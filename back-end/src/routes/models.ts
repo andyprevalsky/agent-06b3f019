@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import NodeCache from 'node-cache';
-import { ROSE_MODEL_POOLS } from '../lib/roseModels';
+import { ROSE_MODEL_POOLS } from '../providers/roseModels';
 
 const router = Router();
 // Cache models for 1 hour (3600 seconds)
@@ -62,7 +62,7 @@ async function calculateRoseMetadata(modelName: string, allModels: OpenRouterMod
 
     for (const modelId of pool) {
       const modelInfo = allModels.find((m: any) => m.id === modelId);
-      
+
       if (modelInfo) {
         // Track minimum context length for all models
         const contextLength = modelInfo.top_provider?.context_length || modelInfo.context_length;
@@ -75,7 +75,7 @@ async function calculateRoseMetadata(modelName: string, allModels: OpenRouterMod
           // OpenRouter returns price per token, accumulate as-is
           const promptCost = parseFloat(modelInfo.pricing.prompt || '0');
           const completionCost = parseFloat(modelInfo.pricing.completion || '0');
-          
+
           totalPrompt += promptCost;
           totalCompletion += completionCost;
           validModels++;
@@ -90,7 +90,7 @@ async function calculateRoseMetadata(modelName: string, allModels: OpenRouterMod
     // Calculate averages (per token)
     const avgPrompt = totalPrompt / validModels;
     const avgCompletion = totalCompletion / validModels;
-    
+
     // Convert to per-million tokens for rounding, then back to per-token
     const roundUpToNearestFiveCents = (perTokenPrice: number) => {
       const perMillionPrice = perTokenPrice * 1000000;
@@ -101,9 +101,9 @@ async function calculateRoseMetadata(modelName: string, allModels: OpenRouterMod
     return {
       pricing: {
         prompt: roundUpToNearestFiveCents(avgPrompt).toString(),
-        completion: roundUpToNearestFiveCents(avgCompletion).toString()
+        completion: roundUpToNearestFiveCents(avgCompletion).toString(),
       },
-      contextLength: minContextLength === Infinity ? 200000 : minContextLength
+      contextLength: minContextLength === Infinity ? 200000 : minContextLength,
     };
   } catch (error) {
     console.error(`Error calculating ${modelName} metadata:`, error);
@@ -111,9 +111,9 @@ async function calculateRoseMetadata(modelName: string, allModels: OpenRouterMod
     return {
       pricing: {
         prompt: '0.05',
-        completion: '0.10'
+        completion: '0.10',
       },
-      contextLength: 200000
+      contextLength: 200000,
     };
   }
 }
@@ -134,21 +134,21 @@ router.get('/', async (req: Request, res: Response) => {
     // Fetch from OpenRouter
     const response = await fetch('https://openrouter.ai/api/v1/models', {
       headers: {
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Rose AI Agent'
-      }
+        'X-Title': 'Rose AI Agent',
+      },
     });
 
     if (!response.ok) {
       throw new Error(`OpenRouter API returned ${response.status}: ${response.statusText}`);
     }
 
-    const data = await response.json() as { data?: OpenRouterModel[] };
+    const data = (await response.json()) as { data?: OpenRouterModel[] };
     const allModels: OpenRouterModel[] = data.data || [];
 
     // Filter to only models that support tool use
-    const toolSupportedModels = allModels.filter(model => 
+    const toolSupportedModels = allModels.filter((model) =>
       model.supported_parameters?.includes('tools')
     );
 
@@ -164,24 +164,24 @@ router.get('/', async (req: Request, res: Response) => {
     // Keep the code for future reference when Cerebras improves structured output support
 
     // Inject Rose models at the beginning
-  const roseModels: SortedModel[] = [
-    {
-      id: 'rose-labs/rose-1-lite',
-      name: 'rose-1-lite',
-      provider: 'rose-labs',
-      description: 'Rose Labs fast model optimized for low latency (< 6s avg)',
-      contextLength: roseFastMetadata.contextLength,
-      pricing: roseFastMetadata.pricing
-    },
-    {
-      id: 'rose-labs/rose-1-ultra',
-      name: 'rose-1-ultra',
-      provider: 'rose-labs',
-      description: 'Rose Labs ultra model for complex tasks (> 6s avg)',
-      contextLength: roseUltraMetadata.contextLength,
-      pricing: roseUltraMetadata.pricing
-    }
-  ];
+    const roseModels: SortedModel[] = [
+      {
+        id: 'rose-labs/rose-1-lite',
+        name: 'rose-1-lite',
+        provider: 'rose-labs',
+        description: 'Rose Labs fast model optimized for low latency (< 6s avg)',
+        contextLength: roseFastMetadata.contextLength,
+        pricing: roseFastMetadata.pricing,
+      },
+      {
+        id: 'rose-labs/rose-1-ultra',
+        name: 'rose-1-ultra',
+        provider: 'rose-labs',
+        description: 'Rose Labs ultra model for complex tasks (> 6s avg)',
+        contextLength: roseUltraMetadata.contextLength,
+        pricing: roseUltraMetadata.pricing,
+      },
+    ];
 
     const finalModels = [...roseModels, ...sortedModels];
 
@@ -192,10 +192,10 @@ router.get('/', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Models endpoint error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to fetch models',
       details: errorMessage,
-      hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY
+      hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
     });
   }
 });
@@ -205,7 +205,7 @@ router.get('/', async (req: Request, res: Response) => {
  */
 function sortModels(models: OpenRouterModel[]): SortedModel[] {
   // Transform models
-  const transformed: SortedModel[] = models.map(model => {
+  const transformed: SortedModel[] = models.map((model) => {
     const parts = model.id.split('/');
     const provider = parts[0] || 'unknown';
     const name = parts.slice(1).join('/') || model.id;
@@ -216,19 +216,18 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
       provider: provider,
       description: model.description,
       contextLength: model.top_provider?.context_length || model.context_length,
-      pricing: model.pricing
+      pricing: model.pricing,
     };
   });
 
   // Define featured models (exact order matters)
   const featuredModels = [
-    'google/gemini-2.5-flash',  // DEFAULT - Fast & capable - 1M context
-    'anthropic/claude-sonnet-4.5',  // Claude Sonnet 4.5
-    'openai/gpt-5-codex',  // GPT-5 Codex
-    'xai/grok-4-fast',  // Grok 4 Fast
+    'google/gemini-2.5-flash', // DEFAULT - Fast & capable - 1M context
+    'anthropic/claude-sonnet-4.5', // Claude Sonnet 4.5
+    'openai/gpt-5-codex', // GPT-5 Codex
+    'xai/grok-4-fast', // Grok 4 Fast
     'openai/gpt-oss-20b',
-    'z-ai/glm-4.6',  // Newest GLM - 200K context
-
+    'z-ai/glm-4.6', // Newest GLM - 200K context
   ];
 
   // Separate featured and non-featured
@@ -236,7 +235,7 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
   const others: SortedModel[] = [];
 
   // Group models
-  transformed.forEach(model => {
+  transformed.forEach((model) => {
     const featuredIndex = featuredModels.indexOf(model.id);
     if (featuredIndex !== -1) {
       featured.push(model);
@@ -265,4 +264,3 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
 }
 
 export default router;
-

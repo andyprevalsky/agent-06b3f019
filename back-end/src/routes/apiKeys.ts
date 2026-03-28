@@ -5,8 +5,8 @@
 
 import express, { Response } from 'express';
 import crypto from 'crypto';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { prisma } from '../lib/prisma';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { prisma } from '../providers/database';
 
 const router = express.Router();
 

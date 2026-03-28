@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
 export interface WhatsAppContactWithMessages {
@@ -51,10 +51,10 @@ function transformToContactToUpsert(contact: WhatsAppContactWithMessages): Conta
     title: contact.title,
     email: contact.email,
     emailAddresses: contact.emailAddresses,
-    messages: contact.messages.map(msg => ({
+    messages: contact.messages.map((msg) => ({
       channel: MessageChannel.WHATSAPP,
-      from: msg.is_from_me ? 'me' : (msg.contactHandle || contactId),
-      to: msg.is_from_me ? (msg.contactHandle || contactId) : 'me',
+      from: msg.is_from_me ? 'me' : msg.contactHandle || contactId,
+      to: msg.is_from_me ? msg.contactHandle || contactId : 'me',
       timestamp: new Date(msg.date),
       message: msg.text,
       externalId: msg.id, // WhatsApp message key.id for deduplication
@@ -87,9 +87,13 @@ export async function parseWhatsAppData(
   }, []);
 
   const totalMessages = sanitizedContacts.reduce((sum, c) => sum + c.messages.length, 0);
-  console.log(`[Job ${jobId}] Processing ${totalMessages} WhatsApp messages from ${sanitizedContacts.length} contacts for user ${userId}`);
+  console.log(
+    `[Job ${jobId}] Processing ${totalMessages} WhatsApp messages from ${sanitizedContacts.length} contacts for user ${userId}`
+  );
   if (skippedContacts > 0) {
-    console.log(`[Job ${jobId}] Skipped ${skippedContacts} contacts due to missing handles or messages`);
+    console.log(
+      `[Job ${jobId}] Skipped ${skippedContacts} contacts due to missing handles or messages`
+    );
   }
 
   const integration = await prisma.integration.findUnique({
@@ -118,5 +122,7 @@ export async function parseWhatsAppData(
     },
   });
 
-  console.log(`[Job ${jobId}] WhatsApp sync complete: ${result.contacts} contacts, ${result.messages} messages`);
+  console.log(
+    `[Job ${jobId}] WhatsApp sync complete: ${result.contacts} contacts, ${result.messages} messages`
+  );
 }

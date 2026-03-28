@@ -5,8 +5,8 @@
 
 import express, { Response } from 'express';
 import Stripe from 'stripe';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { prisma } from '../lib/prisma';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { prisma } from '../providers/database';
 
 const router = express.Router();
 
@@ -36,7 +36,7 @@ router.get('/portal', authenticate, async (req: AuthRequest, res: Response) => {
     if (!subscription || !subscription.stripeCustomerId) {
       return res.status(404).json({
         error: 'No subscription found',
-        message: 'You need an active subscription to access the billing portal.'
+        message: 'You need an active subscription to access the billing portal.',
       });
     }
 

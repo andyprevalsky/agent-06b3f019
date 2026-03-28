@@ -12,15 +12,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Paths are relative globs from back-end/.
  */
 const STRICT_DOMAIN_FILES = [
-  'src/routes/attentionRequests.ts',
-  'src/lib/credits.ts',
-  'src/lib/log.ts',
-  'src/lib/logger.ts',
-  'src/lib/messages.ts',
-  'src/lib/prisma.ts',
-  'src/middleware/auth.ts',
-  'src/middleware/hybridAuth.ts',
-  'src/lib/asyncHandler.ts',
+  'src/domains/attention-requests/types.ts',
+  'src/domains/attention-requests/config.ts',
+  'src/domains/attention-requests/repo.ts',
+  'src/domains/attention-requests/service.ts',
+  'src/domains/attention-requests/routes.ts',
+  'src/providers/credits.ts',
+  'src/utils/log.ts',
+  'src/providers/logger.ts',
+  'src/providers/messages.ts',
+  'src/providers/database.ts',
+  'src/providers/auth.ts',
+  'src/providers/hybridAuth.ts',
+  'src/utils/asyncHandler.ts',
 ];
 
 export default tseslint.config(

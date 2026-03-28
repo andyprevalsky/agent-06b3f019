@@ -12,7 +12,7 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 
 config();
 
@@ -20,12 +20,18 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const DATE_LIKE = z.union([z.string(), z.date()]);
 const FAKE_UUID = '00000000-0000-0000-0000-000000000000';
-const RUN_ID = process.env.BLACKBOX_TEST_RUN_ID || process.env.CONTRACT_TEST_RUN_ID || `${Date.now()}-${randomUUID().slice(0, 8)}`;
-const rawCaseConcurrency = process.env.BLACKBOX_TEST_CASE_CONCURRENCY || process.env.CONTRACT_TEST_CASE_CONCURRENCY;
+const RUN_ID =
+  process.env.BLACKBOX_TEST_RUN_ID ||
+  process.env.CONTRACT_TEST_RUN_ID ||
+  `${Date.now()}-${randomUUID().slice(0, 8)}`;
+const rawCaseConcurrency =
+  process.env.BLACKBOX_TEST_CASE_CONCURRENCY || process.env.CONTRACT_TEST_CASE_CONCURRENCY;
 const CASE_CONCURRENCY = rawCaseConcurrency ? Number(rawCaseConcurrency) : 30;
 
 if (!Number.isInteger(CASE_CONCURRENCY) || CASE_CONCURRENCY <= 0) {
-  throw new Error(`Invalid BLACKBOX_TEST_CASE_CONCURRENCY/CONTRACT_TEST_CASE_CONCURRENCY: ${rawCaseConcurrency}`);
+  throw new Error(
+    `Invalid BLACKBOX_TEST_CASE_CONCURRENCY/CONTRACT_TEST_CASE_CONCURRENCY: ${rawCaseConcurrency}`
+  );
 }
 
 const trackedRealAgentIds = new Set<string>();
@@ -121,7 +127,11 @@ interface CreateRequestOverrides {
 }
 
 function sanitizeLabel(label: string): string {
-  return label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
 }
 
 function isTransientDbError(error: unknown): boolean {
@@ -219,7 +229,7 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
 async function runWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  worker: (item: T, workerIndex: number) => Promise<R>,
+  worker: (item: T, workerIndex: number) => Promise<R>
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
@@ -277,7 +287,9 @@ async function createAnonymousSession(label: string): Promise<AnonymousSessionDa
       assertStatus(res.status, 200, res.data);
     }
 
-    console.warn(`[retry] auth anonymous for ${label} failed on attempt ${attempt}/6: ${JSON.stringify(res.data)}`);
+    console.warn(
+      `[retry] auth anonymous for ${label} failed on attempt ${attempt}/6: ${JSON.stringify(res.data)}`
+    );
     await sleep(250 * attempt);
   }
 
@@ -337,7 +349,10 @@ async function createAttentionRequest(
   return assertSchema(CreateAttentionRequestResponse, res.data, 'POST /api/attention-requests');
 }
 
-async function getRequestById(id: string, headers: Record<string, string>): Promise<GetAttentionRequestBody> {
+async function getRequestById(
+  id: string,
+  headers: Record<string, string>
+): Promise<GetAttentionRequestBody> {
   const res = await request(`${BASE_URL}/api/attention-requests/${id}`, { headers });
   assertStatus(res.status, 200, res.data);
   return assertSchema(GetAttentionRequestResponse, res.data, `GET /api/attention-requests/${id}`);
@@ -372,7 +387,10 @@ async function expectLatestMessage(agentId: string, expectedText: string): Promi
   );
   assert(message, `Expected a message for agent ${agentId}`);
   assert(message.role === 'USER', `Expected latest message role USER, got ${message.role}`);
-  assert(message.text === expectedText, `Expected latest message "${expectedText}", got "${message.text}"`);
+  assert(
+    message.text === expectedText,
+    `Expected latest message "${expectedText}", got "${message.text}"`
+  );
 }
 
 async function countAgentMessages(agentId: string): Promise<number> {
@@ -427,11 +445,21 @@ async function testCreate_happyRoundTrip() {
   });
 
   const requestByUser = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestByUser.agentId === fixture.realAgentId, 'Created request should point at the seeded agent');
-  assert(requestByUser.question === 'Should I proceed with the task?', 'Question should round-trip');
-  assert(requestByUser.imageUrl === 'https://example.com/diagram.png', 'imageUrl should round-trip');
   assert(
-    JSON.stringify(requestByUser.metadata) === JSON.stringify({ tool: 'web_search', priority: 'high' }),
+    requestByUser.agentId === fixture.realAgentId,
+    'Created request should point at the seeded agent'
+  );
+  assert(
+    requestByUser.question === 'Should I proceed with the task?',
+    'Question should round-trip'
+  );
+  assert(
+    requestByUser.imageUrl === 'https://example.com/diagram.png',
+    'imageUrl should round-trip'
+  );
+  assert(
+    JSON.stringify(requestByUser.metadata) ===
+      JSON.stringify({ tool: 'web_search', priority: 'high' }),
     'Metadata should round-trip'
   );
   assert(requestByUser.userResponse === null, 'New request should start unanswered');
@@ -442,7 +470,10 @@ async function testCreate_happyRoundTrip() {
   assert(listItem.answered === false, 'New request should be unanswered in the list response');
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore + 1, `Expected unanswered count ${countBefore + 1}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore + 1,
+    `Expected unanswered count ${countBefore + 1}, got ${countAfter}`
+  );
 }
 
 async function testCreate_missingQuestion() {
@@ -515,11 +546,20 @@ async function testCreate_parallelCreatesPersistBoth() {
   ]);
 
   const list = await listRequests(fixture.ownerToken);
-  assert(list.requests.some((request) => request.id === first.id), 'First parallel request should appear in list');
-  assert(list.requests.some((request) => request.id === second.id), 'Second parallel request should appear in list');
+  assert(
+    list.requests.some((request) => request.id === first.id),
+    'First parallel request should appear in list'
+  );
+  assert(
+    list.requests.some((request) => request.id === second.id),
+    'Second parallel request should appear in list'
+  );
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore + 2, `Expected unanswered count ${countBefore + 2}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore + 2,
+    `Expected unanswered count ${countBefore + 2}, got ${countAfter}`
+  );
 }
 
 async function testList_happyIsolationAndOrdering() {
@@ -533,7 +573,10 @@ async function testList_happyIsolationAndOrdering() {
   });
 
   const list = await listRequests(fixture.ownerToken);
-  assert(list.requests.every((request) => request.id !== otherUser.id), 'Owner list should not include another user request');
+  assert(
+    list.requests.every((request) => request.id !== otherUser.id),
+    'Owner list should not include another user request'
+  );
 
   const firstIndex = listIndexById(list, ownerFirst.id);
   const secondIndex = listIndexById(list, ownerSecond.id);
@@ -568,7 +611,10 @@ async function testCount_happyOnlyTracksOwnUnansweredRequests() {
   assertSchema(ActionResponse, respondRes.data, 'POST /:id/respond');
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore + 1, `Expected only one new unanswered request, got count ${countAfter}`);
+  assert(
+    countAfter === countBefore + 1,
+    `Expected only one new unanswered request, got count ${countAfter}`
+  );
 
   const list = await listRequests(fixture.ownerToken);
   const pendingItem = list.requests.find((request) => request.id === pending.id);
@@ -649,7 +695,10 @@ async function testRespond_happyPersistsStateAndDecrementsCount() {
   assert(requestAfter.userResponse === 'Yes, go ahead', 'Respond should persist the user response');
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore, `Respond should restore unanswered count to ${countBefore}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore,
+    `Respond should restore unanswered count to ${countBefore}, got ${countAfter}`
+  );
 
   const list = await listRequests(fixture.ownerToken);
   const listItem = list.requests.find((request) => request.id === created.id);
@@ -722,7 +771,10 @@ async function testRespond_repeatOverwritesExistingResponse() {
   assertStatus(second.status, 200, second.data);
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestAfter.userResponse === 'second response', 'Repeated respond should overwrite the stored response');
+  assert(
+    requestAfter.userResponse === 'second response',
+    'Repeated respond should overwrite the stored response'
+  );
 }
 
 async function testSkip_happyMovesRequestToBackWithoutChangingCount() {
@@ -735,8 +787,14 @@ async function testSkip_happyMovesRequestToBackWithoutChangingCount() {
   const listBefore = await listRequests(fixture.ownerToken);
   const firstIndexBefore = listIndexById(listBefore, first.id);
   const secondIndexBefore = listIndexById(listBefore, second.id);
-  assert(firstIndexBefore !== -1 && secondIndexBefore !== -1, 'Skip fixture requests should appear in the list');
-  assert(firstIndexBefore < secondIndexBefore, 'First request should start ahead of the second request');
+  assert(
+    firstIndexBefore !== -1 && secondIndexBefore !== -1,
+    'Skip fixture requests should appear in the list'
+  );
+  assert(
+    firstIndexBefore < secondIndexBefore,
+    'First request should start ahead of the second request'
+  );
 
   const firstBefore = await getRequestById(first.id, authHeaders(fixture.ownerToken));
   const res = await request(`${BASE_URL}/api/attention-requests/${first.id}/skip`, {
@@ -749,16 +807,23 @@ async function testSkip_happyMovesRequestToBackWithoutChangingCount() {
   const listAfter = await listRequests(fixture.ownerToken);
   const firstIndexAfter = listIndexById(listAfter, first.id);
   const secondIndexAfter = listIndexById(listAfter, second.id);
-  assert(secondIndexAfter < firstIndexAfter, 'Skipped request should move behind newer pending requests');
+  assert(
+    secondIndexAfter < firstIndexAfter,
+    'Skipped request should move behind newer pending requests'
+  );
 
   const firstAfter = await getRequestById(first.id, authHeaders(fixture.ownerToken));
   assert(
-    new Date(String(firstAfter.updatedAt)).getTime() > new Date(String(firstBefore.updatedAt)).getTime(),
+    new Date(String(firstAfter.updatedAt)).getTime() >
+      new Date(String(firstBefore.updatedAt)).getTime(),
     'Skip should advance updatedAt'
   );
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore + 2, `Skip should not change unanswered count; expected ${countBefore + 2}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore + 2,
+    `Skip should not change unanswered count; expected ${countBefore + 2}, got ${countAfter}`
+  );
 }
 
 async function testSkip_noAuth() {
@@ -805,10 +870,16 @@ async function testReject_happyPersistsRejectedState() {
   assertSchema(ActionResponse, res.data, 'POST /:id/reject');
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestAfter.userResponse === '__REJECTED__', 'Reject should persist the rejection marker');
+  assert(
+    requestAfter.userResponse === '__REJECTED__',
+    'Reject should persist the rejection marker'
+  );
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore, `Reject should restore unanswered count to ${countBefore}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore,
+    `Reject should restore unanswered count to ${countBefore}, got ${countAfter}`
+  );
 }
 
 async function testReject_withMessageCreatesTrimmedUserMessage() {
@@ -828,11 +899,17 @@ async function testReject_withMessageCreatesTrimmedUserMessage() {
   assertSchema(ActionResponse, res.data, 'POST /:id/reject (with message)');
 
   const afterMessages = await countAgentMessages(fixture.realAgentId);
-  assert(afterMessages === beforeMessages + 1, `Expected one new agent message, got count ${afterMessages}`);
+  assert(
+    afterMessages === beforeMessages + 1,
+    `Expected one new agent message, got count ${afterMessages}`
+  );
   await expectLatestMessage(fixture.realAgentId, 'Do not proceed with this');
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestAfter.userResponse === '__REJECTED__', 'Reject with message should still mark the request rejected');
+  assert(
+    requestAfter.userResponse === '__REJECTED__',
+    'Reject with message should still mark the request rejected'
+  );
 }
 
 async function testReject_blankMessageDoesNotCreateSideEffect() {
@@ -852,10 +929,16 @@ async function testReject_blankMessageDoesNotCreateSideEffect() {
   assertSchema(ActionResponse, res.data, 'POST /:id/reject (blank message)');
 
   const afterMessages = await countAgentMessages(fixture.realAgentId);
-  assert(afterMessages === beforeMessages, 'Blank rejection message should not create an agent message');
+  assert(
+    afterMessages === beforeMessages,
+    'Blank rejection message should not create an agent message'
+  );
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestAfter.userResponse === '__REJECTED__', 'Blank rejection message should still reject the request');
+  assert(
+    requestAfter.userResponse === '__REJECTED__',
+    'Blank rejection message should still reject the request'
+  );
 }
 
 async function testReject_missingAgentWithMessageCharacterizesFailure() {
@@ -875,10 +958,16 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
   assertSchema(ErrorResponse, res.data, 'POST /:id/reject (500 missing agent)');
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
-  assert(requestAfter.userResponse === null, 'Failed rejection should leave the request unanswered');
+  assert(
+    requestAfter.userResponse === null,
+    'Failed rejection should leave the request unanswered'
+  );
 
   const countAfter = await getCount(fixture.ownerToken);
-  assert(countAfter === countBefore + 1, `Failed rejection should keep unanswered count at ${countBefore + 1}, got ${countAfter}`);
+  assert(
+    countAfter === countBefore + 1,
+    `Failed rejection should keep unanswered count at ${countBefore + 1}, got ${countAfter}`
+  );
 }
 
 async function testReject_noAuth() {
@@ -927,7 +1016,10 @@ async function runAll() {
         { name: 'empty body', fn: testCreate_emptyBody },
         { name: 'empty question string', fn: testCreate_emptyQuestion },
         { name: 'invalid imageUrl', fn: testCreate_invalidImageUrl },
-        { name: 'parallel create persists both requests', fn: testCreate_parallelCreatesPersistBoth },
+        {
+          name: 'parallel create persists both requests',
+          fn: testCreate_parallelCreatesPersistBoth,
+        },
       ],
     },
     {
@@ -940,7 +1032,10 @@ async function runAll() {
     {
       name: 'GET /count',
       tests: [
-        { name: 'tracks only owner unanswered requests', fn: testCount_happyOnlyTracksOwnUnansweredRequests },
+        {
+          name: 'tracks only owner unanswered requests',
+          fn: testCount_happyOnlyTracksOwnUnansweredRequests,
+        },
         { name: 'no auth -> 401', fn: testCount_noAuth },
       ],
     },
@@ -948,7 +1043,10 @@ async function runAll() {
       name: 'GET /:id',
       tests: [
         { name: 'happy path (JWT)', fn: testGetById_happy },
-        { name: 'API key can access any user request', fn: testGetById_apiKeyCanAccessAnyUserRequest },
+        {
+          name: 'API key can access any user request',
+          fn: testGetById_apiKeyCanAccessAnyUserRequest,
+        },
         { name: 'no auth -> 401', fn: testGetById_noAuth },
         { name: 'not found -> 404', fn: testGetById_notFound },
         { name: 'wrong user -> 403', fn: testGetById_wrongUser },
@@ -957,18 +1055,27 @@ async function runAll() {
     {
       name: 'POST /:id/respond',
       tests: [
-        { name: 'happy path persists state and decrements count', fn: testRespond_happyPersistsStateAndDecrementsCount },
+        {
+          name: 'happy path persists state and decrements count',
+          fn: testRespond_happyPersistsStateAndDecrementsCount,
+        },
         { name: 'no auth -> 401', fn: testRespond_noAuth },
         { name: 'not found -> 404', fn: testRespond_notFound },
         { name: 'bad input -> 400', fn: testRespond_badInput },
         { name: 'wrong user -> 403', fn: testRespond_wrongUser },
-        { name: 'repeat respond overwrites previous response', fn: testRespond_repeatOverwritesExistingResponse },
+        {
+          name: 'repeat respond overwrites previous response',
+          fn: testRespond_repeatOverwritesExistingResponse,
+        },
       ],
     },
     {
       name: 'POST /:id/skip',
       tests: [
-        { name: 'happy path reorders queue without changing count', fn: testSkip_happyMovesRequestToBackWithoutChangingCount },
+        {
+          name: 'happy path reorders queue without changing count',
+          fn: testSkip_happyMovesRequestToBackWithoutChangingCount,
+        },
         { name: 'no auth -> 401', fn: testSkip_noAuth },
         { name: 'not found -> 404', fn: testSkip_notFound },
         { name: 'wrong user -> 403', fn: testSkip_wrongUser },
@@ -978,9 +1085,18 @@ async function runAll() {
       name: 'POST /:id/reject',
       tests: [
         { name: 'happy path persists rejected state', fn: testReject_happyPersistsRejectedState },
-        { name: 'with message creates one trimmed USER message', fn: testReject_withMessageCreatesTrimmedUserMessage },
-        { name: 'blank message creates no side effect', fn: testReject_blankMessageDoesNotCreateSideEffect },
-        { name: 'missing agent + message returns 500 and keeps request pending', fn: testReject_missingAgentWithMessageCharacterizesFailure },
+        {
+          name: 'with message creates one trimmed USER message',
+          fn: testReject_withMessageCreatesTrimmedUserMessage,
+        },
+        {
+          name: 'blank message creates no side effect',
+          fn: testReject_blankMessageDoesNotCreateSideEffect,
+        },
+        {
+          name: 'missing agent + message returns 500 and keeps request pending',
+          fn: testReject_missingAgentWithMessageCharacterizesFailure,
+        },
         { name: 'no auth -> 401', fn: testReject_noAuth },
         { name: 'not found -> 404', fn: testReject_notFound },
         { name: 'wrong user -> 403', fn: testReject_wrongUser },
@@ -1000,14 +1116,10 @@ async function runAll() {
   const resultMap = new Map<string, TestResult>();
 
   try {
-    const results = await runWithConcurrency(
-      orderedTests,
-      CASE_CONCURRENCY,
-      async (test) => ({
-        key: test.fullName,
-        result: await runTest(test.fullName, test.fn),
-      }),
-    );
+    const results = await runWithConcurrency(orderedTests, CASE_CONCURRENCY, async (test) => ({
+      key: test.fullName,
+      result: await runTest(test.fullName, test.fn),
+    }));
 
     for (const item of results) {
       resultMap.set(item.key, item.result);
@@ -1019,7 +1131,9 @@ async function runAll() {
         const key = `${group.name} - ${test.name}`;
         const result = resultMap.get(key)!;
         const prefix = result.passed ? '  PASS' : '  FAIL';
-        console.log(`${prefix} ${test.name}${result.passed ? '' : ` - ${result.error}`} (${result.duration}ms)`);
+        console.log(
+          `${prefix} ${test.name}${result.passed ? '' : ` - ${result.error}`} (${result.duration}ms)`
+        );
       }
     }
 

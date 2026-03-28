@@ -1,4 +1,4 @@
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 
 export interface ParsedVCard {
   firstName: string;
@@ -18,19 +18,19 @@ export interface ParsedVCard {
  */
 export function parseVcfContent(vcfContent: string): ParsedVCard[] {
   const contacts: ParsedVCard[] = [];
-  
+
   // Split into individual vCards
-  const vcardBlocks = vcfContent.split(/(?=BEGIN:VCARD)/i).filter(block => block.trim());
-  
+  const vcardBlocks = vcfContent.split(/(?=BEGIN:VCARD)/i).filter((block) => block.trim());
+
   for (const block of vcardBlocks) {
     if (!block.includes('BEGIN:VCARD')) continue;
-    
+
     const contact = parseVCard(block);
     if (contact && (contact.email || contact.firstName || contact.lastName)) {
       contacts.push(contact);
     }
   }
-  
+
   return contacts;
 }
 
@@ -38,7 +38,7 @@ function parseVCard(vcardText: string): ParsedVCard | null {
   // Handle line folding (lines starting with space/tab are continuations)
   const unfoldedText = vcardText.replace(/\r?\n[ \t]/g, '');
   const lines = unfoldedText.split(/\r?\n/);
-  
+
   let firstName = '';
   let lastName = '';
   let fullName = '';
@@ -47,57 +47,57 @@ function parseVCard(vcardText: string): ParsedVCard | null {
   let company: string | null = null;
   let title: string | null = null;
   let uid: string | null = null;
-  
+
   for (const line of lines) {
     const colonIndex = line.indexOf(':');
     if (colonIndex === -1) continue;
-    
+
     const fieldPart = line.substring(0, colonIndex);
     const valuePart = line.substring(colonIndex + 1).trim();
-    
+
     // Extract field name (before any parameters like ;TYPE=...)
     const fieldName = fieldPart.split(';')[0].toUpperCase();
-    
+
     switch (fieldName) {
       case 'FN':
         fullName = valuePart.trim();
         break;
-        
+
       case 'N':
         // N format: LastName;FirstName;MiddleName;Prefix;Suffix
         const nameParts = valuePart.split(';');
         lastName = (nameParts[0] || '').trim();
         firstName = (nameParts[1] || '').trim();
         break;
-        
+
       case 'EMAIL':
         if (valuePart && !valuePart.includes('@reply.') && !valuePart.includes('@hous.')) {
           emails.push(valuePart.toLowerCase().trim());
         }
         break;
-        
+
       case 'TEL':
         if (valuePart) {
           phones.push(valuePart.trim());
         }
         break;
-        
+
       case 'ORG':
         // ORG format: Company;Department
         const orgParts = valuePart.split(';');
         company = (orgParts[0] || '').trim() || null;
         break;
-        
+
       case 'TITLE':
         title = valuePart.trim() || null;
         break;
-        
+
       case 'UID':
         uid = valuePart.trim() || null;
         break;
     }
   }
-  
+
   // If no first/last name but we have fullName, try to split it
   if (!firstName && !lastName && fullName) {
     const parts = fullName.split(' ');
@@ -108,13 +108,15 @@ function parseVCard(vcardText: string): ParsedVCard | null {
       firstName = parts[0];
     }
   }
-  
+
   // Skip contacts that are just craigslist or empty
-  if (fullName.toLowerCase().includes('craigslist') || 
-      (emails.length === 1 && emails[0].includes('craigslist'))) {
+  if (
+    fullName.toLowerCase().includes('craigslist') ||
+    (emails.length === 1 && emails[0].includes('craigslist'))
+  ) {
     return null;
   }
-  
+
   return {
     firstName,
     lastName,
@@ -139,29 +141,26 @@ export async function importVcfContacts(
   let created = 0;
   let updated = 0;
   let skipped = 0;
-  
+
   for (const contact of contacts) {
     if (!contact.email && !contact.phone) {
       skipped++;
       continue;
     }
-    
+
     try {
       // Try to find existing person by email
       let existingPerson = null;
-      
+
       if (contact.email) {
         existingPerson = await prisma.person.findFirst({
           where: {
             userId,
-            OR: [
-              { email: contact.email },
-              { emailAddresses: { array_contains: [contact.email] } },
-            ],
+            OR: [{ email: contact.email }, { emailAddresses: { array_contains: [contact.email] } }],
           },
         });
       }
-      
+
       // If not found by email, try by phone
       if (!existingPerson && contact.phone) {
         existingPerson = await prisma.person.findFirst({
@@ -171,11 +170,11 @@ export async function importVcfContacts(
           },
         });
       }
-      
+
       if (existingPerson) {
         // Update existing person with new info if fields are empty
         const updateData: Record<string, any> = {};
-        
+
         if (!existingPerson.firstName && contact.firstName) {
           updateData.firstName = contact.firstName;
         }
@@ -191,14 +190,14 @@ export async function importVcfContacts(
         if (!existingPerson.phoneNumber && contact.phone) {
           updateData.phoneNumber = contact.phone;
         }
-        
+
         // Merge email addresses
         const existingEmails = (existingPerson.emailAddresses as string[]) || [];
         const newEmails = [...new Set([...existingEmails, ...contact.emails])];
         if (newEmails.length > existingEmails.length) {
           updateData.emailAddresses = newEmails;
         }
-        
+
         if (Object.keys(updateData).length > 0) {
           await prisma.person.update({
             where: { id: existingPerson.id },
@@ -229,7 +228,6 @@ export async function importVcfContacts(
       skipped++;
     }
   }
-  
+
   return { created, updated, skipped };
 }
-

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { generateLLMJudgePrompt } from '../lib/openrouter';
+import { generateLLMJudgePrompt } from '../providers/openrouter';
 
 const router = Router();
 
@@ -25,13 +25,12 @@ router.post('/generate-llm-judge-prompt', async (req, res) => {
     }
     console.error('Generate prompt error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to generate prompt',
       details: errorMessage,
-      hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY 
+      hasOpenRouterKey: !!process.env.OPENROUTER_API_KEY,
     });
   }
 });
 
 export default router;
-

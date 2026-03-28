@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { AuthRequest, authenticate } from '../middleware/auth';
+import { AuthRequest, authenticate } from '../providers/auth';
 import {
   processUploadedFile,
   getSignedUrl,
   MAX_FILE_SIZE,
   FilePointer,
-} from '../lib/storage';
+} from '../providers/storage';
 
 const router = Router();
 
@@ -20,50 +20,59 @@ const attachmentUpload = multer({
 
 // POST /api/upload - Upload a file attachment to Supabase Storage (not agent-scoped)
 // Files are stored under userId, allowing them to be reused across agents
-router.post('/', authenticate, attachmentUpload.single('file') as any, async (req: AuthRequest, res) => {
-  try {
-    const userId = req.user!.id;
+router.post(
+  '/',
+  authenticate,
+  attachmentUpload.single('file') as any,
+  async (req: AuthRequest, res) => {
+    try {
+      const userId = req.user!.id;
 
-    if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
-      return;
-    }
+      if (!req.file) {
+        res.status(400).json({ error: 'No file uploaded' });
+        return;
+      }
 
-    // Content validation: reject files whose bytes don't match their declared MIME type.
-    // This catches proxy/dev-server issues where HTML error pages are stored as PDFs, etc.
-    const head = req.file.buffer.subarray(0, 256).toString('utf-8').trimStart().toLowerCase();
-    const isHtml = head.startsWith('<!doctype') || head.startsWith('<html');
-    const declaredMime = req.file.mimetype;
-    if (isHtml && !declaredMime.includes('html')) {
-      console.error(`[Upload] Content mismatch: file "${req.file.originalname}" (${declaredMime}) contains HTML. Likely a proxy/dev-server error.`);
-      res.status(400).json({
-        error: 'File content does not match its type',
-        details: `Expected ${declaredMime} but received HTML. The file may have been intercepted by a dev server or proxy.`,
+      // Content validation: reject files whose bytes don't match their declared MIME type.
+      // This catches proxy/dev-server issues where HTML error pages are stored as PDFs, etc.
+      const head = req.file.buffer.subarray(0, 256).toString('utf-8').trimStart().toLowerCase();
+      const isHtml = head.startsWith('<!doctype') || head.startsWith('<html');
+      const declaredMime = req.file.mimetype;
+      if (isHtml && !declaredMime.includes('html')) {
+        console.error(
+          `[Upload] Content mismatch: file "${req.file.originalname}" (${declaredMime}) contains HTML. Likely a proxy/dev-server error.`
+        );
+        res.status(400).json({
+          error: 'File content does not match its type',
+          details: `Expected ${declaredMime} but received HTML. The file may have been intercepted by a dev server or proxy.`,
+        });
+        return;
+      }
+
+      // Process the uploaded file (stored under userId, not agent-scoped)
+      const filePointer = await processUploadedFile(
+        userId,
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype
+      );
+
+      console.log(
+        `[Upload] Uploaded file for user ${userId}: ${filePointer.original_filename} (${filePointer.size_bytes} bytes)`
+      );
+
+      res.status(201).json({
+        file_pointer: filePointer,
       });
-      return;
+    } catch (error) {
+      console.error('Upload error:', error);
+      res.status(500).json({
+        error: 'Failed to upload file',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    // Process the uploaded file (stored under userId, not agent-scoped)
-    const filePointer = await processUploadedFile(
-      userId,
-      req.file.buffer,
-      req.file.originalname,
-      req.file.mimetype
-    );
-
-    console.log(`[Upload] Uploaded file for user ${userId}: ${filePointer.original_filename} (${filePointer.size_bytes} bytes)`);
-
-    res.status(201).json({
-      file_pointer: filePointer,
-    });
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({
-      error: 'Failed to upload file',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 // GET /api/upload/:fileId/url - Get a signed URL for a file
 // Verifies the storage path starts with the user's ID for security

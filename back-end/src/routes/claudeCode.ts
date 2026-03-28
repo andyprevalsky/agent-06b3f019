@@ -1,16 +1,16 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { prisma } from '../lib/prisma';
-import { logJson } from '../lib/log';
-import { AuthRequest, authenticate } from '../middleware/auth';
+import { prisma } from '../providers/database';
+import { logJson } from '../utils/log';
+import { AuthRequest, authenticate } from '../providers/auth';
 import {
   createClaudeCodeSession,
   closeClaudeCodeSession,
   getClaudeCodeSession,
   connectToSandbox,
-} from '../lib/e2b';
-import { FilePointer } from '../lib/storage';
-import { checkGithubRepoAccess } from '../lib/github';
+} from '../providers/e2b';
+import { FilePointer } from '../providers/storage';
+import { checkGithubRepoAccess } from '../providers/github';
 
 const router = Router();
 
@@ -38,7 +38,11 @@ const closeSessionSchema = z.object({
   task_id: z.string().uuid(),
   user_id: z.string().uuid().optional(),
   agent_id: z.string().uuid().optional(),
-  additional_paths: z.array(z.string()).nullable().optional().transform(v => v ?? undefined), // Additional file paths to extract (e.g., from verifier)
+  additional_paths: z
+    .array(z.string())
+    .nullable()
+    .optional()
+    .transform((v) => v ?? undefined), // Additional file paths to extract (e.g., from verifier)
 });
 
 /**
@@ -49,7 +53,9 @@ const closeSessionSchema = z.object({
  */
 router.post('/create', authenticate, async (req: AuthRequest, res) => {
   try {
-    const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(req.body);
+    const { agent_id, goal, attachments, github_repo_url, user_id } = createSessionSchema.parse(
+      req.body
+    );
 
     // Auto-inject GitHub repo URL from agent record if not explicitly provided.
     // Claude Code is typically spawned by sub-agents, but githubRepoUrl lives on the
@@ -77,14 +83,18 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
           }
         }
         if (effectiveGithubRepoUrl) {
-          console.log(`[ClaudeCode] Auto-injecting GitHub repo from agent tree: ${effectiveGithubRepoUrl}`);
+          console.log(
+            `[ClaudeCode] Auto-injecting GitHub repo from agent tree: ${effectiveGithubRepoUrl}`
+          );
         }
       } catch (err) {
         console.error(`[ClaudeCode] Failed to look up agent GitHub repo:`, err);
       }
     }
 
-    console.log(`[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}${effectiveGithubRepoUrl ? ` with GitHub repo ${effectiveGithubRepoUrl}` : ''}`);
+    console.log(
+      `[ClaudeCode] Creating session for agent ${agent_id}${attachments?.length ? ` with ${attachments.length} attachments` : ''}${effectiveGithubRepoUrl ? ` with GitHub repo ${effectiveGithubRepoUrl}` : ''}`
+    );
 
     // Check GitHub repo access if specified
     let normalizedRepoUrl: string | undefined;
@@ -98,7 +108,9 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
 
       const accessCheck = await checkGithubRepoAccess(effectiveUserId, effectiveGithubRepoUrl);
       if (!accessCheck.allowed) {
-        console.log(`[ClaudeCode] GitHub access denied for user ${effectiveUserId}: ${accessCheck.error}`);
+        console.log(
+          `[ClaudeCode] GitHub access denied for user ${effectiveUserId}: ${accessCheck.error}`
+        );
         return res.status(403).json({
           error: accessCheck.error,
           code: 'GITHUB_ACCESS_DENIED',
@@ -124,11 +136,10 @@ router.post('/create', authenticate, async (req: AuthRequest, res) => {
       uploaded_files: session.uploadedFiles,
       github_repo_url: normalizedRepoUrl || null,
     });
-
   } catch (error) {
     console.error('Failed to create Claude Code session:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to create Claude Code session'
+      error: error instanceof Error ? error.message : 'Failed to create Claude Code session',
     });
   }
 });
@@ -141,7 +152,9 @@ router.post('/close', authenticate, async (req: AuthRequest, res) => {
   try {
     const { task_id, user_id, agent_id, additional_paths } = closeSessionSchema.parse(req.body);
 
-    console.log(`🖥️ Closing Claude Code session ${task_id}${additional_paths?.length ? ` with ${additional_paths.length} additional paths` : ''}`);
+    console.log(
+      `🖥️ Closing Claude Code session ${task_id}${additional_paths?.length ? ` with ${additional_paths.length} additional paths` : ''}`
+    );
 
     const result = await closeClaudeCodeSession(task_id, user_id, agent_id, additional_paths);
 
@@ -151,11 +164,10 @@ router.post('/close', authenticate, async (req: AuthRequest, res) => {
       output_files: result.outputFiles,
       usage: result.usage,
     });
-
   } catch (error) {
     console.error('❌ Failed to close Claude Code session:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to close Claude Code session'
+      error: error instanceof Error ? error.message : 'Failed to close Claude Code session',
     });
   }
 });
@@ -184,11 +196,10 @@ router.get('/:taskId', authenticate, async (req: AuthRequest, res) => {
       created_at: session.createdAt,
       closed_at: session.closedAt,
     });
-
   } catch (error) {
     console.error('❌ Failed to get Claude Code session:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to get session info'
+      error: error instanceof Error ? error.message : 'Failed to get session info',
     });
   }
 });
@@ -208,7 +219,6 @@ router.get('/agent/:agentId', authenticate, async (req: AuthRequest, res) => {
     });
 
     res.json({ sessions });
-
   } catch (error) {
     console.error('❌ Failed to get agent sessions:', error);
     res.status(500).json({ error: 'Failed to get agent sessions' });
@@ -241,11 +251,10 @@ router.post('/:taskId/output', authenticate, async (req: AuthRequest, res) => {
     });
 
     res.json({ success: true });
-
   } catch (error) {
     console.error('Failed to persist Claude Code output:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to persist output'
+      error: error instanceof Error ? error.message : 'Failed to persist output',
     });
   }
 });
@@ -271,11 +280,15 @@ router.get('/:sandboxId/health', authenticate, async (req: AuthRequest, res) => 
 
     if (result.exitCode === 0 && result.stdout.includes('alive')) {
       // Sandbox is alive - also check if WS server process is running
-      const wsCheck = await sandbox.commands.run('pgrep -f ws-server.mjs || echo not_running', { timeoutMs: 5000 });
+      const wsCheck = await sandbox.commands.run('pgrep -f ws-server.mjs || echo not_running', {
+        timeoutMs: 5000,
+      });
       const wsRunning = !wsCheck.stdout.includes('not_running');
 
       // Check if Claude process is running
-      const claudeCheck = await sandbox.commands.run('pgrep -f "claude" || echo not_running', { timeoutMs: 5000 });
+      const claudeCheck = await sandbox.commands.run('pgrep -f "claude" || echo not_running', {
+        timeoutMs: 5000,
+      });
       const claudeRunning = !claudeCheck.stdout.includes('not_running');
 
       // If WS or Claude not running, extract diagnostic info
@@ -284,23 +297,38 @@ router.get('/:sandboxId/health', authenticate, async (req: AuthRequest, res) => 
         diagnostics = {};
         try {
           // Check for OOM killer
-          const dmesgResult = await sandbox.commands.run('dmesg 2>/dev/null | grep -i "killed process\\|oom\\|out of memory" | tail -10 || echo "no_oom"', { timeoutMs: 5000 });
+          const dmesgResult = await sandbox.commands.run(
+            'dmesg 2>/dev/null | grep -i "killed process\\|oom\\|out of memory" | tail -10 || echo "no_oom"',
+            { timeoutMs: 5000 }
+          );
           diagnostics.oom_check = dmesgResult.stdout.trim();
 
           // Get memory usage
-          const memResult = await sandbox.commands.run('free -m 2>/dev/null || echo "free not available"', { timeoutMs: 5000 });
+          const memResult = await sandbox.commands.run(
+            'free -m 2>/dev/null || echo "free not available"',
+            { timeoutMs: 5000 }
+          );
           diagnostics.memory = memResult.stdout.trim();
 
           // Get process list
-          const psResult = await sandbox.commands.run('ps aux --sort=-%mem 2>/dev/null | head -15 || echo "ps not available"', { timeoutMs: 5000 });
+          const psResult = await sandbox.commands.run(
+            'ps aux --sort=-%mem 2>/dev/null | head -15 || echo "ps not available"',
+            { timeoutMs: 5000 }
+          );
           diagnostics.processes = psResult.stdout.trim();
 
           // Check if there's a core dump or crash log
-          const crashResult = await sandbox.commands.run('ls -la /tmp/*.log /var/crash/* 2>/dev/null || echo "no_crash_files"', { timeoutMs: 5000 });
+          const crashResult = await sandbox.commands.run(
+            'ls -la /tmp/*.log /var/crash/* 2>/dev/null || echo "no_crash_files"',
+            { timeoutMs: 5000 }
+          );
           diagnostics.crash_files = crashResult.stdout.trim();
 
           // Get last lines of any log files that might exist
-          const logsResult = await sandbox.commands.run('tail -50 /tmp/ws-server.log 2>/dev/null || echo "no_ws_log"', { timeoutMs: 5000 });
+          const logsResult = await sandbox.commands.run(
+            'tail -50 /tmp/ws-server.log 2>/dev/null || echo "no_ws_log"',
+            { timeoutMs: 5000 }
+          );
           diagnostics.ws_log = logsResult.stdout.trim();
 
           console.log(`[ClaudeCode] Sandbox ${sandboxId} diagnostics:`, logJson(diagnostics));
@@ -309,7 +337,9 @@ router.get('/:sandboxId/health', authenticate, async (req: AuthRequest, res) => 
         }
       }
 
-      console.log(`[ClaudeCode] Sandbox ${sandboxId} is alive (ws=${wsRunning}, claude=${claudeRunning})`);
+      console.log(
+        `[ClaudeCode] Sandbox ${sandboxId} is alive (ws=${wsRunning}, claude=${claudeRunning})`
+      );
 
       res.json({
         alive: true,

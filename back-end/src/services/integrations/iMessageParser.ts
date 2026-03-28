@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
 const INVALID_HANDLE_SENTINEL = 'unknown';
@@ -61,10 +61,10 @@ function transformToContactToUpsert(contact: ContactWithMessages): ContactToUpse
     title: contact.jobTitle,
     email: contact.email,
     emailAddresses: contact.emailAddresses,
-    messages: contact.messages.map(msg => ({
+    messages: contact.messages.map((msg) => ({
       channel: MessageChannel.IMESSAGE,
-      from: msg.is_from_me ? 'me' : (msg.contactHandle || contactId),
-      to: msg.is_from_me ? (msg.contactHandle || contactId) : 'me',
+      from: msg.is_from_me ? 'me' : msg.contactHandle || contactId,
+      to: msg.is_from_me ? msg.contactHandle || contactId : 'me',
       timestamp: appleTimestampToDate(msg.date),
       message: msg.text,
       externalId: String(msg.id), // iMessage ROWID for deduplication
@@ -97,9 +97,13 @@ export async function parseIMessageData(
   }, []);
 
   const totalMessages = sanitizedContacts.reduce((sum, c) => sum + c.messages.length, 0);
-  console.log(`[Job ${jobId}] Processing ${totalMessages} iMessage messages from ${sanitizedContacts.length} contacts for user ${userId}`);
+  console.log(
+    `[Job ${jobId}] Processing ${totalMessages} iMessage messages from ${sanitizedContacts.length} contacts for user ${userId}`
+  );
   if (skippedContacts > 0) {
-    console.log(`[Job ${jobId}] Skipped ${skippedContacts} contacts due to missing handles or messages`);
+    console.log(
+      `[Job ${jobId}] Skipped ${skippedContacts} contacts due to missing handles or messages`
+    );
   }
 
   const integration = await prisma.integration.findUnique({
@@ -128,5 +132,7 @@ export async function parseIMessageData(
     },
   });
 
-  console.log(`[Job ${jobId}] ✅ iMessage sync complete: ${result.contacts} contacts, ${result.messages} messages`);
+  console.log(
+    `[Job ${jobId}] ✅ iMessage sync complete: ${result.contacts} contacts, ${result.messages} messages`
+  );
 }

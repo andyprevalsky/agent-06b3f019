@@ -1,6 +1,6 @@
 /**
  * Stripe Webhooks
- * 
+ *
  * NOTE: This must be mounted BEFORE express.json() middleware
  * because Stripe requires raw body for signature verification
  */
@@ -9,8 +9,8 @@ import express from 'express';
 import Stripe from 'stripe';
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
-import { prisma } from '../lib/prisma';
-import { getUserUsage } from '../lib/credits';
+import { prisma } from '../providers/database';
+import { getUserUsage } from '../providers/credits';
 
 const router = express.Router();
 
@@ -32,11 +32,7 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
 
   try {
     // Verify webhook signature
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      STRIPE_WEBHOOK_SECRET
-    );
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err: any) {
     console.error('⚠️ Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -92,7 +88,7 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
 
   const session = sessions.data[0];
   const userId = session?.client_reference_id;
-  
+
   if (!userId) {
     console.error('❌ No client_reference_id found in checkout session');
     console.error('   Make sure payment link URL includes ?client_reference_id=USER_ID');
@@ -128,7 +124,7 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
       subscriptionTier: tier,
       stripeSubscriptionId: subscription.id,
       currentPeriodEnd,
-    }
+    },
   });
 
   // Add credit for the subscription period (in cents)
@@ -137,7 +133,7 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
       userId,
       amountCents: tier * 100, // Convert dollars to cents
       expirationDate: currentPeriodEnd,
-    }
+    },
   });
 
   console.log(`✅ Added $${tier} credit for user ${userId} (expires: ${currentPeriodEnd})`);
@@ -155,7 +151,7 @@ async function handlePaymentSuccess(invoice: Stripe.Invoice) {
 async function unpauseUserAgents(userId: string) {
   // Check if user has credits
   const usage = await getUserUsage(userId);
-  
+
   if (usage.remaining <= 0) {
     console.log(`User ${userId} still has no credits, not unpausing agents`);
     return;
@@ -166,8 +162,8 @@ async function unpauseUserAgents(userId: string) {
     where: {
       userId,
       status: 'PAUSED',
-      deletedAt: null
-    }
+      deletedAt: null,
+    },
   });
 
   if (pausedAgents.length === 0) {
@@ -223,13 +219,11 @@ async function autoGenerateApiKeyIfNeeded(userId: string) {
     // Generate 32-character API key (UUID without dashes)
     const apiKey = crypto.randomUUID().replace(/-/g, '');
 
-    const { error: insertError } = await supabase
-      .from('RoseApiKey')
-      .insert({
-        userId,
-        apiKey,
-        name: 'Default (auto-generated)',
-      });
+    const { error: insertError } = await supabase.from('RoseApiKey').insert({
+      userId,
+      apiKey,
+      name: 'Default (auto-generated)',
+    });
 
     if (insertError) {
       console.error('❌ Error creating API key:', insertError);
@@ -244,4 +238,3 @@ async function autoGenerateApiKeyIfNeeded(userId: string) {
 }
 
 export default router;
-

@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
-import { prisma } from '../lib/prisma';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { createInitialCredit } from '../lib/credits';
+import { prisma } from '../providers/database';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { createInitialCredit } from '../providers/credits';
 
 const router = Router();
 
@@ -30,19 +30,19 @@ router.get('/my-code', authenticate, async (req: AuthRequest, res: Response) => 
       select: {
         inviteCode: true,
         inviteCodeUses: true,
-      }
+      },
     });
 
     // If user doesn't exist or doesn't have an invite code, create one
     if (!user || !user.inviteCode) {
       let inviteCode: number;
       let isUnique = false;
-      
+
       // Keep generating until we get a unique code
       while (!isUnique) {
         inviteCode = generateInviteCode();
         const existing = await prisma.user.findUnique({
-          where: { inviteCode }
+          where: { inviteCode },
         });
         if (!existing) {
           isUnique = true;
@@ -62,7 +62,7 @@ router.get('/my-code', authenticate, async (req: AuthRequest, res: Response) => 
         select: {
           inviteCode: true,
           inviteCodeUses: true,
-        }
+        },
       });
     }
 
@@ -100,7 +100,7 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
     // Check if user already used an invite code
     const existingUser = await prisma.user.findUnique({
       where: { userId },
-      select: { usedInviteCode: true }
+      select: { usedInviteCode: true },
     });
 
     if (existingUser?.usedInviteCode) {
@@ -117,12 +117,12 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
         },
         update: {
           usedInviteCode: inviteCode,
-        }
+        },
       });
 
       return res.json({
         success: true,
-        message: 'Master invite code accepted'
+        message: 'Master invite code accepted',
       });
     }
 
@@ -132,7 +132,7 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
       select: {
         userId: true,
         inviteCodeUses: true,
-      }
+      },
     });
 
     if (!inviter) {
@@ -151,9 +151,9 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
         where: { inviteCode },
         data: {
           inviteCodeUses: {
-            increment: 1
-          }
-        }
+            increment: 1,
+          },
+        },
       }),
       // Update the new user to record which code they used
       prisma.user.upsert({
@@ -164,13 +164,13 @@ router.post('/use', authenticate, async (req: AuthRequest, res: Response) => {
         },
         update: {
           usedInviteCode: inviteCode,
-        }
-      })
+        },
+      }),
     ]);
 
     res.json({
       success: true,
-      message: 'Invite code accepted'
+      message: 'Invite code accepted',
     });
   } catch (error) {
     console.error('Error using invite code:', error);
@@ -193,23 +193,23 @@ router.get('/check', authenticate, async (req: AuthRequest, res: Response) => {
 
     let user = await prisma.user.findUnique({
       where: { userId },
-      select: { usedInviteCode: true }
+      select: { usedInviteCode: true },
     });
 
     // If user doesn't exist, create them and give initial $5 credit
     if (!user) {
       user = await prisma.user.create({
         data: { userId },
-        select: { usedInviteCode: true }
+        select: { usedInviteCode: true },
       });
       console.log(`✅ Created user record for ${userId}`);
-      
+
       // Initialize $5 credit for new user
       await createInitialCredit(userId);
     }
 
     res.json({
-      needsInviteCode: false // PUBLIC BETA - was: user.usedInviteCode === null
+      needsInviteCode: false, // PUBLIC BETA - was: user.usedInviteCode === null
     });
   } catch (error) {
     console.error('Error checking invite code:', error);
@@ -218,4 +218,3 @@ router.get('/check', authenticate, async (req: AuthRequest, res: Response) => {
 });
 
 export default router;
-

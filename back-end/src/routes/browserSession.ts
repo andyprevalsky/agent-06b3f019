@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
-import { prisma } from '../lib/prisma';
-import { AuthRequest, authenticate } from '../middleware/auth';
+import { prisma } from '../providers/database';
+import { AuthRequest, authenticate } from '../providers/auth';
 import {
   getOrCreateContext,
   createSessionWithContext,
@@ -14,16 +14,16 @@ import {
   listSessionFiles,
   getFingerprintInjectionData,
   SteelRateLimitError,
-  SteelFileInfo
-} from '../lib/steel';
-import { DEFAULT_GEOLOCATION, ProxyGeoLocation } from '../lib/geoip';
+  SteelFileInfo,
+} from '../providers/steel';
+import { DEFAULT_GEOLOCATION, ProxyGeoLocation } from '../providers/geoip';
 
 // Configure multer for file uploads (store in memory)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB max file size
-  }
+  },
 });
 
 const router = Router();
@@ -38,11 +38,11 @@ const initSessionSchema = z.object({
 const closeSessionSchema = z.object({
   session_id: z.string(),
   pause: z.boolean().optional().default(false),
-  current_url: z.string().optional(),  // Save current page URL for resume
+  current_url: z.string().optional(), // Save current page URL for resume
 });
 
 const resumeSessionSchema = z.object({
-  task_id: z.string().uuid(),  // Use stable task ID instead of session_id
+  task_id: z.string().uuid(), // Use stable task ID instead of session_id
 });
 
 const injectLocalStorageSchema = z.object({
@@ -59,13 +59,15 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
   try {
     const { user_id, agent_id, start_url } = initSessionSchema.parse(req.body);
 
-    console.log(`🌐 Initializing browser session for user ${user_id}, agent ${agent_id}, start_url: ${start_url || 'none'}`);
+    console.log(
+      `🌐 Initializing browser session for user ${user_id}, agent ${agent_id}, start_url: ${start_url || 'none'}`
+    );
 
     // Phase 1: All independent queries in parallel
     const [agent, contextId, user, fingerprintInjection, passwords] = await Promise.all([
       prisma.agent.findUnique({
         where: { id: agent_id },
-        select: { proxyCountry: true, proxyState: true, proxyCity: true }
+        select: { proxyCountry: true, proxyState: true, proxyCity: true },
       }),
       getOrCreateContext(user_id),
       prisma.user.findUnique({
@@ -83,7 +85,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
           systemName: true,
           profilePicture: true,
           customSystemPrompt: true,
-        }
+        },
       }),
       getFingerprintInjectionData(user_id),
       prisma.browserPassword.findMany({
@@ -108,7 +110,9 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
         }
       : DEFAULT_GEOLOCATION;
 
-    console.log(`🌍 Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
+    console.log(
+      `🌍 Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`
+    );
 
     // Phase 2: Create session (needs agent proxy + context)
     const session = await createSessionWithContext(contextId, agent_id, proxyGeo, start_url);
@@ -117,7 +121,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     const injectionResult = await injectUserData(session.sessionId, user_id, start_url);
 
     // Convert BigInt to number for JSON serialization
-    const serializedPasswords = passwords.map(p => ({
+    const serializedPasswords = passwords.map((p) => ({
       origin: p.origin,
       username: p.username,
       encryptedPassword: p.encryptedPassword,
@@ -125,30 +129,32 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     }));
 
     // Build user settings for agent (avoids separate GET /api/user-settings call)
-    const userSettings = user ? {
-      name: user.name,
-      phone: user.phone,
-      addressLine1: user.addressLine1,
-      addressLine2: user.addressLine2,
-      city: user.city,
-      state: user.state,
-      postalCode: user.postalCode,
-      country: user.country,
-      encryptedPaymentInformation: user.encryptedPaymentInformation,
-      systemName: user.systemName,
-      profilePicture: user.profilePicture,
-      customSystemPrompt: user.customSystemPrompt,
-    } : null;
+    const userSettings = user
+      ? {
+          name: user.name,
+          phone: user.phone,
+          addressLine1: user.addressLine1,
+          addressLine2: user.addressLine2,
+          city: user.city,
+          state: user.state,
+          postalCode: user.postalCode,
+          country: user.country,
+          encryptedPaymentInformation: user.encryptedPaymentInformation,
+          systemName: user.systemName,
+          profilePicture: user.profilePicture,
+          customSystemPrompt: user.customSystemPrompt,
+        }
+      : null;
 
     console.log(`🔐 Including ${serializedPasswords.length} passwords in init response`);
 
     res.json({
       success: true,
-      task_id: session.taskId,  // Stable ID for grouping browser actions
+      task_id: session.taskId, // Stable ID for grouping browser actions
       context_id: contextId,
       session_id: session.sessionId,
       debug_url: session.debugUrl,
-      ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
+      ws_url: session.wsUrl, // CDP WebSocket URL for browser-use
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
       fingerprint_injected: injectionResult.fingerprint.injected,
@@ -156,7 +162,6 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
       passwords: serializedPasswords,
       user_settings: userSettings,
     });
-    
   } catch (error) {
     // Forward Steel 429 so agents can back off and retry
     if (error instanceof SteelRateLimitError) {
@@ -168,7 +173,7 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
     }
     console.error('❌ Failed to init browser session:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to initialize browser session'
+      error: error instanceof Error ? error.message : 'Failed to initialize browser session',
     });
   }
 });
@@ -182,21 +187,20 @@ router.post('/init', authenticate, async (req: AuthRequest, res) => {
 router.post('/close', authenticate, async (req: AuthRequest, res) => {
   try {
     const { session_id, pause, current_url } = closeSessionSchema.parse(req.body);
-    
+
     console.log(`🌐 ${pause ? 'Pausing' : 'Closing'} browser session ${session_id}`);
     console.log(`   Received current_url: ${current_url ? current_url : 'NULL/EMPTY'}`);
-    
+
     await closeSession(session_id, pause, current_url);
-    
+
     res.json({
       success: true,
       status: pause ? 'PAUSED' : 'CLOSED',
     });
-    
   } catch (error) {
     console.error('❌ Failed to close browser session:', error);
-    res.status(500).json({ 
-      error: error instanceof Error ? error.message : 'Failed to close browser session' 
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Failed to close browser session',
     });
   }
 });
@@ -210,23 +214,30 @@ router.post('/close', authenticate, async (req: AuthRequest, res) => {
 router.post('/resume', authenticate, async (req: AuthRequest, res) => {
   try {
     const { task_id } = resumeSessionSchema.parse(req.body);
-    
+
     console.log(`🌐 Resuming browser task ${task_id}`);
-    
+
     const result = await resumeSession(task_id);
-    
+
     // Get user_id from the session's context
     const session = await prisma.browserSession.findUnique({
       where: { id: task_id },
-      include: { context: true }
+      include: { context: true },
     });
-    
+
     // Inject cookies and fingerprint into resumed session
-    let injectionResult = { cookies: { injected: false, cookieCount: 0 }, fingerprint: { injected: false } };
+    let injectionResult = {
+      cookies: { injected: false, cookieCount: 0 },
+      fingerprint: { injected: false },
+    };
     let fingerprintInjection = null;
     if (session?.context?.userId) {
       if (result.savedUrl) {
-        injectionResult = await injectUserData(result.sessionId, session.context.userId, result.savedUrl);
+        injectionResult = await injectUserData(
+          result.sessionId,
+          session.context.userId,
+          result.savedUrl
+        );
       }
       // Get fingerprint data for agent to apply via CDP
       fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
@@ -234,11 +245,11 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
 
     res.json({
       success: true,
-      task_id,  // Same stable task ID
-      session_id: result.sessionId,  // NEW BrowserBase session ID
+      task_id, // Same stable task ID
+      session_id: result.sessionId, // NEW BrowserBase session ID
       debug_url: result.debugUrl,
-      ws_url: result.wsUrl,  // CDP WebSocket URL for browser-use
-      saved_url: result.savedUrl,  // URL to navigate back to
+      ws_url: result.wsUrl, // CDP WebSocket URL for browser-use
+      saved_url: result.savedUrl, // URL to navigate back to
       status: 'ACTIVE',
       cookies_injected: injectionResult.cookies.injected,
       cookies_count: injectionResult.cookies.cookieCount,
@@ -246,7 +257,6 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
       // Fingerprint data for agent to apply via CDP
       fingerprint_injection: fingerprintInjection,
     });
-    
   } catch (error) {
     if (error instanceof SteelRateLimitError) {
       console.warn('⚠️ Steel rate limit hit during session resume');
@@ -257,7 +267,7 @@ router.post('/resume', authenticate, async (req: AuthRequest, res) => {
     }
     console.error('❌ Failed to resume browser task:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to resume browser task'
+      error: error instanceof Error ? error.message : 'Failed to resume browser task',
     });
   }
 });
@@ -273,14 +283,14 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
 
     const session = await prisma.browserSession.findUnique({
       where: { id: taskId },
-      include: { context: true }
+      include: { context: true },
     });
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-// Get fingerprint data for the agent to apply via CDP
+    // Get fingerprint data for the agent to apply via CDP
     let fingerprintInjection = null;
 
     // Fetch passwords for the user
@@ -307,7 +317,7 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
         },
       });
 
-      serializedPasswords = passwords.map(p => ({
+      serializedPasswords = passwords.map((p) => ({
         origin: p.origin,
         username: p.username,
         encryptedPassword: p.encryptedPassword,
@@ -319,17 +329,16 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
       task_id: session.id,
       session_id: session.sessionId,
       debug_url: session.debugUrl,
-      ws_url: session.wsUrl,  // CDP WebSocket URL for browser-use
+      ws_url: session.wsUrl, // CDP WebSocket URL for browser-use
       status: session.status,
       // Fingerprint data for agent to apply via CDP
       fingerprint_injection: fingerprintInjection,
       passwords: serializedPasswords,
     });
-
   } catch (error) {
     console.error('❌ Failed to get session info:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to get session info'
+      error: error instanceof Error ? error.message : 'Failed to get session info',
     });
   }
 });
@@ -341,18 +350,18 @@ router.get('/task/:taskId', authenticate, async (req: AuthRequest, res) => {
 router.get('/context/:userId', authenticate, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
-    
+
     const context = await prisma.browserContext.findUnique({
       where: { userId },
       include: {
         sessions: {
           where: { status: 'ACTIVE' },
           take: 5,
-          orderBy: { createdAt: 'desc' }
-        }
-      }
+          orderBy: { createdAt: 'desc' },
+        },
+      },
     });
-    
+
     res.json({ context });
   } catch (error) {
     console.error('❌ Failed to get context:', error);
@@ -386,37 +395,43 @@ router.get('/:sessionId', authenticate, async (req: AuthRequest, res) => {
  * Upload a file to a Steel browser session.
  * The file becomes available in the session's VM environment for use with file inputs.
  */
-router.post('/:sessionId/files', authenticate, upload.single('file') as any, async (req: AuthRequest, res) => {
-  try {
-    const { sessionId } = req.params;
+router.post(
+  '/:sessionId/files',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res) => {
+    try {
+      const { sessionId } = req.params;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file provided' });
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file provided' });
+      }
+
+      console.log(
+        `📎 Uploading file to session ${sessionId}: ${req.file.originalname} (${req.file.size} bytes)`
+      );
+
+      const result = await uploadFileToSession(
+        sessionId,
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype
+      );
+
+      res.json({
+        success: true,
+        path: result.path,
+        size: result.size,
+        filename: req.file.originalname,
+      });
+    } catch (error) {
+      console.error('❌ Failed to upload file to session:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to upload file to session',
+      });
     }
-
-    console.log(`📎 Uploading file to session ${sessionId}: ${req.file.originalname} (${req.file.size} bytes)`);
-
-    const result = await uploadFileToSession(
-      sessionId,
-      req.file.buffer,
-      req.file.originalname,
-      req.file.mimetype
-    );
-
-    res.json({
-      success: true,
-      path: result.path,
-      size: result.size,
-      filename: req.file.originalname,
-    });
-
-  } catch (error) {
-    console.error('❌ Failed to upload file to session:', error);
-    res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to upload file to session'
-    });
   }
-});
+);
 
 /**
  * GET /api/browser-session/:sessionId/files/list
@@ -437,11 +452,10 @@ router.get('/:sessionId/files/list', authenticate, async (req: AuthRequest, res)
       files,
       count: files.length,
     });
-
   } catch (error) {
     console.error('❌ Failed to list session files:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to list session files'
+      error: error instanceof Error ? error.message : 'Failed to list session files',
     });
   }
 });
@@ -463,7 +477,7 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
     // 1. Get session with context to find userId
     const session = await prisma.browserSession.findUnique({
       where: { sessionId },
-      include: { context: true }
+      include: { context: true },
     });
 
     if (!session) {
@@ -486,7 +500,7 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
       return res.json({
         injected: false,
         reason: 'no_data_for_origin',
-        count: 0
+        count: 0,
       });
     }
 
@@ -498,7 +512,7 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
       return res.json({
         injected: false,
         reason: 'no_data_for_origin',
-        count: 0
+        count: 0,
       });
     }
 
@@ -511,7 +525,7 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
       return res.json({
         injected: false,
         reason: 'already_injected',
-        count: entries.length
+        count: entries.length,
       });
     }
 
@@ -539,12 +553,11 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
       }, entries);
 
       console.log(`  ✅ Injected ${entries.length} localStorage entries for ${origin}`);
-
     } catch (cdpError) {
       console.error(`  ❌ Failed to inject via CDP:`, cdpError);
       return res.status(500).json({
         error: 'Failed to inject localStorage via CDP',
-        details: cdpError instanceof Error ? cdpError.message : 'Unknown error'
+        details: cdpError instanceof Error ? cdpError.message : 'Unknown error',
       });
     }
 
@@ -568,14 +581,12 @@ router.post('/:sessionId/inject-localStorage', authenticate, async (req: AuthReq
       reason: injectedHash ? 'data_changed' : 'first_injection',
       count: entries.length,
     });
-
   } catch (error) {
     console.error('❌ Failed to inject localStorage:', error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to inject localStorage'
+      error: error instanceof Error ? error.message : 'Failed to inject localStorage',
     });
   }
 });
 
 export default router;
-

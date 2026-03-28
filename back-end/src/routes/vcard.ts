@@ -3,13 +3,15 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 // @ts-ignore - vcards-js doesn't have type declarations
 import vCardsJS from 'vcards-js';
-import { prisma } from '../lib/prisma';
+import { prisma } from '../providers/database';
 
 const router = Router();
 
 // Pre-load the default Rose contact photo as base64 (256x256, ~35KB)
 // This avoids fetching the full-size 556KB image at runtime and keeps vCards under MMS size limits
-const DEFAULT_PHOTO_BASE64 = readFileSync(join(__dirname, '../assets/rose-contact-256.png')).toString('base64');
+const DEFAULT_PHOTO_BASE64 = readFileSync(
+  join(__dirname, '../assets/rose-contact-256.png')
+).toString('base64');
 
 function applyDefaultPhoto(vCard: any) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');

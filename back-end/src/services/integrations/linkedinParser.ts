@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 import AdmZip from 'adm-zip';
 import { parse } from 'csv-parse/sync';
@@ -77,7 +77,7 @@ function parseCsvBuffer(buffer: Buffer, columns: string[]): Record<string, strin
   const lines = content.split('\n');
   let headerIndex = -1;
   for (let i = 0; i < Math.min(lines.length, 10); i++) {
-    if (columns.some(col => lines[i].includes(col))) {
+    if (columns.some((col) => lines[i].includes(col))) {
       headerIndex = i;
       break;
     }
@@ -119,7 +119,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
     switch (name) {
       case 'Connections.csv': {
         const rows = parseCsvBuffer(buffer, ['First Name', 'Last Name', 'URL']);
-        result.connections = rows.map(r => ({
+        result.connections = rows.map((r) => ({
           firstName: r['First Name'] || '',
           lastName: r['Last Name'] || '',
           url: r['URL'] || '',
@@ -132,7 +132,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
       }
       case 'messages.csv': {
         const rows = parseCsvBuffer(buffer, ['CONVERSATION ID', 'FROM', 'CONTENT']);
-        result.messages = rows.map(r => ({
+        result.messages = rows.map((r) => ({
           conversationId: r['CONVERSATION ID'] || '',
           conversationTitle: r['CONVERSATION TITLE'] || '',
           from: r['FROM'] || '',
@@ -163,7 +163,7 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
       }
       case 'Positions.csv': {
         const rows = parseCsvBuffer(buffer, ['Company Name', 'Title']);
-        result.positions = rows.map(r => ({
+        result.positions = rows.map((r) => ({
           companyName: r['Company Name'] || '',
           title: r['Title'] || '',
           description: r['Description'] || '',
@@ -176,7 +176,9 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
     }
   }
 
-  console.log(`[LinkedInParser] Extracted: ${result.connections.length} connections, ${result.messages.length} messages, ${result.positions.length} positions`);
+  console.log(
+    `[LinkedInParser] Extracted: ${result.connections.length} connections, ${result.messages.length} messages, ${result.positions.length} positions`
+  );
   return result;
 }
 
@@ -206,7 +208,8 @@ export function transformLinkedInContacts(
     if (!msg.senderProfileUrl || !msg.content) continue;
     const normalizedUrl = msg.senderProfileUrl.replace(/\/$/, '').toLowerCase();
     // Skip messages from the user
-    if (userProfileUrl && normalizedUrl === userProfileUrl.replace(/\/$/, '').toLowerCase()) continue;
+    if (userProfileUrl && normalizedUrl === userProfileUrl.replace(/\/$/, '').toLowerCase())
+      continue;
     if (!messagesBySender.has(normalizedUrl)) {
       messagesBySender.set(normalizedUrl, []);
     }
@@ -220,7 +223,7 @@ export function transformLinkedInContacts(
     if (!conn.firstName && !conn.lastName) continue;
 
     const normalizedUrl = conn.url?.replace(/\/$/, '').toLowerCase() || '';
-    const senderMessages = normalizedUrl ? (messagesBySender.get(normalizedUrl) || []) : [];
+    const senderMessages = normalizedUrl ? messagesBySender.get(normalizedUrl) || [] : [];
 
     // Build identifier: prefer email, fall back to LinkedIn URL
     const identifier = conn.emailAddress || conn.url;
@@ -278,16 +281,17 @@ export function transformLinkedInContacts(
     if (!msg.senderProfileUrl || !msg.content) continue;
     const normalizedUrl = msg.senderProfileUrl.replace(/\/$/, '').toLowerCase();
     // Only process messages FROM the user
-    if (!userProfileUrl || normalizedUrl !== userProfileUrl.replace(/\/$/, '').toLowerCase()) continue;
+    if (!userProfileUrl || normalizedUrl !== userProfileUrl.replace(/\/$/, '').toLowerCase())
+      continue;
 
     // LinkedIn exports comma-separated URLs for group conversations
     const recipientUrls = (msg.recipientProfileUrls || '')
       .split(',')
-      .map(u => u.trim().replace(/\/$/, '').toLowerCase())
+      .map((u) => u.trim().replace(/\/$/, '').toLowerCase())
       .filter(Boolean);
 
     for (const recipientUrl of recipientUrls) {
-      const existingContact = contacts.find(c => {
+      const existingContact = contacts.find((c) => {
         const cUrl = (c.identifier || '').replace(/\/$/, '').toLowerCase();
         return cUrl === recipientUrl;
       });
@@ -325,7 +329,7 @@ export async function importLinkedInData(
   // Strategy 1: Match profile name against message senders
   if (data.profile?.firstName && data.profile?.lastName) {
     const userName = `${data.profile.firstName} ${data.profile.lastName}`;
-    const userMsg = data.messages.find(m => m.from === userName);
+    const userMsg = data.messages.find((m) => m.from === userName);
     if (userMsg?.senderProfileUrl) {
       userProfileUrl = userMsg.senderProfileUrl;
     }
@@ -349,14 +353,18 @@ export async function importLinkedInData(
       }
     }
     if (userProfileUrl) {
-      console.log(`[Job ${jobId}] Detected user profile URL via frequency heuristic: ${userProfileUrl}`);
+      console.log(
+        `[Job ${jobId}] Detected user profile URL via frequency heuristic: ${userProfileUrl}`
+      );
     }
   }
 
   const contactsToUpsert = transformLinkedInContacts(data, userProfileUrl);
   const totalMessages = contactsToUpsert.reduce((sum, c) => sum + c.messages.length, 0);
 
-  console.log(`[Job ${jobId}] Processing ${totalMessages} LinkedIn messages from ${contactsToUpsert.length} contacts for user ${userId}`);
+  console.log(
+    `[Job ${jobId}] Processing ${totalMessages} LinkedIn messages from ${contactsToUpsert.length} contacts for user ${userId}`
+  );
 
   // Upsert via shared manager
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
@@ -375,7 +383,8 @@ export async function importLinkedInData(
           ...existingConfig,
           lastUploadedAt: new Date().toISOString(),
           totalMessagesProcessed: (existingConfig.totalMessagesProcessed || 0) + totalMessages,
-          totalContactsProcessed: (existingConfig.totalContactsProcessed || 0) + contactsToUpsert.length,
+          totalContactsProcessed:
+            (existingConfig.totalContactsProcessed || 0) + contactsToUpsert.length,
           batchesReceived: (existingConfig.batchesReceived || 0) + 1,
           profile: data.profile,
           positions: data.positions,
@@ -384,6 +393,8 @@ export async function importLinkedInData(
     });
   }
 
-  console.log(`[Job ${jobId}] ✅ LinkedIn sync complete: ${result.contacts} contacts, ${result.messages} messages`);
+  console.log(
+    `[Job ${jobId}] ✅ LinkedIn sync complete: ${result.contacts} contacts, ${result.messages} messages`
+  );
   return result;
 }

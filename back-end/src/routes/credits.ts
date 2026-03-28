@@ -3,16 +3,16 @@
  */
 
 import express, { Response } from 'express';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest } from '../providers/auth';
 import {
   getUserUsage,
   getSubscriptionTier,
   getUpgradeOptions,
-  createInitialCredit
-} from '../lib/credits';
-import { prisma } from '../lib/prisma';
+  createInitialCredit,
+} from '../providers/credits';
+import { prisma } from '../providers/database';
 import Stripe from 'stripe';
-import { createLogger } from '../lib/logger';
+import { createLogger } from '../providers/logger';
 
 const log = createLogger('Credits');
 const router = express.Router();
@@ -40,14 +40,16 @@ router.get('/usage', async (req: AuthRequest, res: Response) => {
     if (apiKey && apiKey === internalApiKey) {
       // Internal API call - userId from query param
       userId = req.query.userId as string;
-      
+
       if (!userId) {
-        return res.status(400).json({ error: 'userId query parameter required for internal calls' });
+        return res
+          .status(400)
+          .json({ error: 'userId query parameter required for internal calls' });
       }
     } else {
       // User-authenticated call - use authenticate middleware inline
       const authHeader = req.headers.authorization;
-      
+
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Missing or invalid authorization header' });
       }
@@ -70,20 +72,19 @@ router.get('/usage', async (req: AuthRequest, res: Response) => {
       userId = req.user.id; // From Supabase JWT
     }
 
-    const [usage, tier] = await Promise.all([
-      getUserUsage(userId),
-      getSubscriptionTier(userId)
-    ]);
+    const [usage, tier] = await Promise.all([getUserUsage(userId), getSubscriptionTier(userId)]);
 
     res.json({
       total: usage.total,
       used: usage.used,
       remaining: usage.remaining,
       tier: tier,
-      upgradeOptions: getUpgradeOptions(tier)
+      upgradeOptions: getUpgradeOptions(tier),
     });
   } catch (error) {
-    log.error('Error checking usage', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Error checking usage', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to check usage' });
   }
 });
@@ -102,13 +103,13 @@ router.post('/initialize', authenticate, async (req: AuthRequest, res: Response)
 
     // Ensure user exists in User table first
     let user = await prisma.user.findUnique({
-      where: { userId }
+      where: { userId },
     });
 
     if (!user) {
       // Create user record if it doesn't exist
       user = await prisma.user.create({
-        data: { userId }
+        data: { userId },
       });
       log.info('Created user record', { user_id: userId });
     }
@@ -120,11 +121,13 @@ router.post('/initialize', authenticate, async (req: AuthRequest, res: Response)
       success: true,
       credit: {
         amount: credit.amountCents,
-        expirationDate: credit.expirationDate
-      }
+        expirationDate: credit.expirationDate,
+      },
     });
   } catch (error) {
-    log.error('Error initializing credits', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Error initializing credits', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to initialize credits' });
   }
 });
@@ -142,24 +145,26 @@ router.get('/subscription', authenticate, async (req: AuthRequest, res: Response
     const userId = req.user.id;
 
     const subscription = await prisma.subscription.findUnique({
-      where: { userId }
+      where: { userId },
     });
 
     if (!subscription) {
       return res.json({
         tier: null,
         currentPeriodEnd: null,
-        upgradeOptions: getUpgradeOptions(null)
+        upgradeOptions: getUpgradeOptions(null),
       });
     }
 
     res.json({
       tier: subscription.subscriptionTier,
       currentPeriodEnd: subscription.currentPeriodEnd,
-      upgradeOptions: getUpgradeOptions(subscription.subscriptionTier)
+      upgradeOptions: getUpgradeOptions(subscription.subscriptionTier),
     });
   } catch (error) {
-    log.error('Error fetching subscription', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Error fetching subscription', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch subscription' });
   }
 });
@@ -218,10 +223,11 @@ router.get('/stats', authenticate, async (req: AuthRequest, res: Response) => {
       topModels,
     });
   } catch (error) {
-    log.error('Error fetching stats', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Error fetching stats', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 
 export default router;
-

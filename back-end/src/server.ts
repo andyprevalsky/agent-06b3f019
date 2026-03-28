@@ -4,14 +4,14 @@ dotenv.config();
 
 import express from 'express';
 import cors from 'cors';
-import { authenticate } from './middleware/auth';
+import { authenticate } from './providers/auth';
 import agentsRouter from './routes/agents';
 import formatRouter from './routes/format';
 import toolsRouter from './routes/tools';
 import waitlistRouter from './routes/waitlist';
 import blueprintsRouter from './routes/blueprints';
 import modelsRouter from './routes/models';
-import attentionRequestsRouter from './routes/attentionRequests';
+import attentionRequestsRouter from './domains/attention-requests/routes';
 import userSettingsRouter from './routes/userSettings';
 import creditsRouter from './routes/credits';
 import webhooksRouter from './routes/webhooks';
@@ -35,30 +35,39 @@ import imessageRouter from './routes/imessage';
 import memoryRouter from './routes/memory';
 import dataRouter from './routes/data';
 import benchmarksRouter from './routes/benchmarks';
-import { prisma } from './lib/prisma';
-import { createLogger } from './lib/logger';
+import { prisma } from './providers/database';
+import { createLogger } from './providers/logger';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
 const SYSTEM_TOOLS = [
-  { name: "web_search", description: "Search the web for information using Perplexity AI" },
-  { name: "deep_research", description: "Conduct deep, comprehensive research on a topic" },
-  { name: "spawn_sub_agent", description: "Spawn a sub-agent for delegating complex subtasks" },
-  { name: "spawn_browser_agent", description: "Spawn autonomous browser agent for web tasks" },
-  { name: "spawn_claude_code_agent", description: "Spawn Claude Code agent in E2B sandbox for coding tasks" },
-  { name: "find_all", description: "Discover entities matching criteria using natural language" },
-  { name: "enrich", description: "Enrich entity data from the web" },
-  { name: "monitor", description: "Monitor the web for changes on a schedule" },
-  { name: "check_monitor_events", description: "Check for events from monitors" },
-  { name: "search_user_network_for_people", description: "Search user's network for people" },
-  { name: "message_person", description: "Send messages via iMessage or email with AI-generated content" },
-  { name: "send_message_to_user", description: "Message the user from PLAN phase (optionally blocking for a reply)" },
-  { name: "wait_seconds", description: "Pause execution for a specified duration" },
+  { name: 'web_search', description: 'Search the web for information using Perplexity AI' },
+  { name: 'deep_research', description: 'Conduct deep, comprehensive research on a topic' },
+  { name: 'spawn_sub_agent', description: 'Spawn a sub-agent for delegating complex subtasks' },
+  { name: 'spawn_browser_agent', description: 'Spawn autonomous browser agent for web tasks' },
+  {
+    name: 'spawn_claude_code_agent',
+    description: 'Spawn Claude Code agent in E2B sandbox for coding tasks',
+  },
+  { name: 'find_all', description: 'Discover entities matching criteria using natural language' },
+  { name: 'enrich', description: 'Enrich entity data from the web' },
+  { name: 'monitor', description: 'Monitor the web for changes on a schedule' },
+  { name: 'check_monitor_events', description: 'Check for events from monitors' },
+  { name: 'search_user_network_for_people', description: "Search user's network for people" },
+  {
+    name: 'message_person',
+    description: 'Send messages via iMessage or email with AI-generated content',
+  },
+  {
+    name: 'send_message_to_user',
+    description: 'Message the user from PLAN phase (optionally blocking for a reply)',
+  },
+  { name: 'wait_seconds', description: 'Pause execution for a specified duration' },
 ];
 
 // Build dynamic Bazaar description with all tools
 const BAZAAR_DESCRIPTION = `Spawn an autonomous Rose agent cluster of up to 10,000 agents to complete any arbitrarily complex task. Each Rose agent has access to the following tools:
 
-${SYSTEM_TOOLS.map(t => `• ${t.name}: ${t.description}`).join('\n')}
+${SYSTEM_TOOLS.map((t) => `• ${t.name}: ${t.description}`).join('\n')}
 
 Pay with USDC on Base network. Credits are consumed as the agent works. Top up anytime to continue.`;
 import cron from 'node-cron';
@@ -74,7 +83,9 @@ const httpLog = createLogger('HTTP');
 if (!process.env.BACKEND_API_KEY) {
   log.warn('BACKEND_API_KEY not found in environment - internal API calls from workers will fail');
 } else {
-  log.info('BACKEND_API_KEY loaded', { key_prefix: process.env.BACKEND_API_KEY.substring(0, 20) + '...' });
+  log.info('BACKEND_API_KEY loaded', {
+    key_prefix: process.env.BACKEND_API_KEY.substring(0, 20) + '...',
+  });
 }
 
 const app = express();
@@ -99,29 +110,32 @@ const defaultOrigins = [
   'http://localhost:8081',
 ];
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
-  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
   : defaultOrigins;
 
 log.info('CORS Configuration', { allowed_origins: allowedOrigins.join(', ') });
 
 app.use(
   cors({
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void
+    ) => {
       // Allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
-      
+
       // Check exact matches
       if (allowedOrigins.indexOf(origin) !== -1) {
         return callback(null, true);
       }
-      
+
       // Allow Vercel preview URLs (*.vercel.app)
       if (origin.endsWith('.vercel.app')) {
         log.info('Allowed Vercel preview origin', { origin });
         return callback(null, true);
       }
-      
+
       // Reject other origins (don't throw error, just return false)
       log.warn('CORS rejected origin', { origin });
       callback(null, false);
@@ -134,14 +148,16 @@ app.use(
 
 // Request logging middleware
 // UUID pattern to extract agent_id from URL paths like /api/agents/:id
-const UUID_RE = /\/api\/(?:agents|tool-usage)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const UUID_RE =
+  /\/api\/(?:agents|tool-usage)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 app.use((req, res, next) => {
   const start = Date.now();
   const { method, path: urlPath } = req;
-  const body = req.body && Object.keys(req.body).length > 0
-    ? JSON.stringify(req.body).substring(0, 200)
-    : undefined;
+  const body =
+    req.body && Object.keys(req.body).length > 0
+      ? JSON.stringify(req.body).substring(0, 200)
+      : undefined;
 
   res.on('finish', () => {
     const duration_ms = Date.now() - start;
@@ -180,45 +196,47 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Public routes (no auth required)
-app.use('/api/auth', authRouter);  // OTP send/verify (creates user + $5 credit)
+app.use('/api/auth', authRouter); // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
-app.use('/api/models', modelsRouter);  // Models list is public
-app.use('/api/tools', toolsRouter);  // Tools list is public read
-app.use('/api/benchmarks', benchmarksRouter);  // Benchmark tasks are public
-app.use('/api/vcard', vcardRouter);  // vCard for contact card (public for Twilio MMS)
+app.use('/api/models', modelsRouter); // Models list is public
+app.use('/api/tools', toolsRouter); // Tools list is public read
+app.use('/api/benchmarks', benchmarksRouter); // Benchmark tasks are public
+app.use('/api/vcard', vcardRouter); // vCard for contact card (public for Twilio MMS)
 
 // x402 Payment Routes Setup
 const x402ReceivingWallet = process.env.X402_RECEIVING_WALLET;
 if (x402ReceivingWallet) {
-  log.info('x402 payments enabled', { receiving_wallet: x402ReceivingWallet.substring(0, 10) + '...' });
+  log.info('x402 payments enabled', {
+    receiving_wallet: x402ReceivingWallet.substring(0, 10) + '...',
+  });
 
   // Create payment middleware instance for /api/agents
   const agentsPaymentMiddleware = paymentMiddleware(
     x402ReceivingWallet,
     {
-      "POST /": {
-        price: "$0.05",
-        network: "base",
+      'POST /': {
+        price: '$0.05',
+        network: 'base',
         config: {
           description: BAZAAR_DESCRIPTION,
           inputSchema: {
-            type: "object",
+            type: 'object',
             properties: {
-              goal: { type: "string", description: "What should the agent accomplish?" },
-              model: { type: "string", description: "LLM model (default: rose-1-lite)" }
+              goal: { type: 'string', description: 'What should the agent accomplish?' },
+              model: { type: 'string', description: 'LLM model (default: rose-1-lite)' },
             },
-            required: ["goal"]
+            required: ['goal'],
           },
           outputSchema: {
-            type: "object",
+            type: 'object',
             properties: {
-              agent_id: { type: "string" },
-              status_url: { type: "string" },
-              credits_added: { type: "number" }
-            }
-          }
-        }
-      }
+              agent_id: { type: 'string' },
+              status_url: { type: 'string' },
+              credits_added: { type: 'number' },
+            },
+          },
+        },
+      },
     },
     facilitator
   );
@@ -234,26 +252,29 @@ if (x402ReceivingWallet) {
   });
 
   // x402 topup endpoint
-  app.use('/api/x402', paymentMiddleware(
-    x402ReceivingWallet,
-    {
-      "POST /topup": {
-        price: "$0.05",
-        network: "base",
-        config: {
-          description: "Add credits to your Rose agent account. Credits are used as agents work.",
-          outputSchema: {
-            type: "object",
-            properties: {
-              credits_added: { type: "number" },
-              total_remaining: { type: "number" }
-            }
-          }
-        }
-      }
-    },
-    facilitator
-  ));
+  app.use(
+    '/api/x402',
+    paymentMiddleware(
+      x402ReceivingWallet,
+      {
+        'POST /topup': {
+          price: '$0.05',
+          network: 'base',
+          config: {
+            description: 'Add credits to your Rose agent account. Credits are used as agents work.',
+            outputSchema: {
+              type: 'object',
+              properties: {
+                credits_added: { type: 'number' },
+                total_remaining: { type: 'number' },
+              },
+            },
+          },
+        },
+      },
+      facilitator
+    )
+  );
   app.use('/api/x402', x402Router);
 } else {
   log.warn('X402_RECEIVING_WALLET not set, x402 payments disabled');
@@ -296,12 +317,12 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
     stack: err.stack,
   });
-  
+
   // Return appropriate status code
   const statusCode = err.statusCode || err.status || 500;
-  res.status(statusCode).json({ 
+  res.status(statusCode).json({
     error: err.message || 'Internal server error',
-    path: req.path 
+    path: req.path,
   });
 });
 
@@ -326,8 +347,10 @@ app.listen(PORT, () => {
     const cronLog = createLogger('Cron');
     const runSync = () => {
       cronLog.info('Running Gmail sync job...');
-      runGmailSyncJob().catch(err => {
-        cronLog.error('Gmail sync job error', { error: err instanceof Error ? err.message : String(err) });
+      runGmailSyncJob().catch((err) => {
+        cronLog.error('Gmail sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
     };
     runSync();

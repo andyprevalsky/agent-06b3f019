@@ -1,17 +1,27 @@
 import express, { Response } from 'express';
 import { IntegrationType, IntegrationStatus, EmailProvider, Prisma } from '@prisma/client';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest } from '../providers/auth';
 import multer from 'multer';
 import fs from 'fs';
 import { parseIMessageData, ContactWithMessages } from '../services/integrations/iMessageParser';
-import { parseWhatsAppData, WhatsAppContactWithMessages } from '../services/integrations/whatsappParser';
-import { parseTelegramData, TelegramContactWithMessages } from '../services/integrations/telegramParser';
+import {
+  parseWhatsAppData,
+  WhatsAppContactWithMessages,
+} from '../services/integrations/whatsappParser';
+import {
+  parseTelegramData,
+  TelegramContactWithMessages,
+} from '../services/integrations/telegramParser';
 import { parseVcfContent, importVcfContacts } from '../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../services/integrations/emailParser';
-import { fetchGmailEmails, parseGmailOAuthEmails, fetchGmailMessagesSince } from '../services/integrations/gmailParser';
+import {
+  fetchGmailEmails,
+  parseGmailOAuthEmails,
+  fetchGmailMessagesSince,
+} from '../services/integrations/gmailParser';
 import { getValidAccessToken } from '../services/integrations/gmailSync';
-import { sendSms } from '../lib/smsQueue';
-import { prisma } from '../lib/prisma';
+import { sendSms } from '../providers/smsQueue';
+import { prisma } from '../providers/database';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import {
@@ -19,7 +29,7 @@ import {
   fetchPoolToken,
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
-} from '../lib/claudeCredentials';
+} from '../providers/claudeCredentials';
 import { importLinkedInData } from '../services/integrations/linkedinParser';
 
 const router = express.Router();
@@ -64,22 +74,13 @@ const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfig> = {
 };
 
 const base64UrlEncode = (buffer: Buffer) =>
-  buffer
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
+  buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 
 const generateCodeVerifier = () => base64UrlEncode(crypto.randomBytes(32));
 const generateStateToken = () => base64UrlEncode(crypto.randomBytes(24));
 
 const createCodeChallenge = (verifier: string) =>
-  base64UrlEncode(
-    crypto
-      .createHash('sha256')
-      .update(verifier)
-      .digest()
-  );
+  base64UrlEncode(crypto.createHash('sha256').update(verifier).digest());
 
 const normalizeProvider = (provider?: string): EmailProviderSlug | null => {
   if (!provider) return null;
@@ -97,7 +98,10 @@ const buildRedirectUri = (provider: EmailProviderSlug) => {
   return `${BACKEND_BASE_URL}/api/integrations/email/${provider}/callback`;
 };
 
-const buildAuthUrl = (provider: EmailProviderSlug, opts: { state: string; codeChallenge: string }) => {
+const buildAuthUrl = (
+  provider: EmailProviderSlug,
+  opts: { state: string; codeChallenge: string }
+) => {
   const config = EMAIL_PROVIDER_CONFIG[provider];
   if (!config.clientId) {
     throw new Error(`Missing client ID for provider ${provider}`);
@@ -184,8 +188,8 @@ const exchangeProviderCode = async (
   const scopes = Array.isArray(json.scope)
     ? json.scope
     : typeof json.scope === 'string'
-    ? json.scope.split(/[\s+,]/).filter(Boolean)
-    : EMAIL_PROVIDER_CONFIG[provider].scopes;
+      ? json.scope.split(/[\s+,]/).filter(Boolean)
+      : EMAIL_PROVIDER_CONFIG[provider].scopes;
 
   // Fetch user's email from provider
   let userEmail: string | undefined;
@@ -202,7 +206,7 @@ const exchangeProviderCode = async (
     } catch (err) {
       console.error('Failed to fetch Gmail user info:', err);
     }
-    
+
     // Fallback: decode email from id_token if userinfo failed
     if (!userEmail && json.id_token) {
       try {
@@ -255,12 +259,15 @@ const ALLOWED_REDIRECT_PATTERNS = [
 ];
 
 function isAllowedRedirectUrl(url: string): boolean {
-  return ALLOWED_REDIRECT_PATTERNS.some(pattern => pattern.test(url));
+  return ALLOWED_REDIRECT_PATTERNS.some((pattern) => pattern.test(url));
 }
 
-const sendOAuthResult = (res: Response, opts: { success: boolean; message: string; returnUrl?: string | null; errorUrl?: string | null }) => {
+const sendOAuthResult = (
+  res: Response,
+  opts: { success: boolean; message: string; returnUrl?: string | null; errorUrl?: string | null }
+) => {
   // Redirect to the appropriate URL (supports both http URLs and deep links like roselabs://...)
-  const redirectTarget = opts.success ? opts.returnUrl : (opts.errorUrl || opts.returnUrl);
+  const redirectTarget = opts.success ? opts.returnUrl : opts.errorUrl || opts.returnUrl;
   if (redirectTarget && isAllowedRedirectUrl(redirectTarget)) {
     const url = new URL(redirectTarget);
     url.searchParams.set('oauth_result', opts.success ? 'success' : 'error');
@@ -297,50 +304,122 @@ const upload = multer({
   dest: '/tmp/integration-uploads/',
   limits: {
     fileSize: 500 * 1024 * 1024, // 500MB max file size
-    fieldSize: 200 * 1024 * 1024,  // 200MB max field size (for localStorage uploads which can be large)
+    fieldSize: 200 * 1024 * 1024, // 200MB max field size (for localStorage uploads which can be large)
   },
 });
 
 // Auth cookie name patterns that indicate a logged-in session
 const AUTH_COOKIE_PATTERNS = [
-  'session', 'sess', 'auth', 'token', 'login', 'logged', 'user', 'usr',
-  'sso', 'jwt', 'bearer', 'access', 'refresh', 'credential', 'identity',
-  'account', 'member', 'subscriber',
+  'session',
+  'sess',
+  'auth',
+  'token',
+  'login',
+  'logged',
+  'user',
+  'usr',
+  'sso',
+  'jwt',
+  'bearer',
+  'access',
+  'refresh',
+  'credential',
+  'identity',
+  'account',
+  'member',
+  'subscriber',
 ];
 
 // False positive patterns (tracking cookies, not auth)
 const FALSE_POSITIVE_COOKIES = [
-  'cf_clearance', '_ga', '_gid', '_gcl', '_fbp', '_fbc', 'mp_',
-  '_hp5_', '_hjSession', 'OptanonConsent', '_pin_unauth', 'intercom-',
-  '__stripe_mid', '_rdt_uuid', '_tt_enable_cookie', '_ttp', '_uetvid',
-  'hubspotutk', '__hstc', '__kla_id', 'ajs_anonymous_id', 'ph_phc_',
-  '_clck', '_clsk', '_scid', '_sctr', 'FPID', 'FPAU', '_derived_epik',
-  '_zitok', 'receive-cookie-deprecation',
+  'cf_clearance',
+  '_ga',
+  '_gid',
+  '_gcl',
+  '_fbp',
+  '_fbc',
+  'mp_',
+  '_hp5_',
+  '_hjSession',
+  'OptanonConsent',
+  '_pin_unauth',
+  'intercom-',
+  '__stripe_mid',
+  '_rdt_uuid',
+  '_tt_enable_cookie',
+  '_ttp',
+  '_uetvid',
+  'hubspotutk',
+  '__hstc',
+  '__kla_id',
+  'ajs_anonymous_id',
+  'ph_phc_',
+  '_clck',
+  '_clsk',
+  '_scid',
+  '_sctr',
+  'FPID',
+  'FPAU',
+  '_derived_epik',
+  '_zitok',
+  'receive-cookie-deprecation',
 ];
 
 // Ad/tracking domains to exclude — only pure ad-tech/tracking infrastructure
 // that no real user would intentionally log into
 const AD_TRACKING_DOMAINS = [
   // Google ad/analytics
-  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+  'doubleclick.net',
+  'googlesyndication.com',
+  'googleadservices.com',
   'analytics.google.com',
   // Social tracking pixels (not the main sites)
   'fbcdn.net',
   // Ad exchanges / SSPs / DSPs
-  'adition.com', 'adnxs.com', 'adprime.com', 'colossusssp.com',
-  'cpmstar.com', 'deepintent.com', 'dianomi.com', 'dotomi.com',
-  'eqads.com', 'extremereach.io', 'infolinks.com', 'krushmedia.com',
-  'loopme.me', 'mookie1.com', 'pubmatic.com', 'servenobid.com',
-  'sharethrough.com', 'smilewanted.com', 'stackadapt.com',
-  'taboola.com', 'tappx.com', 'tsyndicate.com', 'vrtcal.com',
-  'ymmobi.com', 'connatix.com', 'openwebmp.com',
+  'adition.com',
+  'adnxs.com',
+  'adprime.com',
+  'colossusssp.com',
+  'cpmstar.com',
+  'deepintent.com',
+  'dianomi.com',
+  'dotomi.com',
+  'eqads.com',
+  'extremereach.io',
+  'infolinks.com',
+  'krushmedia.com',
+  'loopme.me',
+  'mookie1.com',
+  'pubmatic.com',
+  'servenobid.com',
+  'sharethrough.com',
+  'smilewanted.com',
+  'stackadapt.com',
+  'taboola.com',
+  'tappx.com',
+  'tsyndicate.com',
+  'vrtcal.com',
+  'ymmobi.com',
+  'connatix.com',
+  'openwebmp.com',
   // Ad-tech intermediaries / cookie sync
-  'bqstreamer.com', 'medialiance.com', 'mediawallahscript.com',
-  'minutemedia-prebid.com', 'rezync.com', 'rkdms.com',
-  'shb-sync.com', 'tk0x1.com', 'ib-ibi.com',
+  'bqstreamer.com',
+  'medialiance.com',
+  'mediawallahscript.com',
+  'minutemedia-prebid.com',
+  'rezync.com',
+  'rkdms.com',
+  'shb-sync.com',
+  'tk0x1.com',
+  'ib-ibi.com',
   // Tracking / analytics / fingerprinting
-  'alphonso.tv', 'clickonometrics.pl', 'fly-metrics.net',
-  'iesnare.com', 'intentsify.io', 'iovation.com', 'securecafenet.com',
+  'alphonso.tv',
+  'clickonometrics.pl',
+  'fly-metrics.net',
+  'iesnare.com',
+  'intentsify.io',
+  'iovation.com',
+  'securecafenet.com',
 ];
 
 // Chromium epoch offset (Jan 1, 1601 to Jan 1, 1970 in microseconds)
@@ -360,9 +439,7 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal
-      ? (req.headers['x-user-id'] as string)
-      : req.user?.id;
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -372,7 +449,9 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
     const cached = authDomainsCache.get(userId);
     const hasCachedDomains = cached && cached.expiresAt > Date.now();
 
-    console.log(`[Integrations GET] Fetching for user ${userId}${hasCachedDomains ? ' (domains cached)' : ''}`);
+    console.log(
+      `[Integrations GET] Fetching for user ${userId}${hasCachedDomains ? ' (domains cached)' : ''}`
+    );
     const queryStart = Date.now();
 
     // Always fetch integrations; only query cookies if cache miss
@@ -393,12 +472,15 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
       authenticatedDomains = cached.domains;
     } else {
       const authRegex = AUTH_COOKIE_PATTERNS.join('|');
-      const falsePositiveRegex = FALSE_POSITIVE_COOKIES.map(p => p.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-      const adDomainRegex = AD_TRACKING_DOMAINS.map(d => d.replace(/\./g, '\\.')).join('|');
+      const falsePositiveRegex = FALSE_POSITIVE_COOKIES.map((p) =>
+        p.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      ).join('|');
+      const adDomainRegex = AD_TRACKING_DOMAINS.map((d) => d.replace(/\./g, '\\.')).join('|');
       const nowMicroseconds = BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_MICROSECONDS;
 
-      const domainRows = await prisma.$queryRawUnsafe<{ domain: string }[]>(
-        `SELECT DISTINCT
+      const domainRows = await prisma
+        .$queryRawUnsafe<{ domain: string }[]>(
+          `SELECT DISTINCT
            CASE
              WHEN array_length(string_to_array(LTRIM(domain, '.'), '.'), 1) >= 2
              THEN (string_to_array(LTRIM(domain, '.'), '.'))[array_length(string_to_array(LTRIM(domain, '.'), '.'), 1) - 1]
@@ -411,19 +493,28 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
            AND NOT name ~* $3
            AND NOT domain ~* $4
            AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 OR "expiresUtc" >= $5)`,
-        userId,
-        authRegex,
-        falsePositiveRegex,
-        adDomainRegex,
-        nowMicroseconds
-      ).catch((err) => {
-        console.error(`[Integrations GET] domains query failed (${Date.now() - queryStart}ms):`, err.message);
-        return [] as { domain: string }[];
-      });
+          userId,
+          authRegex,
+          falsePositiveRegex,
+          adDomainRegex,
+          nowMicroseconds
+        )
+        .catch((err) => {
+          console.error(
+            `[Integrations GET] domains query failed (${Date.now() - queryStart}ms):`,
+            err.message
+          );
+          return [] as { domain: string }[];
+        });
 
-      authenticatedDomains = domainRows.map(r => r.domain).sort();
-      authDomainsCache.set(userId, { domains: authenticatedDomains, expiresAt: Date.now() + AUTH_DOMAINS_CACHE_TTL_MS });
-      console.log(`[Integrations GET] domains query done (${Date.now() - queryStart}ms, ${authenticatedDomains.length} domains, cached for 5m)`);
+      authenticatedDomains = domainRows.map((r) => r.domain).sort();
+      authDomainsCache.set(userId, {
+        domains: authenticatedDomains,
+        expiresAt: Date.now() + AUTH_DOMAINS_CACHE_TTL_MS,
+      });
+      console.log(
+        `[Integrations GET] domains query done (${Date.now() - queryStart}ms, ${authenticatedDomains.length} domains, cached for 5m)`
+      );
     }
 
     return res.json({
@@ -442,27 +533,27 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
 
 /**
  * POST /api/integrations
- * 
+ *
  * Create or update an integration
  */
 router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const { name, type, config } = req.body;
-    
+
     if (!name || !type) {
       return res.status(400).json({
         error: 'name and type are required',
       });
     }
-    
+
     // Validate type enum
     if (!Object.values(IntegrationType).includes(type)) {
       return res.status(400).json({
         error: `Invalid integration type. Must be one of: ${Object.values(IntegrationType).join(', ')}`,
       });
     }
-    
+
     // Upsert integration
     const integration = await prisma.integration.upsert({
       where: {
@@ -485,7 +576,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
         isActive: true,
       },
     });
-    
+
     return res.json({ integration });
   } catch (error) {
     console.error('Error creating integration:', error);
@@ -498,79 +589,185 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
 
 /**
  * POST /api/integrations/upload
- * 
+ *
  * Upload integration data file (LinkedIn ZIP, Twitter export, iMessage db, etc.)
- * 
+ *
  * This is a placeholder endpoint - actual parsing logic will be implemented
  * in Phase 3 with integration-specific parsers.
  */
-router.post('/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { integrationType } = req.body;
-    
-    if (!req.file) {
-      return res.status(400).json({
-        error: 'No file uploaded',
-      });
-    }
-    
-    if (!integrationType) {
-      return res.status(400).json({
-        error: 'integrationType is required',
-      });
-    }
-    
-    const filePath = req.file.path;
-    const fileName = req.file.originalname;
-    
-    console.log(`File uploaded: ${fileName} (${req.file.size} bytes)`);
-    console.log(`Integration type: ${integrationType}`);
-    console.log(`File path: ${filePath}`);
-    
-    // Update integration status to SYNCING
-    const integration = await prisma.integration.upsert({
-      where: {
-        userId_name: {
+router.post(
+  '/upload',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const userId = req.user!.id;
+      const { integrationType } = req.body;
+
+      if (!req.file) {
+        return res.status(400).json({
+          error: 'No file uploaded',
+        });
+      }
+
+      if (!integrationType) {
+        return res.status(400).json({
+          error: 'integrationType is required',
+        });
+      }
+
+      const filePath = req.file.path;
+      const fileName = req.file.originalname;
+
+      console.log(`File uploaded: ${fileName} (${req.file.size} bytes)`);
+      console.log(`Integration type: ${integrationType}`);
+      console.log(`File path: ${filePath}`);
+
+      // Update integration status to SYNCING
+      const integration = await prisma.integration.upsert({
+        where: {
+          userId_name: {
+            userId,
+            name: integrationType,
+          },
+        },
+        create: {
           userId,
           name: integrationType,
+          type: IntegrationType.DATA_SOURCE,
+          status: IntegrationStatus.SYNCING,
+          config: {
+            fileName,
+            filePath,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      create: {
-        userId,
-        name: integrationType,
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.SYNCING,
-        config: {
-          fileName,
-          filePath,
-          uploadedAt: new Date().toISOString(),
+        update: {
+          status: IntegrationStatus.SYNCING,
+          config: {
+            fileName,
+            filePath,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      update: {
-        status: IntegrationStatus.SYNCING,
-        config: {
-          fileName,
-          filePath,
-          uploadedAt: new Date().toISOString(),
+      });
+
+      // TODO: Process the file based on integrationType
+      // This will be implemented in Phase 3 with integration parsers
+      // For now, just return success
+
+      // Simulate async processing
+      setTimeout(async () => {
+        try {
+          // TODO: Call appropriate parser based on integrationType
+          // - parseLinkedInExport(filePath, userId)
+          // - parseTwitterExport(filePath, userId)
+          // - parseIMessageDb(filePath, userId)
+          // etc.
+
+          // For now, just update status to CONNECTED
+          await prisma.integration.update({
+            where: { id: integration.id },
+            data: {
+              status: IntegrationStatus.CONNECTED,
+              isActive: true,
+              lastSyncAt: new Date(),
+              lastSuccessfulSyncAt: new Date(),
+            },
+          });
+
+          // Clean up file
+          fs.unlinkSync(filePath);
+        } catch (error) {
+          console.error('Error processing integration:', error);
+          await prisma.integration.update({
+            where: { id: integration.id },
+            data: {
+              status: IntegrationStatus.SYNC_FAILED,
+              lastSyncAt: new Date(),
+              lastFailedSyncAt: new Date(),
+              failureReason: error instanceof Error ? error.message : 'Unknown error',
+            },
+          });
+        }
+      }, 1000);
+
+      return res.json({
+        message: 'File uploaded successfully, processing in background',
+        integration,
+      });
+    } catch (error) {
+      console.error('Error uploading file:', error);
+
+      // Clean up file on error
+      if (req.file) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up file:', cleanupError);
+        }
+      }
+
+      return res.status(500).json({
+        error: 'Failed to upload file',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/integrations/linkedin/upload
+ *
+ * Upload a LinkedIn data export ZIP file.
+ * Parses Connections.csv, messages.csv, Profile.csv, Positions.csv
+ * and imports contacts + messages into the database.
+ */
+router.post(
+  '/linkedin/upload',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const userId = req.user!.id;
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const filePath = req.file.path;
+      const fileName = req.file.originalname;
+
+      if (!fileName.toLowerCase().endsWith('.zip')) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: 'File must be a .zip file' });
+      }
+
+      console.log(
+        `[LinkedIn] File uploaded: ${fileName} (${req.file.size} bytes) for user ${userId}`
+      );
+
+      // Upsert integration record
+      const integration = await prisma.integration.upsert({
+        where: { userId_name: { userId, name: 'linkedin' } },
+        create: {
+          userId,
+          name: 'linkedin',
+          type: IntegrationType.DATA_SOURCE,
+          status: IntegrationStatus.SYNCING,
+          config: { fileName, uploadedAt: new Date().toISOString() },
         },
-      },
-    });
-    
-    // TODO: Process the file based on integrationType
-    // This will be implemented in Phase 3 with integration parsers
-    // For now, just return success
-    
-    // Simulate async processing
-    setTimeout(async () => {
+        update: {
+          status: IntegrationStatus.SYNCING,
+          config: { fileName, uploadedAt: new Date().toISOString() },
+        },
+      });
+
+      const jobId = integration.id;
+
       try {
-        // TODO: Call appropriate parser based on integrationType
-        // - parseLinkedInExport(filePath, userId)
-        // - parseTwitterExport(filePath, userId)
-        // - parseIMessageDb(filePath, userId)
-        // etc.
-        
-        // For now, just update status to CONNECTED
+        const result = await importLinkedInData(userId, filePath, jobId);
+
         await prisma.integration.update({
           where: { id: integration.id },
           data: {
@@ -580,318 +777,240 @@ router.post('/upload', authenticate, upload.single('file') as any, async (req: A
             lastSuccessfulSyncAt: new Date(),
           },
         });
-        
-        // Clean up file
+
+        // Cleanup temp file
         fs.unlinkSync(filePath);
-      } catch (error) {
-        console.error('Error processing integration:', error);
+
+        return res.json({
+          message: 'LinkedIn data imported successfully',
+          jobId,
+          contacts: result.contacts,
+          messages: result.messages,
+        });
+      } catch (parseError) {
+        console.error('[LinkedIn] Parse/import error:', parseError);
+
         await prisma.integration.update({
           where: { id: integration.id },
           data: {
             status: IntegrationStatus.SYNC_FAILED,
             lastSyncAt: new Date(),
             lastFailedSyncAt: new Date(),
-            failureReason: error instanceof Error ? error.message : 'Unknown error',
+            failureReason: parseError instanceof Error ? parseError.message : 'Unknown error',
           },
         });
+
+        // Cleanup temp file
+        try {
+          fs.unlinkSync(filePath);
+        } catch {}
+
+        return res.status(500).json({
+          error: 'Failed to parse LinkedIn data',
+          details: parseError instanceof Error ? parseError.message : 'Unknown error',
+        });
       }
-    }, 1000);
-    
-    return res.json({
-      message: 'File uploaded successfully, processing in background',
-      integration,
-    });
-  } catch (error) {
-    console.error('Error uploading file:', error);
-    
-    // Clean up file on error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.error('Error cleaning up file:', cleanupError);
+    } catch (error) {
+      console.error('[LinkedIn] Upload error:', error);
+
+      if (req.file) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch {}
       }
-    }
-    
-    return res.status(500).json({
-      error: 'Failed to upload file',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
-/**
- * POST /api/integrations/linkedin/upload
- *
- * Upload a LinkedIn data export ZIP file.
- * Parses Connections.csv, messages.csv, Profile.csv, Positions.csv
- * and imports contacts + messages into the database.
- */
-router.post('/linkedin/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const filePath = req.file.path;
-    const fileName = req.file.originalname;
-
-    if (!fileName.toLowerCase().endsWith('.zip')) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'File must be a .zip file' });
-    }
-
-    console.log(`[LinkedIn] File uploaded: ${fileName} (${req.file.size} bytes) for user ${userId}`);
-
-    // Upsert integration record
-    const integration = await prisma.integration.upsert({
-      where: { userId_name: { userId, name: 'linkedin' } },
-      create: {
-        userId,
-        name: 'linkedin',
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.SYNCING,
-        config: { fileName, uploadedAt: new Date().toISOString() },
-      },
-      update: {
-        status: IntegrationStatus.SYNCING,
-        config: { fileName, uploadedAt: new Date().toISOString() },
-      },
-    });
-
-    const jobId = integration.id;
-
-    try {
-      const result = await importLinkedInData(userId, filePath, jobId);
-
-      await prisma.integration.update({
-        where: { id: integration.id },
-        data: {
-          status: IntegrationStatus.CONNECTED,
-          isActive: true,
-          lastSyncAt: new Date(),
-          lastSuccessfulSyncAt: new Date(),
-        },
-      });
-
-      // Cleanup temp file
-      fs.unlinkSync(filePath);
-
-      return res.json({
-        message: 'LinkedIn data imported successfully',
-        jobId,
-        contacts: result.contacts,
-        messages: result.messages,
-      });
-    } catch (parseError) {
-      console.error('[LinkedIn] Parse/import error:', parseError);
-
-      await prisma.integration.update({
-        where: { id: integration.id },
-        data: {
-          status: IntegrationStatus.SYNC_FAILED,
-          lastSyncAt: new Date(),
-          lastFailedSyncAt: new Date(),
-          failureReason: parseError instanceof Error ? parseError.message : 'Unknown error',
-        },
-      });
-
-      // Cleanup temp file
-      try { fs.unlinkSync(filePath); } catch {}
 
       return res.status(500).json({
-        error: 'Failed to parse LinkedIn data',
-        details: parseError instanceof Error ? parseError.message : 'Unknown error',
+        error: 'Failed to upload LinkedIn data',
+        details: error instanceof Error ? error.message : 'Unknown error',
       });
     }
-  } catch (error) {
-    console.error('[LinkedIn] Upload error:', error);
-
-    if (req.file) {
-      try { fs.unlinkSync(req.file.path); } catch {}
-    }
-
-    return res.status(500).json({
-      error: 'Failed to upload LinkedIn data',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/contacts/upload
  *
  * Upload a VCF file to import contacts
  */
-router.post('/contacts/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
+router.post(
+  '/contacts/upload',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const userId = req.user!.id;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
 
-    const filePath = req.file.path;
-    const fileName = req.file.originalname;
+      const filePath = req.file.path;
+      const fileName = req.file.originalname;
 
-    // Validate file extension
-    if (!fileName.toLowerCase().endsWith('.vcf')) {
+      // Validate file extension
+      if (!fileName.toLowerCase().endsWith('.vcf')) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: 'File must be a .vcf file' });
+      }
+
+      console.log(`[Integrations] VCF file uploaded: ${fileName} (${req.file.size} bytes)`);
+
+      // Read and parse the VCF file
+      const vcfContent = fs.readFileSync(filePath, 'utf-8');
+      const contacts = parseVcfContent(vcfContent);
+
+      console.log(`[Integrations] Parsed ${contacts.length} contacts from VCF`);
+
+      // Import contacts into the database
+      const result = await importVcfContacts(userId, contacts);
+
+      // Clean up file
       fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'File must be a .vcf file' });
-    }
 
-    console.log(`[Integrations] VCF file uploaded: ${fileName} (${req.file.size} bytes)`);
-
-    // Read and parse the VCF file
-    const vcfContent = fs.readFileSync(filePath, 'utf-8');
-    const contacts = parseVcfContent(vcfContent);
-
-    console.log(`[Integrations] Parsed ${contacts.length} contacts from VCF`);
-
-    // Import contacts into the database
-    const result = await importVcfContacts(userId, contacts);
-
-    // Clean up file
-    fs.unlinkSync(filePath);
-
-    // Update integration status
-    await prisma.integration.upsert({
-      where: {
-        userId_name: {
+      // Update integration status
+      await prisma.integration.upsert({
+        where: {
+          userId_name: {
+            userId,
+            name: 'contacts',
+          },
+        },
+        create: {
           userId,
           name: 'contacts',
+          type: IntegrationType.DATA_SOURCE,
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            lastUploadedAt: new Date().toISOString(),
+            lastFileName: fileName,
+            contactsImported: result.created + result.updated,
+          },
         },
-      },
-      create: {
-        userId,
-        name: 'contacts',
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          lastUploadedAt: new Date().toISOString(),
-          lastFileName: fileName,
-          contactsImported: result.created + result.updated,
+        update: {
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            lastUploadedAt: new Date().toISOString(),
+            lastFileName: fileName,
+            contactsImported: result.created + result.updated,
+          },
         },
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          lastUploadedAt: new Date().toISOString(),
-          lastFileName: fileName,
-          contactsImported: result.created + result.updated,
-        },
-      },
-    });
+      });
 
-    return res.json({
-      message: 'Contacts imported successfully',
-      parsed: contacts.length,
-      created: result.created,
-      updated: result.updated,
-      skipped: result.skipped,
-    });
-  } catch (error) {
-    console.error('Error uploading VCF file:', error);
+      return res.json({
+        message: 'Contacts imported successfully',
+        parsed: contacts.length,
+        created: result.created,
+        updated: result.updated,
+        skipped: result.skipped,
+      });
+    } catch (error) {
+      console.error('Error uploading VCF file:', error);
 
-    // Clean up file on error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.error('Error cleaning up file:', cleanupError);
+      // Clean up file on error
+      if (req.file) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up file:', cleanupError);
+        }
       }
-    }
 
-    return res.status(500).json({
-      error: 'Failed to import contacts',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
+      return res.status(500).json({
+        error: 'Failed to import contacts',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
  * POST /api/integrations/email/upload
  *
  * Upload a ZIP file containing EML email files
  */
-router.post('/email/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
-  const jobId = `email-upload-${Date.now()}`;
-  
-  try {
-    const userId = req.user!.id;
+router.post(
+  '/email/upload',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res: Response) => {
+    const jobId = `email-upload-${Date.now()}`;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+    try {
+      const userId = req.user!.id;
 
-    const filePath = req.file.path;
-    const fileName = req.file.originalname;
-
-    // Validate file extension
-    if (!fileName.toLowerCase().endsWith('.zip')) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'File must be a .zip file' });
-    }
-
-    console.log(`[Job ${jobId}] Email ZIP uploaded: ${fileName} (${req.file.size} bytes)`);
-
-    // Get user's email from the auth token
-    const userEmail = req.user!.email;
-    if (!userEmail) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'User email not found in auth token' });
-    }
-
-    // User's email addresses (could be expanded to include aliases)
-    const userEmails = [userEmail];
-
-    // Parse the ZIP file
-    console.log(`[Job ${jobId}] Parsing email ZIP...`);
-    const emails = parseEmailZip(filePath);
-    console.log(`[Job ${jobId}] Parsed ${emails.length} emails from ZIP`);
-
-    // Import emails to database
-    const result = await importEmailsToDb(userId, userEmails, emails, jobId);
-
-    // Clean up file
-    fs.unlinkSync(filePath);
-
-    return res.json({
-      message: 'Emails imported successfully',
-      jobId,
-      emailsParsed: emails.length,
-      contactsCreated: result.contacts,
-      messagesImported: result.messages,
-    });
-  } catch (error) {
-    console.error(`[Job ${jobId}] Error uploading email ZIP:`, error);
-
-    // Clean up file on error
-    if (req.file) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (cleanupError) {
-        console.error('Error cleaning up file:', cleanupError);
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
       }
-    }
 
-    return res.status(500).json({
-      error: 'Failed to import emails',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
+      const filePath = req.file.path;
+      const fileName = req.file.originalname;
+
+      // Validate file extension
+      if (!fileName.toLowerCase().endsWith('.zip')) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: 'File must be a .zip file' });
+      }
+
+      console.log(`[Job ${jobId}] Email ZIP uploaded: ${fileName} (${req.file.size} bytes)`);
+
+      // Get user's email from the auth token
+      const userEmail = req.user!.email;
+      if (!userEmail) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: 'User email not found in auth token' });
+      }
+
+      // User's email addresses (could be expanded to include aliases)
+      const userEmails = [userEmail];
+
+      // Parse the ZIP file
+      console.log(`[Job ${jobId}] Parsing email ZIP...`);
+      const emails = parseEmailZip(filePath);
+      console.log(`[Job ${jobId}] Parsed ${emails.length} emails from ZIP`);
+
+      // Import emails to database
+      const result = await importEmailsToDb(userId, userEmails, emails, jobId);
+
+      // Clean up file
+      fs.unlinkSync(filePath);
+
+      return res.json({
+        message: 'Emails imported successfully',
+        jobId,
+        emailsParsed: emails.length,
+        contactsCreated: result.contacts,
+        messagesImported: result.messages,
+      });
+    } catch (error) {
+      console.error(`[Job ${jobId}] Error uploading email ZIP:`, error);
+
+      // Clean up file on error
+      if (req.file) {
+        try {
+          fs.unlinkSync(req.file.path);
+        } catch (cleanupError) {
+          console.error('Error cleaning up file:', cleanupError);
+        }
+      }
+
+      return res.status(500).json({
+        error: 'Failed to import emails',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res: Response) => {
-  console.log(`[Integrations] POST /email/${req.params.provider}/start - user: ${req.user?.id?.slice(0, 8)}`);
+  console.log(
+    `[Integrations] POST /email/${req.params.provider}/start - user: ${req.user?.id?.slice(0, 8)}`
+  );
   try {
     const providerKey = normalizeProvider(req.params.provider);
     if (!providerKey) {
@@ -951,7 +1070,7 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
         pkceVerifier: codeVerifier,
         stateToken: state,
         scopes: config.scopes,
-        metadata: (returnUrl || errorUrl) ? { returnUrl, errorUrl } : undefined,
+        metadata: returnUrl || errorUrl ? { returnUrl, errorUrl } : undefined,
       },
     });
 
@@ -971,7 +1090,9 @@ router.post('/email/:provider/start', authenticate, async (req: AuthRequest, res
 });
 
 router.get('/email/:provider/callback', async (req, res: Response) => {
-  console.log(`[Integrations] GET /email/${req.params.provider}/callback - code: ${req.query.code ? 'present' : 'missing'}, state: ${req.query.state ? 'present' : 'missing'}`);
+  console.log(
+    `[Integrations] GET /email/${req.params.provider}/callback - code: ${req.query.code ? 'present' : 'missing'}, state: ${req.query.state ? 'present' : 'missing'}`
+  );
   // returnUrl/errorUrl are extracted from credential metadata once available
   let returnUrl: string | null = null;
   let errorUrl: string | null = null;
@@ -992,7 +1113,10 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
 
     const config = EMAIL_PROVIDER_CONFIG[providerKey];
     if (!config.clientId) {
-      return sendOAuthResult(res, { success: false, message: `Missing client ID for ${providerKey}` });
+      return sendOAuthResult(res, {
+        success: false,
+        message: `Missing client ID for ${providerKey}`,
+      });
     }
 
     // Look up credential by state token (no auth header available on callback)
@@ -1004,16 +1128,24 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     });
 
     if (!credential) {
-      return sendOAuthResult(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
+      return sendOAuthResult(res, {
+        success: false,
+        message: 'No pending OAuth request found or state mismatch',
+      });
     }
 
     // Extract returnUrl/errorUrl from credential metadata for redirect-based flow
     const metadata = credential.metadata as Record<string, unknown> | null;
-    returnUrl = metadata?.returnUrl as string || null;
-    errorUrl = metadata?.errorUrl as string || null;
+    returnUrl = (metadata?.returnUrl as string) || null;
+    errorUrl = (metadata?.errorUrl as string) || null;
 
     if (!credential.pkceVerifier) {
-      return sendOAuthResult(res, { success: false, message: 'Missing PKCE verifier for this request', returnUrl, errorUrl });
+      return sendOAuthResult(res, {
+        success: false,
+        message: 'Missing PKCE verifier for this request',
+        returnUrl,
+        errorUrl,
+      });
     }
 
     const redirectUri = buildRedirectUri(providerKey);
@@ -1023,7 +1155,9 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
       redirectUri,
     });
 
-    const expiresAt = tokenResult.expiresIn ? new Date(Date.now() + tokenResult.expiresIn * 1000) : null;
+    const expiresAt = tokenResult.expiresIn
+      ? new Date(Date.now() + tokenResult.expiresIn * 1000)
+      : null;
 
     // Check if this email is already connected for this user
     if (tokenResult.userEmail) {
@@ -1037,7 +1171,9 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
       });
 
       if (existingCredential) {
-        console.log(`[Integrations] Gmail already connected for ${tokenResult.userEmail}, refreshing tokens`);
+        console.log(
+          `[Integrations] Gmail already connected for ${tokenResult.userEmail}, refreshing tokens`
+        );
         // Email already connected - delete the pending credential and update the existing one
         await prisma.emailIntegrationCredential.delete({
           where: { id: credential.id },
@@ -1069,7 +1205,8 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
         return sendOAuthResult(res, {
           success: true,
           message: `${tokenResult.userEmail} was already connected. Tokens refreshed.`,
-          returnUrl, errorUrl,
+          returnUrl,
+          errorUrl,
         });
       }
     }
@@ -1099,7 +1236,7 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
       },
       select: { email: true },
     });
-    const connectedEmails = allCredentials.map(c => c.email).filter(Boolean) as string[];
+    const connectedEmails = allCredentials.map((c) => c.email).filter(Boolean) as string[];
 
     const integration = await prisma.integration.findUnique({
       where: { id: credential.integrationId },
@@ -1127,7 +1264,8 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     sendOAuthResult(res, {
       success: true,
       message: `Successfully connected ${providerKey.toUpperCase()}${displayEmail}.`,
-      returnUrl, errorUrl,
+      returnUrl,
+      errorUrl,
     });
 
     // Process emails after returning response (same as iMessage pattern)
@@ -1166,7 +1304,9 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
             },
           });
 
-          console.log(`[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} new contacts, ${result.messages} new messages (total: ${existingContacts + result.contacts} contacts, ${existingMessages + result.messages} messages)`);
+          console.log(
+            `[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} new contacts, ${result.messages} new messages (total: ${existingContacts + result.contacts} contacts, ${existingMessages + result.messages} messages)`
+          );
         } catch (error) {
           console.error('Error syncing Gmail emails:', error);
           // Update integration with error status
@@ -1186,7 +1326,8 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
     return sendOAuthResult(res, {
       success: false,
       message: 'Failed to connect email account. Please try again.',
-      returnUrl, errorUrl,
+      returnUrl,
+      errorUrl,
     });
   }
 });
@@ -1199,7 +1340,10 @@ router.get('/email/:provider/callback', async (req, res: Response) => {
 router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body as { contacts?: ContactWithMessages[]; accessedAt?: string };
+    const { contacts, accessedAt } = req.body as {
+      contacts?: ContactWithMessages[];
+      accessedAt?: string;
+    };
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({
@@ -1275,7 +1419,8 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
               messages: existingMessages + totalMessages,
               lastJobId: jobId,
               lastUploadedAt: new Date().toISOString(),
-              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
+              lastFrontendAccessAt:
+                accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
             },
           },
         });
@@ -1309,7 +1454,10 @@ router.post('/imessage/upload', authenticate, async (req: AuthRequest, res: Resp
 router.post('/whatsapp/upload', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body as { contacts?: WhatsAppContactWithMessages[]; accessedAt?: string };
+    const { contacts, accessedAt } = req.body as {
+      contacts?: WhatsAppContactWithMessages[];
+      accessedAt?: string;
+    };
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({
@@ -1384,7 +1532,8 @@ router.post('/whatsapp/upload', authenticate, async (req: AuthRequest, res: Resp
               messages: existingMessages + totalMessages,
               lastJobId: jobId,
               lastUploadedAt: new Date().toISOString(),
-              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
+              lastFrontendAccessAt:
+                accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
             },
           },
         });
@@ -1470,7 +1619,10 @@ router.post('/telegram/connect', authenticate, async (req: AuthRequest, res: Res
 router.post('/telegram/upload', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { contacts, accessedAt } = req.body as { contacts?: TelegramContactWithMessages[]; accessedAt?: string };
+    const { contacts, accessedAt } = req.body as {
+      contacts?: TelegramContactWithMessages[];
+      accessedAt?: string;
+    };
 
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({
@@ -1545,7 +1697,8 @@ router.post('/telegram/upload', authenticate, async (req: AuthRequest, res: Resp
               messages: existingMessages + totalMessages,
               lastJobId: jobId,
               lastUploadedAt: new Date().toISOString(),
-              lastFrontendAccessAt: accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
+              lastFrontendAccessAt:
+                accessedAt || existingConfig.lastFrontendAccessAt || new Date().toISOString(),
             },
           },
         });
@@ -1582,184 +1735,206 @@ router.post('/telegram/upload', authenticate, async (req: AuthRequest, res: Resp
  * When the same cookie (domain, name, path) exists in multiple browsers,
  * the one that expires latest wins.
  */
-router.post('/cookies/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key, browser = 'chrome' } = req.body;
-
-    // Validate browser type
-    const validBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
-    if (!validBrowsers.includes(browser)) {
-      return res.status(400).json({
-        error: `Invalid browser type: ${browser}. Valid types: ${validBrowsers.join(', ')}`,
-      });
-    }
-
-    // Integration name is just the browser name (e.g., 'chrome', 'edge')
-    // All browser state (cookies, localStorage, IndexedDB, etc.) syncs based on this integration
-    const integrationName = browser;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    let cookies: any[];
+router.post(
+  '/cookies/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
+      const userId = req.user!.id;
+      const { data, iv, key, browser = 'chrome' } = req.body;
+
+      // Validate browser type
+      const validBrowsers = [
+        'chrome',
+        'edge',
+        'brave',
+        'arc',
+        'opera',
+        'vivaldi',
+        'chromium',
+        'atlas',
+      ];
+      if (!validBrowsers.includes(browser)) {
+        return res.status(400).json({
+          error: `Invalid browser type: ${browser}. Valid types: ${validBrowsers.join(', ')}`,
+        });
+      }
+
+      // Integration name is just the browser name (e.g., 'chrome', 'edge')
+      // All browser state (cookies, localStorage, IndexedDB, etc.) syncs based on this integration
+      const integrationName = browser;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
+      }
+
+      // Decrypt the AES-256-CBC encrypted payload
+      let cookies: any[];
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+        let decrypted = decipher.update(data, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        cookies = JSON.parse(decrypted);
+      } catch (decryptError) {
+        console.error('[Integrations] Cookie decryption failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt cookie payload',
+        });
+      }
+
+      if (!Array.isArray(cookies)) {
+        return res.status(400).json({
+          error: 'Invalid cookie payload: expected array',
+        });
+      }
+
+      // Sanitize cookies: remove null bytes that PostgreSQL can't store
+      const sanitizeString = (str: string): string => {
+        if (typeof str !== 'string') return str;
+        return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+      };
+
+      const sanitizedCookies = cookies
+        .map((cookie: any) => ({
+          ...cookie,
+          value: sanitizeString(cookie.value || ''),
+          name: sanitizeString(cookie.name || ''),
+          host_key: sanitizeString(cookie.host_key || ''),
+          domain: sanitizeString(cookie.host_key || ''), // Preserve original format (with or without leading dot)
+          path: sanitizeString(cookie.path || '/') || '/',
+          top_frame_site_key: sanitizeString(cookie.top_frame_site_key || ''),
+        }))
+        .filter((cookie: any) => cookie.name && cookie.value);
+
+      console.log(
+        `[Integrations] Received ${cookies.length} ${browser} cookies, ${sanitizedCookies.length} after sanitization for user ${userId}`
       );
-      let decrypted = decipher.update(data, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      cookies = JSON.parse(decrypted);
-    } catch (decryptError) {
-      console.error('[Integrations] Cookie decryption failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt cookie payload',
-      });
-    }
 
-    if (!Array.isArray(cookies)) {
-      return res.status(400).json({
-        error: 'Invalid cookie payload: expected array',
-      });
-    }
-
-    // Sanitize cookies: remove null bytes that PostgreSQL can't store
-    const sanitizeString = (str: string): string => {
-      if (typeof str !== 'string') return str;
-      return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-    };
-
-    const sanitizedCookies = cookies.map((cookie: any) => ({
-      ...cookie,
-      value: sanitizeString(cookie.value || ''),
-      name: sanitizeString(cookie.name || ''),
-      host_key: sanitizeString(cookie.host_key || ''),
-      domain: sanitizeString(cookie.host_key || ''),  // Preserve original format (with or without leading dot)
-      path: sanitizeString(cookie.path || '/') || '/',
-      top_frame_site_key: sanitizeString(cookie.top_frame_site_key || ''),
-    })).filter((cookie: any) => cookie.name && cookie.value);
-
-    console.log(
-      `[Integrations] Received ${cookies.length} ${browser} cookies, ${sanitizedCookies.length} after sanitization for user ${userId}`
-    );
-
-    // 1. Update Integration row for status tracking (no cookie data in config)
-    const integration = await prisma.integration.upsert({
-      where: {
-        userId_name: {
+      // 1. Update Integration row for status tracking (no cookie data in config)
+      const integration = await prisma.integration.upsert({
+        where: {
+          userId_name: {
+            userId,
+            name: integrationName,
+          },
+        },
+        create: {
           userId,
           name: integrationName,
+          type: IntegrationType.DATA_SOURCE,
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            browser,
+            cookieCount: sanitizedCookies.length,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      create: {
-        userId,
-        name: integrationName,
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          browser,
-          cookieCount: sanitizedCookies.length,
-          uploadedAt: new Date().toISOString(),
+        update: {
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            browser,
+            cookieCount: sanitizedCookies.length,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          browser,
-          cookieCount: sanitizedCookies.length,
-          uploadedAt: new Date().toISOString(),
-        },
-      },
-    });
+      });
 
-    // 2. Upsert cookies to Cookie table - only update if expires later
-    // Use batched raw SQL for performance
-    // Unique key: (userId, domain, name, path, topFrameSiteKey) - this matches what makes a cookie unique in Chromium
-    if (sanitizedCookies.length > 0) {
-      const BATCH_SIZE = 100;
-      let processedCount = 0;
+      // 2. Upsert cookies to Cookie table - only update if expires later
+      // Use batched raw SQL for performance
+      // Unique key: (userId, domain, name, path, topFrameSiteKey) - this matches what makes a cookie unique in Chromium
+      if (sanitizedCookies.length > 0) {
+        const BATCH_SIZE = 100;
+        let processedCount = 0;
 
-      // Get count before to measure updates vs inserts
-      const countBefore = await prisma.cookie.count({ where: { userId } });
+        // Get count before to measure updates vs inserts
+        const countBefore = await prisma.cookie.count({ where: { userId } });
 
-      for (let i = 0; i < sanitizedCookies.length; i += BATCH_SIZE) {
-        const batch = sanitizedCookies.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < sanitizedCookies.length; i += BATCH_SIZE) {
+          const batch = sanitizedCookies.slice(i, i + BATCH_SIZE);
 
-        // Dedupe within batch: keep cookie with latest expiry for each unique key
-        const cookiesByKey = new Map<string, any>();
-        let dupCount = 0;
-        for (const cookie of batch) {
-          const uniqueKey = `${cookie.domain}|${cookie.name}|${cookie.path}|${cookie.top_frame_site_key || ''}`;
-          const existing = cookiesByKey.get(uniqueKey);
-          if (existing) {
-            dupCount++;
-            // Keep the one with later expiry (or the new one if expiry is null/0)
-            const existingExpiry = BigInt(existing.expires_utc || 0);
-            const newExpiry = BigInt(cookie.expires_utc || 0);
-            if (newExpiry > existingExpiry) {
-              console.log(`[Integrations] Deduping cookie ${uniqueKey}: keeping expiry ${newExpiry} over ${existingExpiry}`);
+          // Dedupe within batch: keep cookie with latest expiry for each unique key
+          const cookiesByKey = new Map<string, any>();
+          let dupCount = 0;
+          for (const cookie of batch) {
+            const uniqueKey = `${cookie.domain}|${cookie.name}|${cookie.path}|${cookie.top_frame_site_key || ''}`;
+            const existing = cookiesByKey.get(uniqueKey);
+            if (existing) {
+              dupCount++;
+              // Keep the one with later expiry (or the new one if expiry is null/0)
+              const existingExpiry = BigInt(existing.expires_utc || 0);
+              const newExpiry = BigInt(cookie.expires_utc || 0);
+              if (newExpiry > existingExpiry) {
+                console.log(
+                  `[Integrations] Deduping cookie ${uniqueKey}: keeping expiry ${newExpiry} over ${existingExpiry}`
+                );
+                cookiesByKey.set(uniqueKey, cookie);
+              }
+            } else {
               cookiesByKey.set(uniqueKey, cookie);
             }
-          } else {
-            cookiesByKey.set(uniqueKey, cookie);
           }
-        }
 
-        // Use deduped batch
-        const dedupedBatch = Array.from(cookiesByKey.values());
-        if (dupCount > 0) {
-          console.log(`[Integrations] Deduped batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.length} -> ${dedupedBatch.length} cookies (${dupCount} duplicates removed, kept latest expiry)`);
-        }
+          // Use deduped batch
+          const dedupedBatch = Array.from(cookiesByKey.values());
+          if (dupCount > 0) {
+            console.log(
+              `[Integrations] Deduped batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.length} -> ${dedupedBatch.length} cookies (${dupCount} duplicates removed, kept latest expiry)`
+            );
+          }
 
-        // Build VALUES clause for batch upsert (19 columns)
-        const values = dedupedBatch.map((_, idx) => {
-          const base = idx * 19;
-          return `(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::bigint, $${base + 7}::boolean, $${base + 8}::boolean, $${base + 9}, NOW(), $${base + 10}::bigint, $${base + 11}, $${base + 12}::bigint, $${base + 13}::boolean, $${base + 14}::boolean, $${base + 15}::int, $${base + 16}::int, $${base + 17}::int, $${base + 18}::int, $${base + 19}::bigint)`;
-        }).join(', ');
+          // Build VALUES clause for batch upsert (19 columns)
+          const values = dedupedBatch
+            .map((_, idx) => {
+              const base = idx * 19;
+              return `(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::bigint, $${base + 7}::boolean, $${base + 8}::boolean, $${base + 9}, NOW(), $${base + 10}::bigint, $${base + 11}, $${base + 12}::bigint, $${base + 13}::boolean, $${base + 14}::boolean, $${base + 15}::int, $${base + 16}::int, $${base + 17}::int, $${base + 18}::int, $${base + 19}::bigint)`;
+            })
+            .join(', ');
 
-        // Flatten params (19 values per cookie)
-        const params: (string | number | bigint | boolean | null)[] = [];
-        for (const cookie of dedupedBatch) {
-          params.push(
-            userId,
-            cookie.domain,
-            cookie.name,
-            cookie.path,
-            cookie.value,
-            cookie.expires_utc ? BigInt(cookie.expires_utc) : null,
-            cookie.is_secure ?? false,
-            cookie.is_httponly ?? false,
-            browser,
-            // New fields
-            cookie.creation_utc ? BigInt(cookie.creation_utc) : null,
-            cookie.top_frame_site_key || '',
-            cookie.last_access_utc ? BigInt(cookie.last_access_utc) : null,
-            cookie.has_expires ?? true,
-            cookie.is_persistent ?? true,
-            cookie.priority ?? 1,
-            cookie.samesite ?? -1,
-            cookie.source_scheme ?? 0,
-            cookie.source_port ?? -1,
-            cookie.last_update_utc ? BigInt(cookie.last_update_utc) : null
-          );
-        }
+          // Flatten params (19 values per cookie)
+          const params: (string | number | bigint | boolean | null)[] = [];
+          for (const cookie of dedupedBatch) {
+            params.push(
+              userId,
+              cookie.domain,
+              cookie.name,
+              cookie.path,
+              cookie.value,
+              cookie.expires_utc ? BigInt(cookie.expires_utc) : null,
+              cookie.is_secure ?? false,
+              cookie.is_httponly ?? false,
+              browser,
+              // New fields
+              cookie.creation_utc ? BigInt(cookie.creation_utc) : null,
+              cookie.top_frame_site_key || '',
+              cookie.last_access_utc ? BigInt(cookie.last_access_utc) : null,
+              cookie.has_expires ?? true,
+              cookie.is_persistent ?? true,
+              cookie.priority ?? 1,
+              cookie.samesite ?? -1,
+              cookie.source_scheme ?? 0,
+              cookie.source_port ?? -1,
+              cookie.last_update_utc ? BigInt(cookie.last_update_utc) : null
+            );
+          }
 
-        // Upsert with conditional update: only update if incoming expiresUtc is greater
-        // Unique key now includes topFrameSiteKey for partitioned cookies (CHIPS)
-        // If both are null, or existing is greater, keep existing
-        await prisma.$executeRawUnsafe(`
+          // Upsert with conditional update: only update if incoming expiresUtc is greater
+          // Unique key now includes topFrameSiteKey for partitioned cookies (CHIPS)
+          // If both are null, or existing is greater, keep existing
+          await prisma.$executeRawUnsafe(
+            `
           INSERT INTO "Cookie" (id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", "browserSource", "syncedAt", "creationUtc", "topFrameSiteKey", "lastAccessUtc", "hasExpires", "isPersistent", priority, "sameSite", "sourceScheme", "sourcePort", "lastUpdateUtc")
           VALUES ${values}
           ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey") DO UPDATE SET
@@ -1782,39 +1957,42 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
             -- Update if incoming expires later, or if existing has no expiry but incoming does
             EXCLUDED."expiresUtc" > COALESCE("Cookie"."expiresUtc", 0)
             OR (EXCLUDED."expiresUtc" IS NOT NULL AND "Cookie"."expiresUtc" IS NULL)
-        `, ...params);
+        `,
+            ...params
+          );
 
-        processedCount += dedupedBatch.length;
+          processedCount += dedupedBatch.length;
+        }
+
+        // Calculate how many were actually inserted vs updated (for conflict visibility)
+        const countAfter = await prisma.cookie.count({ where: { userId } });
+        const newlyInserted = countAfter - countBefore;
+        const conflictsResolved = processedCount - newlyInserted;
+
+        console.log(
+          `[Integrations] ✅ Processed ${processedCount} ${browser} cookies for user ${userId}: ` +
+            `${newlyInserted} new, ${conflictsResolved} conflicts (kept cookie with later expiry)`
+        );
       }
 
-      // Calculate how many were actually inserted vs updated (for conflict visibility)
-      const countAfter = await prisma.cookie.count({ where: { userId } });
-      const newlyInserted = countAfter - countBefore;
-      const conflictsResolved = processedCount - newlyInserted;
-
-      console.log(
-        `[Integrations] ✅ Processed ${processedCount} ${browser} cookies for user ${userId}: ` +
-        `${newlyInserted} new, ${conflictsResolved} conflicts (kept cookie with later expiry)`
-      );
+      return res.json({
+        message: 'Cookies uploaded successfully',
+        cookieCount: sanitizedCookies.length,
+        integration: {
+          id: integration.id,
+          name: integration.name,
+          status: integration.status,
+        },
+      });
+    } catch (error) {
+      console.error('Error uploading cookies:', error);
+      return res.status(500).json({
+        error: 'Failed to upload cookies',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    return res.json({
-      message: 'Cookies uploaded successfully',
-      cookieCount: sanitizedCookies.length,
-      integration: {
-        id: integration.id,
-        name: integration.name,
-        status: integration.status,
-      },
-    });
-  } catch (error) {
-    console.error('Error uploading cookies:', error);
-    return res.status(500).json({
-      error: 'Failed to upload cookies',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/localStorage/upload
@@ -1825,128 +2003,142 @@ router.post('/cookies/upload', authenticate, upload.none() as any, async (req: A
  *
  * Payload: { byOrigin, hashes, batchIndex, totalBatches, entryCount, originCount }
  */
-router.post('/localStorage/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key, compressed } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    let localStorageData: {
-      byOrigin: Record<string, { key: string; value: string }[]>;
-      hashes: Record<string, string>;
-      batchIndex: number;
-      totalBatches: number;
-      entryCount: number;
-      originCount: number;
-    };
+router.post(
+  '/localStorage/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
+      const userId = req.user!.id;
+      const { data, iv, key, compressed } = req.body;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
+      }
+
+      // Decrypt the AES-256-CBC encrypted payload
+      let localStorageData: {
+        byOrigin: Record<string, { key: string; value: string }[]>;
+        hashes: Record<string, string>;
+        batchIndex: number;
+        totalBatches: number;
+        entryCount: number;
+        originCount: number;
+      };
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+
+        const decryptedBuffer = Buffer.concat([
+          decipher.update(Buffer.from(data, 'hex')),
+          decipher.final(),
+        ]);
+
+        let jsonString: string;
+        if (compressed === 'true') {
+          const zlib = await import('zlib');
+          const { promisify } = await import('util');
+          const gunzip = promisify(zlib.gunzip);
+          const decompressed = await gunzip(decryptedBuffer);
+          jsonString = decompressed.toString('utf8');
+        } else {
+          jsonString = decryptedBuffer.toString('utf8');
+        }
+
+        localStorageData = JSON.parse(jsonString);
+      } catch (decryptError) {
+        console.error('[Integrations] localStorage decryption/decompression failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt localStorage payload',
+        });
+      }
+
+      if (!localStorageData.byOrigin || typeof localStorageData.byOrigin !== 'object') {
+        return res.status(400).json({
+          error: 'Invalid localStorage payload: expected byOrigin object',
+        });
+      }
+
+      const batchInfo = ` (batch ${localStorageData.batchIndex + 1}/${localStorageData.totalBatches})`;
+
+      // Sanitize values: remove null bytes and fix malformed Unicode that PostgreSQL can't store
+      const sanitizeString = (str: string): string => {
+        if (typeof str !== 'string') return str;
+        // Remove null bytes and control characters
+        let sanitized = str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+        // Remove orphan Unicode surrogates character by character
+        // High surrogates: 0xD800-0xDBFF, Low surrogates: 0xDC00-0xDFFF
+        const chars = [...sanitized];
+        const filtered: string[] = [];
+        for (let i = 0; i < chars.length; i++) {
+          const code = chars[i].charCodeAt(0);
+          if (code >= 0xd800 && code <= 0xdbff) {
+            // High surrogate - keep only if followed by low surrogate
+            const nextCode = chars[i + 1]?.charCodeAt(0);
+            if (nextCode >= 0xdc00 && nextCode <= 0xdfff) {
+              filtered.push(chars[i], chars[i + 1]);
+              i++; // Skip the low surrogate we just added
+            }
+            // Otherwise drop the orphan high surrogate
+          } else if (code >= 0xdc00 && code <= 0xdfff) {
+            // Low surrogate without preceding high - drop it
+          } else {
+            filtered.push(chars[i]);
+          }
+        }
+        return filtered.join('');
+      };
+
+      const sanitizedByOrigin: Record<string, { key: string; value: string }[]> = {};
+      let batchEntryCount = 0;
+
+      for (const [origin, entries] of Object.entries(localStorageData.byOrigin)) {
+        const sanitizedOrigin = sanitizeString(origin);
+        sanitizedByOrigin[sanitizedOrigin] = entries
+          .map((entry: { key: string; value: string }) => ({
+            key: sanitizeString(entry.key),
+            value: sanitizeString(entry.value),
+          }))
+          .filter((entry: { key: string; value: string }) => entry.key && entry.value);
+        batchEntryCount += sanitizedByOrigin[sanitizedOrigin].length;
+      }
+
+      const batchOriginCount = Object.keys(sanitizedByOrigin).length;
+
+      console.log(
+        `[Integrations] Received${batchInfo} ${localStorageData.entryCount} localStorage entries from ${localStorageData.originCount} origins, ${batchEntryCount} after sanitization for user ${userId}`
       );
 
-      const decryptedBuffer = Buffer.concat([
-        decipher.update(Buffer.from(data, 'hex')),
-        decipher.final(),
-      ]);
+      // Bulk upsert all origins in this batch using raw SQL
+      const origins = Object.keys(sanitizedByOrigin);
+      if (origins.length > 0) {
+        // Build VALUES clause for bulk upsert
+        const values = origins
+          .map((origin, i) => {
+            const entries = sanitizedByOrigin[origin];
+            const hash = localStorageData.hashes[origin] || '';
+            return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+          })
+          .join(', ');
 
-      let jsonString: string;
-      if (compressed === 'true') {
-        const zlib = await import('zlib');
-        const { promisify } = await import('util');
-        const gunzip = promisify(zlib.gunzip);
-        const decompressed = await gunzip(decryptedBuffer);
-        jsonString = decompressed.toString('utf8');
-      } else {
-        jsonString = decryptedBuffer.toString('utf8');
-      }
-
-      localStorageData = JSON.parse(jsonString);
-    } catch (decryptError) {
-      console.error('[Integrations] localStorage decryption/decompression failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt localStorage payload',
-      });
-    }
-
-    if (!localStorageData.byOrigin || typeof localStorageData.byOrigin !== 'object') {
-      return res.status(400).json({
-        error: 'Invalid localStorage payload: expected byOrigin object',
-      });
-    }
-
-    const batchInfo = ` (batch ${localStorageData.batchIndex + 1}/${localStorageData.totalBatches})`;
-
-    // Sanitize values: remove null bytes and fix malformed Unicode that PostgreSQL can't store
-    const sanitizeString = (str: string): string => {
-      if (typeof str !== 'string') return str;
-      // Remove null bytes and control characters
-      let sanitized = str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-      // Remove orphan Unicode surrogates character by character
-      // High surrogates: 0xD800-0xDBFF, Low surrogates: 0xDC00-0xDFFF
-      const chars = [...sanitized];
-      const filtered: string[] = [];
-      for (let i = 0; i < chars.length; i++) {
-        const code = chars[i].charCodeAt(0);
-        if (code >= 0xD800 && code <= 0xDBFF) {
-          // High surrogate - keep only if followed by low surrogate
-          const nextCode = chars[i + 1]?.charCodeAt(0);
-          if (nextCode >= 0xDC00 && nextCode <= 0xDFFF) {
-            filtered.push(chars[i], chars[i + 1]);
-            i++; // Skip the low surrogate we just added
-          }
-          // Otherwise drop the orphan high surrogate
-        } else if (code >= 0xDC00 && code <= 0xDFFF) {
-          // Low surrogate without preceding high - drop it
-        } else {
-          filtered.push(chars[i]);
+        // Flatten params: [userId, origin, entries, hash, userId, origin, entries, hash, ...]
+        const params: (string | object)[] = [];
+        for (const origin of origins) {
+          params.push(
+            userId,
+            origin,
+            JSON.stringify(sanitizedByOrigin[origin]),
+            localStorageData.hashes[origin] || ''
+          );
         }
-      }
-      return filtered.join('');
-    };
 
-    const sanitizedByOrigin: Record<string, { key: string; value: string }[]> = {};
-    let batchEntryCount = 0;
-
-    for (const [origin, entries] of Object.entries(localStorageData.byOrigin)) {
-      const sanitizedOrigin = sanitizeString(origin);
-      sanitizedByOrigin[sanitizedOrigin] = entries.map((entry: { key: string; value: string }) => ({
-        key: sanitizeString(entry.key),
-        value: sanitizeString(entry.value),
-      })).filter((entry: { key: string; value: string }) => entry.key && entry.value);
-      batchEntryCount += sanitizedByOrigin[sanitizedOrigin].length;
-    }
-
-    const batchOriginCount = Object.keys(sanitizedByOrigin).length;
-
-    console.log(
-      `[Integrations] Received${batchInfo} ${localStorageData.entryCount} localStorage entries from ${localStorageData.originCount} origins, ${batchEntryCount} after sanitization for user ${userId}`
-    );
-
-    // Bulk upsert all origins in this batch using raw SQL
-    const origins = Object.keys(sanitizedByOrigin);
-    if (origins.length > 0) {
-      // Build VALUES clause for bulk upsert
-      const values = origins.map((origin, i) => {
-        const entries = sanitizedByOrigin[origin];
-        const hash = localStorageData.hashes[origin] || '';
-        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
-      }).join(', ');
-
-      // Flatten params: [userId, origin, entries, hash, userId, origin, entries, hash, ...]
-      const params: (string | object)[] = [];
-      for (const origin of origins) {
-        params.push(userId, origin, JSON.stringify(sanitizedByOrigin[origin]), localStorageData.hashes[origin] || '');
-      }
-
-      await prisma.$executeRawUnsafe(`
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "LocalStorageOrigin" (id, "userId", origin, entries, hash, "updatedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin) DO UPDATE SET
@@ -1954,26 +2146,31 @@ router.post('/localStorage/upload', authenticate, upload.none() as any, async (r
           hash = EXCLUDED.hash,
           "updatedAt" = NOW()
         WHERE "LocalStorageOrigin".hash IS DISTINCT FROM EXCLUDED.hash
-      `, ...params);
+      `,
+          ...params
+        );
+      }
+
+      console.log(
+        `[Integrations] ✅ Upserted${batchInfo} ${batchOriginCount} origins for user ${userId}`
+      );
+
+      return res.json({
+        message: 'Batch uploaded',
+        batchIndex: localStorageData.batchIndex,
+        totalBatches: localStorageData.totalBatches,
+        entryCount: batchEntryCount,
+        originCount: batchOriginCount,
+      });
+    } catch (error) {
+      console.error('Error uploading localStorage batch:', error);
+      return res.status(500).json({
+        error: 'Failed to upload localStorage batch',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    console.log(`[Integrations] ✅ Upserted${batchInfo} ${batchOriginCount} origins for user ${userId}`);
-
-    return res.json({
-      message: 'Batch uploaded',
-      batchIndex: localStorageData.batchIndex,
-      totalBatches: localStorageData.totalBatches,
-      entryCount: batchEntryCount,
-      originCount: batchOriginCount,
-    });
-  } catch (error) {
-    console.error('Error uploading localStorage batch:', error);
-    return res.status(500).json({
-      error: 'Failed to upload localStorage batch',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/indexedDB/upload
@@ -1983,110 +2180,117 @@ router.post('/localStorage/upload', authenticate, upload.none() as any, async (r
  *
  * Payload: { origins: IndexedDBOriginData[], hashes, batchIndex, totalBatches }
  */
-router.post('/indexedDB/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key, compressed } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    interface IndexedDBRecord {
-      key: string | number | (string | number)[];
-      value: unknown;
-      error?: string;
-    }
-
-    interface IndexedDBObjectStore {
-      name: string;
-      records: IndexedDBRecord[];
-    }
-
-    interface IndexedDBDatabase {
-      name: string;
-      objectStores: IndexedDBObjectStore[];
-    }
-
-    interface IndexedDBOriginData {
-      origin: string;
-      databases: IndexedDBDatabase[];
-      error?: string;
-    }
-
-    let indexedDBData: {
-      origins: IndexedDBOriginData[];
-      hashes: Record<string, string>;
-      batchIndex: number;
-      totalBatches: number;
-    };
-
+router.post(
+  '/indexedDB/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
+      const userId = req.user!.id;
+      const { data, iv, key, compressed } = req.body;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
+      }
+
+      // Decrypt the AES-256-CBC encrypted payload
+      interface IndexedDBRecord {
+        key: string | number | (string | number)[];
+        value: unknown;
+        error?: string;
+      }
+
+      interface IndexedDBObjectStore {
+        name: string;
+        records: IndexedDBRecord[];
+      }
+
+      interface IndexedDBDatabase {
+        name: string;
+        objectStores: IndexedDBObjectStore[];
+      }
+
+      interface IndexedDBOriginData {
+        origin: string;
+        databases: IndexedDBDatabase[];
+        error?: string;
+      }
+
+      let indexedDBData: {
+        origins: IndexedDBOriginData[];
+        hashes: Record<string, string>;
+        batchIndex: number;
+        totalBatches: number;
+      };
+
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+
+        const decryptedBuffer = Buffer.concat([
+          decipher.update(Buffer.from(data, 'hex')),
+          decipher.final(),
+        ]);
+
+        let jsonString: string;
+        if (compressed === 'true') {
+          const zlib = await import('zlib');
+          const { promisify } = await import('util');
+          const gunzip = promisify(zlib.gunzip);
+          const decompressed = await gunzip(decryptedBuffer);
+          jsonString = decompressed.toString('utf8');
+        } else {
+          jsonString = decryptedBuffer.toString('utf8');
+        }
+
+        indexedDBData = JSON.parse(jsonString);
+      } catch (decryptError) {
+        console.error('[Integrations] IndexedDB decryption/decompression failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt IndexedDB payload',
+        });
+      }
+
+      if (!indexedDBData.origins || !Array.isArray(indexedDBData.origins)) {
+        return res.status(400).json({
+          error: 'Invalid IndexedDB payload: expected origins array',
+        });
+      }
+
+      const batchInfo = ` (batch ${indexedDBData.batchIndex + 1}/${indexedDBData.totalBatches})`;
+
+      console.log(
+        `[Integrations] Received${batchInfo} ${indexedDBData.origins.length} IndexedDB origins for user ${userId}`
       );
 
-      const decryptedBuffer = Buffer.concat([
-        decipher.update(Buffer.from(data, 'hex')),
-        decipher.final(),
-      ]);
+      // Bulk upsert all origins in this batch
+      const origins = indexedDBData.origins.filter((o) => !o.error);
+      if (origins.length > 0) {
+        // Build VALUES clause for bulk upsert
+        const values = origins
+          .map((origin, i) => {
+            return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+          })
+          .join(', ');
 
-      let jsonString: string;
-      if (compressed === 'true') {
-        const zlib = await import('zlib');
-        const { promisify } = await import('util');
-        const gunzip = promisify(zlib.gunzip);
-        const decompressed = await gunzip(decryptedBuffer);
-        jsonString = decompressed.toString('utf8');
-      } else {
-        jsonString = decryptedBuffer.toString('utf8');
-      }
+        // Flatten params
+        const params: (string | object)[] = [];
+        for (const origin of origins) {
+          params.push(
+            userId,
+            origin.origin,
+            JSON.stringify(origin.databases),
+            indexedDBData.hashes[origin.origin] || ''
+          );
+        }
 
-      indexedDBData = JSON.parse(jsonString);
-    } catch (decryptError) {
-      console.error('[Integrations] IndexedDB decryption/decompression failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt IndexedDB payload',
-      });
-    }
-
-    if (!indexedDBData.origins || !Array.isArray(indexedDBData.origins)) {
-      return res.status(400).json({
-        error: 'Invalid IndexedDB payload: expected origins array',
-      });
-    }
-
-    const batchInfo = ` (batch ${indexedDBData.batchIndex + 1}/${indexedDBData.totalBatches})`;
-
-    console.log(
-      `[Integrations] Received${batchInfo} ${indexedDBData.origins.length} IndexedDB origins for user ${userId}`
-    );
-
-    // Bulk upsert all origins in this batch
-    const origins = indexedDBData.origins.filter(o => !o.error);
-    if (origins.length > 0) {
-      // Build VALUES clause for bulk upsert
-      const values = origins.map((origin, i) => {
-        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
-      }).join(', ');
-
-      // Flatten params
-      const params: (string | object)[] = [];
-      for (const origin of origins) {
-        params.push(
-          userId,
-          origin.origin,
-          JSON.stringify(origin.databases),
-          indexedDBData.hashes[origin.origin] || ''
-        );
-      }
-
-      await prisma.$executeRawUnsafe(`
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin) DO UPDATE SET
@@ -2094,25 +2298,30 @@ router.post('/indexedDB/upload', authenticate, upload.none() as any, async (req:
           hash = EXCLUDED.hash,
           "updatedAt" = NOW()
         WHERE "IndexedDBOrigin".hash IS DISTINCT FROM EXCLUDED.hash
-      `, ...params);
+      `,
+          ...params
+        );
+      }
+
+      console.log(
+        `[Integrations] ✅ Upserted${batchInfo} ${origins.length} IndexedDB origins for user ${userId}`
+      );
+
+      return res.json({
+        message: 'IndexedDB batch uploaded',
+        batchIndex: indexedDBData.batchIndex,
+        totalBatches: indexedDBData.totalBatches,
+        originCount: origins.length,
+      });
+    } catch (error) {
+      console.error('Error uploading IndexedDB batch:', error);
+      return res.status(500).json({
+        error: 'Failed to upload IndexedDB batch',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    console.log(`[Integrations] ✅ Upserted${batchInfo} ${origins.length} IndexedDB origins for user ${userId}`);
-
-    return res.json({
-      message: 'IndexedDB batch uploaded',
-      batchIndex: indexedDBData.batchIndex,
-      totalBatches: indexedDBData.totalBatches,
-      originCount: origins.length,
-    });
-  } catch (error) {
-    console.error('Error uploading IndexedDB batch:', error);
-    return res.status(500).json({
-      error: 'Failed to upload IndexedDB batch',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/fingerprint/upload
@@ -2120,97 +2329,102 @@ router.post('/indexedDB/upload', authenticate, upload.none() as any, async (req:
  * Upload browser fingerprint data from the Mac app.
  * Receives AES-256-CBC encrypted payload with iv and key.
  */
-router.post('/fingerprint/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    let fingerprint: any;
+router.post(
+  '/fingerprint/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
+      const userId = req.user!.id;
+      const { data, iv, key } = req.body;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
+      }
+
+      // Decrypt the AES-256-CBC encrypted payload
+      let fingerprint: any;
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+        let decrypted = decipher.update(data, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        fingerprint = JSON.parse(decrypted);
+      } catch (decryptError) {
+        console.error('[Integrations] Fingerprint decryption failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt fingerprint payload',
+        });
+      }
+
+      // Validate fingerprint structure
+      if (!fingerprint || !fingerprint.navigator || !fingerprint.screen) {
+        return res.status(400).json({
+          error: 'Invalid fingerprint payload: missing required fields',
+        });
+      }
+
+      console.log(
+        `[Integrations] Received fingerprint for user ${userId}: UA=${fingerprint.navigator?.userAgent?.substring(0, 50)}...`
       );
-      let decrypted = decipher.update(data, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      fingerprint = JSON.parse(decrypted);
-    } catch (decryptError) {
-      console.error('[Integrations] Fingerprint decryption failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt fingerprint payload',
-      });
-    }
 
-    // Validate fingerprint structure
-    if (!fingerprint || !fingerprint.navigator || !fingerprint.screen) {
-      return res.status(400).json({
-        error: 'Invalid fingerprint payload: missing required fields',
-      });
-    }
-
-    console.log(
-      `[Integrations] Received fingerprint for user ${userId}: UA=${fingerprint.navigator?.userAgent?.substring(0, 50)}...`
-    );
-
-    // Store fingerprint in Integration.config
-    const integration = await prisma.integration.upsert({
-      where: {
-        userId_name: {
+      // Store fingerprint in Integration.config
+      const integration = await prisma.integration.upsert({
+        where: {
+          userId_name: {
+            userId,
+            name: 'browser_fingerprint',
+          },
+        },
+        create: {
           userId,
           name: 'browser_fingerprint',
+          type: IntegrationType.DATA_SOURCE,
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            fingerprint,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      create: {
-        userId,
-        name: 'browser_fingerprint',
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          fingerprint,
-          uploadedAt: new Date().toISOString(),
+        update: {
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          config: {
+            fingerprint,
+            uploadedAt: new Date().toISOString(),
+          },
         },
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        config: {
-          fingerprint,
-          uploadedAt: new Date().toISOString(),
-        },
-      },
-    });
+      });
 
-    console.log(`[Integrations] ✅ Stored fingerprint for user ${userId}`);
+      console.log(`[Integrations] ✅ Stored fingerprint for user ${userId}`);
 
-    return res.json({
-      message: 'Fingerprint uploaded successfully',
-      integration: {
-        id: integration.id,
-        name: integration.name,
-        status: integration.status,
-      },
-    });
-  } catch (error) {
-    console.error('Error uploading fingerprint:', error);
-    return res.status(500).json({
-      error: 'Failed to upload fingerprint',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
+      return res.json({
+        message: 'Fingerprint uploaded successfully',
+        integration: {
+          id: integration.id,
+          name: integration.name,
+          status: integration.status,
+        },
+      });
+    } catch (error) {
+      console.error('Error uploading fingerprint:', error);
+      return res.status(500).json({
+        error: 'Failed to upload fingerprint',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
  * POST /api/integrations/permissions/upload
@@ -2218,85 +2432,97 @@ router.post('/fingerprint/upload', authenticate, upload.none() as any, async (re
  * Upload browser permission grants from the Mac app.
  * Receives AES-256-CBC encrypted payload with iv and key.
  */
-router.post('/permissions/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    let permissionData: {
-      grants: Array<{ origin: string; permission: string; setting: number }>;
-      hash: string;
-      grantCount: number;
-    };
+router.post(
+  '/permissions/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
-      );
-      let decrypted = decipher.update(data, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      permissionData = JSON.parse(decrypted);
-    } catch (decryptError) {
-      console.error('[Integrations] Permission decryption failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt permission payload',
-      });
-    }
+      const userId = req.user!.id;
+      const { data, iv, key } = req.body;
 
-    if (!permissionData.grants || !Array.isArray(permissionData.grants)) {
-      return res.status(400).json({
-        error: 'Invalid permission payload: expected grants array',
-      });
-    }
-
-    console.log(
-      `[Integrations] Received ${permissionData.grants.length} permission grants for user ${userId}`
-    );
-
-    // Bulk upsert permission grants
-    if (permissionData.grants.length > 0) {
-      // Build VALUES clause for bulk upsert
-      const values = permissionData.grants.map((_, i) => {
-        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::int, NOW())`;
-      }).join(', ');
-
-      // Flatten params
-      const params: (string | number)[] = [];
-      for (const grant of permissionData.grants) {
-        params.push(userId, grant.origin, grant.permission, grant.setting);
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
       }
 
-      await prisma.$executeRawUnsafe(`
+      // Decrypt the AES-256-CBC encrypted payload
+      let permissionData: {
+        grants: Array<{ origin: string; permission: string; setting: number }>;
+        hash: string;
+        grantCount: number;
+      };
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+        let decrypted = decipher.update(data, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        permissionData = JSON.parse(decrypted);
+      } catch (decryptError) {
+        console.error('[Integrations] Permission decryption failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt permission payload',
+        });
+      }
+
+      if (!permissionData.grants || !Array.isArray(permissionData.grants)) {
+        return res.status(400).json({
+          error: 'Invalid permission payload: expected grants array',
+        });
+      }
+
+      console.log(
+        `[Integrations] Received ${permissionData.grants.length} permission grants for user ${userId}`
+      );
+
+      // Bulk upsert permission grants
+      if (permissionData.grants.length > 0) {
+        // Build VALUES clause for bulk upsert
+        const values = permissionData.grants
+          .map((_, i) => {
+            return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::int, NOW())`;
+          })
+          .join(', ');
+
+        // Flatten params
+        const params: (string | number)[] = [];
+        for (const grant of permissionData.grants) {
+          params.push(userId, grant.origin, grant.permission, grant.setting);
+        }
+
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "BrowserPermission" (id, "userId", origin, permission, setting, "syncedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin, permission) DO UPDATE SET
           setting = EXCLUDED.setting,
           "syncedAt" = NOW()
-      `, ...params);
+      `,
+          ...params
+        );
+      }
+
+      console.log(
+        `[Integrations] ✅ Upserted ${permissionData.grants.length} permission grants for user ${userId}`
+      );
+
+      return res.json({
+        message: 'Permissions uploaded successfully',
+        grantCount: permissionData.grants.length,
+      });
+    } catch (error) {
+      console.error('Error uploading permissions:', error);
+      return res.status(500).json({
+        error: 'Failed to upload permissions',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    console.log(`[Integrations] ✅ Upserted ${permissionData.grants.length} permission grants for user ${userId}`);
-
-    return res.json({
-      message: 'Permissions uploaded successfully',
-      grantCount: permissionData.grants.length,
-    });
-  } catch (error) {
-    console.error('Error uploading permissions:', error);
-    return res.status(500).json({
-      error: 'Failed to upload permissions',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/cacheStorage/upload
@@ -2305,95 +2531,102 @@ router.post('/permissions/upload', authenticate, upload.none() as any, async (re
  * Receives AES-256-CBC encrypted payload with iv and key.
  * Stores cache names per origin (not response bodies).
  */
-router.post('/cacheStorage/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key, compressed } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted payload
-    interface CacheInfo {
-      name: string;
-      size?: number;
-    }
-
-    interface CacheStorageOriginData {
-      origin: string;
-      caches: CacheInfo[];
-    }
-
-    let cacheStorageData: {
-      origins: CacheStorageOriginData[];
-      hashes: Record<string, string>;
-      originCount: number;
-    };
-
+router.post(
+  '/cacheStorage/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
+      const userId = req.user!.id;
+      const { data, iv, key, compressed } = req.body;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
+      }
+
+      // Decrypt the AES-256-CBC encrypted payload
+      interface CacheInfo {
+        name: string;
+        size?: number;
+      }
+
+      interface CacheStorageOriginData {
+        origin: string;
+        caches: CacheInfo[];
+      }
+
+      let cacheStorageData: {
+        origins: CacheStorageOriginData[];
+        hashes: Record<string, string>;
+        originCount: number;
+      };
+
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+
+        const decryptedBuffer = Buffer.concat([
+          decipher.update(Buffer.from(data, 'hex')),
+          decipher.final(),
+        ]);
+
+        let jsonString: string;
+        if (compressed === 'true') {
+          const zlib = await import('zlib');
+          const { promisify } = await import('util');
+          const gunzip = promisify(zlib.gunzip);
+          const decompressed = await gunzip(decryptedBuffer);
+          jsonString = decompressed.toString('utf8');
+        } else {
+          jsonString = decryptedBuffer.toString('utf8');
+        }
+
+        cacheStorageData = JSON.parse(jsonString);
+      } catch (decryptError) {
+        console.error('[Integrations] CacheStorage decryption failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt cacheStorage payload',
+        });
+      }
+
+      if (!cacheStorageData.origins || !Array.isArray(cacheStorageData.origins)) {
+        return res.status(400).json({
+          error: 'Invalid cacheStorage payload: expected origins array',
+        });
+      }
+
+      console.log(
+        `[Integrations] Received ${cacheStorageData.origins.length} Cache Storage origins for user ${userId}`
       );
 
-      const decryptedBuffer = Buffer.concat([
-        decipher.update(Buffer.from(data, 'hex')),
-        decipher.final(),
-      ]);
+      // Bulk upsert cache storage origins
+      const origins = cacheStorageData.origins;
+      if (origins.length > 0) {
+        // Build VALUES clause for bulk upsert
+        const values = origins
+          .map((_, i) => {
+            return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
+          })
+          .join(', ');
 
-      let jsonString: string;
-      if (compressed === 'true') {
-        const zlib = await import('zlib');
-        const { promisify } = await import('util');
-        const gunzip = promisify(zlib.gunzip);
-        const decompressed = await gunzip(decryptedBuffer);
-        jsonString = decompressed.toString('utf8');
-      } else {
-        jsonString = decryptedBuffer.toString('utf8');
-      }
+        // Flatten params
+        const params: (string | object)[] = [];
+        for (const origin of origins) {
+          params.push(
+            userId,
+            origin.origin,
+            JSON.stringify(origin.caches),
+            cacheStorageData.hashes[origin.origin] || ''
+          );
+        }
 
-      cacheStorageData = JSON.parse(jsonString);
-    } catch (decryptError) {
-      console.error('[Integrations] CacheStorage decryption failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt cacheStorage payload',
-      });
-    }
-
-    if (!cacheStorageData.origins || !Array.isArray(cacheStorageData.origins)) {
-      return res.status(400).json({
-        error: 'Invalid cacheStorage payload: expected origins array',
-      });
-    }
-
-    console.log(
-      `[Integrations] Received ${cacheStorageData.origins.length} Cache Storage origins for user ${userId}`
-    );
-
-    // Bulk upsert cache storage origins
-    const origins = cacheStorageData.origins;
-    if (origins.length > 0) {
-      // Build VALUES clause for bulk upsert
-      const values = origins.map((_, i) => {
-        return `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`;
-      }).join(', ');
-
-      // Flatten params
-      const params: (string | object)[] = [];
-      for (const origin of origins) {
-        params.push(
-          userId,
-          origin.origin,
-          JSON.stringify(origin.caches),
-          cacheStorageData.hashes[origin.origin] || ''
-        );
-      }
-
-      await prisma.$executeRawUnsafe(`
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "CacheStorageOrigin" (id, "userId", origin, caches, hash, "updatedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin) DO UPDATE SET
@@ -2401,23 +2634,28 @@ router.post('/cacheStorage/upload', authenticate, upload.none() as any, async (r
           hash = EXCLUDED.hash,
           "updatedAt" = NOW()
         WHERE "CacheStorageOrigin".hash IS DISTINCT FROM EXCLUDED.hash
-      `, ...params);
+      `,
+          ...params
+        );
+      }
+
+      console.log(
+        `[Integrations] ✅ Upserted ${origins.length} Cache Storage origins for user ${userId}`
+      );
+
+      return res.json({
+        message: 'Cache Storage uploaded successfully',
+        originCount: origins.length,
+      });
+    } catch (error) {
+      console.error('Error uploading cacheStorage:', error);
+      return res.status(500).json({
+        error: 'Failed to upload cacheStorage',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    console.log(`[Integrations] ✅ Upserted ${origins.length} Cache Storage origins for user ${userId}`);
-
-    return res.json({
-      message: 'Cache Storage uploaded successfully',
-      originCount: origins.length,
-    });
-  } catch (error) {
-    console.error('Error uploading cacheStorage:', error);
-    return res.status(500).json({
-      error: 'Failed to upload cacheStorage',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/passwords/upload
@@ -2426,88 +2664,97 @@ router.post('/cacheStorage/upload', authenticate, upload.none() as any, async (r
  * Receives AES-256-CBC encrypted payload containing RSA-encrypted passwords.
  * The passwords are already RSA-encrypted before upload; we store them as-is.
  */
-router.post('/passwords/upload', authenticate, upload.none() as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({
-        error: 'Missing required fields: data, iv, key',
-      });
-    }
-
-    // Decrypt the AES-256-CBC encrypted transport payload
-    let passwordData: {
-      passwords: Array<{
-        origin: string;
-        username: string;
-        encryptedPassword: string;  // Already RSA-encrypted
-        dateLastUsed: number;
-        dateCreated: number;
-        browserSource: string;
-      }>;
-    };
+router.post(
+  '/passwords/upload',
+  authenticate,
+  upload.none() as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
-      );
-      let decrypted = decipher.update(data, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      passwordData = JSON.parse(decrypted);
-    } catch (decryptError) {
-      console.error('[Integrations] Password decryption failed:', decryptError);
-      return res.status(400).json({
-        error: 'Failed to decrypt password payload',
-      });
-    }
+      const userId = req.user!.id;
+      const { data, iv, key } = req.body;
 
-    if (!passwordData.passwords || !Array.isArray(passwordData.passwords)) {
-      return res.status(400).json({
-        error: 'Invalid password payload: expected passwords array',
-      });
-    }
-
-    console.log(
-      `[Integrations] Received ${passwordData.passwords.length} passwords for user ${userId}`
-    );
-
-    // Bulk upsert passwords
-    if (passwordData.passwords.length > 0) {
-      // Deduplicate passwords by (origin, username) - keep most recently used
-      const passwordMap = new Map<string, typeof passwordData.passwords[0]>();
-      for (const pwd of passwordData.passwords) {
-        const key = `${pwd.origin}|${pwd.username}`;
-        const existing = passwordMap.get(key);
-        if (!existing || (pwd.dateLastUsed || 0) > (existing.dateLastUsed || 0)) {
-          passwordMap.set(key, pwd);
-        }
+      if (!data || !iv || !key) {
+        return res.status(400).json({
+          error: 'Missing required fields: data, iv, key',
+        });
       }
-      const deduplicatedPasswords = Array.from(passwordMap.values());
-      console.log(`[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`);
 
-      // Build VALUES clause for bulk upsert
-      const values = deduplicatedPasswords.map((_, i) => {
-        return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
-      }).join(', ');
-
-      // Flatten params
-      const params: (string | number | null)[] = [];
-      for (const pwd of deduplicatedPasswords) {
-        params.push(
-          userId,
-          pwd.origin,
-          pwd.username,
-          pwd.encryptedPassword,
-          pwd.dateLastUsed || null,
-          pwd.dateCreated || null,
-          pwd.browserSource
+      // Decrypt the AES-256-CBC encrypted transport payload
+      let passwordData: {
+        passwords: Array<{
+          origin: string;
+          username: string;
+          encryptedPassword: string; // Already RSA-encrypted
+          dateLastUsed: number;
+          dateCreated: number;
+          browserSource: string;
+        }>;
+      };
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
         );
+        let decrypted = decipher.update(data, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        passwordData = JSON.parse(decrypted);
+      } catch (decryptError) {
+        console.error('[Integrations] Password decryption failed:', decryptError);
+        return res.status(400).json({
+          error: 'Failed to decrypt password payload',
+        });
       }
 
-      await prisma.$executeRawUnsafe(`
+      if (!passwordData.passwords || !Array.isArray(passwordData.passwords)) {
+        return res.status(400).json({
+          error: 'Invalid password payload: expected passwords array',
+        });
+      }
+
+      console.log(
+        `[Integrations] Received ${passwordData.passwords.length} passwords for user ${userId}`
+      );
+
+      // Bulk upsert passwords
+      if (passwordData.passwords.length > 0) {
+        // Deduplicate passwords by (origin, username) - keep most recently used
+        const passwordMap = new Map<string, (typeof passwordData.passwords)[0]>();
+        for (const pwd of passwordData.passwords) {
+          const key = `${pwd.origin}|${pwd.username}`;
+          const existing = passwordMap.get(key);
+          if (!existing || (pwd.dateLastUsed || 0) > (existing.dateLastUsed || 0)) {
+            passwordMap.set(key, pwd);
+          }
+        }
+        const deduplicatedPasswords = Array.from(passwordMap.values());
+        console.log(
+          `[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`
+        );
+
+        // Build VALUES clause for bulk upsert
+        const values = deduplicatedPasswords
+          .map((_, i) => {
+            return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
+          })
+          .join(', ');
+
+        // Flatten params
+        const params: (string | number | null)[] = [];
+        for (const pwd of deduplicatedPasswords) {
+          params.push(
+            userId,
+            pwd.origin,
+            pwd.username,
+            pwd.encryptedPassword,
+            pwd.dateLastUsed || null,
+            pwd.dateCreated || null,
+            pwd.browserSource
+          );
+        }
+
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "syncedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin, username) DO UPDATE SET
@@ -2515,70 +2762,79 @@ router.post('/passwords/upload', authenticate, upload.none() as any, async (req:
           "dateLastUsed" = EXCLUDED."dateLastUsed",
           "browserSource" = EXCLUDED."browserSource",
           "syncedAt" = NOW()
-      `, ...params);
+      `,
+          ...params
+        );
 
-      console.log(`[Integrations] ✅ Upserted ${deduplicatedPasswords.length} passwords for user ${userId}`);
+        console.log(
+          `[Integrations] ✅ Upserted ${deduplicatedPasswords.length} passwords for user ${userId}`
+        );
 
-      // Create integration records per browser source so the frontend can track sync status
-      const browserSources = new Set(deduplicatedPasswords.map(p => p.browserSource));
-      for (const source of browserSources) {
-        const integrationName = `${source}_passwords`;
-        const sourceCount = deduplicatedPasswords.filter(p => p.browserSource === source).length;
-        await prisma.integration.upsert({
-          where: {
-            userId_name: {
+        // Create integration records per browser source so the frontend can track sync status
+        const browserSources = new Set(deduplicatedPasswords.map((p) => p.browserSource));
+        for (const source of browserSources) {
+          const integrationName = `${source}_passwords`;
+          const sourceCount = deduplicatedPasswords.filter(
+            (p) => p.browserSource === source
+          ).length;
+          await prisma.integration.upsert({
+            where: {
+              userId_name: {
+                userId,
+                name: integrationName,
+              },
+            },
+            create: {
               userId,
               name: integrationName,
+              type: IntegrationType.DATA_SOURCE,
+              status: IntegrationStatus.CONNECTED,
+              isActive: true,
+              lastSyncAt: new Date(),
+              lastSuccessfulSyncAt: new Date(),
+              config: {
+                browserSource: source,
+                passwordCount: sourceCount,
+                uploadedAt: new Date().toISOString(),
+              },
             },
-          },
-          create: {
-            userId,
-            name: integrationName,
-            type: IntegrationType.DATA_SOURCE,
-            status: IntegrationStatus.CONNECTED,
-            isActive: true,
-            lastSyncAt: new Date(),
-            lastSuccessfulSyncAt: new Date(),
-            config: {
-              browserSource: source,
-              passwordCount: sourceCount,
-              uploadedAt: new Date().toISOString(),
+            update: {
+              status: IntegrationStatus.CONNECTED,
+              isActive: true,
+              lastSyncAt: new Date(),
+              lastSuccessfulSyncAt: new Date(),
+              config: {
+                browserSource: source,
+                passwordCount: sourceCount,
+                uploadedAt: new Date().toISOString(),
+              },
             },
-          },
-          update: {
-            status: IntegrationStatus.CONNECTED,
-            isActive: true,
-            lastSyncAt: new Date(),
-            lastSuccessfulSyncAt: new Date(),
-            config: {
-              browserSource: source,
-              passwordCount: sourceCount,
-              uploadedAt: new Date().toISOString(),
-            },
-          },
+          });
+          console.log(
+            `[Integrations] ✅ Upserted ${integrationName} integration for user ${userId}`
+          );
+        }
+
+        return res.json({
+          message: 'Passwords uploaded successfully',
+          passwordCount: deduplicatedPasswords.length,
         });
-        console.log(`[Integrations] ✅ Upserted ${integrationName} integration for user ${userId}`);
       }
 
+      // No passwords to upload
       return res.json({
-        message: 'Passwords uploaded successfully',
-        passwordCount: deduplicatedPasswords.length,
+        message: 'No passwords to upload',
+        passwordCount: 0,
+      });
+    } catch (error) {
+      console.error('Error uploading passwords:', error);
+      return res.status(500).json({
+        error: 'Failed to upload passwords',
+        details: error instanceof Error ? error.message : 'Unknown error',
       });
     }
-
-    // No passwords to upload
-    return res.json({
-      message: 'No passwords to upload',
-      passwordCount: 0,
-    });
-  } catch (error) {
-    console.error('Error uploading passwords:', error);
-    return res.status(500).json({
-      error: 'Failed to upload passwords',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * GET /api/integrations/email/messages
@@ -2593,9 +2849,12 @@ router.post('/passwords/upload', authenticate, upload.none() as any, async (req:
 router.get('/email/messages', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // Support both JWT auth (req.user) and internal API key auth (x-user-id header)
-    const userId = req.user?.id || (req.isInternal ? (req.headers['x-user-id'] as string) : undefined);
+    const userId =
+      req.user?.id || (req.isInternal ? (req.headers['x-user-id'] as string) : undefined);
     if (!userId) {
-      return res.status(400).json({ error: 'Missing user ID. Use JWT auth or x-user-id header with API key.' });
+      return res
+        .status(400)
+        .json({ error: 'Missing user ID. Use JWT auth or x-user-id header with API key.' });
     }
     const sinceParam = req.query.since as string;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
@@ -2628,7 +2887,9 @@ router.get('/email/messages', authenticate, async (req: AuthRequest, res: Respon
     }
 
     // Collect all credentials with valid refresh tokens across all integrations
-    const allCredentials = integrations.flatMap(i => i.emailCredentials).filter(c => c.refreshToken);
+    const allCredentials = integrations
+      .flatMap((i) => i.emailCredentials)
+      .filter((c) => c.refreshToken);
     if (allCredentials.length === 0) {
       return res.status(404).json({ error: 'Gmail credentials not found' });
     }
@@ -2640,7 +2901,9 @@ router.get('/email/messages', authenticate, async (req: AuthRequest, res: Respon
         try {
           const accessToken = await getValidAccessToken(credential);
           if (!accessToken) {
-            console.warn(`[Integrations] Failed to get access token for credential ${credential.id} (${credential.email})`);
+            console.warn(
+              `[Integrations] Failed to get access token for credential ${credential.id} (${credential.email})`
+            );
             return [];
           }
           return await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
@@ -2657,10 +2920,12 @@ router.get('/email/messages', authenticate, async (req: AuthRequest, res: Respon
       .sort((a, b) => b.date.getTime() - a.date.getTime())
       .slice(0, limit);
 
-    console.log(`[Integrations] Fetched ${emails.length} emails from ${allCredentials.length} Gmail account(s) since ${since.toISOString()} for user ${userId}`);
+    console.log(
+      `[Integrations] Fetched ${emails.length} emails from ${allCredentials.length} Gmail account(s) since ${since.toISOString()} for user ${userId}`
+    );
 
     return res.json({
-      emails: emails.map(email => ({
+      emails: emails.map((email) => ({
         from: email.from,
         fromName: email.fromName,
         to: email.to,
@@ -2720,9 +2985,7 @@ async function refreshGmailToken(credential: {
     }
 
     // Update credential with new access token
-    const expiresAt = json.expires_in
-      ? new Date(Date.now() + json.expires_in * 1000)
-      : null;
+    const expiresAt = json.expires_in ? new Date(Date.now() + json.expires_in * 1000) : null;
 
     await prisma.emailIntegrationCredential.update({
       where: { id: credential.id },
@@ -2784,8 +3047,8 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
     const userId = req.isInternal ? user_id : req.user!.id;
 
     if (!userId) {
-      return res.status(401).json({ 
-        error: 'Unauthorized: user_id required for internal auth' 
+      return res.status(401).json({
+        error: 'Unauthorized: user_id required for internal auth',
       });
     }
 
@@ -2806,7 +3069,7 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
         where: { userId, provider: EmailProvider.GMAIL, accessToken: { not: null } },
         select: { email: true },
       });
-      const available = creds.map(c => c.email).filter(Boolean);
+      const available = creds.map((c) => c.email).filter(Boolean);
       if (available.length > 0) {
         return res.status(400).json({
           error: 'from_email required',
@@ -2815,7 +3078,8 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
       }
       return res.status(400).json({
         error: 'Gmail not connected',
-        message: 'No Gmail accounts connected. Connect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
+        message:
+          'No Gmail accounts connected. Connect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
       });
     }
 
@@ -2837,12 +3101,13 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
         where: { userId, provider: EmailProvider.GMAIL, accessToken: { not: null } },
         select: { email: true },
       });
-      const available = creds.map(c => c.email).filter(Boolean);
+      const available = creds.map((c) => c.email).filter(Boolean);
       return res.status(400).json({
         error: 'Gmail not connected',
-        message: available.length > 0
-          ? `No connected Gmail account found for '${from_email}'. Available accounts: ${available.join(', ')}`
-          : 'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
+        message:
+          available.length > 0
+            ? `No connected Gmail account found for '${from_email}'. Available accounts: ${available.join(', ')}`
+            : 'Connect your Gmail in order to allow Rose to send emails on your behalf. To connect your Gmail click on the hamburger icon > Integrations > Connect Gmail',
       });
     }
 
@@ -2869,7 +3134,8 @@ router.post('/email/send', authenticate, async (req: AuthRequest, res: Response)
 
     // Get sender email from credential (preferred) or integration config (fallback)
     const integrationConfig = (credential.integration?.config as Record<string, unknown>) || {};
-    const senderEmail = credential.email || (integrationConfig.connectedEmail as string) || req.user!.email;
+    const senderEmail =
+      credential.email || (integrationConfig.connectedEmail as string) || req.user!.email;
 
     if (!senderEmail) {
       return res.status(400).json({
@@ -2944,7 +3210,7 @@ router.patch('/:name', authenticate, async (req: AuthRequest, res: Response) => 
     const userId = req.user!.id;
     const { name } = req.params;
     const { status, isActive, config } = req.body;
-    
+
     // Find existing integration
     const existing = await prisma.integration.findUnique({
       where: {
@@ -2954,24 +3220,24 @@ router.patch('/:name', authenticate, async (req: AuthRequest, res: Response) => 
         },
       },
     });
-    
+
     if (!existing) {
       return res.status(404).json({
         error: 'Integration not found',
       });
     }
-    
+
     // Build update data
     const updateData: any = {};
     if (status !== undefined) updateData.status = status;
     if (isActive !== undefined) updateData.isActive = isActive;
     if (config !== undefined) updateData.config = config;
-    
+
     const updated = await prisma.integration.update({
       where: { id: existing.id },
       data: updateData,
     });
-    
+
     return res.json({ integration: updated });
   } catch (error) {
     console.error('Error updating integration:', error);
@@ -2984,14 +3250,14 @@ router.patch('/:name', authenticate, async (req: AuthRequest, res: Response) => 
 
 /**
  * DELETE /api/integrations/:name
- * 
+ *
  * Disconnect/delete an integration
  */
 router.delete('/:name', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const { name } = req.params;
-    
+
     const integration = await prisma.integration.findUnique({
       where: {
         userId_name: {
@@ -3000,17 +3266,17 @@ router.delete('/:name', authenticate, async (req: AuthRequest, res: Response) =>
         },
       },
     });
-    
+
     if (!integration) {
       return res.status(404).json({
         error: 'Integration not found',
       });
     }
-    
+
     await prisma.integration.delete({
       where: { id: integration.id },
     });
-    
+
     return res.json({
       message: 'Integration deleted successfully',
     });
@@ -3046,10 +3312,7 @@ function encryptPasswordForStorage(password: string): string {
 
   // 2. Encrypt password with AES-256-GCM
   const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(password, 'utf8'),
-    cipher.final()
-  ]);
+  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const ciphertext = Buffer.concat([encrypted, authTag]);
 
@@ -3162,13 +3425,13 @@ function parseApplePasswordsCsv(csvContent: string): Array<{
   }
 
   // Parse header to find column indices
-  const header = rows[0].map(h => h.trim().toLowerCase().replace(/"/g, ''));
-  const titleIdx = header.findIndex(h => h === 'title');
-  const urlIdx = header.findIndex(h => h === 'url');
-  const usernameIdx = header.findIndex(h => h === 'username');
-  const passwordIdx = header.findIndex(h => h === 'password');
-  const notesIdx = header.findIndex(h => h === 'notes');
-  const otpAuthIdx = header.findIndex(h => h === 'otpauth');
+  const header = rows[0].map((h) => h.trim().toLowerCase().replace(/"/g, ''));
+  const titleIdx = header.findIndex((h) => h === 'title');
+  const urlIdx = header.findIndex((h) => h === 'url');
+  const usernameIdx = header.findIndex((h) => h === 'username');
+  const passwordIdx = header.findIndex((h) => h === 'password');
+  const notesIdx = header.findIndex((h) => h === 'notes');
+  const otpAuthIdx = header.findIndex((h) => h === 'otpauth');
 
   // Validate required columns
   if (urlIdx === -1 || usernameIdx === -1 || passwordIdx === -1) {
@@ -3199,12 +3462,12 @@ function parseApplePasswordsCsv(csvContent: string): Array<{
     if (!url || !username || !password) continue;
 
     passwords.push({
-      title: titleIdx >= 0 ? (values[titleIdx]?.trim() || '') : '',
+      title: titleIdx >= 0 ? values[titleIdx]?.trim() || '' : '',
       url,
       username,
       password,
-      notes: notesIdx >= 0 ? (values[notesIdx]?.trim() || '') : '',
-      otpAuth: otpAuthIdx >= 0 ? (values[otpAuthIdx]?.trim() || '') : '',
+      notes: notesIdx >= 0 ? values[notesIdx]?.trim() || '' : '',
+      otpAuth: otpAuthIdx >= 0 ? values[otpAuthIdx]?.trim() || '' : '',
     });
   }
 
@@ -3217,90 +3480,101 @@ function parseApplePasswordsCsv(csvContent: string): Array<{
  * Upload passwords from Apple Passwords CSV export.
  * The CSV is parsed and each password is encrypted before storage.
  */
-router.post('/passwords/apple/upload', authenticate, upload.single('file') as any, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const file = (req as any).file;
-
-    if (!file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Read and parse CSV file
-    const csvContent = fs.readFileSync(file.path, 'utf8');
-
-    // Clean up temp file
-    fs.unlinkSync(file.path);
-
-    let passwords;
+router.post(
+  '/passwords/apple/upload',
+  authenticate,
+  upload.single('file') as any,
+  async (req: AuthRequest, res: Response) => {
     try {
-      passwords = parseApplePasswordsCsv(csvContent);
-    } catch (parseError) {
-      return res.status(400).json({
-        error: 'Failed to parse CSV file',
-        details: parseError instanceof Error ? parseError.message : 'Unknown error',
-      });
-    }
+      const userId = req.user!.id;
+      const file = (req as any).file;
 
-    if (passwords.length === 0) {
-      return res.status(400).json({ error: 'No valid passwords found in CSV' });
-    }
+      if (!file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
 
-    console.log(`[Integrations] Parsed ${passwords.length} passwords from Apple CSV for user ${userId}`);
+      // Read and parse CSV file
+      const csvContent = fs.readFileSync(file.path, 'utf8');
 
-    // Encrypt and prepare passwords for storage
-    const now = Date.now();
-    const encryptedPasswords = passwords.map(p => {
-      // Extract origin from URL
-      let origin = p.url;
+      // Clean up temp file
+      fs.unlinkSync(file.path);
+
+      let passwords;
       try {
-        const urlObj = new URL(p.url);
-        origin = urlObj.origin;
-      } catch {
-        // Keep original URL if parsing fails
+        passwords = parseApplePasswordsCsv(csvContent);
+      } catch (parseError) {
+        return res.status(400).json({
+          error: 'Failed to parse CSV file',
+          details: parseError instanceof Error ? parseError.message : 'Unknown error',
+        });
       }
 
-      return {
-        origin,
-        username: p.username,
-        encryptedPassword: encryptPasswordForStorage(p.password),
-        dateLastUsed: now,
-        dateCreated: now,
-        browserSource: 'apple_passwords',
-      };
-    });
-
-    // Deduplicate by (origin, username) - keep first occurrence
-    const passwordMap = new Map<string, typeof encryptedPasswords[0]>();
-    for (const pwd of encryptedPasswords) {
-      const key = `${pwd.origin}|${pwd.username}`;
-      if (!passwordMap.has(key)) {
-        passwordMap.set(key, pwd);
-      }
-    }
-    const deduplicatedPasswords = Array.from(passwordMap.values());
-    console.log(`[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`);
-
-    // Bulk upsert passwords
-    if (deduplicatedPasswords.length > 0) {
-      const values = deduplicatedPasswords.map((_, i) => {
-        return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
-      }).join(', ');
-
-      const params: (string | number | null)[] = [];
-      for (const pwd of deduplicatedPasswords) {
-        params.push(
-          userId,
-          pwd.origin,
-          pwd.username,
-          pwd.encryptedPassword,
-          pwd.dateLastUsed || null,
-          pwd.dateCreated || null,
-          pwd.browserSource
-        );
+      if (passwords.length === 0) {
+        return res.status(400).json({ error: 'No valid passwords found in CSV' });
       }
 
-      await prisma.$executeRawUnsafe(`
+      console.log(
+        `[Integrations] Parsed ${passwords.length} passwords from Apple CSV for user ${userId}`
+      );
+
+      // Encrypt and prepare passwords for storage
+      const now = Date.now();
+      const encryptedPasswords = passwords.map((p) => {
+        // Extract origin from URL
+        let origin = p.url;
+        try {
+          const urlObj = new URL(p.url);
+          origin = urlObj.origin;
+        } catch {
+          // Keep original URL if parsing fails
+        }
+
+        return {
+          origin,
+          username: p.username,
+          encryptedPassword: encryptPasswordForStorage(p.password),
+          dateLastUsed: now,
+          dateCreated: now,
+          browserSource: 'apple_passwords',
+        };
+      });
+
+      // Deduplicate by (origin, username) - keep first occurrence
+      const passwordMap = new Map<string, (typeof encryptedPasswords)[0]>();
+      for (const pwd of encryptedPasswords) {
+        const key = `${pwd.origin}|${pwd.username}`;
+        if (!passwordMap.has(key)) {
+          passwordMap.set(key, pwd);
+        }
+      }
+      const deduplicatedPasswords = Array.from(passwordMap.values());
+      console.log(
+        `[Integrations] Deduplicated to ${deduplicatedPasswords.length} unique passwords`
+      );
+
+      // Bulk upsert passwords
+      if (deduplicatedPasswords.length > 0) {
+        const values = deduplicatedPasswords
+          .map((_, i) => {
+            return `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`;
+          })
+          .join(', ');
+
+        const params: (string | number | null)[] = [];
+        for (const pwd of deduplicatedPasswords) {
+          params.push(
+            userId,
+            pwd.origin,
+            pwd.username,
+            pwd.encryptedPassword,
+            pwd.dateLastUsed || null,
+            pwd.dateCreated || null,
+            pwd.browserSource
+          );
+        }
+
+        await prisma.$executeRawUnsafe(
+          `
         INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "syncedAt")
         VALUES ${values}
         ON CONFLICT ("userId", origin, username) DO UPDATE SET
@@ -3308,50 +3582,55 @@ router.post('/passwords/apple/upload', authenticate, upload.single('file') as an
           "dateLastUsed" = EXCLUDED."dateLastUsed",
           "browserSource" = EXCLUDED."browserSource",
           "syncedAt" = NOW()
-      `, ...params);
+      `,
+          ...params
+        );
 
-      console.log(`[Integrations] ✅ Imported ${deduplicatedPasswords.length} Apple passwords for user ${userId}`);
-    }
+        console.log(
+          `[Integrations] ✅ Imported ${deduplicatedPasswords.length} Apple passwords for user ${userId}`
+        );
+      }
 
-    // Update or create integration record
-    await prisma.integration.upsert({
-      where: {
-        userId_name: {
+      // Update or create integration record
+      await prisma.integration.upsert({
+        where: {
+          userId_name: {
+            userId,
+            name: 'apple_passwords',
+          },
+        },
+        update: {
+          status: IntegrationStatus.CONNECTED,
+          config: {
+            passwordCount: deduplicatedPasswords.length,
+            lastImportAt: new Date().toISOString(),
+          },
+        },
+        create: {
           userId,
+          type: IntegrationType.DATA_SOURCE,
           name: 'apple_passwords',
+          status: IntegrationStatus.CONNECTED,
+          config: {
+            passwordCount: deduplicatedPasswords.length,
+            lastImportAt: new Date().toISOString(),
+          },
         },
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        config: {
-          passwordCount: deduplicatedPasswords.length,
-          lastImportAt: new Date().toISOString(),
-        },
-      },
-      create: {
-        userId,
-        type: IntegrationType.DATA_SOURCE,
-        name: 'apple_passwords',
-        status: IntegrationStatus.CONNECTED,
-        config: {
-          passwordCount: deduplicatedPasswords.length,
-          lastImportAt: new Date().toISOString(),
-        },
-      },
-    });
+      });
 
-    return res.json({
-      message: 'Passwords imported successfully',
-      passwordCount: deduplicatedPasswords.length,
-    });
-  } catch (error) {
-    console.error('Error importing Apple passwords:', error);
-    return res.status(500).json({
-      error: 'Failed to import passwords',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
+      return res.json({
+        message: 'Passwords imported successfully',
+        passwordCount: deduplicatedPasswords.length,
+      });
+    } catch (error) {
+      console.error('Error importing Apple passwords:', error);
+      return res.status(500).json({
+        error: 'Failed to import passwords',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
  * Request a new password integration
@@ -3407,69 +3686,73 @@ router.post('/passwords/request', authenticate, async (req: AuthRequest, res: Re
  * Upload Claude Code credentials from the Mac app.
  * Receives AES-256-CBC encrypted payload containing RSA-encrypted credentials.
  */
-router.post('/claude-code/credentials/upload', authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const { data, iv, key } = req.body;
-
-    if (!data || !iv || !key) {
-      return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
-    }
-
-    // Decrypt the AES-256-CBC transport layer
-    let payload: { encryptedCredentials: string };
+router.post(
+  '/claude-code/credentials/upload',
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
     try {
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(iv, 'hex')
-      );
-      let decrypted = decipher.update(data, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      payload = JSON.parse(decrypted);
-    } catch (decryptError) {
-      console.error('[Integrations] Claude Code credential decryption failed:', decryptError);
-      return res.status(400).json({ error: 'Failed to decrypt credential payload' });
+      const userId = req.user!.id;
+      const { data, iv, key } = req.body;
+
+      if (!data || !iv || !key) {
+        return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
+      }
+
+      // Decrypt the AES-256-CBC transport layer
+      let payload: { encryptedCredentials: string };
+      try {
+        const decipher = crypto.createDecipheriv(
+          'aes-256-cbc',
+          Buffer.from(key, 'hex'),
+          Buffer.from(iv, 'hex')
+        );
+        let decrypted = decipher.update(data, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        payload = JSON.parse(decrypted);
+      } catch (decryptError) {
+        console.error('[Integrations] Claude Code credential decryption failed:', decryptError);
+        return res.status(400).json({ error: 'Failed to decrypt credential payload' });
+      }
+
+      if (!payload.encryptedCredentials) {
+        return res.status(400).json({ error: 'Invalid payload: missing encryptedCredentials' });
+      }
+
+      console.log(`[Integrations] Storing Claude Code credentials for user ${userId}`);
+
+      await prisma.integration.upsert({
+        where: { userId_name: { userId, name: 'claude_code' } },
+        create: {
+          userId,
+          type: IntegrationType.TOOL_SETUP,
+          name: 'claude_code',
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          config: { encryptedCredentials: payload.encryptedCredentials },
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+        },
+        update: {
+          status: IntegrationStatus.CONNECTED,
+          isActive: true,
+          config: { encryptedCredentials: payload.encryptedCredentials },
+          lastSyncAt: new Date(),
+          lastSuccessfulSyncAt: new Date(),
+          failureReason: null,
+        },
+      });
+
+      console.log(`[Integrations] Claude Code credentials stored for user ${userId}`);
+      return res.json({ message: 'Claude Code credentials uploaded successfully' });
+    } catch (error) {
+      console.error('Error uploading Claude Code credentials:', error);
+      return res.status(500).json({
+        error: 'Failed to upload Claude Code credentials',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    if (!payload.encryptedCredentials) {
-      return res.status(400).json({ error: 'Invalid payload: missing encryptedCredentials' });
-    }
-
-    console.log(`[Integrations] Storing Claude Code credentials for user ${userId}`);
-
-    await prisma.integration.upsert({
-      where: { userId_name: { userId, name: 'claude_code' } },
-      create: {
-        userId,
-        type: IntegrationType.TOOL_SETUP,
-        name: 'claude_code',
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        config: { encryptedCredentials: payload.encryptedCredentials },
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        config: { encryptedCredentials: payload.encryptedCredentials },
-        lastSyncAt: new Date(),
-        lastSuccessfulSyncAt: new Date(),
-        failureReason: null,
-      },
-    });
-
-    console.log(`[Integrations] Claude Code credentials stored for user ${userId}`);
-    return res.json({ message: 'Claude Code credentials uploaded successfully' });
-  } catch (error) {
-    console.error('Error uploading Claude Code credentials:', error);
-    return res.status(500).json({
-      error: 'Failed to upload Claude Code credentials',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * GET /api/integrations/claude-code/credentials/token
@@ -3481,54 +3764,60 @@ router.post('/claude-code/credentials/upload', authenticate, async (req: AuthReq
  *   X-Force-Pool: 'true' — skip user's own token, go straight to pool
  *   X-Exclude-Pool-Tokens: 'id1,id2' — skip specific pool tokens (for retry after 429)
  */
-router.get('/claude-code/credentials/token', authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = req.isInternal
-      ? (req.headers['x-user-id'] as string)
-      : req.user?.id;
+router.get(
+  '/claude-code/credentials/token',
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
 
-    if (!userId) {
-      return res.status(400).json({ error: 'Missing user ID' });
-    }
-
-    const forcePool = req.headers['x-force-pool'] === 'true';
-
-    // 1. Try user's own token first (unless forcing pool)
-    if (!forcePool) {
-      const userToken = await fetchClaudeCodeAccessToken(userId);
-      if (userToken) {
-        return res.json({ accessToken: userToken, source: 'user' });
+      if (!userId) {
+        return res.status(400).json({ error: 'Missing user ID' });
       }
+
+      const forcePool = req.headers['x-force-pool'] === 'true';
+
+      // 1. Try user's own token first (unless forcing pool)
+      if (!forcePool) {
+        const userToken = await fetchClaudeCodeAccessToken(userId);
+        if (userToken) {
+          return res.json({ accessToken: userToken, source: 'user' });
+        }
+      }
+
+      // 2. Check if user is onboarded (pool access requires completed onboarding)
+      const user = await prisma.user.findUnique({ where: { userId } });
+      if (!user?.onboardingCompletedAt) {
+        return res
+          .status(404)
+          .json({ error: 'Claude Code credentials not found. Sync credentials from the Mac app.' });
+      }
+
+      // 3. Try pool token
+      const excludeHeader = req.headers['x-exclude-pool-tokens'] as string | undefined;
+      const excludeIds = excludeHeader
+        ? excludeHeader.split(',').map((id) => id.trim())
+        : undefined;
+
+      const poolResult = await fetchPoolToken(excludeIds);
+      if (!poolResult) {
+        return res.status(404).json({ error: 'NO_TOKENS_AVAILABLE' });
+      }
+
+      return res.json({
+        accessToken: poolResult.accessToken,
+        source: 'pool',
+        poolTokenId: poolResult.poolTokenId,
+      });
+    } catch (error) {
+      console.error('[Integrations] Error fetching Claude Code token:', error);
+      return res.status(500).json({
+        error: 'Failed to fetch Claude Code credentials',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    // 2. Check if user is onboarded (pool access requires completed onboarding)
-    const user = await prisma.user.findUnique({ where: { userId } });
-    if (!user?.onboardingCompletedAt) {
-      return res.status(404).json({ error: 'Claude Code credentials not found. Sync credentials from the Mac app.' });
-    }
-
-    // 3. Try pool token
-    const excludeHeader = req.headers['x-exclude-pool-tokens'] as string | undefined;
-    const excludeIds = excludeHeader ? excludeHeader.split(',').map(id => id.trim()) : undefined;
-
-    const poolResult = await fetchPoolToken(excludeIds);
-    if (!poolResult) {
-      return res.status(404).json({ error: 'NO_TOKENS_AVAILABLE' });
-    }
-
-    return res.json({
-      accessToken: poolResult.accessToken,
-      source: 'pool',
-      poolTokenId: poolResult.poolTokenId,
-    });
-  } catch (error) {
-    console.error('[Integrations] Error fetching Claude Code token:', error);
-    return res.status(500).json({
-      error: 'Failed to fetch Claude Code credentials',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 /**
  * POST /api/integrations/claude-code/token/rate-limited
@@ -3536,64 +3825,77 @@ router.get('/claude-code/credentials/token', authenticate, async (req: AuthReque
  * Marks either a pool token or a user's token as rate-limited until a specific timestamp.
  * Internal-only (X-API-Key auth).
  */
-router.post('/claude-code/token/rate-limited', authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.isInternal) {
-      return res.status(403).json({ error: 'Internal only' });
-    }
-
-    const body = req.body || {};
-    const source = body.source as string | undefined;
-    const rateLimitedUntil = body.rateLimitedUntil as string | undefined;
-
-    if (source === 'pool') {
-      const poolTokenId = body.poolTokenId as string | undefined;
-      if (!poolTokenId) {
-        return res.status(400).json({ error: 'Missing poolTokenId for source=pool' });
+router.post(
+  '/claude-code/token/rate-limited',
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.isInternal) {
+        return res.status(403).json({ error: 'Internal only' });
       }
-      await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
-      return res.json({ ok: true, source, poolTokenId, rateLimitedUntil: rateLimitedUntil || null });
-    }
 
-    if (source === 'user') {
-      const userIdFromHeader = req.headers['x-user-id'] as string | undefined;
-      const userId = (body.userId as string | undefined) || userIdFromHeader;
-      if (!userId) {
-        return res.status(400).json({ error: 'Missing userId for source=user' });
+      const body = req.body || {};
+      const source = body.source as string | undefined;
+      const rateLimitedUntil = body.rateLimitedUntil as string | undefined;
+
+      if (source === 'pool') {
+        const poolTokenId = body.poolTokenId as string | undefined;
+        if (!poolTokenId) {
+          return res.status(400).json({ error: 'Missing poolTokenId for source=pool' });
+        }
+        await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
+        return res.json({
+          ok: true,
+          source,
+          poolTokenId,
+          rateLimitedUntil: rateLimitedUntil || null,
+        });
       }
-      await markUserTokenRateLimited(userId, { rateLimitedUntil });
-      return res.json({ ok: true, source, userId, rateLimitedUntil: rateLimitedUntil || null });
-    }
 
-    return res.status(400).json({ error: 'Invalid source. Must be "pool" or "user".' });
-  } catch (error) {
-    console.error('[Integrations] Error marking Claude token rate-limited:', error);
-    return res.status(500).json({ error: 'Failed to mark Claude token rate-limited' });
+      if (source === 'user') {
+        const userIdFromHeader = req.headers['x-user-id'] as string | undefined;
+        const userId = (body.userId as string | undefined) || userIdFromHeader;
+        if (!userId) {
+          return res.status(400).json({ error: 'Missing userId for source=user' });
+        }
+        await markUserTokenRateLimited(userId, { rateLimitedUntil });
+        return res.json({ ok: true, source, userId, rateLimitedUntil: rateLimitedUntil || null });
+      }
+
+      return res.status(400).json({ error: 'Invalid source. Must be "pool" or "user".' });
+    } catch (error) {
+      console.error('[Integrations] Error marking Claude token rate-limited:', error);
+      return res.status(500).json({ error: 'Failed to mark Claude token rate-limited' });
+    }
   }
-});
+);
 
 /**
  * POST /api/integrations/claude-code/pool-token/rate-limited
  *
  * Marks a pool token as rate-limited. Internal-only (X-API-Key auth).
  */
-router.post('/claude-code/pool-token/rate-limited', authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    if (!req.isInternal) {
-      return res.status(403).json({ error: 'Internal only' });
-    }
+router.post(
+  '/claude-code/pool-token/rate-limited',
+  authenticate,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.isInternal) {
+        return res.status(403).json({ error: 'Internal only' });
+      }
 
-    const { poolTokenId, rateLimitedUntil } = req.body || {};
-    if (!poolTokenId) {
-      return res.status(400).json({ error: 'Missing poolTokenId' });
-    }
+      const { poolTokenId, rateLimitedUntil } = req.body || {};
+      if (!poolTokenId) {
+        return res.status(400).json({ error: 'Missing poolTokenId' });
+      }
 
-    await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
-    return res.json({ ok: true, poolTokenId, rateLimitedUntil: rateLimitedUntil || null });
-  } catch (error) {
-    console.error('[Integrations] Error marking pool token rate-limited:', error);
-    return res.status(500).json({ error: 'Failed to mark pool token rate-limited' });
+      await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
+      return res.json({ ok: true, poolTokenId, rateLimitedUntil: rateLimitedUntil || null });
+    } catch (error) {
+      console.error('[Integrations] Error marking pool token rate-limited:', error);
+      return res.status(500).json({ error: 'Failed to mark pool token rate-limited' });
+    }
   }
-});
+);
 
 export default router;

@@ -15,12 +15,12 @@
 
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { prisma } from '../lib/prisma';
-import { getTemporalClient } from '../lib/temporal';
-import { sendSms } from '../lib/smsQueue';
-import { SMS_TEMPLATES } from '../lib/smsTemplates';
-import { handleSmsSupervisorMessage } from '../lib/smsSupervisor';
-import { lookupAndConsumeShortcode } from '../lib/smsSupervisor/shortcodes';
+import { prisma } from '../providers/database';
+import { getTemporalClient } from '../providers/temporal';
+import { sendSms } from '../providers/smsQueue';
+import { SMS_TEMPLATES } from '../providers/smsTemplates';
+import { handleSmsSupervisorMessage } from '../providers/smsSupervisor';
+import { lookupAndConsumeShortcode } from '../providers/smsSupervisor/shortcodes';
 
 const router = Router();
 
@@ -65,10 +65,7 @@ function abortAllSupervisorRuns(userId: string): void {
  * Surge sends: Surge-Signature: t=<timestamp>,v1=<hmac>
  * Signed payload: "<timestamp>.<raw_json_body>"
  */
-function validateSurgeSignature(
-  req: Request,
-  signingSecret: string
-): boolean {
+function validateSurgeSignature(req: Request, signingSecret: string): boolean {
   const signatureHeader = req.headers['surge-signature'] as string;
   if (!signatureHeader) {
     return false;
@@ -124,7 +121,7 @@ function validateSurgeSignature(
 function parseSurgePayload(body: any): { fromPhone: string; messageBody: string } | null {
   // Surge wraps the message under a `data` envelope
   const data = body?.data ?? body;
-  const messageBody = (data?.body as string || '').trim();
+  const messageBody = ((data?.body as string) || '').trim();
   const fromPhone = data?.conversation?.contact?.phone_number as string;
 
   if (!fromPhone || !messageBody) {
@@ -160,7 +157,9 @@ router.post('/inbound', async (req: Request, res: Response) => {
       hasBody: 'body' in (req.body || {}),
       hasConversation: 'conversation' in (req.body || {}),
       conversationKeys: req.body?.conversation ? Object.keys(req.body.conversation) : [],
-      contactKeys: req.body?.conversation?.contact ? Object.keys(req.body.conversation.contact) : [],
+      contactKeys: req.body?.conversation?.contact
+        ? Object.keys(req.body.conversation.contact)
+        : [],
       raw: JSON.stringify(req.body).substring(0, 500),
     });
 
@@ -234,7 +233,13 @@ router.post('/inbound', async (req: Request, res: Response) => {
         try {
           const client = await getTemporalClient();
           const handle = client.workflow.getHandle(shortcodeResult.workflowId);
-          await handle.signal('receive_user_response', JSON.stringify({ request_id: shortcodeResult.attentionRequestId, response: 'Approved via SMS shortcode' }));
+          await handle.signal(
+            'receive_user_response',
+            JSON.stringify({
+              request_id: shortcodeResult.attentionRequestId,
+              response: 'Approved via SMS shortcode',
+            })
+          );
 
           console.log('[SMS Webhook] Signaled workflow with shortcode approval', {
             workflowId: shortcodeResult.workflowId,
@@ -261,7 +266,10 @@ router.post('/inbound', async (req: Request, res: Response) => {
 
       // Invalid/expired shortcode
       console.log('[SMS Webhook] Shortcode not found or expired', { code });
-      await sendSms(fromPhone, `Code "${code}" not found or expired. Check the code and try again.`);
+      await sendSms(
+        fromPhone,
+        `Code "${code}" not found or expired. Check the code and try again.`
+      );
       return res.json({ ok: true });
     }
 
@@ -296,7 +304,7 @@ router.post('/inbound', async (req: Request, res: Response) => {
         console.log('[SMS Webhook] Terminating active SMS agents on /clear', {
           userId: user.userId,
           agentCount: activeAgents.length,
-          agentIds: activeAgents.map(a => a.id),
+          agentIds: activeAgents.map((a) => a.id),
         });
 
         const client = await getTemporalClient();
@@ -308,17 +316,17 @@ router.post('/inbound', async (req: Request, res: Response) => {
               const handle = client.workflow.getHandle(agent.temporalWorkflowId);
               await handle.terminate('Session cleared by user via /clear');
             } catch (error) {
-              console.warn(`[SMS Webhook] Failed to terminate workflow for agent ${agent.id}:`, error instanceof Error ? error.message : String(error));
+              console.warn(
+                `[SMS Webhook] Failed to terminate workflow for agent ${agent.id}:`,
+                error instanceof Error ? error.message : String(error)
+              );
             }
           }
 
           // Soft-delete the agent and all its children
           await prisma.agent.updateMany({
             where: {
-              OR: [
-                { id: agent.id },
-                { parentAgentId: agent.id },
-              ],
+              OR: [{ id: agent.id }, { parentAgentId: agent.id }],
               deletedAt: null,
             },
             data: { deletedAt: new Date() },
@@ -374,12 +382,11 @@ router.post('/inbound', async (req: Request, res: Response) => {
         });
 
         // Send error SMS as fallback
-        sendSms(fromPhone, "Sorry, something went wrong. Please try again.")
-          .catch(smsError => {
-            console.error('[SMS Webhook] Failed to send error SMS', {
-              error: smsError instanceof Error ? smsError.message : String(smsError),
-            });
+        sendSms(fromPhone, 'Sorry, something went wrong. Please try again.').catch((smsError) => {
+          console.error('[SMS Webhook] Failed to send error SMS', {
+            error: smsError instanceof Error ? smsError.message : String(smsError),
           });
+        });
       })
       .finally(() => {
         unregisterSupervisorRun(user.userId, abortController);

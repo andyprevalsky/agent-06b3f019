@@ -1,5 +1,5 @@
-import { prisma } from '../../lib/prisma';
-import { logTruncate } from '../../lib/log';
+import { prisma } from '../../providers/database';
+import { logTruncate } from '../../utils/log';
 import { IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
 import {
   fetchGmailEmails,
@@ -53,7 +53,9 @@ async function refreshGoogleAccessToken(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[GmailSync] Token refresh failed: ${response.status} - ${logTruncate(errorText)}`);
+      console.error(
+        `[GmailSync] Token refresh failed: ${response.status} - ${logTruncate(errorText)}`
+      );
       return null;
     }
 
@@ -157,8 +159,8 @@ async function transformAndFilterEmails(
     const toCounts = new Map<string, number>();
     for (const email of emails) {
       const from = email.from.toLowerCase();
-      const allRecipients = [...email.to, ...email.cc].map(e => e.toLowerCase());
-      if (userEmailSet.has(from) || allRecipients.some(r => userEmailSet.has(r))) continue;
+      const allRecipients = [...email.to, ...email.cc].map((e) => e.toLowerCase());
+      if (userEmailSet.has(from) || allRecipients.some((r) => userEmailSet.has(r))) continue;
       fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
       for (const r of allRecipients) {
         toCounts.set(r, (toCounts.get(r) || 0) + 1);
@@ -173,27 +175,32 @@ async function transformAndFilterEmails(
       if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
         userEmailSet.add(topAddr);
         foundNew = true;
-        console.log(`[GmailSync] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`);
+        console.log(
+          `[GmailSync] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`
+        );
       }
     }
   }
   console.log(`[GmailSync] userEmailSet: ${JSON.stringify([...userEmailSet])}`);
 
   // Group emails by contact
-  const contactMap = new Map<string, {
-    email: string;
-    name: string | null;
-    sentCount: number;
-    receivedCount: number;
-    messages: Array<{
-      from: string;
-      to: string;
-      subject: string;
-      date: Date;
-      body: string | null;
-      isFromMe: boolean;
-    }>;
-  }>();
+  const contactMap = new Map<
+    string,
+    {
+      email: string;
+      name: string | null;
+      sentCount: number;
+      receivedCount: number;
+      messages: Array<{
+        from: string;
+        to: string;
+        subject: string;
+        date: Date;
+        body: string | null;
+        isFromMe: boolean;
+      }>;
+    }
+  >();
 
   for (const email of emails) {
     const isFromMe = email.isSent || userEmailSet.has(email.from.toLowerCase());
@@ -201,7 +208,7 @@ async function transformAndFilterEmails(
     // Determine contact emails
     let contactEmails: string[] = [];
     if (isFromMe) {
-      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e.toLowerCase()));
+      contactEmails = [...email.to, ...email.cc].filter((e) => !userEmailSet.has(e.toLowerCase()));
     } else {
       contactEmails = [email.from];
     }
@@ -217,7 +224,7 @@ async function transformAndFilterEmails(
 
     for (const contactEmail of contactEmails) {
       const contactEmailLower = contactEmail.toLowerCase();
-      
+
       if (!contactMap.has(contactEmailLower)) {
         contactMap.set(contactEmailLower, {
           email: contactEmailLower,
@@ -229,7 +236,7 @@ async function transformAndFilterEmails(
       }
 
       const contact = contactMap.get(contactEmailLower)!;
-      
+
       if (isFromMe) {
         contact.sentCount++;
       } else {
@@ -252,7 +259,7 @@ async function transformAndFilterEmails(
 
   // Get unique contact emails from this batch
   const batchContactEmails = Array.from(contactMap.keys());
-  
+
   if (batchContactEmails.length === 0) {
     return [];
   }
@@ -270,7 +277,9 @@ async function transformAndFilterEmails(
     distinct: ['to'],
   });
 
-  const historicallySentTo = new Set(sentToContacts.map(m => m.to?.toLowerCase()).filter(Boolean));
+  const historicallySentTo = new Set(
+    sentToContacts.map((m) => m.to?.toLowerCase()).filter(Boolean)
+  );
 
   // Also include contacts we sent to in THIS batch
   for (const [email, contact] of contactMap) {
@@ -287,7 +296,7 @@ async function transformAndFilterEmails(
   console.log(`[GmailSync] Filtered to ${validContacts.length} contacts (user has sent to them)`);
 
   // Transform to ContactToUpsert format
-  return validContacts.map(contact => {
+  return validContacts.map((contact) => {
     let firstName = '';
     let lastName = '';
     if (contact.name) {
@@ -303,7 +312,7 @@ async function transformAndFilterEmails(
       lastName,
       email: contact.email,
       emailAddresses: [contact.email],
-      messages: contact.messages.map(msg => ({
+      messages: contact.messages.map((msg) => ({
         channel: MessageChannel.EMAIL,
         from: msg.from,
         to: msg.to,
@@ -356,7 +365,9 @@ async function syncGmailForUser(
   // Per-credential historyId: stored in config.historyIds[credentialEmail]
   // Falls back to legacy config.historyId for the primary account
   const historyIds = (config as any).historyIds as Record<string, string> | undefined;
-  const historyId = historyIds?.[credentialEmail] || (credentialEmail === config.userEmail ? config.historyId : undefined);
+  const historyId =
+    historyIds?.[credentialEmail] ||
+    (credentialEmail === config.userEmail ? config.historyId : undefined);
 
   // Use the credential's own email for sender detection
   let userEmail = credentialEmail;
@@ -375,7 +386,9 @@ async function syncGmailForUser(
 
   if (historyId) {
     // Incremental sync using History API
-    console.log(`[GmailSync] Performing incremental sync for ${credentialEmail} from historyId: ${historyId}`);
+    console.log(
+      `[GmailSync] Performing incremental sync for ${credentialEmail} from historyId: ${historyId}`
+    );
 
     const historyResult = await fetchGmailHistory(accessToken, historyId);
 
@@ -391,7 +404,9 @@ async function syncGmailForUser(
       newHistoryId = historyResult.newHistoryId;
     } else {
       // Fetch the new messages
-      console.log(`[GmailSync] ${historyResult.addedMessageIds.length} new messages for ${credentialEmail}`);
+      console.log(
+        `[GmailSync] ${historyResult.addedMessageIds.length} new messages for ${credentialEmail}`
+      );
       emails = await fetchMessagesByIds(accessToken, historyResult.addedMessageIds);
       newHistoryId = historyResult.newHistoryId;
     }
@@ -446,7 +461,9 @@ async function syncGmailForUser(
     },
   });
 
-  console.log(`[GmailSync] ✅ Sync complete for ${credentialEmail}: ${contactCount} new contacts, ${messageCount} new messages`);
+  console.log(
+    `[GmailSync] ✅ Sync complete for ${credentialEmail}: ${contactCount} new contacts, ${messageCount} new messages`
+  );
   return { success: true, contacts: contactCount, messages: messageCount };
 }
 
@@ -483,7 +500,7 @@ export async function runGmailSyncJob(): Promise<void> {
   let failCount = 0;
 
   for (const integration of dueIntegrations) {
-    const validCredentials = integration.emailCredentials.filter(c => c.refreshToken);
+    const validCredentials = integration.emailCredentials.filter((c) => c.refreshToken);
 
     if (validCredentials.length === 0) {
       console.log(`[GmailSync] Skipping integration ${integration.id} - no valid credentials`);
@@ -503,7 +520,9 @@ export async function runGmailSyncJob(): Promise<void> {
 
     for (const credential of validCredentials) {
       try {
-        console.log(`[GmailSync] Syncing credential ${credential.email} for integration ${integration.id}`);
+        console.log(
+          `[GmailSync] Syncing credential ${credential.email} for integration ${integration.id}`
+        );
         const result = await syncGmailForUser(integration.userId, credential, integration.id);
 
         if (!result.success) {
@@ -534,4 +553,3 @@ export async function runGmailSyncJob(): Promise<void> {
 
   console.log(`[GmailSync] ✅ Sync job complete: ${successCount} succeeded, ${failCount} failed`);
 }
-

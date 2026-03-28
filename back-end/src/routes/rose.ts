@@ -1,11 +1,11 @@
 import { Router, Response } from 'express';
-import { logTruncate } from '../lib/log';
-import { AuthRequest } from '../middleware/auth';
-import { ROSE_MODEL_POOLS, normalizeRoseAlias, isCerebrasPool } from '../lib/roseModels';
+import { logTruncate } from '../utils/log';
+import { AuthRequest } from '../providers/auth';
+import { ROSE_MODEL_POOLS, normalizeRoseAlias, isCerebrasPool } from '../providers/roseModels';
 // import { MMLUProHarness } from '../benchmarks/harnesses/mmlu-pro';
 // import { TerminalBenchHarness, TerminalBenchTask } from '../benchmarks/harnesses/terminal-bench';
-import { prisma } from '../lib/prisma';
-import { createLogger } from '../lib/logger';
+import { prisma } from '../providers/database';
+import { createLogger } from '../providers/logger';
 
 const log = createLogger('Rose');
 const router = Router();
@@ -14,19 +14,22 @@ const router = Router();
 const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
 
 // Use local Supabase functions in development, production URL otherwise
-const SUPABASE_FUNCTIONS_URL = process.env.NODE_ENV === 'production'
-  ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
-  : `http://localhost:${process.env.RESEARCH_PORT || '54321'}/functions/v1`;
+const SUPABASE_FUNCTIONS_URL =
+  process.env.NODE_ENV === 'production'
+    ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
+    : `http://localhost:${process.env.RESEARCH_PORT || '54321'}/functions/v1`;
 
 // Randomly select a model from the pool
 function selectModel(requestedModel: string): { model: string; isCerebras: boolean } {
   const normalized = normalizeRoseAlias(requestedModel) ?? requestedModel.toLowerCase();
   const pool = ROSE_MODEL_POOLS[normalized as keyof typeof ROSE_MODEL_POOLS];
-  
+
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`);
+    throw new Error(
+      `Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite', 'rose-labs/rose-1-ultra', or 'rose-labs/rose-hyper'`
+    );
   }
-  
+
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
   const isCerebras = isCerebrasPool(normalized);
   log.info(`Model selection: ${requestedModel} -> ${selectedModel}`, { cerebras: isCerebras });
@@ -55,8 +58,8 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
     try {
       selection = selectModel(model);
     } catch (error) {
-      return res.status(400).json({ 
-        error: error instanceof Error ? error.message : 'Invalid model' 
+      return res.status(400).json({
+        error: error instanceof Error ? error.message : 'Invalid model',
       });
     }
 
@@ -73,22 +76,25 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
       };
 
       log.info(`Calling Cerebras API`, { model: selection.model });
-      
+
       const cerebrasResponse = await fetch(CEREBRAS_API_URL, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${process.env.CEREBRAS_API_KEY}`,
+          Authorization: `Bearer ${process.env.CEREBRAS_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(cerebrasBody)
+        body: JSON.stringify(cerebrasBody),
       });
 
       if (!cerebrasResponse.ok) {
         const errorText = await cerebrasResponse.text();
-        log.error('Cerebras API error', { status: cerebrasResponse.status, details: logTruncate(errorText) });
+        log.error('Cerebras API error', {
+          status: cerebrasResponse.status,
+          details: logTruncate(errorText),
+        });
         return res.status(cerebrasResponse.status).json({
           error: 'Cerebras API error',
-          details: logTruncate(errorText)
+          details: logTruncate(errorText),
         });
       }
 
@@ -102,27 +108,30 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
         max_tokens,
         ...otherParams,
         provider: {
-          sort: 'throughput'  // Optimize for lowest e2e latency
-        }
+          sort: 'throughput', // Optimize for lowest e2e latency
+        },
       };
 
       const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-          'X-Title': 'Rose AI Agent'
+          'X-Title': 'Rose AI Agent',
         },
-        body: JSON.stringify(openrouterBody)
+        body: JSON.stringify(openrouterBody),
       });
 
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();
-        log.error('OpenRouter API error', { status: openrouterResponse.status, details: logTruncate(errorText) });
+        log.error('OpenRouter API error', {
+          status: openrouterResponse.status,
+          details: logTruncate(errorText),
+        });
         return res.status(openrouterResponse.status).json({
           error: 'OpenRouter API error',
-          details: logTruncate(errorText)
+          details: logTruncate(errorText),
         });
       }
 
@@ -131,17 +140,19 @@ router.post('/chat/completions', async (req: AuthRequest, res: Response) => {
 
     // Mask the actual model in the response - return the requested model name
     if (data.model) {
-      data.model = model;  // Replace actual model with the requested Rose variant
+      data.model = model; // Replace actual model with the requested Rose variant
     }
 
     // Return the response (with masked model)
     res.json(data);
   } catch (error) {
-    log.error('Rose endpoint error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Rose endpoint error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Internal server error',
-      details: errorMessage 
+      details: errorMessage,
     });
   }
 });
@@ -162,25 +173,25 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
     const pool = ROSE_MODEL_POOLS[modelName as keyof typeof ROSE_MODEL_POOLS];
 
     if (!pool) {
-      return res.status(404).json({ 
-        error: `Model not found: ${modelName}` 
+      return res.status(404).json({
+        error: `Model not found: ${modelName}`,
       });
     }
 
     // Fetch all OpenRouter models
     const response = await fetch('https://openrouter.ai/api/v1/models', {
       headers: {
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
         'HTTP-Referer': process.env.BACKEND_URL || 'https://navi-j9a9.onrender.com',
-        'X-Title': 'Rose AI Agent'
-      }
+        'X-Title': 'Rose AI Agent',
+      },
     });
 
     if (!response.ok) {
       throw new Error(`OpenRouter API returned ${response.status}`);
     }
 
-    const data = await response.json() as any;
+    const data = (await response.json()) as any;
     const allModels = data.data || [];
 
     // Calculate average pricing and minimum context length
@@ -191,7 +202,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
 
     for (const modelId of pool) {
       const modelInfo = allModels.find((m: any) => m.id === modelId);
-      
+
       if (modelInfo) {
         // Track minimum context length for all models
         const contextLength = modelInfo.top_provider?.context_length || modelInfo.context_length;
@@ -204,7 +215,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
           // OpenRouter returns price per token, accumulate as-is
           const promptCost = parseFloat(modelInfo.pricing.prompt || '0');
           const completionCost = parseFloat(modelInfo.pricing.completion || '0');
-          
+
           totalPrompt += promptCost;
           totalCompletion += completionCost;
           validModels++;
@@ -213,8 +224,8 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
     }
 
     if (validModels === 0) {
-      return res.status(500).json({ 
-        error: 'No pricing information available for models in pool' 
+      return res.status(500).json({
+        error: 'No pricing information available for models in pool',
       });
     }
 
@@ -238,15 +249,17 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
       contextLength: minContextLength === Infinity ? 200000 : minContextLength,
       pricing: {
         prompt: roundedPrompt.toString(),
-        completion: roundedCompletion.toString()
-      }
+        completion: roundedCompletion.toString(),
+      },
     });
   } catch (error) {
-    log.error('Cost calculation error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Cost calculation error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to calculate cost',
-      details: errorMessage 
+      details: errorMessage,
     });
   }
 });
@@ -258,7 +271,7 @@ router.get('/cost/:modelName', async (req: AuthRequest, res: Response) => {
 router.post('/bench', (_req: AuthRequest, res: Response) => {
   return res.status(503).json({
     error: 'Benchmarking temporarily disabled',
-    detail: 'Bench harnesses were removed from the build to keep TypeScript memory usage low.'
+    detail: 'Bench harnesses were removed from the build to keep TypeScript memory usage low.',
   });
 });
 
@@ -565,4 +578,3 @@ function compareWithStandards(benchmarkName: string, score: number, standards: a
 */
 
 export default router;
-

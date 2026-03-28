@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { prisma } from '../lib/prisma';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { prisma } from '../providers/database';
+import { authenticate, AuthRequest } from '../providers/auth';
 import OpenAI from 'openai';
 
 const router = Router();
@@ -66,7 +66,7 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       const queryEmbedding = await getEmbedding(goal);
 
       // Filter blueprints that have embeddings (skip any without)
-      const blueprintsWithEmbeddings = blueprints.filter(bp => bp.embedding);
+      const blueprintsWithEmbeddings = blueprints.filter((bp) => bp.embedding);
 
       if (blueprintsWithEmbeddings.length === 0) {
         return res.json([]);
@@ -81,7 +81,7 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       // Filter by minimum similarity threshold and return top K
       const SIMILARITY_THRESHOLD = 0.38;
       const topResults = withSimilarity
-        .filter(bp => bp.similarity >= SIMILARITY_THRESHOLD)
+        .filter((bp) => bp.similarity >= SIMILARITY_THRESHOLD)
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit)
         .map(({ similarity, embedding, ...bp }) => bp); // Remove similarity score and embedding from response
@@ -318,4 +318,3 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export default router;
-

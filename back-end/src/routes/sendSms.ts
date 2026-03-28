@@ -1,19 +1,16 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { logTruncate } from '../lib/log';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import {
-  sendSms,
-  getUserPhone,
-} from '../lib/smsQueue';
-import { prisma } from '../lib/prisma';
+import { logTruncate } from '../utils/log';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { sendSms, getUserPhone } from '../providers/smsQueue';
+import { prisma } from '../providers/database';
 import {
   notifyAgentStarted,
   notifyPlannerMessage,
   notifyWriteLock,
   notifyCompletion,
   notifyCostLimit,
-} from '../lib/smsSupervisor/outboundEvents';
+} from '../providers/smsSupervisor/outboundEvents';
 
 const router = Router();
 
@@ -46,20 +43,17 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       return res.status(500).json({ error: 'Surge not configured' });
     }
 
-    const response = await fetch(
-      `https://api.surge.app/accounts/${accountId}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          to: phone_number,
-          body: message,
-        }),
-      }
-    );
+    const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        to: phone_number,
+        body: message,
+      }),
+    });
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -70,7 +64,7 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const result = await response.json() as { id: string; [key: string]: any };
+    const result = (await response.json()) as { id: string; [key: string]: any };
 
     console.log('✅ SMS sent via Surge', {
       messageId: result.id,
@@ -83,7 +77,6 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
       phone_number: phone_number,
       provider: 'surge',
     });
-
   } catch (error) {
     console.error('Error sending SMS:', error);
     res.status(500).json({ error: 'Failed to send SMS' });
@@ -139,7 +132,13 @@ router.post('/direct', authenticate, async (req: AuthRequest, res) => {
  */
 const notifySchema = z.object({
   user_id: z.string(),
-  event_type: z.enum(['agent_started', 'planner_message', 'write_lock', 'completion', 'cost_limit']),
+  event_type: z.enum([
+    'agent_started',
+    'planner_message',
+    'write_lock',
+    'completion',
+    'cost_limit',
+  ]),
   agent_id: z.string(),
   payload: z.record(z.any()).optional(),
 });
@@ -200,11 +199,7 @@ router.post('/notify', authenticate, async (req: AuthRequest, res) => {
         break;
 
       case 'completion':
-        await notifyCompletion(
-          data.user_id,
-          { id: data.agent_id },
-          payload.summary || ''
-        );
+        await notifyCompletion(data.user_id, { id: data.agent_id }, payload.summary || '');
         break;
 
       case 'cost_limit':
@@ -241,4 +236,3 @@ router.post('/notify', authenticate, async (req: AuthRequest, res) => {
 });
 
 export default router;
-

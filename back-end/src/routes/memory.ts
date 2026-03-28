@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { LRUCache } from 'lru-cache';
-import { prisma } from '../lib/prisma';
-import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
+import { prisma } from '../providers/database';
+import { HybridAuthRequest, hybridAuth } from '../providers/hybridAuth';
 
 const router = Router();
 
@@ -50,10 +50,14 @@ const appendEntrySchema = z.object({
     type: z.string(),
     message_id: z.string().optional(),
     content: z.string(),
-    files: z.array(z.object({
-      original_filename: z.string(),
-      mime_type: z.string(),
-    })).optional(),
+    files: z
+      .array(
+        z.object({
+          original_filename: z.string(),
+          mime_type: z.string(),
+        })
+      )
+      .optional(),
   }),
 });
 
@@ -142,7 +146,7 @@ router.post('/:busId/append', hybridAuth, async (req: HybridAuthRequest, res) =>
 
     // Deduplication: if message_id provided, check if already exists
     if (entry.message_id) {
-      const exists = content.some(e => e.message_id === entry.message_id);
+      const exists = content.some((e) => e.message_id === entry.message_id);
       if (exists) {
         // Already exists - return current hash without appending
         const hash = memory ? memory.contentHash : computeHash(content);
@@ -201,7 +205,9 @@ router.post('/:busId/append', hybridAuth, async (req: HybridAuthRequest, res) =>
     // Update cache
     memoryCache.set(busId, { content: newContent, hash: newHash });
 
-    console.log(`[Memory] Appended entry to busId=${busId}, type=${entry.type}, tokens=${estimatedTokens}`);
+    console.log(
+      `[Memory] Appended entry to busId=${busId}, type=${entry.type}, tokens=${estimatedTokens}`
+    );
 
     res.json({ hash: newHash });
   } catch (error) {

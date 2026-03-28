@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 
 const PERSON_CHUNK_SIZE = 50;
 const MESSAGE_BATCH_SIZE = 10000;
@@ -37,7 +37,7 @@ function calculateCommunicationFrequency(messages: Array<{ timestamp: Date }>): 
   const now = new Date();
   const datesSeen = new Set<string>();
   const sortedMessages = [...messages]
-    .map(m => m.timestamp)
+    .map((m) => m.timestamp)
     .sort((a, b) => b.getTime() - a.getTime()); // Newest first
 
   const dailyCutoff = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
@@ -98,7 +98,9 @@ export async function upsertPersonAndMessageRecords(
   jobId: string
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
-  console.log(`[Job ${jobId}] Processing ${totalMessages} messages from ${contacts.length} contacts for user ${userId}`);
+  console.log(
+    `[Job ${jobId}] Processing ${totalMessages} messages from ${contacts.length} contacts for user ${userId}`
+  );
 
   let messagesProcessed = 0;
   let contactsProcessed = 0;
@@ -111,13 +113,13 @@ export async function upsertPersonAndMessageRecords(
     await upsertContactsChunk(userId, chunk);
 
     // Build lookup map for person IDs with a single consolidated query
-    const phoneContacts = chunk.filter(c => c.identifierType === 'phone');
-    const emailContacts = chunk.filter(c => c.identifierType === 'email');
-    const linkedinContacts = chunk.filter(c => c.identifierType === 'linkedin_url');
+    const phoneContacts = chunk.filter((c) => c.identifierType === 'phone');
+    const emailContacts = chunk.filter((c) => c.identifierType === 'email');
+    const linkedinContacts = chunk.filter((c) => c.identifierType === 'linkedin_url');
 
-    const phoneIdentifiers = phoneContacts.map(c => c.identifier);
-    const emailIdentifiers = emailContacts.map(c => c.identifier);
-    const linkedinIdentifiers = linkedinContacts.map(c => c.identifier);
+    const phoneIdentifiers = phoneContacts.map((c) => c.identifier);
+    const emailIdentifiers = emailContacts.map((c) => c.identifier);
+    const linkedinIdentifiers = linkedinContacts.map((c) => c.identifier);
 
     // Single query to fetch all persons matching any identifier type
     const orConditions: Array<Record<string, unknown>> = [];
@@ -132,21 +134,28 @@ export async function upsertPersonAndMessageRecords(
       orConditions.push({ linkedinUrl: { in: linkedinIdentifiers } });
     }
 
-    const matchedPersons = orConditions.length > 0
-      ? await prisma.person.findMany({
-          where: { userId, OR: orConditions },
-          select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
-        })
-      : [];
+    const matchedPersons =
+      orConditions.length > 0
+        ? await prisma.person.findMany({
+            where: { userId, OR: orConditions },
+            select: {
+              id: true,
+              phoneNumber: true,
+              email: true,
+              emailAddresses: true,
+              linkedinUrl: true,
+            },
+          })
+        : [];
 
     // Build identifier -> personId map
     const personMap = new Map<string, string>();
 
-    matchedPersons.forEach(p => {
+    matchedPersons.forEach((p) => {
       if (p.phoneNumber) personMap.set(p.phoneNumber, p.id);
       if (p.email) personMap.set(p.email, p.id);
       if (p.emailAddresses && Array.isArray(p.emailAddresses)) {
-        (p.emailAddresses as string[]).forEach(email => {
+        (p.emailAddresses as string[]).forEach((email) => {
           if (email && !personMap.has(email)) {
             personMap.set(email, p.id);
           }
@@ -161,7 +170,9 @@ export async function upsertPersonAndMessageRecords(
         const personId = personMap.get(contact.identifier);
 
         if (!personId) {
-          console.warn(`[Job ${jobId}] ⚠️ Person not found for contact ${contact.identifier}, skipping messages`);
+          console.warn(
+            `[Job ${jobId}] ⚠️ Person not found for contact ${contact.identifier}, skipping messages`
+          );
           continue;
         }
 
@@ -171,11 +182,15 @@ export async function upsertPersonAndMessageRecords(
         }
 
         // Insert messages in batches
-        for (let batchIndex = 0; batchIndex < contact.messages.length; batchIndex += MESSAGE_BATCH_SIZE) {
+        for (
+          let batchIndex = 0;
+          batchIndex < contact.messages.length;
+          batchIndex += MESSAGE_BATCH_SIZE
+        ) {
           const batch = contact.messages.slice(batchIndex, batchIndex + MESSAGE_BATCH_SIZE);
 
           await prisma.messageRecord.createMany({
-            data: batch.map(msg => ({
+            data: batch.map((msg) => ({
               personId,
               channel: msg.channel,
               from: msg.from,
@@ -202,14 +217,18 @@ export async function upsertPersonAndMessageRecords(
         contactsProcessed++;
         messagesProcessed += contact.messages.length;
 
-        console.log(`[Job ${jobId}] Processed contact ${contact.identifier}: ${contact.messages.length} messages (${messagesProcessed}/${totalMessages} total)`);
+        console.log(
+          `[Job ${jobId}] Processed contact ${contact.identifier}: ${contact.messages.length} messages (${messagesProcessed}/${totalMessages} total)`
+        );
       } catch (error) {
         console.error(`[Job ${jobId}] Error processing contact ${contact.identifier}:`, error);
       }
     }
   }
 
-  console.log(`[Job ${jobId}] ✅ Stored ${messagesProcessed} messages from ${contactsProcessed} contacts`);
+  console.log(
+    `[Job ${jobId}] ✅ Stored ${messagesProcessed} messages from ${contactsProcessed} contacts`
+  );
   return { contacts: contactsProcessed, messages: messagesProcessed };
 }
 
@@ -221,32 +240,32 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
   if (!chunk.length) return;
 
   // Separate contacts by type
-  const phoneContacts = chunk.filter(c => c.identifierType === 'phone');
-  const emailContacts = chunk.filter(c => c.identifierType === 'email');
-  const linkedinContacts = chunk.filter(c => c.identifierType === 'linkedin_url');
+  const phoneContacts = chunk.filter((c) => c.identifierType === 'phone');
+  const emailContacts = chunk.filter((c) => c.identifierType === 'email');
+  const linkedinContacts = chunk.filter((c) => c.identifierType === 'linkedin_url');
 
   // Collect all identifiers to check
-  const phonesToCheck = phoneContacts.map(c => c.identifier);
-  const linkedinUrlsToCheck = linkedinContacts.map(c => c.identifier);
+  const phonesToCheck = phoneContacts.map((c) => c.identifier);
+  const linkedinUrlsToCheck = linkedinContacts.map((c) => c.identifier);
   const allEmailsToCheck = new Set<string>();
 
   // Add emails from email contacts
-  emailContacts.forEach(c => {
+  emailContacts.forEach((c) => {
     if (c.email) allEmailsToCheck.add(c.email);
     if (c.identifier) allEmailsToCheck.add(c.identifier);
-    c.emailAddresses?.forEach(e => allEmailsToCheck.add(e));
+    c.emailAddresses?.forEach((e) => allEmailsToCheck.add(e));
   });
 
   // Add emails from phone contacts (for cross-linking)
-  phoneContacts.forEach(c => {
+  phoneContacts.forEach((c) => {
     if (c.email) allEmailsToCheck.add(c.email);
-    c.emailAddresses?.forEach(e => allEmailsToCheck.add(e));
+    c.emailAddresses?.forEach((e) => allEmailsToCheck.add(e));
   });
 
   // Add emails from linkedin contacts (for cross-linking)
-  linkedinContacts.forEach(c => {
+  linkedinContacts.forEach((c) => {
     if (c.email) allEmailsToCheck.add(c.email);
-    c.emailAddresses?.forEach(e => allEmailsToCheck.add(e));
+    c.emailAddresses?.forEach((e) => allEmailsToCheck.add(e));
   });
 
   const emailsArray = Array.from(allEmailsToCheck);
@@ -263,21 +282,28 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
     orConditions.push({ linkedinUrl: { in: linkedinUrlsToCheck } });
   }
 
-  const existingPersons = orConditions.length > 0
-    ? await prisma.person.findMany({
-        where: { userId, OR: orConditions },
-        select: { id: true, phoneNumber: true, email: true, emailAddresses: true, linkedinUrl: true },
-      })
-    : [];
+  const existingPersons =
+    orConditions.length > 0
+      ? await prisma.person.findMany({
+          where: { userId, OR: orConditions },
+          select: {
+            id: true,
+            phoneNumber: true,
+            email: true,
+            emailAddresses: true,
+            linkedinUrl: true,
+          },
+        })
+      : [];
 
   // Build comprehensive lookup maps
   const personMap = new Map<string, (typeof existingPersons)[0]>();
 
-  existingPersons.forEach(p => {
+  existingPersons.forEach((p) => {
     if (p.phoneNumber) personMap.set(p.phoneNumber, p);
     if (p.email) personMap.set(p.email, p);
     if (p.emailAddresses && Array.isArray(p.emailAddresses)) {
-      (p.emailAddresses as string[]).forEach(email => {
+      (p.emailAddresses as string[]).forEach((email) => {
         if (email && !personMap.has(email)) {
           personMap.set(email, p);
         }
@@ -337,7 +363,7 @@ async function upsertContactsChunk(userId: string, chunk: ContactToUpsert[]) {
 
   if (updateOperations.length) {
     await prisma.$transaction(
-      updateOperations.map(operation =>
+      updateOperations.map((operation) =>
         prisma.person.update({
           where: { id: operation.id },
           data: operation.data,
@@ -364,7 +390,7 @@ function buildPersonCreateData(userId: string, contact: ContactToUpsert) {
 
   return {
     userId,
-    phoneNumber: (isEmail || isLinkedin) ? null : contact.identifier,
+    phoneNumber: isEmail || isLinkedin ? null : contact.identifier,
     email: primaryEmail,
     emailAddresses,
     firstName: contact.firstName || '',
@@ -421,4 +447,3 @@ function buildPersonUpdateData(contact: ContactToUpsert) {
 
   return data;
 }
-

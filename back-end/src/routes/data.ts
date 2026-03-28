@@ -6,8 +6,8 @@
  */
 
 import express, { Response } from 'express';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { prisma } from '../lib/prisma';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { prisma } from '../providers/database';
 
 const router = express.Router();
 
@@ -21,10 +21,10 @@ function stripEmailQuotes(message: string): string {
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .split('\n')
-    .filter(line => !line.match(/^\s*>+/))              // lines starting with >
-    .filter(line => !line.match(/^On .+ wrote:\s*$/))    // "On ... wrote:" attribution
+    .filter((line) => !line.match(/^\s*>+/)) // lines starting with >
+    .filter((line) => !line.match(/^On .+ wrote:\s*$/)) // "On ... wrote:" attribution
     .join('\n')
-    .replace(/\n{3,}/g, '\n\n')                         // collapse excessive blank lines
+    .replace(/\n{3,}/g, '\n\n') // collapse excessive blank lines
     .trim();
 }
 
@@ -62,7 +62,7 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
   const startTime = Date.now();
   try {
     const userId = req.isInternal
-      ? (req.headers['x-user-id'] as string || req.body.user_id)
+      ? (req.headers['x-user-id'] as string) || req.body.user_id
       : req.user?.id;
 
     if (!userId) {
@@ -76,7 +76,8 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
     if (pattern === undefined || pattern === null || typeof pattern !== 'string') {
       return res.status(400).json({
         error: 'INVALID_PATTERN',
-        message: "Required field 'pattern' must be a string. Use '' to return all messages, or search for keywords like 'dinner', 'meeting'.",
+        message:
+          "Required field 'pattern' must be a string. Use '' to return all messages, or search for keywords like 'dinner', 'meeting'.",
       });
     }
 
@@ -96,7 +97,9 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
     // Validate person_id if provided
     if (person_id) {
       // Resolve person_id: accept UUID, email, phone number, or name
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(person_id);
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        person_id
+      );
       let person;
       if (isUuid) {
         person = await prisma.person.findFirst({
@@ -115,7 +118,12 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
               {
                 AND: [
                   { firstName: { equals: person_id.split(' ')[0], mode: 'insensitive' } },
-                  { lastName: { equals: person_id.split(' ').slice(1).join(' '), mode: 'insensitive' } },
+                  {
+                    lastName: {
+                      equals: person_id.split(' ').slice(1).join(' '),
+                      mode: 'insensitive',
+                    },
+                  },
                 ],
               },
             ],
@@ -155,7 +163,9 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
     const matches = await prisma.messageRecord.findMany({
       where: {
         person: { userId },
-        ...(trimmedPattern.length > 0 ? { message: { contains: trimmedPattern, mode: 'insensitive' } } : {}),
+        ...(trimmedPattern.length > 0
+          ? { message: { contains: trimmedPattern, mode: 'insensitive' } }
+          : {}),
         timestamp: { gte: cutoffTime },
         ...(person_id ? { personId: person_id } : {}),
       },
@@ -198,7 +208,9 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
 
       const elapsed = Date.now() - startTime;
       const sinceLabel = since ? `since ${since}` : 'last 365 days';
-      console.log(`[Data] grep: no matches for '${pattern}' (${totalMessages} messages, ${threadCount} threads, ${sinceLabel}) [${elapsed}ms]`);
+      console.log(
+        `[Data] grep: no matches for '${pattern}' (${totalMessages} messages, ${threadCount} threads, ${sinceLabel}) [${elapsed}ms]`
+      );
 
       return res.json({
         matches: [],
@@ -219,7 +231,12 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
     // For each thread with matches, fetch context messages around each match
     const formattedResults: Array<{
       thread: string;
-      person: { firstName: string | null; lastName: string | null; phoneNumber: string | null; email: string | null };
+      person: {
+        firstName: string | null;
+        lastName: string | null;
+        phoneNumber: string | null;
+        email: string | null;
+      };
       messages: Array<{
         channel: string;
         from: string;
@@ -241,9 +258,9 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
       }
 
       // Get context messages (N before and after each match timestamp)
-      const timestamps = threadMatches.map(m => m.timestamp);
-      const earliestMatch = new Date(Math.min(...timestamps.map(t => t.getTime())));
-      const latestMatch = new Date(Math.max(...timestamps.map(t => t.getTime())));
+      const timestamps = threadMatches.map((m) => m.timestamp);
+      const earliestMatch = new Date(Math.min(...timestamps.map((t) => t.getTime())));
+      const latestMatch = new Date(Math.max(...timestamps.map((t) => t.getTime())));
 
       // Expand window by 1 hour on each side for context
       const contextStart = new Date(earliestMatch.getTime() - 3600000);
@@ -256,7 +273,7 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
           timestamp: { gte: contextStart, lte: contextEnd },
         },
         orderBy: { timestamp: 'asc' },
-        take: (threadMatches.length * (MAX_CONTEXT_MESSAGES * 2 + 1)) + 10, // cap per thread
+        take: threadMatches.length * (MAX_CONTEXT_MESSAGES * 2 + 1) + 10, // cap per thread
         select: {
           id: true,
           channel: true,
@@ -268,7 +285,7 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
       });
 
       // Build the output: for each match, include N context messages before/after
-      const matchIds = new Set(threadMatches.map(m => m.id));
+      const matchIds = new Set(threadMatches.map((m) => m.id));
       const contextWindow: typeof contextMessages = [];
 
       for (let i = 0; i < contextMessages.length; i++) {
@@ -279,7 +296,7 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
           // Include N messages after
           const end = Math.min(contextMessages.length - 1, i + MAX_CONTEXT_MESSAGES);
           for (let j = start; j <= end; j++) {
-            if (!contextWindow.find(m => m.id === contextMessages[j].id)) {
+            if (!contextWindow.find((m) => m.id === contextMessages[j].id)) {
               contextWindow.push(contextMessages[j]);
             }
           }
@@ -290,10 +307,13 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
       contextWindow.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
       const person = threadMatches[0].person;
-      const threadName = [person.firstName, person.lastName].filter(Boolean).join(' ')
-        || person.phoneNumber || person.email || personId;
+      const threadName =
+        [person.firstName, person.lastName].filter(Boolean).join(' ') ||
+        person.phoneNumber ||
+        person.email ||
+        personId;
 
-      const threadMessages = contextWindow.map(msg => ({
+      const threadMessages = contextWindow.map((msg) => ({
         channel: msg.channel,
         from: msg.from,
         to: msg.to,
@@ -325,21 +345,22 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
     const elapsed = Date.now() - startTime;
     console.log(
       `[Data] grep: '${pattern}' → ${matches.length} matches in ${formattedResults.length} threads` +
-      `${truncatedCount > 0 ? ` (${truncatedCount} truncated)` : ''} [${elapsed}ms]`
+        `${truncatedCount > 0 ? ` (${truncatedCount} truncated)` : ''} [${elapsed}ms]`
     );
 
     return res.json({
       matches: formattedResults,
       total_matches: matches.length,
       truncated: truncatedCount > 0,
-      ...(truncatedCount > 0 ? {
-        truncation_message: `& ${truncatedCount} more matches truncated to fit token budget. Narrow your search with person_id or a more recent 'since' timestamp.`,
-      } : {}),
+      ...(truncatedCount > 0
+        ? {
+            truncation_message: `& ${truncatedCount} more matches truncated to fit token budget. Narrow your search with person_id or a more recent 'since' timestamp.`,
+          }
+        : {}),
       pattern,
       source: resolvedSource,
       since: cutoffTime.toISOString(),
     });
-
   } catch (error) {
     const elapsed = Date.now() - startTime;
     console.error(`[Data] grep failed [${elapsed}ms]:`, error);
@@ -351,7 +372,6 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
   }
 });
 
-
 /**
  * GET /api/data/summary
  *
@@ -361,9 +381,7 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
 router.get('/summary', authenticate, async (req: AuthRequest, res: Response) => {
   const startTime = Date.now();
   try {
-    const userId = req.isInternal
-      ? (req.headers['x-user-id'] as string)
-      : req.user?.id;
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -418,15 +436,17 @@ router.get('/summary', authenticate, async (req: AuthRequest, res: Response) => 
     });
 
     // Format channel counts
-    const channels = channelCounts.reduce((acc, c) => {
-      acc[c.channel] = c._count;
-      return acc;
-    }, {} as Record<string, number>);
+    const channels = channelCounts.reduce(
+      (acc, c) => {
+        acc[c.channel] = c._count;
+        return acc;
+      },
+      {} as Record<string, number>
+    );
 
     // Format thread summary (top threads by volume)
-    const threadSummaries = threads.map(t => {
-      const name = [t.firstName, t.lastName].filter(Boolean).join(' ')
-        || t.phoneNumber || t.id;
+    const threadSummaries = threads.map((t) => {
+      const name = [t.firstName, t.lastName].filter(Boolean).join(' ') || t.phoneNumber || t.id;
       const lastMsg = t.messageRecords[0]?.timestamp;
       const lastMsgAgo = lastMsg ? formatTimeAgo(lastMsg) : 'unknown';
 
@@ -438,7 +458,9 @@ router.get('/summary', authenticate, async (req: AuthRequest, res: Response) => 
     });
 
     const elapsed = Date.now() - startTime;
-    console.log(`[Data] summary: ${threads.length} threads, ${totalMessages} messages [${elapsed}ms]`);
+    console.log(
+      `[Data] summary: ${threads.length} threads, ${totalMessages} messages [${elapsed}ms]`
+    );
 
     return res.json({
       sources: {
@@ -454,7 +476,6 @@ router.get('/summary', authenticate, async (req: AuthRequest, res: Response) => 
         },
       },
     });
-
   } catch (error) {
     const elapsed = Date.now() - startTime;
     console.error(`[Data] summary failed [${elapsed}ms]:`, error);
@@ -464,7 +485,6 @@ router.get('/summary', authenticate, async (req: AuthRequest, res: Response) => 
     });
   }
 });
-
 
 /**
  * Format a date as relative time ago string.
@@ -481,6 +501,5 @@ function formatTimeAgo(date: Date): string {
   if (diffDays < 30) return `${diffDays}d ago`;
   return `${Math.floor(diffDays / 30)}mo ago`;
 }
-
 
 export default router;

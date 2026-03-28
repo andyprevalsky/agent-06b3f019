@@ -26,6 +26,10 @@ export default defineConfig({
     // Resolve dependencies from front-end's node_modules
     dedupe: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],
   },
+  // Serve large JSON files as JSON.parse("...") instead of expanding into JS object literals
+  json: {
+    stringify: true,
+  },
   // Also look in front-end/node_modules for dependencies
   optimizeDeps: {
     include: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],

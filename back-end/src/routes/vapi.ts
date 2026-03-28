@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { logJson, logTruncate } from '../lib/log';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { logJson, logTruncate } from '../utils/log';
 
 const router = Router();
 
@@ -39,7 +39,7 @@ function normalizeJsonSchema(schema: Record<string, any>): Record<string, any> {
   // Check if schema is malformed: {"field_name": "description", ...}
   // i.e., keys are field names and values are string descriptions
   const keys = Object.keys(schema);
-  if (keys.length > 0 && keys.every(k => typeof schema[k] === 'string')) {
+  if (keys.length > 0 && keys.every((k) => typeof schema[k] === 'string')) {
     // Convert to proper JSON Schema format
     const properties: Record<string, any> = {};
     for (const key of keys) {
@@ -153,7 +153,7 @@ router.post('/call', authenticate, async (req: AuthRequest, res) => {
     const response = await fetch(`${VAPI_BASE_URL}/call`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${vapiPrivateKey}`,
+        Authorization: `Bearer ${vapiPrivateKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -165,9 +165,7 @@ router.post('/call', authenticate, async (req: AuthRequest, res) => {
           model: {
             provider: 'openai',
             model: 'gpt-4o',
-            messages: [
-              { role: 'system', content: fullSystemPrompt }
-            ],
+            messages: [{ role: 'system', content: fullSystemPrompt }],
           },
           voice: {
             provider: '11labs',
@@ -206,7 +204,6 @@ router.post('/call', authenticate, async (req: AuthRequest, res) => {
       call_id: result.id,
       status: result.status,
     });
-
   } catch (error) {
     console.error('Error initiating Vapi call:', error);
     res.status(500).json({ error: 'Failed to initiate call' });
@@ -239,7 +236,7 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
     const response = await fetch(`${VAPI_BASE_URL}/call/${id}`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${vapiPrivateKey}`,
+        Authorization: `Bearer ${vapiPrivateKey}`,
       },
     });
 
@@ -252,7 +249,7 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
       });
     }
 
-    const result = await response.json() as Record<string, unknown>;
+    const result = (await response.json()) as Record<string, unknown>;
 
     console.log('Vapi call poll response', {
       callId: id,
@@ -263,7 +260,6 @@ router.get('/call/:id', authenticate, async (req: AuthRequest, res) => {
     });
 
     res.json(result);
-
   } catch (error) {
     console.error('Error polling Vapi call:', error);
     res.status(500).json({ error: 'Failed to poll call status' });

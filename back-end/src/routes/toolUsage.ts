@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { prisma } from '../lib/prisma';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { createLogger } from '../lib/logger';
+import { prisma } from '../providers/database';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { createLogger } from '../providers/logger';
 
 const log = createLogger('ToolUsage');
 const router = Router();
@@ -19,7 +19,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     if (!agent_id) {
       return res.status(400).json({ error: 'agent_id is required' });
     }
-    
+
     if (!user_id) {
       return res.status(400).json({ error: 'user_id is required' });
     }
@@ -39,7 +39,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     // Verify agent exists and belongs to user
     const agent = await prisma.agent.findUnique({
       where: { id: agent_id },
-      select: { id: true, userId: true }
+      select: { id: true, userId: true },
     });
 
     if (!agent) {
@@ -53,26 +53,31 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     // Save tool usage
     const toolUsage = await prisma.toolUsage.create({
       data: {
-        userId: user_id,      // Direct user tracking
-        agentId: agent_id,    // Agent-specific tracking
+        userId: user_id, // Direct user tracking
+        agentId: agent_id, // Agent-specific tracking
         toolName: tool_name,
         totalCostCents: total_cost_cents,
-        usageItems: usage_items
-      }
+        usageItems: usage_items,
+      },
     });
 
-    log.info(`Saved tool usage: ${tool_name} - $${(total_cost_cents / 100).toFixed(2)}`, { agent_id, tool_name });
+    log.info(`Saved tool usage: ${tool_name} - $${(total_cost_cents / 100).toFixed(2)}`, {
+      agent_id,
+      tool_name,
+    });
 
     res.status(201).json({
       id: toolUsage.id,
       agent_id: toolUsage.agentId,
       tool_name: toolUsage.toolName,
       total_cost_cents: toolUsage.totalCostCents,
-      created_at: toolUsage.createdAt
+      created_at: toolUsage.createdAt,
     });
-
   } catch (error) {
-    log.error('Error saving tool usage', { agent_id: req.body?.agent_id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Error saving tool usage', {
+      agent_id: req.body?.agent_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to save tool usage' });
   }
 });
@@ -89,7 +94,7 @@ router.get('/:agentId', authenticate, async (req: AuthRequest, res: Response) =>
     // Verify agent exists and user has access
     const agent = await prisma.agent.findUnique({
       where: { id: agentId },
-      select: { id: true, userId: true }
+      select: { id: true, userId: true },
     });
 
     if (!agent) {
@@ -107,12 +112,12 @@ router.get('/:agentId', authenticate, async (req: AuthRequest, res: Response) =>
     // Get all tool usage for this agent
     const toolUsages = await prisma.toolUsage.findMany({
       where: { agentId },
-      orderBy: { createdAt: 'asc' }
+      orderBy: { createdAt: 'asc' },
     });
 
     // Calculate totals
     const totalCostCents = toolUsages.reduce((sum, usage) => sum + usage.totalCostCents, 0);
-    
+
     // Aggregate token counts (only from LLM-type usage items)
     let totalTokens = 0;
     for (const usage of toolUsages) {
@@ -130,20 +135,21 @@ router.get('/:agentId', authenticate, async (req: AuthRequest, res: Response) =>
       total_cost_cents: totalCostCents,
       total_cost_dollars: totalCostCents / 100,
       total_tokens_from_tools: totalTokens,
-      usages: toolUsages.map(usage => ({
+      usages: toolUsages.map((usage) => ({
         id: usage.id,
         tool_name: usage.toolName,
         total_cost_cents: usage.totalCostCents,
         usage_items: usage.usageItems,
-        created_at: usage.createdAt
-      }))
+        created_at: usage.createdAt,
+      })),
     });
-
   } catch (error) {
-    log.error('Error fetching tool usage', { agent_id: req.params.agentId, error: error instanceof Error ? error.message : String(error) });
+    log.error('Error fetching tool usage', {
+      agent_id: req.params.agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch tool usage' });
   }
 });
 
 export default router;
-

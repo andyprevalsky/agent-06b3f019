@@ -1,17 +1,22 @@
 import express, { Response } from 'express';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { searchPeopleBySignals, PersonSignals, getEmbedding, buildPersonEmbeddingText } from '../lib/embeddings';
-import { findCollision, mergePersonRecords, PersonData } from '../lib/personCollision';
+import { authenticate, AuthRequest } from '../providers/auth';
+import {
+  searchPeopleBySignals,
+  PersonSignals,
+  getEmbedding,
+  buildPersonEmbeddingText,
+} from '../providers/embeddings';
+import { findCollision, mergePersonRecords, PersonData } from '../providers/personCollision';
 import { MessageRecord } from '../types/person';
-import { prisma } from '../lib/prisma';
+import { prisma } from '../providers/database';
 
 const router = express.Router();
 
 /**
  * POST /api/people/search
- * 
+ *
  * Search for people in user's network matching the given signals
- * 
+ *
  * Body: PersonSignals object (18 signals)
  * Returns: Array of matching people with similarity scores
  */
@@ -19,16 +24,14 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal 
-      ? (req.headers['x-user-id'] as string) 
-      : req.user?.id;
-    
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const querySignals: PersonSignals = req.body;
-    
+
     // Validate that at least one search criterion is provided
     const hasAnyCriteria = Object.entries(querySignals).some(([key, value]) => {
       if (value === null || value === undefined) return false;
@@ -36,18 +39,18 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
       if (typeof value === 'string') return value.trim().length > 0;
       return true;
     });
-    
+
     if (!hasAnyCriteria) {
       return res.status(400).json({
         error: 'At least one search criterion is required (name, profession, skills, etc.)',
       });
     }
-    
+
     const limit = parseInt(req.query.limit as string) || 5;
-    
+
     // Perform semantic search
     const results = await searchPeopleBySignals(userId, querySignals, limit);
-    
+
     return res.json({
       query: querySignals,
       results,
@@ -64,36 +67,36 @@ router.post('/search', authenticate, async (req: AuthRequest, res: Response) => 
 
 /**
  * POST /api/people
- * 
+ *
  * Add a new person to user's network or update existing if collision detected
- * 
+ *
  * Body: PersonData object
  * Returns: Created/updated person record
  */
 router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const personData: PersonData = req.body;
-    
+
     // Validate required fields
     if (!personData.first_name || !personData.last_name) {
       return res.status(400).json({
         error: 'first_name and last_name are required',
       });
     }
-    
+
     // Check for collision (duplicate person)
     const collision = await findCollision(userId, personData);
-    
+
     if (collision.isDuplicate && collision.existingPersonId) {
       // Merge with existing person
       const merged = await mergePersonRecords(collision.existingPersonId, personData);
-      
+
       // Regenerate embedding with merged data
       const signals: PersonSignals = {
         first_name: merged.firstName ?? personData.first_name,
@@ -117,22 +120,22 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
         network_orientation: merged.networkOrientation || undefined,
         notes: merged.notes || undefined,
       };
-      
+
       const embeddingText = buildPersonEmbeddingText(signals);
       const embedding = await getEmbedding(embeddingText, userId);
-      
+
       const updated = await prisma.person.update({
         where: { id: merged.id },
         data: { embedding },
       });
-      
+
       return res.json({
         person: updated,
         merged: true,
         reason: collision.reason,
       });
     }
-    
+
     // Create new person
     const signals: PersonSignals = {
       first_name: personData.first_name,
@@ -156,11 +159,11 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       network_orientation: personData.network_orientation,
       notes: personData.notes,
     };
-    
+
     // Generate embedding
     const embeddingText = buildPersonEmbeddingText(signals);
     const embedding = await getEmbedding(embeddingText, userId);
-    
+
     // Create person record
     const person = await prisma.person.create({
       data: {
@@ -196,7 +199,7 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
         emailAddresses: personData.emailAddresses || [],
       },
     });
-    
+
     return res.status(201).json({
       person,
       merged: false,
@@ -228,9 +231,7 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal
-      ? (req.headers['x-user-id'] as string)
-      : req.user?.id;
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -239,7 +240,7 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 2000, 2000);
     const skip = (page - 1) * limit;
-    const search = (req.query.search as string || '').trim();
+    const search = ((req.query.search as string) || '').trim();
 
     // Validate sort column against allowed list to prevent SQL injection
     const allowedSortColumns: Record<string, string> = {
@@ -341,18 +342,18 @@ router.get('/', authenticate, async (req: AuthRequest, res: Response) => {
 
 /**
  * POST /api/people/messages
- * 
+ *
  * Get message history for a person by phone, email, or name
- * 
+ *
  * Body:
  * - user_id: User ID (required for internal calls)
  * - phone: Phone number (E.164 format)
  * - email: Email address
  * - firstName: First name (requires lastName)
  * - lastName: Last name (requires firstName)
- * 
+ *
  * At least one identifier (phone, email, or firstName+lastName) is required.
- * 
+ *
  * Returns: Array of message records with channel info, or "No messages present" message
  */
 router.post('/messages', authenticate, async (req: AuthRequest, res: Response) => {
@@ -361,11 +362,11 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
     // For user calls (JWT auth), get from req.user
     const { user_id, phone, email, firstName, lastName } = req.body;
     const userId = req.isInternal ? user_id : req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     // Validate that at least one identifier is provided
     const hasPhone = phone && typeof phone === 'string' && phone.trim().length > 0;
     const hasEmail = email && typeof email === 'string' && email.trim().length > 0;
@@ -378,15 +379,15 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
         error: 'At least one identifier is required: phone, email, or firstName',
       });
     }
-    
+
     // Normalize phone number for comparison (keep only digits and leading +)
     const normalizePhone = (p: string): string => {
       return p.replace(/[^\d+]/g, '');
     };
-    
+
     // Build where clause to find the person
     const whereConditions: any[] = [];
-    
+
     if (hasPhone) {
       // Normalize phone for matching - search for normalized version
       const normalizedPhone = normalizePhone(phone as string);
@@ -408,10 +409,12 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
 
     // Build person identifier string for messages
     const personIdentifier = hasName
-      ? hasLastName ? `${firstName} ${lastName}` : firstName as string
+      ? hasLastName
+        ? `${firstName} ${lastName}`
+        : (firstName as string)
       : hasEmail
-        ? email as string
-        : phone as string;
+        ? (email as string)
+        : (phone as string);
 
     // Find ALL matching people first (for disambiguation)
     const matchingPeople = await prisma.person.findMany({
@@ -445,7 +448,7 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
         messages: [],
         multiple_matches: true,
         message: `Multiple people found with the ${idType}: ${personIdentifier}`,
-        matches: matchingPeople.map(p => ({
+        matches: matchingPeople.map((p) => ({
           id: p.id,
           firstName: p.firstName,
           lastName: p.lastName,
@@ -491,7 +494,7 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
     }
 
     // Format message records with channel info
-    const formattedMessages = person.messageRecords.map(record => ({
+    const formattedMessages = person.messageRecords.map((record) => ({
       channel: record.channel,
       from: record.from,
       to: record.to,
@@ -515,35 +518,33 @@ router.post('/messages', authenticate, async (req: AuthRequest, res: Response) =
 
 /**
  * GET /api/people/messages/recent
- * 
+ *
  * Get all recent messages across all people for a user
- * 
+ *
  * Query params:
  * - limit: Max messages to return (default: 200)
  * - days: Number of days to look back (default: 1, max: 30)
- * 
+ *
  * Returns: Array of message records with channel, from, to, timestamp, message
  */
 router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal 
-      ? (req.headers['x-user-id'] as string) 
-      : req.user?.id;
-    
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const limit = parseInt(req.query.limit as string) || 200;
     // Support days parameter for extended lookback (used by user simulation)
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 1, 1), 30);
-    
+
     // Calculate cutoff time based on days parameter
     const cutoffTime = new Date();
     cutoffTime.setDate(cutoffTime.getDate() - days);
-    
+
     // Query MessageRecords from past N days for all of user's people
     const messages = await prisma.messageRecord.findMany({
       where: {
@@ -566,16 +567,16 @@ router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Respo
         message: true,
       },
     });
-    
+
     // Format messages
-    const formattedMessages = messages.map(record => ({
+    const formattedMessages = messages.map((record) => ({
       channel: record.channel,
       from: record.from,
       to: record.to,
       timestamp: record.timestamp.toISOString(),
       message: record.message,
     }));
-    
+
     return res.json({
       messages: formattedMessages,
       count: formattedMessages.length,
@@ -592,32 +593,32 @@ router.get('/messages/recent', authenticate, async (req: AuthRequest, res: Respo
 
 /**
  * GET /api/people/:id
- * 
+ *
  * Get a specific person by ID
  */
 router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const { id } = req.params;
-    
+
     const person = await prisma.person.findFirst({
       where: {
         id,
         userId, // Ensure user can only access their own people
       },
     });
-    
+
     if (!person) {
       return res.status(404).json({
         error: 'Person not found',
       });
     }
-    
+
     return res.json({ person });
   } catch (error) {
     console.error('Error fetching person:', error);
@@ -630,34 +631,34 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
 
 /**
  * DELETE /api/people/:id
- * 
+ *
  * Delete a person from user's network
  */
 router.delete('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
-    
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    
+
     const { id } = req.params;
-    
+
     // Verify person belongs to user
     const person = await prisma.person.findFirst({
       where: { id, userId },
     });
-    
+
     if (!person) {
       return res.status(404).json({
         error: 'Person not found',
       });
     }
-    
+
     await prisma.person.delete({
       where: { id },
     });
-    
+
     return res.json({
       message: 'Person deleted successfully',
     });

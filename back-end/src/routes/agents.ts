@@ -3,18 +3,22 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
-import { prisma } from '../lib/prisma';
-import { HybridAuthRequest, hybridAuth } from '../middleware/hybridAuth';
-import { startAgentWorkflow, getTemporalClient } from '../lib/temporal';
-import { getModelPricing, dollarsToMicrodollars } from '../lib/modelPricing';
-import { getX402Endpoints } from '../lib/x402Endpoints';
-import { setResponseSchema, generateResponseSchema } from '../lib/setResponseSchema';
-import { handleChatMessage, broadcastAgentModeStarted, broadcastAgentUpdate } from '../lib/chat';
-import { createMessage } from '../lib/messages';
-import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../lib/geoip';
-import { cleanupAgentSessions } from '../lib/agentCleanup';
-import { createGithubRepo } from '../lib/github';
-import { createLogger } from '../lib/logger';
+import { prisma } from '../providers/database';
+import { HybridAuthRequest, hybridAuth } from '../providers/hybridAuth';
+import { startAgentWorkflow, getTemporalClient } from '../providers/temporal';
+import { getModelPricing, dollarsToMicrodollars } from '../providers/modelPricing';
+import { getX402Endpoints } from '../providers/x402Endpoints';
+import { setResponseSchema, generateResponseSchema } from '../providers/setResponseSchema';
+import {
+  handleChatMessage,
+  broadcastAgentModeStarted,
+  broadcastAgentUpdate,
+} from '../providers/chat';
+import { createMessage } from '../providers/messages';
+import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../providers/geoip';
+import { cleanupAgentSessions } from '../providers/agentCleanup';
+import { createGithubRepo } from '../providers/github';
+import { createLogger } from '../providers/logger';
 import {
   processUploadedFile,
   validateTotalSize,
@@ -22,7 +26,7 @@ import {
   MAX_FILE_SIZE,
   MAX_TOTAL_SIZE,
   FilePointer,
-} from '../lib/storage';
+} from '../providers/storage';
 
 const log = createLogger('Agents');
 
@@ -81,7 +85,16 @@ Scoring Instructions:
 // Response schema field type
 const ResponseSchemaFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]']),
+  type: z.enum([
+    'str',
+    'int',
+    'float',
+    'bool',
+    'list[str]',
+    'list[int]',
+    'file_pointer',
+    'list[file_pointer]',
+  ]),
   required: z.boolean(),
   description: z.string(),
 });
@@ -110,20 +123,24 @@ const createAgentSchema = z.object({
   max_iterations: z.number().int().min(1).optional(), // Optional: step limit for execute phase (sub-agents use 25)
   price_limit_cents: z.number().int().min(1).optional(), // Price limit in cents (default 100 = $1.00)
   // Verifier is now optional - auto-generated from goal if not provided
-  verifier: z.object({
-    type: z.literal('FLOAT_LLM_JUDGE'),
-    llm_judge_prompt: z.string().min(1),
-  }).optional(),
+  verifier: z
+    .object({
+      type: z.literal('FLOAT_LLM_JUDGE'),
+      llm_judge_prompt: z.string().min(1),
+    })
+    .optional(),
   // Context gates: control which user context sections the agent receives (default all true)
-  context_gates: z.object({
-    user_profile: z.boolean().optional(),
-    authenticated_sessions: z.boolean().optional(),
-    integrations: z.boolean().optional(),
-    recent_communications: z.boolean().optional(),
-    network: z.boolean().optional(),
-    custom_system_prompt: z.boolean().optional(),
-    shared_files: z.boolean().optional(),
-  }).optional(),
+  context_gates: z
+    .object({
+      user_profile: z.boolean().optional(),
+      authenticated_sessions: z.boolean().optional(),
+      integrations: z.boolean().optional(),
+      recent_communications: z.boolean().optional(),
+      network: z.boolean().optional(),
+      custom_system_prompt: z.boolean().optional(),
+      shared_files: z.boolean().optional(),
+    })
+    .optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
 });
@@ -137,7 +154,15 @@ const postMessageSchema = z.object({
 });
 
 const updateStatusSchema = z.object({
-  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']),
+  status: z.enum([
+    'STARTING_UP',
+    'ACTIVE',
+    'PAUSED',
+    'COMPLETED',
+    'FAILED',
+    'OUT_OF_CREDITS',
+    'COST_LIMIT_REACHED',
+  ]),
   statusMessage: z.string().optional(),
   progress: z.number().min(0).max(1),
   tokenCount: z.number().int().min(0),
@@ -209,7 +234,9 @@ router.get('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       })),
     });
   } catch (error) {
-    log.error('Get agents error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Get agents error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch agents' });
   }
 });
@@ -259,7 +286,9 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
       })),
     });
   } catch (error) {
-    log.error('Get agent tree error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Get agent tree error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch agent tree' });
   }
 });
@@ -281,12 +310,12 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
     // - Internal: req.userId from body.user_id or X-User-Id header
     // - x402: req.userId from wallet address (credits already added by middleware)
     const userId = req.userId || body.user_id;
-    
+
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized: user_id required' });
       return;
     }
-    
+
     // Auto-generate verifier if not provided
     const verifierPrompt = body.verifier?.llm_judge_prompt || generateVerifierPrompt(body.goal);
     const verifier = {
@@ -298,11 +327,14 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
     const pricing = await getModelPricing(body.model);
     let tokenInPriceMicrodollars: number | null = null;
     let tokenOutPriceMicrodollars: number | null = null;
-    
+
     if (pricing) {
       tokenInPriceMicrodollars = dollarsToMicrodollars(pricing.prompt);
       tokenOutPriceMicrodollars = dollarsToMicrodollars(pricing.completion);
-      log.info(`Fetched pricing for ${body.model}`, { token_in_microdollars: tokenInPriceMicrodollars, token_out_microdollars: tokenOutPriceMicrodollars });
+      log.info(`Fetched pricing for ${body.model}`, {
+        token_in_microdollars: tokenInPriceMicrodollars,
+        token_out_microdollars: tokenOutPriceMicrodollars,
+      });
     } else {
       log.warn(`Could not fetch pricing for ${body.model}, agent will have no pricing data`);
     }
@@ -316,7 +348,9 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
         proxyGeo = geo;
       }
     }
-    log.info(`Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`, { ip: clientIP || 'unknown' });
+    log.info(`Proxy geolocation: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`, {
+      ip: clientIP || 'unknown',
+    });
 
     // Determine if this is a sub-agent and generate ID upfront
     const isSubAgent = !!body.parent_agent_id;
@@ -332,7 +366,7 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           parentWorkflowId: body.parent_workflow_id || null,
           depth: body.depth || 0,
           // Root agents: busId = own id; Sub-agents: busId from parent
-          busId: isSubAgent ? (body.bus_id || null) : agentId,
+          busId: isSubAgent ? body.bus_id || null : agentId,
           goal: body.goal,
           model: body.model,
           reasoningMaxTokens: body.reasoning_max_tokens,
@@ -441,7 +475,9 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           where: { id: agent.agent.id },
           data: {
             status: 'FAILED',
-            statusMessage: 'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
+            statusMessage:
+              'Failed to start workflow: ' +
+              (error instanceof Error ? error.message : String(error)),
           },
         });
 
@@ -512,29 +548,39 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       } else if (body.parent_agent_id) {
         log.warn('Sub-agent spawned without schema', { agent_id: agent.agent.id });
       } else {
-        log.info('Root agent - schema will be generated during set_plan', { agent_id: agent.agent.id });
+        log.info('Root agent - schema will be generated during set_plan', {
+          agent_id: agent.agent.id,
+        });
       }
 
       // Fire-and-forget: create GitHub repo for root agent
       const repoName = `agent-${agentId.substring(0, 8)}`;
-      createGithubRepo(repoName).then(async (repoUrl) => {
-        if (repoUrl) {
-          try {
-            await prisma.agent.update({
-              where: { id: agent.agent.id },
-              data: { githubRepoUrl: repoUrl },
-            });
-            await prisma.githubRepoAccess.create({
-              data: { userId, repoUrl },
-            });
-            log.info(`Repo ${repoUrl} linked to agent`, { agent_id: agent.agent.id });
-          } catch (err) {
-            log.error('Failed to persist repo URL', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) });
+      createGithubRepo(repoName)
+        .then(async (repoUrl) => {
+          if (repoUrl) {
+            try {
+              await prisma.agent.update({
+                where: { id: agent.agent.id },
+                data: { githubRepoUrl: repoUrl },
+              });
+              await prisma.githubRepoAccess.create({
+                data: { userId, repoUrl },
+              });
+              log.info(`Repo ${repoUrl} linked to agent`, { agent_id: agent.agent.id });
+            } catch (err) {
+              log.error('Failed to persist repo URL', {
+                agent_id: agent.agent.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
-        }
-      }).catch((err) => {
-        log.error('Repo creation failed', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) });
-      });
+        })
+        .catch((err) => {
+          log.error('Repo creation failed', {
+            agent_id: agent.agent.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
 
       // Handle chat message (non-blocking for response)
       // Run in background so we can return the agent immediately
@@ -548,13 +594,21 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
           error: err instanceof Error ? err.message : String(err),
         });
         // Update agent status to failed
-        prisma.agent.update({
-          where: { id: agent.agent.id },
-          data: {
-            status: 'FAILED',
-            statusMessage: 'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
-          },
-        }).catch((err) => log.error('Failed to update agent status', { agent_id: agent.agent.id, error: err instanceof Error ? err.message : String(err) }));
+        prisma.agent
+          .update({
+            where: { id: agent.agent.id },
+            data: {
+              status: 'FAILED',
+              statusMessage:
+                'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
+            },
+          })
+          .catch((err) =>
+            log.error('Failed to update agent status', {
+              agent_id: agent.agent.id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          );
       });
 
       // Note: workflowId remains null for chat mode agents
@@ -581,7 +635,9 @@ router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    log.error('Create agent error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Create agent error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to create agent' });
   }
 });
@@ -638,14 +694,17 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
     // Fetch tool usage summary
     const toolUsages = await prisma.toolUsage.findMany({
       where: { agentId },
-      select: { 
+      select: {
         totalCostCents: true,
-        usageItems: true 
-      }
+        usageItems: true,
+      },
     });
 
-    const toolUsageTotalCostCents = toolUsages.reduce((sum: number, usage: any) => sum + usage.totalCostCents, 0);
-    
+    const toolUsageTotalCostCents = toolUsages.reduce(
+      (sum: number, usage: any) => sum + usage.totalCostCents,
+      0
+    );
+
     // Calculate tool tokens from usage items
     let toolTokensIn = 0;
     let toolTokensOut = 0;
@@ -719,7 +778,10 @@ router.get('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       },
     });
   } catch (error) {
-    log.error('Get agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Get agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch agent' });
   }
 });
@@ -748,7 +810,10 @@ router.get('/:id/ancestors', hybridAuth, async (req: HybridAuthRequest, res) => 
 
     res.json({ ancestors });
   } catch (error) {
-    log.error('Get ancestors error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Get ancestors error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch ancestors' });
   }
 });
@@ -765,7 +830,9 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
     if (isInternal) {
       // Internal (worker): role must be provided
       if (!body.role) {
-        res.status(400).json({ error: 'Internal messages must specify role (USER/ASSISTANT/TOOL/SYSTEM)' });
+        res
+          .status(400)
+          .json({ error: 'Internal messages must specify role (USER/ASSISTANT/TOOL/SYSTEM)' });
         return;
       }
       role = body.role;
@@ -810,7 +877,9 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       try {
         validateTotalSize(body.attachments as FilePointer[]);
       } catch (error) {
-        res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid attachments' });
+        res
+          .status(400)
+          .json({ error: error instanceof Error ? error.message : 'Invalid attachments' });
         return;
       }
     }
@@ -844,8 +913,10 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       });
 
       // If agent is COMPLETED/FAILED, clear the dead workflow so it falls through to chat mode
-      if (agentForChat?.temporalWorkflowId &&
-          (agentForChat.status === 'COMPLETED' || agentForChat.status === 'FAILED')) {
+      if (
+        agentForChat?.temporalWorkflowId &&
+        (agentForChat.status === 'COMPLETED' || agentForChat.status === 'FAILED')
+      ) {
         await prisma.agent.update({
           where: { id: agentId },
           data: { temporalWorkflowId: null, status: 'ACTIVE' },
@@ -856,13 +927,16 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       if (agentForChat?.temporalWorkflowId) {
         // Agent mode: signal Temporal workflow
         try {
-          const { getTemporalClient } = await import('../lib/temporal');
+          const { getTemporalClient } = await import('../providers/temporal');
           const client = await getTemporalClient();
           const handle = client.workflow.getHandle(agentForChat.temporalWorkflowId);
           await handle.signal('receive_user_response', body.message);
         } catch (error) {
           // Don't fail the request if signaling fails - workflow will eventually poll
-          log.error('Failed to signal workflow', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+          log.error('Failed to signal workflow', {
+            agent_id: req.params.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       } else if (agentForChat) {
         // Chat mode: handle message with fixed LLM call sequence
@@ -891,43 +965,59 @@ router.post('/:id/messages', hybridAuth, async (req: HybridAuthRequest, res) => 
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    log.error('Post message error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Post message error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to post message' });
   }
 });
 
 // POST /api/agents/:id/attachments - DEPRECATED: Use POST /api/upload instead
 // Kept for backwards compatibility - redirects to new endpoint behavior
-router.post('/:id/attachments', hybridAuth, attachmentUpload.single('file') as any, async (req: HybridAuthRequest, res) => {
-  try {
-    const userId = req.userId!;
+router.post(
+  '/:id/attachments',
+  hybridAuth,
+  attachmentUpload.single('file') as any,
+  async (req: HybridAuthRequest, res) => {
+    try {
+      const userId = req.userId!;
 
-    if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
-      return;
+      if (!req.file) {
+        res.status(400).json({ error: 'No file uploaded' });
+        return;
+      }
+
+      // Process the uploaded file (stored under userId, not agent-scoped)
+      const filePointer = await processUploadedFile(
+        userId,
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype
+      );
+
+      log.info('Uploaded file', {
+        user_id: userId,
+        filename: filePointer.original_filename,
+        size_bytes: filePointer.size_bytes,
+        agent_id: req.params.id,
+      });
+
+      res.status(201).json({
+        file_pointer: filePointer,
+      });
+    } catch (error) {
+      log.error('Upload attachment error', {
+        agent_id: req.params.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({
+        error: 'Failed to upload attachment',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
-
-    // Process the uploaded file (stored under userId, not agent-scoped)
-    const filePointer = await processUploadedFile(
-      userId,
-      req.file.buffer,
-      req.file.originalname,
-      req.file.mimetype
-    );
-
-    log.info('Uploaded file', { user_id: userId, filename: filePointer.original_filename, size_bytes: filePointer.size_bytes, agent_id: req.params.id });
-
-    res.status(201).json({
-      file_pointer: filePointer,
-    });
-  } catch (error) {
-    log.error('Upload attachment error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
-    res.status(500).json({
-      error: 'Failed to upload attachment',
-      details: error instanceof Error ? error.message : 'Unknown error',
-    });
   }
-});
+);
 
 // GET /api/agents/:id/attachments/:fileId/url - Get a signed URL for a file attachment
 // Verifies the storage path starts with the user's ID for security
@@ -955,7 +1045,10 @@ router.get('/:id/attachments/:fileId/url', hybridAuth, async (req: HybridAuthReq
       expires_in: 3600,
     });
   } catch (error) {
-    log.error('Get signed URL error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Get signed URL error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({
       error: 'Failed to generate signed URL',
       details: error instanceof Error ? error.message : 'Unknown error',
@@ -989,7 +1082,10 @@ router.get('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       status: agent.status,
     });
   } catch (error) {
-    log.error('Get agent status error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Get agent status error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to get agent status' });
   }
 });
@@ -1067,7 +1163,10 @@ router.post('/:id/start-agent', hybridAuth, async (req: HybridAuthRequest, res) 
       workflow_id: workflowId,
     });
   } catch (error) {
-    log.error('Start agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Start agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to start agent mode' });
   }
 });
@@ -1139,7 +1238,10 @@ router.patch('/:id/status', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    log.error('Update status error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Update status error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to update agent status' });
   }
 });
@@ -1179,7 +1281,7 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   // the terminate call throws and we catch it.
   try {
     log.info('Terminating workflow', { agent_id: agentId });
-    const { getTemporalClient } = await import('../lib/temporal');
+    const { getTemporalClient } = await import('../providers/temporal');
     const client = await getTemporalClient();
     const handle = client.workflow.getHandle(agentId);
     await handle.terminate('Agent deleted by user');
@@ -1187,7 +1289,11 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   } catch (error) {
     // Expected if agent was chat-only (no workflow ever started) or already terminated
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes('not found') || msg.includes('already completed') || msg.includes('terminated')) {
+    if (
+      msg.includes('not found') ||
+      msg.includes('already completed') ||
+      msg.includes('terminated')
+    ) {
       log.info('No active workflow to terminate', { agent_id: agentId, reason: msg });
     } else {
       log.warn('Failed to terminate workflow', { agent_id: agentId, error: msg });
@@ -1233,7 +1339,10 @@ router.delete('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.status(204).send();
   } catch (error) {
-    log.error('Delete agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Delete agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to delete agent' });
   }
 });
@@ -1267,12 +1376,15 @@ async function pauseAgent(agentId: string): Promise<void> {
   // Try to send signal (best effort for instant response)
   if (agent.temporalWorkflowId) {
     try {
-      const { getTemporalClient } = await import('../lib/temporal');
+      const { getTemporalClient } = await import('../providers/temporal');
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('pause');
     } catch (error) {
-      log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', { agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
+      log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }
@@ -1302,7 +1414,10 @@ router.post('/:id/pause', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    log.error('Pause agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Pause agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to pause agent' });
   }
 });
@@ -1329,12 +1444,15 @@ async function resumeAgent(agentId: string): Promise<void> {
   // Try to send signal (best effort for instant response)
   if (agent.temporalWorkflowId) {
     try {
-      const { getTemporalClient } = await import('../lib/temporal');
+      const { getTemporalClient } = await import('../providers/temporal');
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('resume');
     } catch (error) {
-      log.warn('Resume signal failed, DB updated. Workflow will sync next iteration', { agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
+      log.warn('Resume signal failed, DB updated. Workflow will sync next iteration', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }
@@ -1365,7 +1483,10 @@ router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
         where: { id: agent.parentAgentId, deletedAt: null },
         select: { status: true },
       });
-      if (parentAgent && (parentAgent.status === 'PAUSED' || parentAgent.status === 'COST_LIMIT_REACHED')) {
+      if (
+        parentAgent &&
+        (parentAgent.status === 'PAUSED' || parentAgent.status === 'COST_LIMIT_REACHED')
+      ) {
         res.status(400).json({
           error: `Cannot resume agent — parent agent is ${parentAgent.status === 'COST_LIMIT_REACHED' ? 'cost-limited' : 'paused'}. Resume the root agent first.`,
         });
@@ -1378,7 +1499,10 @@ router.post('/:id/resume', hybridAuth, async (req: HybridAuthRequest, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    log.error('Resume agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Resume agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to resume agent' });
   }
 });
@@ -1397,7 +1521,17 @@ const updateAgentSchema = z.object({
   tree_cost_cents: z.number().int().min(0).optional(), // Workflow updates this
   own_cost_cents: z.number().min(0).optional(), // Workflow updates this (actual_model-aware cost)
   write_lock_enabled: z.boolean().optional(), // Write lock for browser agent actions
-  status: z.enum(['STARTING_UP', 'ACTIVE', 'PAUSED', 'COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']).optional(), // For tree state status updates
+  status: z
+    .enum([
+      'STARTING_UP',
+      'ACTIVE',
+      'PAUSED',
+      'COMPLETED',
+      'FAILED',
+      'OUT_OF_CREDITS',
+      'COST_LIMIT_REACHED',
+    ])
+    .optional(), // For tree state status updates
 });
 
 router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
@@ -1474,9 +1608,16 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
           await handle.signal('price_limit_increased', {
             new_limit_cents: body.price_limit_cents,
           });
-          log.info('Signaled price_limit_increased to workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
+          log.info('Signaled price_limit_increased to workflow', {
+            workflow_id: agent.temporalWorkflowId,
+            agent_id: agentId,
+          });
         } catch (error) {
-          log.error('Failed to signal price_limit_increased', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
+          log.error('Failed to signal price_limit_increased', {
+            workflow_id: agent.temporalWorkflowId,
+            agent_id: agentId,
+            error: error instanceof Error ? error.message : String(error),
+          });
           // Continue with update even if signal fails - workflow will poll DB
         }
       }
@@ -1574,7 +1715,10 @@ router.patch('/:id', hybridAuth, async (req: HybridAuthRequest, res) => {
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    log.error('Update agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Update agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to update agent' });
   }
 });
@@ -1620,7 +1764,7 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
     }
 
     // Small delay to ensure termination is processed
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     // 2. Reset agent status to ACTIVE
     await prisma.agent.update({
@@ -1659,7 +1803,10 @@ router.post('/:id/restart', hybridAuth, async (req: HybridAuthRequest, res) => {
       message: 'Workflow restarted - will continue from existing context',
     });
   } catch (error) {
-    log.error('Restart agent error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Restart agent error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to restart agent' });
   }
 });
@@ -1694,9 +1841,16 @@ router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRe
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
         await handle.signal('signup_completed');
-        log.info('Sent signup_completed signal', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
+        log.info('Sent signup_completed signal', {
+          workflow_id: agent.temporalWorkflowId,
+          agent_id: agentId,
+        });
       } catch (error) {
-        log.error('Failed to signal workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
+        log.error('Failed to signal workflow', {
+          workflow_id: agent.temporalWorkflowId,
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
         res.status(500).json({ error: 'Failed to signal workflow' });
         return;
       }
@@ -1704,7 +1858,10 @@ router.post('/:id/signal/signup_completed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    log.error('Signal signup_completed error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Signal signup_completed error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to signal signup completed' });
   }
 });
@@ -1735,9 +1892,16 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
         await handle.signal('signup_dismissed');
-        log.info('Sent signup_dismissed signal', { workflow_id: agent.temporalWorkflowId, agent_id: agentId });
+        log.info('Sent signup_dismissed signal', {
+          workflow_id: agent.temporalWorkflowId,
+          agent_id: agentId,
+        });
       } catch (error) {
-        log.error('Failed to signal workflow', { workflow_id: agent.temporalWorkflowId, agent_id: agentId, error: error instanceof Error ? error.message : String(error) });
+        log.error('Failed to signal workflow', {
+          workflow_id: agent.temporalWorkflowId,
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
         res.status(500).json({ error: 'Failed to signal workflow' });
         return;
       }
@@ -1745,7 +1909,10 @@ router.post('/:id/signal/signup_dismissed', hybridAuth, async (req: HybridAuthRe
 
     res.json({ success: true });
   } catch (error) {
-    log.error('Signal signup_dismissed error', { agent_id: req.params.id, error: error instanceof Error ? error.message : String(error) });
+    log.error('Signal signup_dismissed error', {
+      agent_id: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to signal signup dismissed' });
   }
 });
@@ -1771,7 +1938,9 @@ router.post('/generate-response-schema', hybridAuth, async (req: HybridAuthReque
       res.status(400).json({ error: 'Invalid request body', details: error.errors });
       return;
     }
-    log.error('Generate response schema error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Generate response schema error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to generate response schema' });
   }
 });

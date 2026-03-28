@@ -1,5 +1,5 @@
 import { MessageChannel } from '@prisma/client';
-import { prisma } from '../../lib/prisma';
+import { prisma } from '../../providers/database';
 import AdmZip from 'adm-zip';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
@@ -179,7 +179,10 @@ function extractBoundary(contentType: string): string | null {
   return match ? match[1] : null;
 }
 
-function parseMultipart(body: string, boundary: string): { text: string | null; html: string | null } {
+function parseMultipart(
+  body: string,
+  boundary: string
+): { text: string | null; html: string | null } {
   let text: string | null = null;
   let html: string | null = null;
 
@@ -300,7 +303,7 @@ function stripHtml(html: string): string {
  * Transform emails into ContactToUpsert format grouped by contact
  */
 function transformEmailsToContacts(emails: ParsedEmail[], userEmails: string[]): ContactToUpsert[] {
-  const userEmailSet = new Set(userEmails.map(e => e.toLowerCase()));
+  const userEmailSet = new Set(userEmails.map((e) => e.toLowerCase()));
   const contactMap = new Map<string, EmailContact>();
 
   for (const email of emails) {
@@ -311,7 +314,7 @@ function transformEmailsToContacts(emails: ParsedEmail[], userEmails: string[]):
 
     if (isFromMe) {
       // User sent this email - contacts are recipients
-      contactEmails = [...email.to, ...email.cc].filter(e => !userEmailSet.has(e));
+      contactEmails = [...email.to, ...email.cc].filter((e) => !userEmailSet.has(e));
     } else {
       // User received this email - contact is sender
       contactEmails = [email.from];
@@ -363,10 +366,10 @@ function transformEmailsToContacts(emails: ParsedEmail[], userEmails: string[]):
   }
 
   // Filter contacts: user must have SENT at least one email to them
-  const validContacts = Array.from(contactMap.values()).filter(c => c.sentCount > 0);
+  const validContacts = Array.from(contactMap.values()).filter((c) => c.sentCount > 0);
 
   // Transform to ContactToUpsert format
-  return validContacts.map(contact => {
+  return validContacts.map((contact) => {
     // Parse name into firstName/lastName
     let firstName = '';
     let lastName = '';
@@ -383,7 +386,7 @@ function transformEmailsToContacts(emails: ParsedEmail[], userEmails: string[]):
       lastName,
       email: contact.email,
       emailAddresses: [contact.email],
-      messages: contact.messages.map(msg => ({
+      messages: contact.messages.map((msg) => ({
         channel: MessageChannel.EMAIL,
         from: msg.from,
         to: msg.to,
@@ -407,7 +410,9 @@ export async function importEmailsToDb(
 
   // Transform emails to contacts format
   const contactsToUpsert = transformEmailsToContacts(emails, userEmails);
-  console.log(`[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`);
+  console.log(
+    `[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`
+  );
 
   // Get or create integration
   const integration = await prisma.integration.upsert({
@@ -442,6 +447,8 @@ export async function importEmailsToDb(
     },
   });
 
-  console.log(`[Job ${jobId}] ✅ Email import complete: ${result.contacts} contacts, ${result.messages} messages`);
+  console.log(
+    `[Job ${jobId}] ✅ Email import complete: ${result.contacts} contacts, ${result.messages} messages`
+  );
   return result;
 }

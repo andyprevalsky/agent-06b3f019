@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { prisma } from '../lib/prisma';
-import { AuthRequest, authenticate } from '../middleware/auth';
+import { prisma } from '../providers/database';
+import { AuthRequest, authenticate } from '../providers/auth';
 
 const router = Router();
 
@@ -26,10 +26,8 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
   try {
     // For internal calls (API key auth), get user_id from X-User-Id header
     // For user calls (JWT auth), get from req.user
-    const userId = req.isInternal 
-      ? (req.headers['x-user-id'] as string) 
-      : req.user?.id;
-    
+    const userId = req.isInternal ? (req.headers['x-user-id'] as string) : req.user?.id;
+
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
@@ -193,10 +191,12 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
     if (body.state !== undefined) updateData.state = body.state;
     if (body.postalCode !== undefined) updateData.postalCode = body.postalCode;
     if (body.country !== undefined) updateData.country = body.country;
-    if (body.encryptedPaymentInformation !== undefined) updateData.encryptedPaymentInformation = body.encryptedPaymentInformation;
+    if (body.encryptedPaymentInformation !== undefined)
+      updateData.encryptedPaymentInformation = body.encryptedPaymentInformation;
     if (body.systemName !== undefined) updateData.systemName = body.systemName;
     if (body.profilePicture !== undefined) updateData.profilePicture = body.profilePicture;
-    if (body.customSystemPrompt !== undefined) updateData.customSystemPrompt = body.customSystemPrompt;
+    if (body.customSystemPrompt !== undefined)
+      updateData.customSystemPrompt = body.customSystemPrompt;
 
     const user = await prisma.user.update({
       where: { userId },
@@ -226,4 +226,3 @@ router.patch('/', authenticate, async (req: AuthRequest, res) => {
 });
 
 export default router;
-

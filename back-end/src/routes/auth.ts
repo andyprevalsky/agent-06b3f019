@@ -9,12 +9,12 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import { prisma } from '../lib/prisma';
-import { createSignupBonusCredit, createInitialCredit } from '../lib/credits';
-import { authenticate, AuthRequest } from '../middleware/auth';
-import { sendSms, sendMms } from '../lib/smsQueue';
-import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../lib/smsTemplates';
-import { createLogger } from '../lib/logger';
+import { prisma } from '../providers/database';
+import { createSignupBonusCredit, createInitialCredit } from '../providers/credits';
+import { authenticate, AuthRequest } from '../providers/auth';
+import { sendSms, sendMms } from '../providers/smsQueue';
+import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../providers/smsTemplates';
+import { createLogger } from '../providers/logger';
 
 const log = createLogger('Auth');
 
@@ -68,7 +68,7 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
@@ -77,7 +77,7 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
       }),
     });
 
-    const data = await response.json() as TwilioVerifyResponse;
+    const data = (await response.json()) as TwilioVerifyResponse;
 
     if (!response.ok) {
       log.error('Twilio Verify send error', {
@@ -97,7 +97,9 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
 
     return { success: true };
   } catch (error) {
-    log.error('Twilio Verify send exception', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Twilio Verify send exception', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return { success: false, error: 'Failed to send OTP' };
   }
 }
@@ -105,7 +107,10 @@ async function sendTwilioVerifyOTP(phone: string): Promise<{ success: boolean; e
 /**
  * Check OTP via Twilio Verify
  */
-async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ approved: boolean; error?: string }> {
+async function checkTwilioVerifyOTP(
+  phone: string,
+  code: string
+): Promise<{ approved: boolean; error?: string }> {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SERVICE_SID) {
     log.error('Missing Twilio Verify configuration');
     return { approved: false, error: 'Server configuration error' };
@@ -118,7 +123,7 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({
@@ -127,7 +132,7 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
       }),
     });
 
-    const data = await response.json() as TwilioVerifyResponse;
+    const data = (await response.json()) as TwilioVerifyResponse;
 
     if (!response.ok) {
       log.error('Twilio Verify check error', {
@@ -158,7 +163,9 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
 
     return { approved, error: approved ? undefined : 'Invalid OTP' };
   } catch (error) {
-    log.error('Twilio Verify check exception', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Twilio Verify check exception', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return { approved: false, error: 'Failed to verify OTP' };
   }
 }
@@ -167,7 +174,9 @@ async function checkTwilioVerifyOTP(phone: string, code: string): Promise<{ appr
  * Find or create Supabase user by phone.
  * First checks our own DB (fast, reliable), then falls back to Supabase Admin API for new users.
  */
-async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string; isNew: boolean } | null> {
+async function findOrCreateSupabaseUser(
+  phone: string
+): Promise<{ userId: string; isNew: boolean } | null> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     log.error('Missing Supabase configuration');
     return null;
@@ -181,10 +190,7 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
 
     const existingDbUser = await prisma.user.findFirst({
       where: {
-        OR: [
-          { phone: phoneWithPlus },
-          { phone: phoneWithoutPlus },
-        ],
+        OR: [{ phone: phoneWithPlus }, { phone: phoneWithoutPlus }],
       },
       select: { userId: true },
     });
@@ -203,8 +209,8 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
     const createResponse = await fetch(createUrl, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -217,7 +223,10 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
 
     if (createResponse.ok) {
       const newUser = createData as SupabaseAdminUserResponse;
-      log.info('Created new Supabase user', { user_id: newUser.id, phone: phone.slice(0, -4) + '****' });
+      log.info('Created new Supabase user', {
+        user_id: newUser.id,
+        phone: phone.slice(0, -4) + '****',
+      });
       return { userId: newUser.id, isNew: true };
     }
 
@@ -231,12 +240,16 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
 
     if (createResponse.status === 422 && errorData.error_code === 'phone_exists') {
       // User exists in Supabase but not in our DB - edge case, shouldn't happen
-      log.error('User exists in Supabase but not in our DB', { phone: phone.slice(0, -4) + '****' });
+      log.error('User exists in Supabase but not in our DB', {
+        phone: phone.slice(0, -4) + '****',
+      });
     }
 
     return null;
   } catch (error) {
-    log.error('Supabase user lookup/create exception', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Supabase user lookup/create exception', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -245,7 +258,10 @@ async function findOrCreateSupabaseUser(phone: string): Promise<{ userId: string
  * Generate JWT session tokens signed with HS256.
  * Uses the JWT secret directly as a string.
  */
-function generateSupabaseSession(userId: string, phone: string): {
+function generateSupabaseSession(
+  userId: string,
+  phone: string
+): {
   access_token: string;
   refresh_token: string;
   expires_in: number;
@@ -423,13 +439,20 @@ async function mergeAnonymousUserResources(anonymousUserId: string, authenticate
     }
 
     if (merged.length > 0) {
-      log.info(`Merged anonymous to authenticated: ${merged.join(', ')}`, { anonymous_user_id: anonymousUserId, user_id: authenticatedUserId });
+      log.info(`Merged anonymous to authenticated: ${merged.join(', ')}`, {
+        anonymous_user_id: anonymousUserId,
+        user_id: authenticatedUserId,
+      });
     } else {
       log.info('No resources to merge from anonymous user', { anonymous_user_id: anonymousUserId });
     }
   } catch (error) {
     // Log but don't fail the auth flow - merge is best-effort
-    log.error('Failed to merge resources', { anonymous_user_id: anonymousUserId, user_id: authenticatedUserId, error: error instanceof Error ? error.message : String(error) });
+    log.error('Failed to merge resources', {
+      anonymous_user_id: anonymousUserId,
+      user_id: authenticatedUserId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -461,7 +484,9 @@ router.post('/anonymous', async (req: Request, res: Response) => {
       session,
     });
   } catch (error) {
-    log.error('Anonymous session error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Anonymous session error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to create anonymous session' });
   }
 });
@@ -552,7 +577,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
           isAnonymous: false,
         },
       });
-      log.info('Created user record', { user_id: userId, phone: phone.slice(0, -4) + '****', name: fullName || undefined });
+      log.info('Created user record', {
+        user_id: userId,
+        phone: phone.slice(0, -4) + '****',
+        name: fullName || undefined,
+      });
 
       // Give signup bonus credit for completing phone verification
       await createSignupBonusCredit(userId);
@@ -589,7 +618,9 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
         // Give signup bonus for converting from anonymous to authenticated
         await createSignupBonusCredit(userId);
-        log.info('Converted anonymous user to authenticated, gave signup bonus', { user_id: userId });
+        log.info('Converted anonymous user to authenticated, gave signup bonus', {
+          user_id: userId,
+        });
       } else if (Object.keys(updates).length > 0) {
         await prisma.user.update({
           where: { userId },
@@ -617,7 +648,9 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       session,
     });
   } catch (error) {
-    log.error('Verify OTP error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Verify OTP error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to verify OTP' });
   }
 });
@@ -671,7 +704,10 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
       sendSms(user.phone, SMS_TEMPLATES.onboardingWelcome(firstName))
         .then(() => sendMms(user.phone!, '', personalizedVcardUrl))
         .catch((error) => {
-          log.error('Failed to send welcome messages', { user_id: userId, error: error instanceof Error ? error.message : String(error) });
+          log.error('Failed to send welcome messages', {
+            user_id: userId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
       log.info('Sending welcome SMS + vCard', { user_id: userId });
     }
@@ -682,7 +718,9 @@ router.post('/complete-onboarding', authenticate, async (req: AuthRequest, res: 
       onboardingCompletedAt: updatedUser.onboardingCompletedAt,
     });
   } catch (error) {
-    log.error('Complete onboarding error', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Complete onboarding error', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to complete onboarding' });
   }
 });
