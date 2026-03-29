@@ -153,7 +153,7 @@ Run `/new_branch_with_context` to sync with main and create a new branch so we c
 
 ## Step 8: Done
 
-Report to the user:
+After the new branch is created, report to the user:
 - PR URL
 - Which services were deployed
 - Any review issues that were fixed along the way
