@@ -91,18 +91,18 @@ async def main():
         run_test_silent("Attachments", test_attachments),
     ]
     
-    # Run sync tests (these are fast, run them sequentially, silently)
+    # Run sequential async tests (fast, run them one at a time, silently)
     import io
     import contextlib
-    
+
     sync_start = time.time()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        wait_for_result = test_wait_for()
+        wait_for_result = await test_wait_for()
     wait_for_duration = (time.time() - sync_start) * 1000
-    
+
     sync_start = time.time()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        request_attention_result = test_send_message_to_user()
+        request_attention_result = await test_send_message_to_user()
     request_attention_duration = (time.time() - sync_start) * 1000
     
     # Wait for all async tests

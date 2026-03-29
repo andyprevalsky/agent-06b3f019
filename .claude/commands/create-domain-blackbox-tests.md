@@ -20,7 +20,7 @@ If `$ARGUMENTS` is empty, ask the user for the domain and stop.
 ## Non-negotiable rules
 
 - Test only observable behavior.
-- Do not assert internal implementation details such as call counts or “function X was called” unless X is an external boundary.
+- Do not assert internal implementation details such as call counts or "function X was called" unless X is an external boundary.
 - Prefer real boundary behavior over raw mocks.
 - For deterministic request/response third-party boundaries, prefer typed adapters backed by `@with-logic/fast-forward` or an equivalent record/replay harness.
 - Use raw mocks only when the boundary is destructive, unsafe, too costly to hit live, requires rare fault injection, or is not meaningfully record/replayable.
@@ -77,7 +77,33 @@ Capture end-to-end observable outputs for normal and edge workflows. Assert:
 - emitted async side effects
 - external boundary interactions
 
-### 3. Invariant coverage
+### 3. Boundary capture coverage
+
+**Every domain that touches third-party services MUST capture and assert on the exact outbound HTTP calls made by the backend.** This is not optional — it is how we ensure production parity.
+
+The repo provides a fetch capture harness (`back-end/src/providers/fetchCapture.ts`) that wraps `globalThis.fetch` and records all outbound HTTP calls when `BLACKBOX_TEST_CAPTURE_OUTBOUND=1`. The blackbox test runner (`scripts/run-blackbox-tests.sh`) enables this automatically.
+
+For each third-party boundary discovered during the behavior map:
+1. **Run the real request** — send a real HTTP request that triggers the outbound call. Use test credentials, seed DB state, or use validation-passing inputs as needed.
+2. **Clear captures** before each boundary test: `DELETE /api/test/captures`
+3. **Read captures** after the request: `GET /api/test/captures`
+4. **Assert on the captured call** with exact parameter matching:
+   - URL pattern (e.g., `https://verify.twilio.com/v2/Services/{SID}/Verifications`)
+   - HTTP method
+   - Request headers (Content-Type, auth scheme)
+   - Request body params (exact key-value pairs)
+   - Call ordering (when multiple outbound calls are expected)
+
+**Important constraints:**
+- Boundary tests MUST run sequentially (not in the parallel pool) because the capture buffer is shared global state.
+- If the third-party service rate-limits or returns errors, still assert on the captured call params — the parameters sent are the contract, not the response received.
+- If the third-party credentials are not configured (e.g., Twilio not set up), skip the boundary test with a clear log message — do not fail.
+- For fire-and-forget async boundaries (e.g., SMS sent after response), add a short delay (~500ms) before reading captures to allow the async call to complete.
+- Validation failures that short-circuit before any outbound call should also be tested as boundary tests: assert that 0 outbound calls were made.
+
+**DB state seeding:** If a boundary test requires specific DB state (e.g., a user with a phone number, a subscription), seed it using existing API endpoints or the internal API key. Document what state was seeded and why.
+
+### 4. Invariant coverage
 
 Include every relevant invariant below. If one is not relevant, explicitly document why it is not applicable.
 
@@ -98,8 +124,10 @@ Include every relevant invariant below. If one is not relevant, explicitly docum
 - observability invariant: every failing run points at the correct run-scoped logs and manifest
 - time or clock invariant where timestamp behavior matters
 - same-input reproducibility invariant
+- **boundary param invariant**: exact params sent to third-party APIs match the expected contract
+- **call ordering invariant**: when a request triggers multiple outbound calls, they happen in the expected order
 
-### 4. Flake resistance
+### 5. Flake resistance
 
 - Run the new domain-focused suite repeatedly at least 5 times.
 - Fix nondeterminism until stable.
@@ -107,6 +135,7 @@ Include every relevant invariant below. If one is not relevant, explicitly docum
 - Treat this as a real execution default, not a recommendation: when running a single domain, the suite must actually execute with case concurrency `30` by default unless explicitly justified otherwise.
 - Run at least 2 concurrent invocations of the same domain suite and ensure both pass without interference.
 - Ensure it can run concurrently with other suites.
+- Boundary tests that hit real third-party APIs must handle rate-limit and transient error responses gracefully — assert on the captured call params, not on the third-party response status.
 
 ## Naming
 
@@ -121,6 +150,7 @@ Include every relevant invariant below. If one is not relevant, explicitly docum
 - In reports, distinguish:
   - `contract coverage` for schema and protocol assertions
   - `black-box coverage` for the full safety net
+  - `boundary coverage` for third-party call capture assertions
 
 ## Execution loop
 
@@ -134,6 +164,13 @@ Before writing tests, discover the resource topology from the repo:
 - env files and runtime config
 - local sidecars or emulators
 - external boundaries
+
+**For external boundaries, trace every `fetch()` call in the domain source to identify:**
+- The third-party service URL pattern
+- The HTTP method and content type
+- The request body structure (JSON fields, URL-encoded params, etc.)
+- The auth mechanism (Basic, Bearer, API key header)
+- Whether the call is synchronous (awaited before response) or fire-and-forget (async after response)
 
 Produce a resource manifest for the run that includes:
 - allocated ports
@@ -154,16 +191,26 @@ If focused commands are not obvious:
 Create a working matrix that maps:
 - entrypoint -> required scenarios -> test file
 - invariant -> test file
+- **third-party boundary -> captured call assertions -> test file**
 
-Use the matrix to identify gaps before writing code.
+Use the matrix to identify gaps before writing code. Every third-party boundary must have at least one capture test.
 
 ### Step 3: Implement missing tests
 
 Add or update tests to close the gaps. Prefer black-box and boundary-level assertions. If minimal test helpers or fixtures are needed, add them.
 
 If the domain touches third-party boundaries:
-- use record/replay adapters instead of raw mocks where appropriate
-- document any boundary where record/replay is not applicable and explain why
+- **Use the fetch capture harness** (`/api/test/captures` endpoints) to capture and assert on outbound HTTP calls
+- Run real requests that trigger the outbound calls, using test credentials or seeded DB state
+- Assert on exact URL, method, headers, and body params of captured calls
+- Assert on call ordering when multiple outbound calls are expected
+- Handle rate-limit and transient errors gracefully in assertions
+- Document any boundary where capture is not applicable and explain why
+
+If a boundary test requires DB state that doesn't exist:
+- Seed it using existing API endpoints (e.g., create anonymous session, use internal API key)
+- If no existing endpoint can create the needed state, create it via a test-only setup helper
+- Document what state was seeded and why in the test file
 
 ### Step 4: Run and fix
 
@@ -193,6 +240,7 @@ Use realistic perturbations such as:
 - broken state transition
 - auth bypass or auth over-restriction
 - ordering, pagination, or idempotency regression
+- **wrong third-party API params** (e.g., wrong URL path, missing body field, wrong content type)
 
 ### Step 7: Final verification
 
@@ -212,6 +260,7 @@ Do not declare success unless all of these are true:
 - concurrent invocations of the same domain suite pass without interference
 - every discovered public entrypoint is either covered by tests or explicitly listed as residual risk with justification
 - every skipped invariant is justified
+- **every third-party boundary has at least one capture test, or is explicitly listed with justification for why capture is not applicable**
 - negative-control checks proved the new tests fail when behavior is intentionally broken
 - the final restored code is green again
 
@@ -225,8 +274,10 @@ Report:
 - the coverage matrix:
   - entrypoint -> test cases
   - invariant -> test file
+  - **third-party boundary -> capture test (with captured URL, method, and param summary)**
 - exact commands run and the result of each
 - whether fast-forward or an equivalent replay harness was used for each relevant third-party boundary, or why it was not applicable
+- **for each boundary capture test: the exact captured URL pattern, method, content-type, and body param keys that are asserted on**
 - residual risks and unobservable areas
 
 Only say:

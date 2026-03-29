@@ -37,6 +37,7 @@ import dataRouter from './routes/data';
 import benchmarksRouter from './routes/benchmarks';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
+import { installFetchCapture } from './providers/fetchCapture';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
 const SYSTEM_TOOLS = [
@@ -175,6 +176,13 @@ app.use((req, res, next) => {
 
   next();
 });
+
+// Fetch capture for blackbox boundary tests (test-only)
+if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
+  const captureRouter = installFetchCapture();
+  app.use('/api/test/captures', captureRouter);
+  log.info('Fetch capture enabled for blackbox boundary tests');
+}
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {

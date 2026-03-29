@@ -248,10 +248,10 @@ async def _run_all_tests():
     return True
 
 
-def run_all_tests():
-    return asyncio.run(_run_all_tests())
+async def run_all_tests():
+    return await _run_all_tests()
 
 
 if __name__ == "__main__":
-    success = run_all_tests()
+    success = asyncio.run(_run_all_tests())
     sys.exit(0 if success else 1)
