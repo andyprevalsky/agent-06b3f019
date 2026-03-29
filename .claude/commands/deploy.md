@@ -94,6 +94,19 @@ Look across all three endpoints for review feedback from **both** Claude Code Re
 
 Skip menial/style nits from either bot. Focus on correctness, bugs, and security issues.
 
+**Reply to every review comment** before proceeding. For each comment, reply with one of:
+- `[FIXED] <short solution description>` — if you fixed the issue
+- `[IGNORED] <reason>` — if you're skipping it (style nit, not applicable, etc.)
+
+Use `gh api` to post replies:
+```bash
+# Reply to a pull request review comment (inline code comment)
+gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments/<COMMENT_ID>/replies -f body="[IGNORED] style nit"
+
+# Reply to an issue comment (regular PR comment)
+gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<original body>\n\n[IGNORED] style nit"
+```
+
 ## Step 5: Merge
 
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
