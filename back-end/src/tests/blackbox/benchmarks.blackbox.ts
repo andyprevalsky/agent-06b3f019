@@ -1,71 +1,616 @@
 #!/usr/bin/env tsx
+/* eslint-disable no-console */
 /**
  * Black-box tests for /api/benchmarks
- * Usage: npx tsx src/tests/blackbox/benchmarks.blackbox.ts
+ *
+ * Domain surface:
+ *   GET /api/benchmarks — public, no auth, returns cached task definitions from agents/benchmarks/tasks.json
+ *
+ * Boundary capture coverage:
+ *   This domain makes zero outbound third-party HTTP calls. The endpoint reads from an
+ *   in-memory cache populated from a local JSON file at startup. A boundary capture test
+ *   verifies that no outbound calls are triggered by a GET request.
+ *
+ * Invariants covered:
+ *   - auth boundary: endpoint is public, works without any auth headers
+ *   - error-surface: only valid responses are 200 with tasks or 500 with { error: string }
+ *   - idempotency: multiple GETs return identical data (cached at startup)
+ *   - ordering: task order is deterministic across requests
+ *   - concurrency: 10 parallel GETs return consistent results
+ *   - duplication prevention: task names are unique
+ *   - same-input reproducibility: three sequential requests return identical responses
+ *   - boundary param: no outbound calls are made (verified via fetch capture)
+ *   - cleanup: tests create no mutable state; nothing to clean up
+ *   - harness independence: no background jobs involved
+ *   - observability: covered by the runner's manifest and artifact directory
+ *
+ * Invariants not applicable:
+ *   - read-after-write consistency: read-only endpoint, no writes
+ *   - state transition: stateless endpoint
+ *   - atomicity: read-only, no transactions
+ *   - referential integrity: no foreign keys or DB relations
+ *   - event/job cardinality: no events emitted
+ *   - tenant isolation: public endpoint, no user scoping
+ *   - time/clock: no timestamps in response
+ *   - call ordering: no outbound calls to order
+ *
+ * Usage:
+ *   npx tsx src/tests/blackbox/benchmarks.blackbox.ts
+ *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/benchmarks.blackbox.ts
  */
+
 import { config } from 'dotenv';
 import { z } from 'zod';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
+const CASE_CONCURRENCY = Number(
+  process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
+);
 
-// Tasks response could be an array or have error
-const TasksResponse = z.object({ tasks: z.array(z.any()) });
-const ErrorResponse = z.object({ error: z.string() });
+// ==================== RESPONSE SCHEMAS ====================
 
-interface TestResult { name: string; passed: boolean; error?: string; duration: number; }
+const BenchmarkTaskSchema = z.object({
+  name: z.string().min(1),
+  title: z.string().min(1),
+  prompt: z.string().min(1),
+  eval_prompt: z.string().min(1),
+  timeout_seconds: z.number().int().positive(),
+  is_chat_mode: z.boolean(),
+  expected_tools: z.array(z.string()),
+  tags: z.array(z.string().min(1)),
+  price_limit_cents: z.number().int().positive(),
+  requires_browser_agent: z.boolean(),
+  requires_claude_code: z.boolean(),
+  attachment: z.string().nullable(),
+  approval_handling: z.string().nullable(),
+  start_phase: z.string().nullable(),
+});
 
-async function request(url: string, options: RequestInit = {}): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
+const TasksResponseSchema = z.object({
+  tasks: z.array(BenchmarkTaskSchema),
+});
+
+const ErrorResponseSchema = z.object({
+  error: z.string(),
+});
+
+type BenchmarkTask = z.infer<typeof BenchmarkTaskSchema>;
+
+// ==================== TEST INFRASTRUCTURE ====================
+
+interface TestResult {
+  name: string;
+  passed: boolean;
+  error?: string;
+  duration: number;
+}
+
+async function request(
+  url: string,
+  options: RequestInit = {}
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  });
   let data: unknown;
-  if (response.headers.get('content-type')?.includes('application/json')) { data = await response.json(); } else { data = await response.text(); }
+  const contentType = response.headers.get('content-type');
+  if (contentType?.includes('application/json')) {
+    data = await response.json();
+  } else {
+    data = await response.text();
+  }
   return { status: response.status, data, headers: response.headers };
 }
+
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
-  try { await fn(); return { name, passed: true, duration: Date.now() - start }; }
-  catch (error) { return { name, passed: false, error: error instanceof Error ? error.message : String(error), duration: Date.now() - start }; }
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    return {
+      name,
+      passed: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration: Date.now() - start,
+    };
+  }
 }
-function assertStatus(actual: number, expected: number, data: unknown): void { if (actual !== expected) throw new Error(`Expected status ${expected}, got ${actual}: ${JSON.stringify(data)}`); }
 
-// GET / - no auth required
+function assertStatus(actual: number, expected: number, data: unknown): void {
+  if (actual !== expected)
+    throw new Error(
+      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`
+    );
+}
+
+function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
+  const result = schema.safeParse(data);
+  if (!result.success)
+    throw new Error(`${label} schema validation failed: ${result.error.message}`);
+  return result.data;
+}
+
+// ==================== KNOWN TASK NAMES ====================
+// Canonical task names from agents/benchmarks/tasks.json — used to detect regressions
+// in task availability without depending on exact count.
+const KNOWN_TASK_NAMES = [
+  'chat-mode',
+  'spawn-sub-agents',
+  'parallel-tool-calls',
+  'message-person',
+  'browser-agent',
+  'claude-code-agent',
+  'image-handling',
+  'files-in-sub-agents',
+  'agent-for-each',
+  'family-office-angel-outreach',
+  'build-boxing-payment',
+  'job-applications',
+];
+
+const KNOWN_TAGS = [
+  'basic',
+  'chat',
+  'smoke',
+  'approval',
+  'browser',
+  'claude-code',
+  'attachment',
+  'for-each',
+  'outreach',
+  'job-applications',
+];
+
+// ==================== GET /api/benchmarks — CONTRACT TESTS ====================
+
 async function testList_happy() {
   const res = await request(`${BASE_URL}/api/benchmarks`);
-  // Could be 200 with tasks or 500 if tasks.json not found in dev
   if (res.status === 200) {
-    const body = TasksResponse.safeParse(res.data);
-    if (!body.success) throw new Error(`Schema validation failed: ${body.error.message}`);
+    assertSchema(TasksResponseSchema, res.data, 'GET /api/benchmarks');
   } else if (res.status === 500) {
-    // tasks.json may not exist in dev — acceptable
-    const body = ErrorResponse.safeParse(res.data);
-    if (!body.success) throw new Error(`Error schema validation failed: ${body.error.message}`);
+    // tasks.json may not exist in dev — acceptable degraded response
+    assertSchema(ErrorResponseSchema, res.data, 'GET /api/benchmarks (error)');
   } else {
-    throw new Error(`Unexpected status ${res.status}: ${JSON.stringify(res.data)}`);
+    throw new Error(
+      `Unexpected status ${res.status}: ${JSON.stringify(res.data).substring(0, 300)}`
+    );
   }
+}
+
+async function testList_returnsNonEmptyTasks() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return; // skip if tasks unavailable in dev
+  const body = assertSchema(TasksResponseSchema, res.data, 'GET /api/benchmarks');
+  if (body.tasks.length === 0) throw new Error('Expected at least 1 task, got 0');
+}
+
+async function testList_taskCountMatchesKnown() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  if (body.tasks.length < KNOWN_TASK_NAMES.length) {
+    throw new Error(`Expected at least ${KNOWN_TASK_NAMES.length} tasks, got ${body.tasks.length}`);
+  }
+}
+
+async function testList_allKnownTasksPresent() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  const returnedNames = new Set(body.tasks.map((t) => t.name));
+  const missing = KNOWN_TASK_NAMES.filter((n) => !returnedNames.has(n));
+  if (missing.length > 0) throw new Error(`Missing known tasks: ${missing.join(', ')}`);
+}
+
+async function testList_taskNamesUnique() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  const seen = new Set<string>();
+  for (const task of body.tasks) {
+    if (seen.has(task.name)) throw new Error(`Duplicate task name: ${task.name}`);
+    seen.add(task.name);
+  }
+}
+
+async function testList_taskItemShape() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: unknown[] };
+  // Validate each task individually for better error messages
+  for (let i = 0; i < body.tasks.length; i++) {
+    const result = BenchmarkTaskSchema.safeParse(body.tasks[i]);
+    if (!result.success) {
+      const name = (body.tasks[i] as { name?: string })?.name ?? `index ${i}`;
+      throw new Error(`Task "${name}" schema validation failed: ${result.error.message}`);
+    }
+  }
+}
+
+async function testList_tagsAreKnown() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  const knownSet = new Set(KNOWN_TAGS);
+  for (const task of body.tasks) {
+    for (const tag of task.tags) {
+      if (!knownSet.has(tag)) {
+        throw new Error(
+          `Task "${task.name}" has unknown tag "${tag}". Known: ${KNOWN_TAGS.join(', ')}`
+        );
+      }
+    }
+  }
+}
+
+async function testList_everyTaskHasAtLeastOneTag() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (task.tags.length === 0) throw new Error(`Task "${task.name}" has no tags`);
+  }
+}
+
+async function testList_contentTypeHeader() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  const ct = res.headers.get('content-type');
+  if (!ct || !ct.includes('application/json')) {
+    throw new Error(`Expected Content-Type application/json, got: ${ct}`);
+  }
+}
+
+// ==================== AUTH BOUNDARY INVARIANT ====================
+
+async function testList_noAuthRequired() {
+  // Request with zero auth headers — should still succeed
+  const response = await fetch(`${BASE_URL}/api/benchmarks`);
+  if (response.status !== 200 && response.status !== 500) {
+    throw new Error(`Expected 200 or 500 without auth, got ${response.status}`);
+  }
+}
+
+// ==================== ERROR SURFACE INVARIANT ====================
+
+async function testList_postMethodNotAllowed() {
+  const res = await request(`${BASE_URL}/api/benchmarks`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  // Express returns 404 for unmatched method on this route (no POST handler)
+  if (res.status === 200) throw new Error('POST should not return 200');
+}
+
+async function testList_putMethodNotAllowed() {
+  const res = await request(`${BASE_URL}/api/benchmarks`, {
+    method: 'PUT',
+    body: JSON.stringify({}),
+  });
+  if (res.status === 200) throw new Error('PUT should not return 200');
+}
+
+async function testList_deleteMethodNotAllowed() {
+  const res = await request(`${BASE_URL}/api/benchmarks`, { method: 'DELETE' });
+  if (res.status === 200) throw new Error('DELETE should not return 200');
+}
+
+async function testList_patchMethodNotAllowed() {
+  const res = await request(`${BASE_URL}/api/benchmarks`, {
+    method: 'PATCH',
+    body: JSON.stringify({}),
+  });
+  if (res.status === 200) throw new Error('PATCH should not return 200');
+}
+
+// ==================== IDEMPOTENCY / CACHE INVARIANT ====================
+
+async function testList_idempotentSameResponse() {
+  const res1 = await request(`${BASE_URL}/api/benchmarks`);
+  const res2 = await request(`${BASE_URL}/api/benchmarks`);
+  if (res1.status !== res2.status) {
+    throw new Error(`Status mismatch: first=${res1.status}, second=${res2.status}`);
+  }
+  if (res1.status === 200) {
+    const a = JSON.stringify(res1.data);
+    const b = JSON.stringify(res2.data);
+    if (a !== b)
+      throw new Error('Idempotency violation: two identical GETs returned different data');
+  }
+}
+
+// ==================== ORDERING INVARIANT ====================
+
+async function testList_taskOrderDeterministic() {
+  const res1 = await request(`${BASE_URL}/api/benchmarks`);
+  const res2 = await request(`${BASE_URL}/api/benchmarks`);
+  if (res1.status !== 200 || res2.status !== 200) return;
+  const names1 = (res1.data as { tasks: BenchmarkTask[] }).tasks.map((t) => t.name);
+  const names2 = (res2.data as { tasks: BenchmarkTask[] }).tasks.map((t) => t.name);
+  if (JSON.stringify(names1) !== JSON.stringify(names2)) {
+    throw new Error('Task ordering is not deterministic between consecutive GETs');
+  }
+}
+
+// ==================== CONCURRENCY INVARIANT ====================
+
+async function testList_concurrentRequestsConsistent() {
+  const requests = Array.from({ length: 10 }, () => request(`${BASE_URL}/api/benchmarks`));
+  const results = await Promise.all(requests);
+
+  const statuses = new Set(results.map((r) => r.status));
+  if (statuses.size > 1) {
+    throw new Error(`Concurrent requests returned mixed statuses: ${[...statuses].join(', ')}`);
+  }
+
+  if (results[0].status === 200) {
+    const baseline = JSON.stringify(results[0].data);
+    for (let i = 1; i < results.length; i++) {
+      if (JSON.stringify(results[i].data) !== baseline) {
+        throw new Error(`Concurrent request ${i} returned different data than request 0`);
+      }
+    }
+  }
+}
+
+// ==================== SAME-INPUT REPRODUCIBILITY INVARIANT ====================
+
+async function testList_reproducibleAcrossThreeRuns() {
+  const snapshots: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const res = await request(`${BASE_URL}/api/benchmarks`);
+    snapshots.push(JSON.stringify({ status: res.status, data: res.data }));
+  }
+  if (new Set(snapshots).size !== 1) {
+    throw new Error('Three sequential GETs did not return identical responses');
+  }
+}
+
+// ==================== TASK DATA INVARIANTS ====================
+
+async function testList_timeoutsArePositive() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (task.timeout_seconds <= 0)
+      throw new Error(`Task "${task.name}" has non-positive timeout: ${task.timeout_seconds}`);
+  }
+}
+
+async function testList_priceLimitsArePositive() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (task.price_limit_cents <= 0)
+      throw new Error(
+        `Task "${task.name}" has non-positive price limit: ${task.price_limit_cents}`
+      );
+  }
+}
+
+async function testList_chatModeTasksHaveNoStartPhase() {
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (task.is_chat_mode && task.start_phase !== null) {
+      throw new Error(
+        `Chat-mode task "${task.name}" should have null start_phase, got "${task.start_phase}"`
+      );
+    }
+  }
+}
+
+async function testList_approvalHandlingValues() {
+  const validValues = new Set([null, 'auto_approve', 'prompt_user', 'ignore']);
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (!validValues.has(task.approval_handling)) {
+      throw new Error(
+        `Task "${task.name}" has invalid approval_handling: "${task.approval_handling}"`
+      );
+    }
+  }
+}
+
+async function testList_startPhaseValues() {
+  const validValues = new Set([null, 'plan', 'execute']);
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status !== 200) return;
+  const body = res.data as { tasks: BenchmarkTask[] };
+  for (const task of body.tasks) {
+    if (!validValues.has(task.start_phase)) {
+      throw new Error(`Task "${task.name}" has invalid start_phase: "${task.start_phase}"`);
+    }
+  }
+}
+
+// ==================== BOUNDARY CAPTURE — NO OUTBOUND CALLS ====================
+
+async function testBoundary_noOutboundCalls() {
+  // Clear captures, hit the endpoint, then verify zero outbound calls were made.
+  // The capture endpoint may not exist if BLACKBOX_TEST_CAPTURE_OUTBOUND is not set —
+  // skip gracefully in that case.
+  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
+  if (clearRes.status === 404) return; // capture harness not active, skip
+
+  await request(`${BASE_URL}/api/benchmarks`);
+
+  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(capturesRes.status, 200, capturesRes.data);
+  const body = capturesRes.data as { captures: unknown[] };
+  if (body.captures.length > 0) {
+    throw new Error(
+      `Expected 0 outbound calls, got ${body.captures.length}: ${JSON.stringify(body.captures).substring(0, 500)}`
+    );
+  }
+}
+
+// ==================== 500 ERROR SHAPE INVARIANT ====================
+
+async function testError_schemaOnFailure() {
+  // We can't force a 500 from the outside (tasks are cached at startup),
+  // but we verify that IF the endpoint returns 500, the body matches ErrorResponseSchema.
+  const res = await request(`${BASE_URL}/api/benchmarks`);
+  if (res.status === 500) {
+    assertSchema(ErrorResponseSchema, res.data, 'GET /api/benchmarks (500)');
+  }
+  // If 200, this test is a no-op — the error path can only be triggered by startup failure.
+}
+
+// ==================== RUNNER ====================
+
+interface TestGroup {
+  name: string;
+  tests: { name: string; fn: () => Promise<void> }[];
 }
 
 async function runAll() {
-  console.log('🧪 Benchmarks Contract Tests\n');
-  console.log(`📡 Testing against: ${BASE_URL}\n`);
+  console.log('Benchmarks Black-Box Tests\n');
+  console.log(`Testing against: ${BASE_URL}`);
+  console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
-  const groups = [
-    { name: 'GET / (list tasks)', tests: [{ name: 'returns tasks or 500', fn: testList_happy }] },
+  // Parallel groups — safe for concurrent execution
+  const parallelGroups: TestGroup[] = [
+    {
+      name: 'GET /api/benchmarks — contract',
+      tests: [
+        { name: 'happy path (200 or 500)', fn: testList_happy },
+        { name: 'returns non-empty tasks', fn: testList_returnsNonEmptyTasks },
+        { name: 'task count >= known count', fn: testList_taskCountMatchesKnown },
+        { name: 'all known tasks present', fn: testList_allKnownTasksPresent },
+        { name: 'task names unique', fn: testList_taskNamesUnique },
+        { name: 'task item schema', fn: testList_taskItemShape },
+        { name: 'tags are known values', fn: testList_tagsAreKnown },
+        { name: 'every task has >= 1 tag', fn: testList_everyTaskHasAtLeastOneTag },
+        { name: 'Content-Type: application/json', fn: testList_contentTypeHeader },
+      ],
+    },
+    {
+      name: 'Auth boundary',
+      tests: [{ name: 'no auth required', fn: testList_noAuthRequired }],
+    },
+    {
+      name: 'Error surface',
+      tests: [
+        { name: 'POST not allowed', fn: testList_postMethodNotAllowed },
+        { name: 'PUT not allowed', fn: testList_putMethodNotAllowed },
+        { name: 'DELETE not allowed', fn: testList_deleteMethodNotAllowed },
+        { name: 'PATCH not allowed', fn: testList_patchMethodNotAllowed },
+        { name: '500 error shape (if applicable)', fn: testError_schemaOnFailure },
+      ],
+    },
+    {
+      name: 'Idempotency / cache',
+      tests: [
+        { name: 'idempotent same response', fn: testList_idempotentSameResponse },
+        { name: 'task order deterministic', fn: testList_taskOrderDeterministic },
+      ],
+    },
+    {
+      name: 'Concurrency',
+      tests: [{ name: '10 concurrent GETs consistent', fn: testList_concurrentRequestsConsistent }],
+    },
+    {
+      name: 'Reproducibility',
+      tests: [
+        { name: 'three sequential runs identical', fn: testList_reproducibleAcrossThreeRuns },
+      ],
+    },
+    {
+      name: 'Task data invariants',
+      tests: [
+        { name: 'timeouts positive', fn: testList_timeoutsArePositive },
+        { name: 'price limits positive', fn: testList_priceLimitsArePositive },
+        {
+          name: 'chat-mode tasks have null start_phase',
+          fn: testList_chatModeTasksHaveNoStartPhase,
+        },
+        { name: 'approval_handling values valid', fn: testList_approvalHandlingValues },
+        { name: 'start_phase values valid', fn: testList_startPhaseValues },
+      ],
+    },
   ];
 
-  const allResults: TestResult[] = [];
-  for (const group of groups) {
-    console.log(`\n📋 ${group.name}`);
+  // Sequential groups — boundary capture tests use shared global state
+  const sequentialGroups: TestGroup[] = [
+    {
+      name: 'Boundary capture',
+      tests: [{ name: 'zero outbound calls on GET', fn: testBoundary_noOutboundCalls }],
+    },
+  ];
+
+  const allGroups = [...parallelGroups, ...sequentialGroups];
+
+  // Flatten parallel tests for concurrent execution
+  const parallelTests: { groupName: string; name: string; fn: () => Promise<void> }[] = [];
+  for (const group of parallelGroups) {
     for (const test of group.tests) {
-      const result = await runTest(`${group.name} — ${test.name}`, test.fn);
-      allResults.push(result);
-      console.log(`  ${result.passed ? '✅' : '❌'} ${test.name}${result.passed ? '' : ` — ${result.error}`} (${result.duration}ms)`);
+      parallelTests.push({ groupName: group.name, name: test.name, fn: test.fn });
     }
   }
-  const passed = allResults.filter(r => r.passed).length;
-  const failed = allResults.filter(r => !r.passed).length;
+
+  // Run parallel tests concurrently with case concurrency limit
+  const allResults: (TestResult & { groupName: string })[] = [];
+  let nextIdx = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= parallelTests.length) return;
+      const t = parallelTests[idx];
+      const result = await runTest(`${t.groupName} -- ${t.name}`, t.fn);
+      allResults[idx] = { ...result, groupName: t.groupName };
+    }
+  }
+
+  const workerCount = Math.min(CASE_CONCURRENCY, parallelTests.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  // Run sequential boundary tests one at a time
+  for (const group of sequentialGroups) {
+    for (const test of group.tests) {
+      const result = await runTest(`${group.name} -- ${test.name}`, test.fn);
+      allResults.push({ ...result, groupName: group.name });
+    }
+  }
+
+  // Print results grouped
+  for (const group of allGroups) {
+    console.log(`\n  ${group.name}`);
+    for (const test of group.tests) {
+      const result = allResults.find(
+        (r) => r.groupName === group.name && r.name.endsWith(test.name)
+      )!;
+      const icon = result.passed ? '  PASS' : '  FAIL';
+      console.log(
+        `${icon}  ${test.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
+      );
+    }
+  }
+
+  const passed = allResults.filter((r) => r.passed).length;
+  const failed = allResults.filter((r) => !r.passed).length;
   console.log('\n' + '='.repeat(50));
-  console.log(`\n📊 Results: ${passed} passed, ${failed} failed, ${allResults.length} total`);
-  if (failed > 0) { console.log('\n❌ FAILURES:'); allResults.filter(r => !r.passed).forEach(r => console.log(`   • ${r.name}: ${r.error}`)); process.exit(1); }
-  console.log('\n✅ ALL CONTRACT TESTS PASSED\n'); process.exit(0);
+  console.log(
+    `\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total (caseConcurrency=${workerCount})`
+  );
+  if (failed > 0) {
+    console.log('\nFAILURES:');
+    allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
+    process.exit(1);
+  }
+  console.log('\nALL BLACK-BOX TESTS PASSED\n');
+  process.exit(0);
 }
-runAll().catch(error => { console.error('\n💥 Crashed:', error); process.exit(1); });
+
+runAll().catch((error) => {
+  console.error('\nBlack-box test suite crashed:', error);
+  process.exit(1);
+});
