@@ -4,7 +4,7 @@ description: "Push current branch, wait for PR review to pass, merge, and wait f
 
 # Deploy
 
-Push the current branch, create a PR, wait for Claude Code Review, merge, and wait for deploys to finish.
+Push the current branch, create a PR, wait for CodeRabbit review, merge, and wait for deploys to finish.
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
@@ -70,29 +70,27 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 3: Wait for code reviews
 
-Poll every 30 seconds until **both** the "Claude Code Review" and "CodeRabbit" checks complete. **No timeout — keep waiting.**
+**Use a background sub-agent** to poll for the CodeRabbit check — do NOT poll in the main context. Launch an Agent with `run_in_background: true` that:
+1. Polls `gh pr checks <PR_NUMBER> --json name,state` every 30 seconds until the "CodeRabbit" check reaches `SUCCESS` state. **No timeout — keep waiting.**
+2. Once CodeRabbit completes, reads reviews from ALL three comment locations:
+   ```bash
+   gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
+   gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
+   gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
+   ```
+3. Returns the full review content back to the main context.
 
-```bash
-gh pr checks <PR_NUMBER> --json name,state,conclusion
-```
-
-Once completed, read reviews from ALL three comment locations (bots may use any of them):
-
-```bash
-gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
-gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
-```
+While the sub-agent polls, you are free to do other work. When notified of completion, continue to Step 4.
 
 ## Step 4: Handle review results
 
-Look across all three endpoints for review feedback from **both** Claude Code Review and CodeRabbit. Both bots may post findings as formal reviews or regular comments.
+Look across all three endpoints for review feedback from CodeRabbit. It may post findings as formal reviews or regular comments.
 
-- **Both APPROVED** with no critical issues → proceed to Step 5.
-- **CHANGES_REQUESTED** or any comment flagging **critical** issues (from either bot) → fix them, push, go back to Step 3.
+- **APPROVED** with no critical issues → proceed to Step 5.
+- **CHANGES_REQUESTED** or any comment flagging **critical** issues → fix them, push, go back to Step 3.
 - **No critical issues found** → proceed to Step 5.
 
-Skip menial/style nits from either bot. Focus on correctness, bugs, and security issues.
+Skip menial/style nits. Focus on correctness, bugs, and security issues.
 
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 - `[FIXED] <short solution description>` — if you fixed the issue

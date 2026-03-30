@@ -109,7 +109,7 @@ export function installFetchCapture(): Router {
   const cachedClient = ff(rawClient, { cache: fsCache, key: keyTransformer });
 
   globalThis.fetch = async (
-    input: RequestInfo | URL,
+    input: string | URL | globalThis.Request,
     init?: RequestInit
   ): Promise<globalThis.Response> => {
     const url =
@@ -154,7 +154,7 @@ export function installFetchCapture(): Router {
           fullHeaders[k] = v;
         }
       } else {
-        for (const [k, v] of Object.entries(rawHeaders)) {
+        for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
           fullHeaders[k] = v;
         }
       }

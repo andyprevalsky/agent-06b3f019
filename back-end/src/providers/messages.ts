@@ -3,6 +3,7 @@
  * Both worker (via API) and chat handler use the same path for message creation.
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 
 export interface CreateMessageParams {
@@ -27,7 +28,7 @@ export async function createMessage(params: CreateMessageParams) {
       agentId: params.agentId,
       text: params.text,
       role: params.role,
-      metadata: params.metadata || undefined,
+      metadata: (params.metadata as Prisma.InputJsonValue) || undefined,
       filePointer: params.filePointer || undefined,
       timestamp: new Date(),
     },
