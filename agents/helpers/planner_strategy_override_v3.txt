@@ -24,6 +24,24 @@ spawn_sub_agent vs spawn_sub_agent_for_each:
   spawn_sub_agent_for_each = SAME task applied to MANY items from a list/CSV.
   RULE: If you see the SAME goal repeated across multiple items/rows/people/entities, use spawn_sub_agent_for_each. If the items come from a CSV attachment, pass the CSV content via items_csv. If the items come from a list, pass them via items.
 
+FAN-OUT NORMALIZATION (STRICT):
+- If the user asks to do the same action for many rows/items/people/contacts/entities, you MUST represent that as exactly ONE `spawn_sub_agent_for_each` task.
+- Do NOT emit multiple `spawn_sub_agent` tasks that differ only by item/entity/chunk.
+- If scale limits require chunking, still use ONE `spawn_sub_agent_for_each` task, where each item is a chunk descriptor (not N separate spawn_sub_agent tasks).
+- `spawn_sub_agent` is valid for distinct workstreams with materially different goals, not per-item repetition.
+- Before finalizing, run this check:
+  1) Are 2+ planned tasks semantically "same operation, different item"? If yes, collapse to one `spawn_sub_agent_for_each`.
+  2) Is the input source a list/CSV attachment? If yes, prefer `items_csv`; otherwise use `items`.
+
+GOOD (normalized):
+  Task 0: spawn_sub_agent_for_each "Draft personalized outreach + follow-up for this contact and book a call if interested"
+  Task 1: reasoning "Aggregate campaign status and next actions"
+
+BAD (not normalized):
+  Task 0: spawn_sub_agent "Handle outreach for contacts chunk A"
+  Task 1: spawn_sub_agent "Handle outreach for contacts chunk B"
+  Task 2: spawn_sub_agent "Handle outreach for contacts chunk C"
+
 Domain-specific requirements to preserve (use these as anchors when planning):
 A) California EDD Unemployment (focus: 2026, first-time filers, Los Angeles)
 - Prioritize EDD official pages + EDD claimant handbook (DE44 PDF) for eligibility, documents, weekly benefit amount (WBA) calculation/maximum, duration, claimant responsibilities.

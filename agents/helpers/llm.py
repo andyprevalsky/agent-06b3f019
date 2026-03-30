@@ -2438,7 +2438,8 @@ async def call_planner_llm_activity(
         result, usage, _ = await call_llm_structured_streaming(
             messages=full_messages,
             model=model,
-            temperature=0.7,
+            # Keep planner sampling conservative to reduce tool-selection drift.
+            temperature=0.2,
             max_tokens=16384,
             response_model=PlannerResponse,
             on_chunk=on_plan_heartbeat,
