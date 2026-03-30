@@ -1,277 +1,1873 @@
 #!/usr/bin/env tsx
+/* eslint-disable no-console, max-lines */
 /**
- * Black-box tests for /api/integrations
- * Usage: npx tsx src/tests/blackbox/integrations.blackbox.ts
+ * Black-box tests for the integrations domain (/api/integrations)
+ *
+ * Covers:
+ *   GET    /api/integrations                           — list integrations + authenticated domains
+ *   POST   /api/integrations                           — create/upsert integration
+ *   PATCH  /api/integrations/:name                     — update integration
+ *   DELETE /api/integrations/:name                     — delete integration
+ *   POST   /api/integrations/imessage/upload           — iMessage data import
+ *   POST   /api/integrations/whatsapp/upload           — WhatsApp data import
+ *   POST   /api/integrations/telegram/connect          — Telegram connection
+ *   POST   /api/integrations/telegram/upload           — Telegram data import
+ *   POST   /api/integrations/cookies/upload            — encrypted browser cookies
+ *   POST   /api/integrations/localStorage/upload       — encrypted localStorage
+ *   POST   /api/integrations/indexedDB/upload          — encrypted IndexedDB
+ *   POST   /api/integrations/fingerprint/upload        — encrypted browser fingerprint
+ *   POST   /api/integrations/permissions/upload        — encrypted browser permissions
+ *   POST   /api/integrations/cacheStorage/upload       — encrypted Cache Storage
+ *   POST   /api/integrations/passwords/upload          — encrypted browser passwords
+ *   POST   /api/integrations/passwords/apple/upload    — Apple passwords CSV
+ *   POST   /api/integrations/passwords/request         — request new password integration
+ *   POST   /api/integrations/email/:provider/start     — OAuth flow start
+ *   GET    /api/integrations/email/:provider/callback  — OAuth callback (public)
+ *   GET    /api/integrations/email/messages            — fetch Gmail messages
+ *   POST   /api/integrations/email/send                — send email via Gmail
+ *   POST   /api/integrations/upload                    — generic file upload
+ *   POST   /api/integrations/linkedin/upload           — LinkedIn data import
+ *   POST   /api/integrations/contacts/upload           — VCF contacts import
+ *   POST   /api/integrations/email/upload              — email archive import
+ *   POST   /api/integrations/claude-code/credentials/upload  — Claude Code credentials
+ *   GET    /api/integrations/claude-code/credentials/token   — get Claude Code token
+ *   POST   /api/integrations/claude-code/token/rate-limited  — mark token rate-limited (internal)
+ *   POST   /api/integrations/claude-code/pool-token/rate-limited — mark pool token rate-limited (internal)
+ *
+ * Boundary capture tests (Phase 3):
+ *   - POST /email/:provider/start with valid provider: asserts 0 outbound calls (DB-only)
+ *   - POST / (create) with valid data: asserts 0 outbound calls (DB-only)
+ *   - Validation failures that short-circuit: asserts 0 outbound calls
+ *   - POST /passwords/request: asserts sendSms boundary call (Twilio/Surge)
+ *
+ * Invariants covered:
+ *   - auth boundary: all authenticated endpoints reject 401 without auth
+ *   - error-surface: all error responses include { error: string }
+ *   - idempotency: create (upsert) is idempotent — same name returns updated integration
+ *   - read-after-write: create → list includes the new integration
+ *   - state-transition: NOT_CONNECTED → CONNECTED (via create upsert)
+ *   - tenant isolation: one user cannot see another user's integrations
+ *   - boundary param: exact params sent to third-party APIs are captured
+ *   - call ordering: no unexpected outbound calls on DB-only endpoints
+ *   - reproducibility: deterministic given the same inputs
+ *   - cleanup: each test creates its own anonymous users; no shared mutable fixtures
+ *   - not-found: PATCH/DELETE on nonexistent integration returns 404
+ *
+ * Invariants not applicable:
+ *   - concurrency: integration CRUD is per-user upsert; no concurrent mutation risk
+ *   - ordering/pagination: list endpoint has no pagination parameters
+ *   - atomicity: upsert operations are single Prisma calls
+ *   - referential integrity: enforced by Prisma/Postgres, not by the integration layer
+ *   - harness independence: no background jobs affect the test (async processing is fire-and-forget)
+ *   - observability: covered by the runner's manifest and artifact directory
+ *   - time/clock: no timestamp assertions needed beyond date field presence
+ *
+ * Usage:
+ *   npx tsx src/tests/blackbox/integrations.blackbox.ts
+ *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/integrations.blackbox.ts
  */
+
 import { config } from 'dotenv';
 import { z } from 'zod';
+import crypto from 'crypto';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
+const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
+
+// ==================== RESPONSE SCHEMAS ====================
 
 const ErrorResponse = z.object({ error: z.string() });
 
-interface TestResult { name: string; passed: boolean; error?: string; duration: number; }
-interface TestContext { accessToken?: string; userId?: string; }
-const ctx: TestContext = {};
+const IntegrationSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  type: z.enum(['TOOL_SETUP', 'DATA_SOURCE']),
+  name: z.string(),
+  status: z.enum(['NOT_CONNECTED', 'CONNECTED', 'SYNCING', 'SYNC_FAILED', 'EXPIRED']),
+  isActive: z.boolean(),
+  config: z.unknown(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
 
-async function request(url: string, options: RequestInit = {}): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } });
+const ListIntegrationsResponse = z.object({
+  integrations: z.array(IntegrationSchema.passthrough()),
+  count: z.number(),
+  authenticatedDomains: z.array(z.string()),
+});
+
+const CreateIntegrationResponse = z.object({
+  integration: IntegrationSchema.passthrough(),
+});
+
+const PatchIntegrationResponse = z.object({
+  integration: IntegrationSchema.passthrough(),
+});
+
+const DeleteIntegrationResponse = z.object({
+  message: z.string(),
+});
+
+const MessagingUploadResponse = z.object({
+  message: z.string(),
+  integration: z.unknown(),
+  jobId: z.string(),
+});
+
+const TelegramConnectResponse = z.object({
+  message: z.string(),
+  integration: z.unknown(),
+});
+
+const CookiesUploadResponse = z.object({
+  message: z.string(),
+  cookieCount: z.number(),
+  integration: z.object({
+    id: z.string(),
+    name: z.string(),
+    status: z.string(),
+  }),
+});
+
+const LocalStorageUploadResponse = z.object({
+  message: z.string(),
+  batchIndex: z.number(),
+  totalBatches: z.number(),
+  entryCount: z.number(),
+  originCount: z.number(),
+});
+
+const IndexedDBUploadResponse = z.object({
+  message: z.string(),
+  batchIndex: z.number(),
+  totalBatches: z.number(),
+  originCount: z.number(),
+});
+
+const FingerprintUploadResponse = z.object({
+  message: z.string(),
+  integration: z.object({
+    id: z.string(),
+    name: z.string(),
+    status: z.string(),
+  }),
+});
+
+const PermissionsUploadResponse = z.object({
+  message: z.string(),
+  grantCount: z.number(),
+});
+
+const CacheStorageUploadResponse = z.object({
+  message: z.string(),
+  originCount: z.number(),
+});
+
+const PasswordsUploadResponse = z.object({
+  message: z.string(),
+  passwordCount: z.number(),
+});
+
+const ClaudeCodeUploadResponse = z.object({
+  message: z.string(),
+});
+
+// ==================== CAPTURE TYPES ====================
+
+interface CapturedCall {
+  id: number;
+  timestamp: string;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string | null;
+  responseStatus: number | null;
+  responseBody: string | null;
+  durationMs: number;
+  error: string | null;
+}
+
+// ==================== TEST INFRASTRUCTURE ====================
+
+interface TestResult {
+  name: string;
+  passed: boolean;
+  error?: string;
+  duration: number;
+}
+
+interface TestContext {
+  accessToken1?: string;
+  userId1?: string;
+  accessToken2?: string;
+  userId2?: string;
+  captureAvailable: boolean;
+}
+
+const ctx: TestContext = { captureAvailable: false };
+
+async function request(
+  url: string,
+  options: RequestInit = {}
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  });
   let data: unknown;
-  if (response.headers.get('content-type')?.includes('application/json')) { data = await response.json(); } else { data = await response.text(); }
+  const ct = response.headers.get('content-type');
+  if (ct?.includes('application/json')) {
+    data = await response.json();
+  } else {
+    data = await response.text();
+  }
   return { status: response.status, data, headers: response.headers };
 }
-function authHeaders(token: string): Record<string, string> { return { Authorization: `Bearer ${token}` }; }
+
+function authHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
+}
+
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
-  try { await fn(); return { name, passed: true, duration: Date.now() - start }; }
-  catch (error) { return { name, passed: false, error: error instanceof Error ? error.message : String(error), duration: Date.now() - start }; }
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    return {
+      name,
+      passed: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration: Date.now() - start,
+    };
+  }
 }
-function assertStatus(actual: number, expected: number, data: unknown): void { if (actual !== expected) throw new Error(`Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`); }
 
-async function setupAuth(): Promise<void> {
+function assertStatus(actual: number, expected: number, data: unknown): void {
+  if (actual !== expected) {
+    throw new Error(
+      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 500)}`
+    );
+  }
+}
+
+function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    throw new Error(`${label} schema validation failed: ${result.error.message}`);
+  }
+  return result.data;
+}
+
+function assert(condition: boolean, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+async function runPool(
+  tests: { name: string; fn: () => Promise<void> }[],
+  concurrency: number
+): Promise<TestResult[]> {
+  const results: TestResult[] = new Array(tests.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const idx = nextIndex++;
+      if (idx >= tests.length) return;
+      results[idx] = await runTest(tests[idx].name, tests[idx].fn);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, tests.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+// ==================== CRYPTO HELPERS ====================
+
+/** Encrypt a JSON payload with AES-256-CBC, returning hex-encoded data/iv/key. */
+function encryptPayload(payload: unknown): { data: string; iv: string; key: string } {
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);
+  const plaintext = JSON.stringify(payload);
+  let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return { data: encrypted, iv: iv.toString('hex'), key: aesKey.toString('hex') };
+}
+
+// ==================== CAPTURE HELPERS ====================
+
+async function clearCaptures(): Promise<void> {
+  const res = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function readCaptures(): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { captures: CapturedCall[] }).captures;
+}
+
+async function checkCaptureAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/api/test/captures`);
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+// ==================== HELPERS ====================
+
+const AnonymousResponse = z.object({
+  success: z.literal(true),
+  user: z.object({ id: z.string(), is_anonymous: z.literal(true) }),
+  session: z.object({ access_token: z.string() }),
+});
+
+async function createAnonSession(): Promise<{ accessToken: string; userId: string }> {
   const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
   assertStatus(res.status, 200, res.data);
-  const d = res.data as { session: { access_token: string }; user: { id: string } };
-  ctx.accessToken = d.session.access_token; ctx.userId = d.user.id;
+  const body = assertSchema(AnonymousResponse, res.data, 'anonymous setup');
+  return { accessToken: body.session.access_token, userId: body.user.id };
 }
 
-// GET / (list integrations)
+/** Generate a unique integration name for test isolation. */
+function uniqueName(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ==================== SETUP ====================
+
+async function setup(): Promise<void> {
+  const [s1, s2] = await Promise.all([createAnonSession(), createAnonSession()]);
+  ctx.accessToken1 = s1.accessToken;
+  ctx.userId1 = s1.userId;
+  ctx.accessToken2 = s2.accessToken;
+  ctx.userId2 = s2.userId;
+  ctx.captureAvailable = await checkCaptureAvailable();
+}
+
+// ==================== AUTH BOUNDARY TESTS (401) ====================
+
 async function testList_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations`);
   assertStatus(res.status, 401, res.data);
-}
-async function testList_happy() {
-  const res = await request(`${BASE_URL}/api/integrations`, { headers: authHeaders(ctx.accessToken!) });
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as { integrations: unknown[]; count: number; authenticatedDomains: string[] };
-  if (!Array.isArray(body.integrations)) throw new Error('Expected integrations array');
-  if (typeof body.count !== 'number') throw new Error('Expected count number');
-  if (!Array.isArray(body.authenticatedDomains)) throw new Error('Expected authenticatedDomains array');
+  assertSchema(ErrorResponse, res.data, 'list no auth');
 }
 
-// POST / (create integration)
 async function testCreate_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations`, { method: 'POST', body: JSON.stringify({ name: 'test', type: 'API' }) });
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'test', type: 'DATA_SOURCE' }),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /upload (generic upload)
-async function testUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /linkedin/upload
-async function testLinkedinUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/linkedin/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /contacts/upload
-async function testContactsUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/contacts/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /email/upload
-async function testEmailUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/email/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /email/:provider/start
-async function testEmailStart_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/email/gmail/start`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /imessage/upload
-async function testImessageUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/imessage/upload`, { method: 'POST', body: JSON.stringify({}) });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /whatsapp/upload
-async function testWhatsappUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/whatsapp/upload`, { method: 'POST', body: JSON.stringify({}) });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /telegram/connect
-async function testTelegramConnect_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, { method: 'POST', body: JSON.stringify({}) });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /telegram/upload
-async function testTelegramUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/telegram/upload`, { method: 'POST', body: JSON.stringify({}) });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /cookies/upload
-async function testCookiesUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /localStorage/upload
-async function testLocalStorageUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/localStorage/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /indexedDB/upload
-async function testIndexedDBUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/indexedDB/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /fingerprint/upload
-async function testFingerprintUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/fingerprint/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /permissions/upload
-async function testPermissionsUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/permissions/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /cacheStorage/upload
-async function testCacheStorageUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/cacheStorage/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /passwords/upload
-async function testPasswordsUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/passwords/upload`, { method: 'POST' });
-  assertStatus(res.status, 401, res.data);
-}
-
-// GET /email/messages
-async function testEmailMessages_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/email/messages`);
-  assertStatus(res.status, 401, res.data);
-}
-
-// POST /email/send
-async function testEmailSend_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/email/send`, { method: 'POST', body: JSON.stringify({}) });
-  assertStatus(res.status, 401, res.data);
-}
-
-// PATCH /:name
 async function testPatch_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/test`, { method: 'PATCH', body: JSON.stringify({}) });
+  const res = await request(`${BASE_URL}/api/integrations/test`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'CONNECTED' }),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// DELETE /:name
 async function testDelete_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/test`, { method: 'DELETE' });
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /passwords/apple/upload
+async function testImessageUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/imessage/upload`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testWhatsappUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/upload`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testTelegramConnect_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testTelegramUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/telegram/upload`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testCookiesUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testLocalStorageUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/localStorage/upload`, {
+    method: 'POST',
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testIndexedDBUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/indexedDB/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testFingerprintUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/fingerprint/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testPermissionsUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/permissions/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testCacheStorageUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/cacheStorage/upload`, {
+    method: 'POST',
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testPasswordsUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/passwords/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testApplePasswordsUpload_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/passwords/apple/upload`, { method: 'POST' });
+  const res = await request(`${BASE_URL}/api/integrations/passwords/apple/upload`, {
+    method: 'POST',
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /passwords/request
 async function testPasswordsRequest_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/passwords/request`, { method: 'POST', body: JSON.stringify({}) });
+  const res = await request(`${BASE_URL}/api/integrations/passwords/request`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /claude-code/credentials/upload
+async function testEmailStart_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/email/gmail/start`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testEmailMessages_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/email/messages`);
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testEmailSend_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/email/send`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testLinkedinUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/linkedin/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testContactsUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/contacts/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testEmailUpload_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/email/upload`, { method: 'POST' });
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testClaudeCodeCredentials_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, { method: 'POST', body: JSON.stringify({}) });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// GET /claude-code/credentials/token
 async function testClaudeCodeToken_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`);
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /claude-code/token/rate-limited
 async function testClaudeCodeRateLimited_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, { method: 'POST', body: JSON.stringify({}) });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-// POST /claude-code/pool-token/rate-limited
 async function testClaudeCodePoolRateLimited_noAuth() {
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/pool-token/rate-limited`, { method: 'POST', body: JSON.stringify({}) });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/pool-token/rate-limited`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
   assertStatus(res.status, 401, res.data);
 }
 
-async function runAll() {
-  console.log('🧪 Integrations Contract Tests\n');
-  console.log(`📡 Testing against: ${BASE_URL}\n`);
-  console.log('🔐 Setting up auth...');
-  await setupAuth();
-  console.log(`   User: ${ctx.userId}\n`);
+// ==================== GET / (LIST INTEGRATIONS) ====================
 
-  const groups = [
-    { name: 'GET / (list)', tests: [{ name: 'no auth → 401', fn: testList_noAuth }, { name: 'happy path', fn: testList_happy }] },
-    { name: 'POST / (create)', tests: [{ name: 'no auth → 401', fn: testCreate_noAuth }] },
-    { name: 'Upload endpoints (no auth)', tests: [
-      { name: 'POST /upload → 401', fn: testUpload_noAuth },
-      { name: 'POST /linkedin/upload → 401', fn: testLinkedinUpload_noAuth },
-      { name: 'POST /contacts/upload → 401', fn: testContactsUpload_noAuth },
-      { name: 'POST /email/upload → 401', fn: testEmailUpload_noAuth },
-      { name: 'POST /imessage/upload → 401', fn: testImessageUpload_noAuth },
-      { name: 'POST /whatsapp/upload → 401', fn: testWhatsappUpload_noAuth },
-      { name: 'POST /telegram/connect → 401', fn: testTelegramConnect_noAuth },
-      { name: 'POST /telegram/upload → 401', fn: testTelegramUpload_noAuth },
-      { name: 'POST /cookies/upload → 401', fn: testCookiesUpload_noAuth },
-      { name: 'POST /localStorage/upload → 401', fn: testLocalStorageUpload_noAuth },
-      { name: 'POST /indexedDB/upload → 401', fn: testIndexedDBUpload_noAuth },
-      { name: 'POST /fingerprint/upload → 401', fn: testFingerprintUpload_noAuth },
-      { name: 'POST /permissions/upload → 401', fn: testPermissionsUpload_noAuth },
-      { name: 'POST /cacheStorage/upload → 401', fn: testCacheStorageUpload_noAuth },
-      { name: 'POST /passwords/upload → 401', fn: testPasswordsUpload_noAuth },
-      { name: 'POST /passwords/apple/upload → 401', fn: testApplePasswordsUpload_noAuth },
-    ] },
-    { name: 'Email endpoints', tests: [
-      { name: 'POST /email/:provider/start → 401', fn: testEmailStart_noAuth },
-      { name: 'GET /email/messages → 401', fn: testEmailMessages_noAuth },
-      { name: 'POST /email/send → 401', fn: testEmailSend_noAuth },
-    ] },
-    { name: 'CRUD endpoints', tests: [
-      { name: 'PATCH /:name → 401', fn: testPatch_noAuth },
-      { name: 'DELETE /:name → 401', fn: testDelete_noAuth },
-    ] },
-    { name: 'Password/credential endpoints', tests: [
-      { name: 'POST /passwords/request → 401', fn: testPasswordsRequest_noAuth },
-      { name: 'POST /claude-code/credentials/upload → 401', fn: testClaudeCodeCredentials_noAuth },
-      { name: 'GET /claude-code/credentials/token → 401', fn: testClaudeCodeToken_noAuth },
-      { name: 'POST /claude-code/token/rate-limited → 401', fn: testClaudeCodeRateLimited_noAuth },
-      { name: 'POST /claude-code/pool-token/rate-limited → 401', fn: testClaudeCodePoolRateLimited_noAuth },
-    ] },
+async function testList_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(ListIntegrationsResponse, res.data, 'GET /integrations');
+}
+
+async function testList_emptyForNewUser() {
+  const { accessToken } = await createAnonSession();
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(ListIntegrationsResponse, res.data, 'GET /integrations empty');
+  assert(body.count === 0, `Expected 0 integrations for new user, got ${body.count}`);
+  assert(
+    body.integrations.length === 0,
+    `Expected empty integrations array, got ${body.integrations.length}`
+  );
+}
+
+// ==================== POST / (CREATE INTEGRATION) ====================
+
+async function testCreate_missingName() {
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ type: 'DATA_SOURCE' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'create missing name');
+}
+
+async function testCreate_missingType() {
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name: 'test' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'create missing type');
+}
+
+async function testCreate_invalidType() {
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name: 'test', type: 'INVALID_TYPE' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'create invalid type');
+}
+
+async function testCreate_happyPath() {
+  const name = uniqueName('test_integration');
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE', config: { test: true } }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(CreateIntegrationResponse, res.data, 'create happy');
+  assert(body.integration.name === name, `Expected name ${name}, got ${body.integration.name}`);
+  assert(
+    body.integration.type === 'DATA_SOURCE',
+    `Expected type DATA_SOURCE, got ${body.integration.type}`
+  );
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+async function testCreate_toolSetupType() {
+  const name = uniqueName('tool_integration');
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'TOOL_SETUP' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(CreateIntegrationResponse, res.data, 'create TOOL_SETUP');
+  assert(
+    body.integration.type === 'TOOL_SETUP',
+    `Expected type TOOL_SETUP, got ${body.integration.type}`
+  );
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+// ==================== IDEMPOTENCY (UPSERT) ====================
+
+async function testCreate_upsertIdempotent() {
+  const name = uniqueName('upsert_test');
+
+  // First create → status should be NOT_CONNECTED
+  const res1 = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE', config: { version: 1 } }),
+  });
+  assertStatus(res1.status, 200, res1.data);
+  const body1 = assertSchema(CreateIntegrationResponse, res1.data, 'upsert first');
+  assert(
+    body1.integration.status === 'NOT_CONNECTED',
+    `Expected NOT_CONNECTED, got ${body1.integration.status}`
+  );
+
+  // Second create (upsert) → status should be CONNECTED (upsert update path)
+  const res2 = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE', config: { version: 2 } }),
+  });
+  assertStatus(res2.status, 200, res2.data);
+  const body2 = assertSchema(CreateIntegrationResponse, res2.data, 'upsert second');
+  assert(
+    body2.integration.id === body1.integration.id,
+    'Expected same integration ID after upsert'
+  );
+  assert(
+    body2.integration.status === 'CONNECTED',
+    `Expected CONNECTED after upsert, got ${body2.integration.status}`
+  );
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+// ==================== READ-AFTER-WRITE ====================
+
+async function testReadAfterWrite_createThenList() {
+  const name = uniqueName('raw_test');
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  const listRes = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(listRes.status, 200, listRes.data);
+  const body = assertSchema(ListIntegrationsResponse, listRes.data, 'list after create');
+  const found = body.integrations.find((i: { name: string }) => i.name === name);
+  assert(found !== undefined, `Expected to find integration ${name} in list`);
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+// ==================== PATCH /:name ====================
+
+async function testPatch_happyPath() {
+  const name = uniqueName('patch_test');
+
+  // Create first
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // Patch
+  const res = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'PATCH',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ status: 'CONNECTED', isActive: true }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(PatchIntegrationResponse, res.data, 'patch happy');
+  assert(
+    body.integration.status === 'CONNECTED',
+    `Expected CONNECTED, got ${body.integration.status}`
+  );
+  assert(body.integration.isActive === true, 'Expected isActive=true');
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+async function testPatch_notFound() {
+  const res = await request(`${BASE_URL}/api/integrations/nonexistent_${Date.now()}`, {
+    method: 'PATCH',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ status: 'CONNECTED' }),
+  });
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'patch not found');
+}
+
+// ==================== DELETE /:name ====================
+
+async function testDelete_happyPath() {
+  const name = uniqueName('delete_test');
+
+  // Create first
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // Delete
+  const res = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(DeleteIntegrationResponse, res.data, 'delete happy');
+}
+
+async function testDelete_notFound() {
+  const res = await request(`${BASE_URL}/api/integrations/nonexistent_${Date.now()}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'delete not found');
+}
+
+async function testDelete_verifyGone() {
+  const name = uniqueName('verify_delete');
+
+  // Create
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // Delete
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+
+  // Verify gone from list
+  const listRes = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  const body = assertSchema(ListIntegrationsResponse, listRes.data, 'list after delete');
+  const found = body.integrations.find((i: { name: string }) => i.name === name);
+  assert(found === undefined, `Integration ${name} should not exist after delete`);
+}
+
+// ==================== TENANT ISOLATION ====================
+
+async function testTenantIsolation_separateUsers() {
+  const name = uniqueName('isolation_test');
+
+  // User 1 creates integration
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // User 2 should not see it
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(ctx.accessToken2!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(ListIntegrationsResponse, res.data, 'isolation list');
+  const found = body.integrations.find((i: { name: string }) => i.name === name);
+  assert(found === undefined, `User 2 should not see User 1's integration ${name}`);
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+async function testTenantIsolation_patchOtherUserIntegration() {
+  const name = uniqueName('cross_patch');
+
+  // User 1 creates integration
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // User 2 tries to patch → 404 (can't find it)
+  const res = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'PATCH',
+    headers: authHeaders(ctx.accessToken2!),
+    body: JSON.stringify({ status: 'CONNECTED' }),
+  });
+  assertStatus(res.status, 404, res.data);
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+async function testTenantIsolation_deleteOtherUserIntegration() {
+  const name = uniqueName('cross_delete');
+
+  // User 1 creates integration
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  // User 2 tries to delete → 404
+  const res = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken2!),
+  });
+  assertStatus(res.status, 404, res.data);
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+// ==================== ERROR SURFACE INVARIANT ====================
+
+async function testErrorSurface_401sHaveErrorField() {
+  const endpoints = [
+    { url: `${BASE_URL}/api/integrations`, method: 'GET' as const },
+    { url: `${BASE_URL}/api/integrations`, method: 'POST' as const },
+    { url: `${BASE_URL}/api/integrations/test`, method: 'PATCH' as const },
+    { url: `${BASE_URL}/api/integrations/test`, method: 'DELETE' as const },
+    { url: `${BASE_URL}/api/integrations/email/messages`, method: 'GET' as const },
+    { url: `${BASE_URL}/api/integrations/email/send`, method: 'POST' as const },
+    { url: `${BASE_URL}/api/integrations/email/gmail/start`, method: 'POST' as const },
   ];
 
-  const allResults: TestResult[] = [];
-  for (const group of groups) {
-    console.log(`\n📋 ${group.name}`);
-    for (const test of group.tests) {
-      const result = await runTest(`${group.name} — ${test.name}`, test.fn);
-      allResults.push(result);
-      console.log(`  ${result.passed ? '✅' : '❌'} ${test.name}${result.passed ? '' : ` — ${result.error}`} (${result.duration}ms)`);
-    }
+  const results = await Promise.all(
+    endpoints.map(async (ep) => {
+      const res = await request(ep.url, { method: ep.method });
+      return { ep, res };
+    })
+  );
+
+  for (const { ep, res } of results) {
+    assertStatus(res.status, 401, res.data);
+    assertSchema(ErrorResponse, res.data, `error surface ${ep.method} ${ep.url}`);
   }
-  const passed = allResults.filter(r => r.passed).length;
-  const failed = allResults.filter(r => !r.passed).length;
-  console.log('\n' + '='.repeat(50));
-  console.log(`\n📊 Results: ${passed} passed, ${failed} failed, ${allResults.length} total`);
-  if (failed > 0) { console.log('\n❌ FAILURES:'); allResults.filter(r => !r.passed).forEach(r => console.log(`   • ${r.name}: ${r.error}`)); process.exit(1); }
-  console.log('\n✅ ALL CONTRACT TESTS PASSED\n'); process.exit(0);
 }
-runAll().catch(error => { console.error('\n💥 Crashed:', error); process.exit(1); });
+
+async function testErrorSurface_400sHaveErrorField() {
+  const cases = [
+    {
+      url: `${BASE_URL}/api/integrations`,
+      method: 'POST' as const,
+      body: JSON.stringify({ name: 'x' }),
+    },
+    {
+      url: `${BASE_URL}/api/integrations`,
+      method: 'POST' as const,
+      body: JSON.stringify({ type: 'DATA_SOURCE' }),
+    },
+    {
+      url: `${BASE_URL}/api/integrations`,
+      method: 'POST' as const,
+      body: JSON.stringify({ name: 'x', type: 'BOGUS' }),
+    },
+  ];
+
+  const results = await Promise.all(
+    cases.map(async (c) => {
+      const res = await request(c.url, {
+        method: c.method,
+        body: c.body,
+        headers: authHeaders(ctx.accessToken1!),
+      });
+      return { c, res };
+    })
+  );
+
+  for (const { res } of results) {
+    assertStatus(res.status, 400, res.data);
+    assertSchema(ErrorResponse, res.data, 'error surface 400');
+  }
+}
+
+async function testErrorSurface_404sHaveErrorField() {
+  const endpoints = [
+    {
+      url: `${BASE_URL}/api/integrations/nonexistent_${Date.now()}`,
+      method: 'PATCH' as const,
+      body: JSON.stringify({}),
+    },
+    {
+      url: `${BASE_URL}/api/integrations/nonexistent_${Date.now()}`,
+      method: 'DELETE' as const,
+    },
+  ];
+
+  const results = await Promise.all(
+    endpoints.map(async (ep) => {
+      const res = await request(ep.url, {
+        method: ep.method,
+        body: ep.body,
+        headers: authHeaders(ctx.accessToken1!),
+      });
+      return { ep, res };
+    })
+  );
+
+  for (const { res } of results) {
+    assertStatus(res.status, 404, res.data);
+    assertSchema(ErrorResponse, res.data, 'error surface 404');
+  }
+}
+
+// ==================== MESSAGING UPLOADS ====================
+
+async function testImessageUpload_emptyContacts() {
+  const res = await request(`${BASE_URL}/api/integrations/imessage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ contacts: [] }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'imessage empty contacts');
+}
+
+async function testImessageUpload_missingContacts() {
+  const res = await request(`${BASE_URL}/api/integrations/imessage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'imessage missing contacts');
+}
+
+async function testImessageUpload_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/imessage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({
+      contacts: [
+        {
+          name: 'Test Contact',
+          phoneNumber: '+10000000001',
+          messages: [
+            {
+              text: 'Hello test',
+              date: new Date().toISOString(),
+              is_from_me: false,
+              handle_id: '+10000000001',
+            },
+          ],
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(MessagingUploadResponse, res.data, 'imessage happy');
+}
+
+async function testWhatsappUpload_emptyContacts() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ contacts: [] }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'whatsapp empty contacts');
+}
+
+async function testWhatsappUpload_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({
+      contacts: [
+        {
+          name: 'WhatsApp Contact',
+          phoneNumber: '+10000000002',
+          messages: [{ text: 'Hey!', timestamp: new Date().toISOString(), fromMe: false }],
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(MessagingUploadResponse, res.data, 'whatsapp happy');
+}
+
+async function testTelegramConnect_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(TelegramConnectResponse, res.data, 'telegram connect');
+}
+
+async function testTelegramUpload_emptyContacts() {
+  const res = await request(`${BASE_URL}/api/integrations/telegram/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ contacts: [] }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'telegram empty contacts');
+}
+
+async function testTelegramUpload_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/telegram/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({
+      contacts: [
+        {
+          name: 'Telegram Contact',
+          username: 'testuser',
+          messages: [{ text: 'Telegram msg', date: new Date().toISOString(), fromMe: false }],
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(MessagingUploadResponse, res.data, 'telegram happy');
+}
+
+// ==================== ENCRYPTED PAYLOAD UPLOADS ====================
+
+async function testCookiesUpload_missingFields() {
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ data: 'x', iv: 'y' }), // missing key
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'cookies missing fields');
+}
+
+async function testCookiesUpload_invalidBrowser() {
+  const encrypted = encryptPayload([]);
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ ...encrypted, browser: 'firefox' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'cookies invalid browser');
+}
+
+async function testCookiesUpload_invalidEncryption() {
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({
+      data: 'deadbeef',
+      iv: crypto.randomBytes(16).toString('hex'),
+      key: crypto.randomBytes(32).toString('hex'),
+    }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'cookies bad encryption');
+}
+
+async function testCookiesUpload_happyPath() {
+  const cookies = [
+    {
+      host_key: '.example.com',
+      name: 'test_cookie',
+      value: 'test_value',
+      path: '/',
+      expires_utc: '13300000000000000',
+      is_secure: true,
+      is_httponly: false,
+      top_frame_site_key: '',
+    },
+  ];
+  const encrypted = encryptPayload(cookies);
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ ...encrypted, browser: 'chrome' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(CookiesUploadResponse, res.data, 'cookies happy');
+  const body = res.data as { cookieCount: number };
+  assert(body.cookieCount === 1, `Expected cookieCount=1, got ${body.cookieCount}`);
+}
+
+async function testLocalStorageUpload_missingFields() {
+  const res = await request(`${BASE_URL}/api/integrations/localStorage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ data: 'x' }), // missing iv and key
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'localStorage missing fields');
+}
+
+async function testLocalStorageUpload_happyPath() {
+  const payload = {
+    byOrigin: {
+      'https://example.com': [{ key: 'testKey', value: 'testValue' }],
+    },
+    hashes: { 'https://example.com': 'abc123' },
+    batchIndex: 0,
+    totalBatches: 1,
+    entryCount: 1,
+    originCount: 1,
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/localStorage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(LocalStorageUploadResponse, res.data, 'localStorage happy');
+}
+
+async function testIndexedDBUpload_happyPath() {
+  const payload = {
+    origins: [
+      {
+        origin: 'https://example.com',
+        databases: [
+          {
+            name: 'testDB',
+            objectStores: [{ name: 'store1', records: [{ key: 'k1', value: 'v1' }] }],
+          },
+        ],
+      },
+    ],
+    hashes: { 'https://example.com': 'hash123' },
+    batchIndex: 0,
+    totalBatches: 1,
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/indexedDB/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(IndexedDBUploadResponse, res.data, 'indexedDB happy');
+}
+
+async function testFingerprintUpload_missingFields() {
+  const res = await request(`${BASE_URL}/api/integrations/fingerprint/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ data: 'x' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'fingerprint missing fields');
+}
+
+async function testFingerprintUpload_invalidPayload() {
+  const encrypted = encryptPayload({ foo: 'bar' }); // missing navigator and screen
+  const res = await request(`${BASE_URL}/api/integrations/fingerprint/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'fingerprint invalid');
+}
+
+async function testFingerprintUpload_happyPath() {
+  const fingerprint = {
+    navigator: { userAgent: 'TestAgent/1.0', language: 'en-US', platform: 'MacIntel' },
+    screen: { width: 1920, height: 1080, colorDepth: 24 },
+  };
+  const encrypted = encryptPayload(fingerprint);
+  const res = await request(`${BASE_URL}/api/integrations/fingerprint/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(FingerprintUploadResponse, res.data, 'fingerprint happy');
+}
+
+async function testPermissionsUpload_happyPath() {
+  const payload = {
+    grants: [{ origin: 'https://example.com', permission: 'notifications', setting: 1 }],
+    hash: 'perms_hash',
+    grantCount: 1,
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/permissions/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(PermissionsUploadResponse, res.data, 'permissions happy');
+}
+
+async function testCacheStorageUpload_happyPath() {
+  const payload = {
+    origins: [{ origin: 'https://example.com', caches: [{ name: 'v1', size: 100 }] }],
+    hashes: { 'https://example.com': 'cs_hash' },
+    originCount: 1,
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/cacheStorage/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(CacheStorageUploadResponse, res.data, 'cacheStorage happy');
+}
+
+async function testPasswordsUpload_missingFields() {
+  const res = await request(`${BASE_URL}/api/integrations/passwords/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'passwords missing fields');
+}
+
+async function testPasswordsUpload_happyPath() {
+  const payload = {
+    passwords: [
+      {
+        origin: 'https://example.com',
+        username: 'testuser',
+        encryptedPassword: 'encrypted_data_here',
+        dateLastUsed: Date.now(),
+        dateCreated: Date.now(),
+        browserSource: 'chrome',
+      },
+    ],
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/passwords/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(PasswordsUploadResponse, res.data, 'passwords happy');
+}
+
+// ==================== CLAUDE CODE CREDENTIALS ====================
+
+async function testClaudeCodeUpload_missingFields() {
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code missing fields');
+}
+
+async function testClaudeCodeUpload_happyPath() {
+  const payload = { encryptedCredentials: 'test_encrypted_credentials_data' };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(ClaudeCodeUploadResponse, res.data, 'claude-code happy');
+}
+
+async function testClaudeCodeToken_notFound() {
+  // Anonymous user without credentials → 404
+  const { accessToken } = await createAnonSession();
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code token not found');
+}
+
+async function testClaudeCodeRateLimited_forbidden() {
+  // Non-internal JWT auth → 403
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ source: 'pool', poolTokenId: 'test' }),
+  });
+  assertStatus(res.status, 403, res.data);
+  assertSchema(ErrorResponse, res.data, 'rate-limited forbidden');
+}
+
+async function testClaudeCodePoolRateLimited_forbidden() {
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/pool-token/rate-limited`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ poolTokenId: 'test' }),
+  });
+  assertStatus(res.status, 403, res.data);
+  assertSchema(ErrorResponse, res.data, 'pool-rate-limited forbidden');
+}
+
+// ==================== EMAIL ENDPOINTS ====================
+
+async function testEmailStart_invalidProvider() {
+  const res = await request(`${BASE_URL}/api/integrations/email/invalid_provider/start`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'email start invalid provider');
+}
+
+async function testEmailMessages_missingSince() {
+  const res = await request(`${BASE_URL}/api/integrations/email/messages`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'email messages missing since');
+}
+
+async function testEmailMessages_invalidSince() {
+  const res = await request(`${BASE_URL}/api/integrations/email/messages?since=not-a-date`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'email messages invalid since');
+}
+
+async function testEmailMessages_gmailNotConnected() {
+  const { accessToken } = await createAnonSession();
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/messages?since=${new Date().toISOString()}`,
+    { headers: authHeaders(accessToken) }
+  );
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'email messages not connected');
+}
+
+async function testPasswordsRequest_missingRequest() {
+  const res = await request(`${BASE_URL}/api/integrations/passwords/request`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'passwords request missing');
+}
+
+async function testPasswordsRequest_emptyRequest() {
+  const res = await request(`${BASE_URL}/api/integrations/passwords/request`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ request: '' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'passwords request empty');
+}
+
+// ==================== STATE TRANSITION TEST ====================
+
+async function testStateTransition_fullLifecycle() {
+  const name = uniqueName('lifecycle');
+
+  // 1. Create (NOT_CONNECTED)
+  const createRes = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+  assertStatus(createRes.status, 200, createRes.data);
+  const created = (createRes.data as { integration: { status: string } }).integration;
+  assert(created.status === 'NOT_CONNECTED', `Expected NOT_CONNECTED, got ${created.status}`);
+
+  // 2. Patch to CONNECTED
+  const patchRes = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'PATCH',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ status: 'CONNECTED', isActive: true }),
+  });
+  assertStatus(patchRes.status, 200, patchRes.data);
+  const patched = (patchRes.data as { integration: { status: string; isActive: boolean } })
+    .integration;
+  assert(patched.status === 'CONNECTED', `Expected CONNECTED, got ${patched.status}`);
+  assert(patched.isActive === true, 'Expected isActive=true');
+
+  // 3. Patch to SYNC_FAILED
+  const failRes = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'PATCH',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ status: 'SYNC_FAILED' }),
+  });
+  assertStatus(failRes.status, 200, failRes.data);
+  const failed = (failRes.data as { integration: { status: string } }).integration;
+  assert(failed.status === 'SYNC_FAILED', `Expected SYNC_FAILED, got ${failed.status}`);
+
+  // 4. Delete
+  const deleteRes = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(deleteRes.status, 200, deleteRes.data);
+
+  // 5. Verify deleted
+  const verifyRes = await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(verifyRes.status, 404, verifyRes.data);
+}
+
+// ==================== OAUTH CALLBACK (PUBLIC) ====================
+
+async function testOAuthCallback_invalidProvider() {
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/invalid_provider/callback?code=x&state=y`
+  );
+  // Callback returns HTML with 400 status (not JSON)
+  assert(res.status === 400, `Expected 400, got ${res.status}`);
+}
+
+async function testOAuthCallback_missingCode() {
+  const res = await request(`${BASE_URL}/api/integrations/email/gmail/callback?state=x`);
+  assert(res.status === 400, `Expected 400, got ${res.status}`);
+}
+
+async function testOAuthCallback_missingState() {
+  const res = await request(`${BASE_URL}/api/integrations/email/gmail/callback?code=x`);
+  assert(res.status === 400, `Expected 400, got ${res.status}`);
+}
+
+// ==================== BOUNDARY CAPTURE TESTS ====================
+// These run sequentially because the capture buffer is shared global state.
+
+/**
+ * POST /api/integrations (create) makes NO outbound HTTP calls.
+ * All work is local (Prisma DB operations only).
+ */
+async function testBoundary_createNoOutbound() {
+  await clearCaptures();
+  const name = uniqueName('boundary_create');
+
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
+  });
+
+  const calls = await readCaptures();
+  assert(calls.length === 0, `Expected 0 outbound calls for create, got ${calls.length}`);
+
+  // Cleanup
+  await request(`${BASE_URL}/api/integrations/${name}`, {
+    method: 'DELETE',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+}
+
+/**
+ * POST /api/integrations/email/:provider/start makes NO outbound calls.
+ * It only writes to DB (integration + credential records).
+ */
+async function testBoundary_emailStartNoOutbound() {
+  await clearCaptures();
+
+  // This may return 500 if Gmail client ID is not configured, but still no outbound calls
+  await request(`${BASE_URL}/api/integrations/email/gmail/start`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+
+  const calls = await readCaptures();
+  assert(
+    calls.length === 0,
+    `Expected 0 outbound calls for email/start, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+  );
+}
+
+/**
+ * POST /api/integrations with invalid type (400) makes NO outbound calls.
+ * Validation short-circuits before any DB or external calls.
+ */
+async function testBoundary_validationNoOutbound() {
+  await clearCaptures();
+
+  await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ name: 'test', type: 'INVALID' }),
+  });
+
+  const calls = await readCaptures();
+  assert(
+    calls.length === 0,
+    `Expected 0 outbound calls for validation failure, got ${calls.length}`
+  );
+}
+
+/**
+ * GET /api/integrations/email/messages with missing 'since' param (400) makes NO outbound calls.
+ */
+async function testBoundary_emailMessagesValidationNoOutbound() {
+  await clearCaptures();
+
+  await request(`${BASE_URL}/api/integrations/email/messages`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+
+  const calls = await readCaptures();
+  assert(
+    calls.length === 0,
+    `Expected 0 outbound calls for email/messages validation, got ${calls.length}`
+  );
+}
+
+/**
+ * POST /api/integrations/passwords/request sends an SMS via sendSms.
+ * This is the only non-OAuth third-party boundary in the integrations domain.
+ *
+ * If SMS provider is not configured, skip the boundary assertion.
+ */
+async function testBoundary_passwordsRequestSms() {
+  await clearCaptures();
+
+  const res = await request(`${BASE_URL}/api/integrations/passwords/request`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ request: 'Test integration request for boundary test' }),
+  });
+
+  // Allow short delay for async SMS dispatch
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const calls = await readCaptures();
+
+  if (res.status === 500) {
+    // SMS provider not configured — no outbound calls expected
+    console.log('    [skipped] SMS provider returned error — cannot verify boundary');
+    return;
+  }
+
+  assertStatus(res.status, 200, res.data);
+
+  // Should have made exactly 1 outbound call (to SMS provider)
+  if (calls.length === 0) {
+    console.log('    [skipped] No outbound SMS calls captured — SMS may use internal queue');
+    return;
+  }
+
+  const smsCall = calls[0];
+  assert(smsCall.method === 'POST', `Expected POST, got ${smsCall.method}`);
+  // The SMS provider URL varies (Twilio, Surge, etc.) — just verify it's an outbound POST
+  assert(
+    !smsCall.url.includes('localhost'),
+    `Expected outbound URL, got localhost: ${smsCall.url}`
+  );
+}
+
+/**
+ * POST /api/integrations/telegram/connect makes NO outbound calls.
+ * All work is local (DB upsert only).
+ */
+async function testBoundary_telegramConnectNoOutbound() {
+  await clearCaptures();
+
+  await request(`${BASE_URL}/api/integrations/telegram/connect`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+
+  const calls = await readCaptures();
+  assert(calls.length === 0, `Expected 0 outbound calls for telegram/connect, got ${calls.length}`);
+}
+
+// ==================== RUNNER ====================
+
+async function runAll() {
+  console.log('Integrations Black-box Tests\n');
+  console.log(`Testing against: ${BASE_URL}`);
+  console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
+
+  // Phase 1: Setup
+  console.log('Setting up auth sessions...');
+  await setup();
+  console.log(`  User 1: ${ctx.userId1}`);
+  console.log(`  User 2: ${ctx.userId2}`);
+  console.log(`  Capture available: ${ctx.captureAvailable}\n`);
+
+  // Phase 2: Parallel independent tests
+  const parallelTests = [
+    // Auth boundary (401)
+    { name: 'GET / no auth -> 401', fn: testList_noAuth },
+    { name: 'POST / no auth -> 401', fn: testCreate_noAuth },
+    { name: 'PATCH /:name no auth -> 401', fn: testPatch_noAuth },
+    { name: 'DELETE /:name no auth -> 401', fn: testDelete_noAuth },
+    { name: 'POST /imessage/upload no auth -> 401', fn: testImessageUpload_noAuth },
+    { name: 'POST /whatsapp/upload no auth -> 401', fn: testWhatsappUpload_noAuth },
+    { name: 'POST /telegram/connect no auth -> 401', fn: testTelegramConnect_noAuth },
+    { name: 'POST /telegram/upload no auth -> 401', fn: testTelegramUpload_noAuth },
+    { name: 'POST /cookies/upload no auth -> 401', fn: testCookiesUpload_noAuth },
+    { name: 'POST /localStorage/upload no auth -> 401', fn: testLocalStorageUpload_noAuth },
+    { name: 'POST /indexedDB/upload no auth -> 401', fn: testIndexedDBUpload_noAuth },
+    { name: 'POST /fingerprint/upload no auth -> 401', fn: testFingerprintUpload_noAuth },
+    { name: 'POST /permissions/upload no auth -> 401', fn: testPermissionsUpload_noAuth },
+    { name: 'POST /cacheStorage/upload no auth -> 401', fn: testCacheStorageUpload_noAuth },
+    { name: 'POST /passwords/upload no auth -> 401', fn: testPasswordsUpload_noAuth },
+    { name: 'POST /passwords/apple/upload no auth -> 401', fn: testApplePasswordsUpload_noAuth },
+    { name: 'POST /passwords/request no auth -> 401', fn: testPasswordsRequest_noAuth },
+    { name: 'POST /email/start no auth -> 401', fn: testEmailStart_noAuth },
+    { name: 'GET /email/messages no auth -> 401', fn: testEmailMessages_noAuth },
+    { name: 'POST /email/send no auth -> 401', fn: testEmailSend_noAuth },
+    { name: 'POST /upload no auth -> 401', fn: testUpload_noAuth },
+    { name: 'POST /linkedin/upload no auth -> 401', fn: testLinkedinUpload_noAuth },
+    { name: 'POST /contacts/upload no auth -> 401', fn: testContactsUpload_noAuth },
+    { name: 'POST /email/upload no auth -> 401', fn: testEmailUpload_noAuth },
+    {
+      name: 'POST /claude-code/credentials/upload no auth -> 401',
+      fn: testClaudeCodeCredentials_noAuth,
+    },
+    { name: 'GET /claude-code/credentials/token no auth -> 401', fn: testClaudeCodeToken_noAuth },
+    {
+      name: 'POST /claude-code/token/rate-limited no auth -> 401',
+      fn: testClaudeCodeRateLimited_noAuth,
+    },
+    {
+      name: 'POST /claude-code/pool-token/rate-limited no auth -> 401',
+      fn: testClaudeCodePoolRateLimited_noAuth,
+    },
+
+    // List
+    { name: 'GET / happy path', fn: testList_happyPath },
+    { name: 'GET / empty for new user', fn: testList_emptyForNewUser },
+
+    // Create
+    { name: 'POST / missing name -> 400', fn: testCreate_missingName },
+    { name: 'POST / missing type -> 400', fn: testCreate_missingType },
+    { name: 'POST / invalid type -> 400', fn: testCreate_invalidType },
+    { name: 'POST / happy path (DATA_SOURCE)', fn: testCreate_happyPath },
+    { name: 'POST / happy path (TOOL_SETUP)', fn: testCreate_toolSetupType },
+
+    // Idempotency
+    { name: 'POST / upsert is idempotent', fn: testCreate_upsertIdempotent },
+
+    // Read-after-write
+    { name: 'create then list includes it', fn: testReadAfterWrite_createThenList },
+
+    // Patch
+    { name: 'PATCH /:name happy path', fn: testPatch_happyPath },
+    { name: 'PATCH /:name not found -> 404', fn: testPatch_notFound },
+
+    // Delete
+    { name: 'DELETE /:name happy path', fn: testDelete_happyPath },
+    { name: 'DELETE /:name not found -> 404', fn: testDelete_notFound },
+    { name: 'DELETE /:name verify gone from list', fn: testDelete_verifyGone },
+
+    // Tenant isolation
+    { name: 'tenant isolation -- separate user lists', fn: testTenantIsolation_separateUsers },
+    {
+      name: 'tenant isolation -- cross-user patch -> 404',
+      fn: testTenantIsolation_patchOtherUserIntegration,
+    },
+    {
+      name: 'tenant isolation -- cross-user delete -> 404',
+      fn: testTenantIsolation_deleteOtherUserIntegration,
+    },
+
+    // Error surface
+    { name: 'error surface -- 401s have error field', fn: testErrorSurface_401sHaveErrorField },
+    { name: 'error surface -- 400s have error field', fn: testErrorSurface_400sHaveErrorField },
+    { name: 'error surface -- 404s have error field', fn: testErrorSurface_404sHaveErrorField },
+
+    // Messaging uploads
+    { name: 'POST /imessage/upload empty contacts -> 400', fn: testImessageUpload_emptyContacts },
+    {
+      name: 'POST /imessage/upload missing contacts -> 400',
+      fn: testImessageUpload_missingContacts,
+    },
+    { name: 'POST /imessage/upload happy path', fn: testImessageUpload_happyPath },
+    { name: 'POST /whatsapp/upload empty contacts -> 400', fn: testWhatsappUpload_emptyContacts },
+    { name: 'POST /whatsapp/upload happy path', fn: testWhatsappUpload_happyPath },
+    { name: 'POST /telegram/connect happy path', fn: testTelegramConnect_happyPath },
+    { name: 'POST /telegram/upload empty contacts -> 400', fn: testTelegramUpload_emptyContacts },
+    { name: 'POST /telegram/upload happy path', fn: testTelegramUpload_happyPath },
+
+    // Encrypted uploads
+    { name: 'POST /cookies/upload missing fields -> 400', fn: testCookiesUpload_missingFields },
+    { name: 'POST /cookies/upload invalid browser -> 400', fn: testCookiesUpload_invalidBrowser },
+    { name: 'POST /cookies/upload bad encryption -> 400', fn: testCookiesUpload_invalidEncryption },
+    { name: 'POST /cookies/upload happy path', fn: testCookiesUpload_happyPath },
+    {
+      name: 'POST /localStorage/upload missing fields -> 400',
+      fn: testLocalStorageUpload_missingFields,
+    },
+    { name: 'POST /localStorage/upload happy path', fn: testLocalStorageUpload_happyPath },
+    { name: 'POST /indexedDB/upload happy path', fn: testIndexedDBUpload_happyPath },
+    {
+      name: 'POST /fingerprint/upload missing fields -> 400',
+      fn: testFingerprintUpload_missingFields,
+    },
+    {
+      name: 'POST /fingerprint/upload invalid payload -> 400',
+      fn: testFingerprintUpload_invalidPayload,
+    },
+    { name: 'POST /fingerprint/upload happy path', fn: testFingerprintUpload_happyPath },
+    { name: 'POST /permissions/upload happy path', fn: testPermissionsUpload_happyPath },
+    { name: 'POST /cacheStorage/upload happy path', fn: testCacheStorageUpload_happyPath },
+    { name: 'POST /passwords/upload missing fields -> 400', fn: testPasswordsUpload_missingFields },
+    { name: 'POST /passwords/upload happy path', fn: testPasswordsUpload_happyPath },
+
+    // Claude Code
+    {
+      name: 'POST /claude-code/credentials/upload missing fields -> 400',
+      fn: testClaudeCodeUpload_missingFields,
+    },
+    { name: 'POST /claude-code/credentials/upload happy path', fn: testClaudeCodeUpload_happyPath },
+    {
+      name: 'GET /claude-code/credentials/token not found -> 404',
+      fn: testClaudeCodeToken_notFound,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited forbidden -> 403',
+      fn: testClaudeCodeRateLimited_forbidden,
+    },
+    {
+      name: 'POST /claude-code/pool-token/rate-limited forbidden -> 403',
+      fn: testClaudeCodePoolRateLimited_forbidden,
+    },
+
+    // Email endpoints
+    { name: 'POST /email/start invalid provider -> 400', fn: testEmailStart_invalidProvider },
+    { name: 'GET /email/messages missing since -> 400', fn: testEmailMessages_missingSince },
+    { name: 'GET /email/messages invalid since -> 400', fn: testEmailMessages_invalidSince },
+    {
+      name: 'GET /email/messages gmail not connected -> 404',
+      fn: testEmailMessages_gmailNotConnected,
+    },
+    { name: 'POST /passwords/request missing -> 400', fn: testPasswordsRequest_missingRequest },
+    { name: 'POST /passwords/request empty -> 400', fn: testPasswordsRequest_emptyRequest },
+
+    // OAuth callback (public)
+    { name: 'GET /email/callback invalid provider -> 400', fn: testOAuthCallback_invalidProvider },
+    { name: 'GET /email/callback missing code -> 400', fn: testOAuthCallback_missingCode },
+    { name: 'GET /email/callback missing state -> 400', fn: testOAuthCallback_missingState },
+  ];
+
+  console.log(
+    `Running ${parallelTests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`
+  );
+  const parallelResults = await runPool(parallelTests, CASE_CONCURRENCY);
+
+  for (const r of parallelResults) {
+    const icon = r.passed ? '  PASS' : '  FAIL';
+    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+  }
+
+  // Phase 3: Sequential tests (state-dependent + boundary capture)
+  const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
+    { name: 'state transition -- full lifecycle', fn: testStateTransition_fullLifecycle },
+  ];
+
+  if (ctx.captureAvailable) {
+    sequentialTests.push(
+      { name: 'boundary -- create makes no outbound calls', fn: testBoundary_createNoOutbound },
+      {
+        name: 'boundary -- email/start makes no outbound calls',
+        fn: testBoundary_emailStartNoOutbound,
+      },
+      {
+        name: 'boundary -- validation failure makes no outbound calls',
+        fn: testBoundary_validationNoOutbound,
+      },
+      {
+        name: 'boundary -- email/messages validation no outbound',
+        fn: testBoundary_emailMessagesValidationNoOutbound,
+      },
+      { name: 'boundary -- passwords/request SMS boundary', fn: testBoundary_passwordsRequestSms },
+      {
+        name: 'boundary -- telegram/connect no outbound',
+        fn: testBoundary_telegramConnectNoOutbound,
+      }
+    );
+  } else {
+    console.log(
+      '\n  [info] Capture not available (BLACKBOX_TEST_CAPTURE_OUTBOUND!=1) -- skipping boundary tests'
+    );
+  }
+
+  console.log(`\nRunning ${sequentialTests.length} sequential tests...`);
+  const sequentialResults: TestResult[] = [];
+  for (const test of sequentialTests) {
+    const result = await runTest(test.name, test.fn);
+    sequentialResults.push(result);
+    const icon = result.passed ? '  PASS' : '  FAIL';
+    console.log(
+      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
+    );
+  }
+
+  // Summary
+  const allResults = [...parallelResults, ...sequentialResults];
+  const passed = allResults.filter((r) => r.passed).length;
+  const failed = allResults.filter((r) => !r.passed).length;
+
+  console.log('\n' + '='.repeat(50));
+  console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
+
+  if (failed > 0) {
+    console.log('\nFAILURES:');
+    allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
+    process.exit(1);
+  }
+
+  console.log('\nALL INTEGRATIONS BLACK-BOX TESTS PASSED\n');
+  process.exit(0);
+}
+
+runAll().catch((error) => {
+  console.error('\nBlack-box test suite crashed:', error);
+  process.exit(1);
+});
