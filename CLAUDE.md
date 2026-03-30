@@ -303,30 +303,19 @@ Each LLM call site, the context chunks it receives, and which `context_gates` ke
 2. **T1 message_person** - `call_llm` doesn't pass `claude_token`. Small per-call cost.
 3. **Schema gen** (`setResponseSchema.ts`) - Forces Rose Ultra for a simple task. Rose Lite would suffice.
 
-## Claude Code Review (MANDATORY)
+## CodeRabbit Review
 
-Every PR must pass a Claude Code Review before merging. The review runs automatically as a GitHub Action (`.github/workflows/claude-code-review.yml`) on PR open/synchronize/reopen.
-
-**How it works:**
-- Uses `anthropics/claude-code-action@v1` with the `code-review@claude-code-plugins` plugin
-- Triggers on: `opened`, `synchronize`, `ready_for_review`, `reopened`
-- Two-tier jobs: `deep-review` (new/reopened PRs, `--effort max`) and `incremental-review` (subsequent pushes, `--effort medium`)
-
-**Loop — run this after every `gh pr create`:**
+PRs are reviewed by CodeRabbit (`.coderabbit.yaml`). After creating a PR:
 ```
 1. Push branch + create PR
-2. Poll check status via `gh pr checks <N> --json name,state,conclusion`
-   - Wait for the "Claude Code Review" check to reach COMPLETED (poll every 30s, no timeout — keep waiting)
+2. Poll check status via `gh pr checks <N> --json name,state`
+   - Wait for "CodeRabbit" check to reach SUCCESS (poll every 30s)
 3. Read the review:
    - `gh api repos/<owner/repo>/pulls/<N>/reviews` → bot reviews
    - `gh api repos/<owner/repo>/pulls/<N>/comments` → inline comments
-4. Check review state:
-   - APPROVED → PASS, proceed to merge
-   - CHANGES_REQUESTED → fix critical issues, push (triggers new review), go to step 2
-   - COMMENTED / no review → ask user whether to fix or skip
+4. Fix critical/major issues from CodeRabbit comments, push, go to step 2
+5. Skip trivial nitpicks
 ```
-
-**Passing criteria:** Review state is APPROVED, or user explicitly skips. Fix critical issues. Skip menial/style nits.
 
 ## Ralph Instructions
 
