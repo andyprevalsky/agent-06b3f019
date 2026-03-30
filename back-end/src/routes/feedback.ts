@@ -12,6 +12,10 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
     }
     const userId = req.user.id;
 
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: 'Feedback is required' });
+    }
+
     const { feedback } = req.body;
 
     if (!feedback || typeof feedback !== 'string' || !feedback.trim()) {
