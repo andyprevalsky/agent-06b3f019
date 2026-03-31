@@ -55,7 +55,7 @@ def print_test_list():
             flags.append("browser")
         if test.requires_claude_code:
             flags.append("claude-code")
-        if test.attachment_url:
+        if test.attachment_url or test.attachment_urls:
             flags.append("attachment")
 
         is_basic = name in basic_names

@@ -20,6 +20,7 @@ class TestPrompt:
     prompt: str  # The goal to send to the agent
     timeout: int = 300  # Timeout in seconds (default 5 min)
     attachment_url: Optional[str] = None  # Optional attachment path
+    attachment_urls: Optional[list[str]] = None  # Multiple attachment paths
     requires_browser_agent: bool = False  # Whether it needs browser agent
     requires_claude_code: bool = False  # Whether it needs Claude Code agent
     expected_patterns: Optional[list[str]] = None  # Patterns to verify in output
@@ -200,9 +201,11 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
             "His existing billing solution is archaic and is causing him to be unable to take a vacation.\n"
             "We need to create and host a site that can be accessed via QR code or direct link.\n\n"
             "The site should include:\n"
-            "- There are 4 waivers on dallasmmaboxing.com that you need to include. "
-            "Signing is required for all waivers. The sparring waivers don't need to be included.\n"
-            "- I've attached the billing & payment terms and the membership terms as PDFs. "
+            "- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, "
+            "Adult Sparring Consent, Minor Sparring Consent). "
+            "Signing is required for the liability waivers (adult and minor). "
+            "The sparring consent waivers are included for reference but don't need to be part of the payment flow.\n"
+            "- I've also attached the billing & payment terms and the membership terms as PDFs. "
             "Before paying, users must check a required opt-in checkbox agreeing to these terms "
             "(you can include this as part of the waiver signing step). The full text of the terms "
             "should be viewable on the site.\n"
@@ -236,7 +239,14 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
             "- A discount code that can be used exclusively for Boxing & Muay Thai purchases"
         ),
         timeout=900,
-        attachment_url="/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf",
+        attachment_urls=[
+            "/test-assets/dallasmmaboxing-waivers/waiver_release_liability_adult.pdf",
+            "/test-assets/dallasmmaboxing-waivers/waiver_release_liability_minor.pdf",
+            "/test-assets/dallasmmaboxing-waivers/sparring_consent_adult.pdf",
+            "/test-assets/dallasmmaboxing-waivers/sparring_consent_minor.pdf",
+            "/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf",
+            "/test-assets/dallasmmaboxing-waivers/billing_payment_terms_final.pdf",
+        ],
         requires_browser_agent=True,
         requires_claude_code=True,
         expected_tools=["spawn_browser_agent", "spawn_claude_code_agent", "spawn_sub_agents"],
@@ -252,6 +262,7 @@ def get_basic_tests() -> list[TestPrompt]:
     return [
         test for test in TEST_PROMPTS.values()
         if not test.attachment_url
+        and not test.attachment_urls
         and not test.requires_browser_agent
         and not test.requires_claude_code
     ]

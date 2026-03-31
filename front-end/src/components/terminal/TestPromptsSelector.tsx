@@ -39,8 +39,8 @@ const TEST_PROMPTS: TestPrompt[] = [
 We need to create and host a site that can be accessed via QR code or direct link.
 
 The site should include:
-- There are 4 waivers on dallasmmaboxing.com that you need to include. Signing is required for all waivers. The sparring waivers don't need to be included.
-- I've attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.
+- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, Adult Sparring Consent, Minor Sparring Consent). Signing is required for the liability waivers (adult and minor). The sparring consent waivers are included for reference but don't need to be part of the payment flow.
+- I've also attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.
 - The classes are:
   Boxing $225/month
   Muay Thai $225/month
@@ -68,9 +68,12 @@ Return to me:
 - A QR Code for the hosted site
 - A discount code that can be used exclusively for Boxing & Muay Thai purchases`,
     attachmentUrls: [
-      '/test-assets/dallasmmaboxing-waivers/billing_payment_terms_final.pdf',
+      '/test-assets/dallasmmaboxing-waivers/waiver_release_liability_adult.pdf',
+      '/test-assets/dallasmmaboxing-waivers/waiver_release_liability_minor.pdf',
+      '/test-assets/dallasmmaboxing-waivers/sparring_consent_adult.pdf',
+      '/test-assets/dallasmmaboxing-waivers/sparring_consent_minor.pdf',
       '/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf',
-      '/test-assets/dallasmmaboxing-waivers/membership_terms.pdf',
+      '/test-assets/dallasmmaboxing-waivers/billing_payment_terms_final.pdf',
     ],
   },
   {
