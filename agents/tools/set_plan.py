@@ -290,7 +290,7 @@ class SetPlanManager(ToolManager):
                         call_planner_llm_activity,
                         args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema, claude_max_token,
                               workflow_instance.agent_id, tool_call_id],
-                        start_to_close_timeout=timedelta(seconds=120),
+                        start_to_close_timeout=timedelta(seconds=240),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     schema_task = workflow.execute_activity(
@@ -338,7 +338,7 @@ class SetPlanManager(ToolManager):
                         call_planner_llm_activity,
                         args=[messages_for_planner, "rose-labs/rose-1-ultra", tools_description, user_context, response_schema, claude_max_token,
                               workflow_instance.agent_id, tool_call_id],
-                        start_to_close_timeout=timedelta(seconds=120),
+                        start_to_close_timeout=timedelta(seconds=240),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
