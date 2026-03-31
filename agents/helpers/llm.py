@@ -990,8 +990,54 @@ async def call_llm_structured_streaming(
         # Rose models output: [explanation text]```json\n{...}\n``` 
         # We need to extract the JSON from within the markdown code block
         try:
+            if not accumulated_json and accumulated_reasoning:
+                # Thinking models (GPT-5.2, Kimi-K2.5) may put structured JSON
+                # in reasoning tokens instead of content tokens.
+                # Use balanced-brace extraction with JSON validation to skip
+                # non-JSON brace blocks, then remove from reasoning to prevent leaking.
+                search_pos = 0
+                while search_pos < len(accumulated_reasoning) and not accumulated_json:
+                    json_start = accumulated_reasoning.find("{", search_pos)
+                    if json_start == -1:
+                        break
+                    depth = 0
+                    in_string = False
+                    escape_next = False
+                    matched_end = -1
+                    for i in range(json_start, len(accumulated_reasoning)):
+                        ch = accumulated_reasoning[i]
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if ch == "\\" and in_string:
+                            escape_next = True
+                            continue
+                        if ch == '"':
+                            in_string = not in_string
+                            continue
+                        if in_string:
+                            continue
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                matched_end = i
+                                break
+                    if matched_end == -1:
+                        break
+                    candidate = accumulated_reasoning[json_start:matched_end + 1]
+                    try:
+                        json.loads(candidate)
+                        accumulated_json = candidate
+                        accumulated_reasoning = (
+                            accumulated_reasoning[:json_start] + accumulated_reasoning[matched_end + 1:]
+                        ).strip()
+                        logger.info(f"📦 Extracted JSON from reasoning (thinking model, {len(accumulated_json)} chars)")
+                    except json.JSONDecodeError:
+                        search_pos = matched_end + 1
+
             if not accumulated_json:
-                # Log diagnostic info to help debug this intermittent issue
                 logger.error(
                     "❌ No JSON content received in Rose response",
                     chunk_count=chunk_count,
@@ -1000,7 +1046,7 @@ async def call_llm_structured_streaming(
                     pool_name=pool_name,
                 )
                 raise ValueError(f"No JSON content received in response (chunks={chunk_count}, model={actual_model})")
-            
+
             # Extract JSON from markdown code block if present
             # Look for ```json ... ``` pattern, or just raw JSON
             json_content = accumulated_json

@@ -1091,7 +1091,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
             <PlanChip
               plan={{
                 title: message.metadata?.title || 'Plan Failed',
-                content: message.message || '',
+                content: message.text || '',
                 tasks: [],
                 dependencies: null,
                 join: 'all',

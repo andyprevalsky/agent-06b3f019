@@ -77,10 +77,8 @@ const MODEL_POOLS: Record<string, string[]> = {
     'moonshotai/kimi-k2.5',
   ],
   'rose-1-ultra': [
-    // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
-    'openai/gpt-5.2',
-    'google/gemini-3-pro-preview',
-    'moonshotai/kimi-k2.5'
+    'google/gemini-3-flash-preview',
+    'moonshotai/kimi-k2.5',
   ],
   // Browser automation pool - completion-based trio racing
   'rose-1-browser-use': [
@@ -92,7 +90,7 @@ const MODEL_POOLS: Record<string, string[]> = {
 };
 
 // Pools that use waterfall routing (sequential fallback) instead of trio racing
-const WATERFALL_POOLS = new Set(['rose-1-lite']);
+const WATERFALL_POOLS = new Set(['rose-1-lite', 'rose-1-ultra']);
 
 // Waterfall config
 const WATERFALL_TIMEOUT_MS = 60000;  // 60s per-model timeout
@@ -4920,9 +4918,10 @@ serve(async (req) => {
     // ============================================
     
     // Check if conversation already has a model selected
+    let shouldRepinConversationModel = false;
     if (conversation_id && !selectedModel) {
       const existingModel = await getConversationModel(supabase, conversation_id);
-      if (existingModel) {
+      if (existingModel && pool.includes(existingModel)) {
         slog('info', `Using existing model for conversation: ${existingModel}`);
         
         if (stream) {
@@ -4949,6 +4948,9 @@ serve(async (req) => {
         
         selectedModel = existingModel;
         selectedIsCerebras = false;
+      } else if (existingModel) {
+        slog('warn', `Pinned model ${existingModel} no longer in pool ${poolName}, reselecting`);
+        shouldRepinConversationModel = true;
       }
     }
 
@@ -5372,6 +5374,11 @@ serve(async (req) => {
     // For non-streaming, use selected model or pick random from pool
     const actualModel = selectedModel || pool[Math.floor(Math.random() * pool.length)];
     const isCerebras = selectedIsCerebras;
+
+    // Persist reselected model after stale pin was detected
+    if (conversation_id && shouldRepinConversationModel && !selectedModel) {
+      await saveConversationModel(supabase, conversation_id, actualModel, poolName);
+    }
 
     // Handle CoT steps (non-streaming)
     let finalResponse: any;
