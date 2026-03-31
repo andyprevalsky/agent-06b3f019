@@ -5,6 +5,8 @@ from typing import Callable, Awaitable, List, Dict
 
 import structlog
 
+from helpers.context_pointers import annotate_with_pointer
+
 logger = structlog.get_logger()
 
 
@@ -28,6 +30,7 @@ async def poll_and_update_context(
     if new_msgs:
         for msg in new_msgs:
             if msg not in context:
+                annotate_with_pointer(msg)
                 context.append(msg)
         context.sort(key=lambda x: x.get("timestamp", ""))
         for msg in context:

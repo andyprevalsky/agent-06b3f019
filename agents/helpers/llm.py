@@ -32,6 +32,7 @@ from helpers.attachments import (
     get_file_from_pointer,
     get_cached_file,
 )
+from helpers.context_pointers import resolve_pointers_in_messages
 
 logger = structlog.get_logger()
 
@@ -561,6 +562,9 @@ async def build_llm_messages(
             messages.append({"role": llm_role, "content": content})
         else:
             messages.append({"role": llm_role, "content": full_text})
+
+    # Resolve context pointers to <resolved-ref> blocks
+    messages = await resolve_pointers_in_messages(messages, local_context=context)
 
     return messages
 
@@ -1463,6 +1467,9 @@ async def call_llm(
     try:
         _safe_heartbeat(f"Calling LLM with {len(messages)} messages")
 
+        # Resolve context pointers
+        messages = await resolve_pointers_in_messages(messages)
+
         config = load_config()
         model = model or config.openrouter.model
 
@@ -1952,7 +1959,10 @@ async def check_progress(
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=False))
         messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})
-        
+
+        # Resolve context pointers
+        messages = await resolve_pointers_in_messages(messages, local_context=context)
+
         # Debug: Log context size to detect contamination
         logger.info(
             "Verifier context",
@@ -2408,6 +2418,10 @@ async def call_planner_llm_activity(
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    # Resolve context pointers
+    full_messages = await resolve_pointers_in_messages(full_messages)
+
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
     logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
 

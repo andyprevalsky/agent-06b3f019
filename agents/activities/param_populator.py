@@ -42,6 +42,16 @@ You will be graded:
 - points are deducted for adding new information that was NOT previously mentioned in any context fed to you.
 - points are deducted if the goal string you output does not adhere to the Goal below. Do not change the intention of the goal even if it is against your better judgment.
 
+CONTEXT POINTERS (CRITICAL):
+Messages and tool results in the conversation include "Reference: @ref:message:<id>" pointers.
+When populating tool parameters (especially goal strings for spawn_agent):
+- PREFER including @ref:message: pointers over rewriting/paraphrasing the referenced content
+- The pointer is automatically resolved to the original data when the child agent runs
+- This prevents information loss — phone numbers, names, and details stay exact
+- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a specific substring
+- Example: Instead of rewriting "Call John Smith at 555-1234", pass the pointer:
+  "Call the person mentioned in @ref:message:abc123[start="John Smith"|end="555-1234"]"
+
 CURRENT TASK:
 Goal: {goal}
 Required Tool: {tool_name}

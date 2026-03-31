@@ -293,6 +293,46 @@ router.get('/tree', hybridAuth, async (req: HybridAuthRequest, res) => {
   }
 });
 
+// POST /api/agents/messages/batch - Batch fetch messages by IDs
+// Used by context pointer resolution to fetch original message text
+router.post('/messages/batch', hybridAuth, async (req: HybridAuthRequest, res) => {
+  try {
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids must be a non-empty array' });
+    }
+
+    if (ids.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 IDs per batch request' });
+    }
+
+    // Scope to requesting user's agents to prevent cross-user data access
+    const userId = req.userId || (req.headers['x-user-id'] as string);
+
+    const messages = await prisma.message.findMany({
+      where: {
+        id: { in: ids },
+        role: { in: ['USER', 'TOOL'] },
+        ...(userId ? { agent: { userId } } : {}),
+      },
+      select: {
+        id: true,
+        text: true,
+        role: true,
+      },
+    });
+
+    res.json({ messages });
+  } catch (error) {
+    console.error(
+      '[Agents] Batch message fetch error:',
+      error instanceof Error ? error.message : String(error)
+    );
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
 // POST /api/agents - Create a new agent
 // Supports: JWT auth, internal API key, or x402 payment
 router.post('/', hybridAuth, async (req: HybridAuthRequest, res) => {

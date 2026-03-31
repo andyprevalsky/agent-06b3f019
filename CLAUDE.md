@@ -90,6 +90,20 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 12. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content.
 
+13. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
+
+## Plans
+
+All implementation plans live in `docs/plans/` (checked into the repo):
+- `docs/plans/active/` — plans currently being implemented
+- `docs/plans/completed/` — plans that have been shipped
+
+Plan filenames should be kept in sync with the description of the task (kebab-case, e.g., `context-pointers.md`).
+
+**Before modifying a file**, check `docs/plans/completed/` for plans that touched those files. Read them to understand implicit business functionality and ensure changes don't break it.
+
+The `/deploy` skill automatically moves the related plan from `active/` to `completed/` before merging (if one exists).
+
 ## Temporal/Agent Patterns
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`

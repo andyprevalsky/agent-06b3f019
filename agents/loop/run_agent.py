@@ -30,6 +30,7 @@ from helpers.update_status import update_agent_status
 from helpers.attachments import resolve_attachments_activity, extract_file_pointer_dicts
 from tools.base import ToolEvent, EventType, MessageStatus
 from loop.context_utils import poll_and_update_context
+from helpers.context_pointers import annotate_with_pointer
 from tools.knowledge_base import query_blueprints_activity, query_blueprints
 from loop.activity_helper import call_temporal_activity_from_activity
 
@@ -133,6 +134,8 @@ async def run_agent(
     """
     # Initialize state
     context: List[Dict] = initial_context.copy() if initial_context else []
+    for msg in context:
+        annotate_with_pointer(msg)
     tokens_in = 0
     tokens_out = 0
     token_count = 0

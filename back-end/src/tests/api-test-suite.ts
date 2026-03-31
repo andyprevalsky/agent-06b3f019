@@ -2,7 +2,7 @@
 /**
  * Comprehensive API Test Suite
  * Tests all backend endpoints for correctness and catches issues like double slashes
- * 
+ *
  * Usage:
  *   npm run test:api
  *   tsx src/tests/api-test-suite.ts
@@ -63,10 +63,7 @@ async function request(
 /**
  * Test runner with parallel execution
  */
-async function runTest(
-  name: string,
-  testFn: () => Promise<void>
-): Promise<TestResult> {
+async function runTest(name: string, testFn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
     await testFn();
@@ -116,15 +113,15 @@ async function authenticate(): Promise<void> {
 
 async function testHealthEndpoint() {
   const response = await request(`${BASE_URL}/health`);
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.status || response.data.status !== 'ok') {
     throw new Error('Health check failed: missing or invalid status');
   }
-  
+
   if (!response.data.timestamp) {
     throw new Error('Health check failed: missing timestamp');
   }
@@ -133,11 +130,11 @@ async function testHealthEndpoint() {
 async function testModelsEndpoint() {
   // Test without double slash
   const response = await request(`${BASE_URL}/api/models`);
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
-  
+
   if (!response.data.models || !Array.isArray(response.data.models)) {
     throw new Error('Models response missing or invalid models array');
   }
@@ -151,11 +148,11 @@ async function testModelsEndpoint() {
 
 async function testToolsEndpoint() {
   const response = await request(`${BASE_URL}/api/tools`);
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.tools || !Array.isArray(response.data.tools)) {
     throw new Error('Tools response missing or invalid tools array');
   }
@@ -171,11 +168,11 @@ async function testWaitlistEndpoint() {
       variant: 'midnight-black',
     }),
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.success) {
     throw new Error('Waitlist join failed');
   }
@@ -190,7 +187,7 @@ async function testWaitlistValidation() {
       email: 'invalid-email',
     }),
   });
-  
+
   if (response.status !== 400) {
     throw new Error(`Expected 400 for invalid email, got ${response.status}`);
   }
@@ -199,7 +196,7 @@ async function testWaitlistValidation() {
 async function testWaitlistDuplicate() {
   // Test duplicate email returns success
   const testEmail = 'duplicate@example.com';
-  
+
   // First registration
   await request(`${BASE_URL}/api/waitlist`, {
     method: 'POST',
@@ -208,7 +205,7 @@ async function testWaitlistDuplicate() {
       email: testEmail,
     }),
   });
-  
+
   // Second registration (duplicate)
   const response = await request(`${BASE_URL}/api/waitlist`, {
     method: 'POST',
@@ -217,11 +214,11 @@ async function testWaitlistDuplicate() {
       email: testEmail,
     }),
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200 for duplicate, got ${response.status}`);
   }
-  
+
   if (!response.data.alreadyRegistered) {
     throw new Error('Expected alreadyRegistered=true for duplicate');
   }
@@ -236,14 +233,14 @@ async function testAgentsListEndpoint() {
 
   const response = await request(`${BASE_URL}/api/agents`, {
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
-  
+
   if (!response.data.agents || !Array.isArray(response.data.agents)) {
     throw new Error('Agents response missing or invalid agents array');
   }
@@ -257,7 +254,7 @@ async function testAgentsCreateEndpoint() {
   const response = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
     body: JSON.stringify({
       goal: 'Test agent for API test suite',
@@ -269,11 +266,11 @@ async function testAgentsCreateEndpoint() {
       },
     }),
   });
-  
+
   if (response.status !== 201) {
     throw new Error(`Expected 201, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
-  
+
   if (!response.data.agent_id) {
     throw new Error('Create agent response missing agent_id');
   }
@@ -292,14 +289,14 @@ async function testAgentGetEndpoint() {
 
   const response = await request(`${BASE_URL}/api/agents/${context.agentId}`, {
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.agent || !response.data.messages) {
     throw new Error('Get agent response missing agent or messages');
   }
@@ -317,18 +314,18 @@ async function testAgentPostMessageEndpoint() {
   const response = await request(`${BASE_URL}/api/agents/${context.agentId}/messages`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
     body: JSON.stringify({
       message: 'Test message from API test suite',
       role: 'USER',
     }),
   });
-  
+
   if (response.status !== 201) {
     throw new Error(`Expected 201, got ${response.status}`);
   }
-  
+
   if (!response.data.message_id) {
     throw new Error('Post message response missing message_id');
   }
@@ -342,14 +339,14 @@ async function testAgentPauseEndpoint() {
   const response = await request(`${BASE_URL}/api/agents/${context.agentId}/pause`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.success) {
     throw new Error('Pause agent failed');
   }
@@ -363,14 +360,14 @@ async function testAgentResumeEndpoint() {
   const response = await request(`${BASE_URL}/api/agents/${context.agentId}/resume`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!response.data.success) {
     throw new Error('Resume agent failed');
   }
@@ -386,7 +383,7 @@ async function testAgentUpdateStatusEndpoint() {
     method: 'PATCH',
     headers: {
       'X-API-Key': process.env.BACKEND_API_KEY || '',
-      'Authorization': context.accessToken ? `Bearer ${context.accessToken}` : '',
+      Authorization: context.accessToken ? `Bearer ${context.accessToken}` : '',
     },
     body: JSON.stringify({
       status: 'ACTIVE',
@@ -397,9 +394,11 @@ async function testAgentUpdateStatusEndpoint() {
       messageCount: 5,
     }),
   });
-  
+
   if (response.status !== 200 && response.status !== 401) {
-    throw new Error(`Expected 200 or 401, got ${response.status}: ${JSON.stringify(response.data)}`);
+    throw new Error(
+      `Expected 200 or 401, got ${response.status}: ${JSON.stringify(response.data)}`
+    );
   }
 }
 
@@ -411,12 +410,50 @@ async function testAgentDeleteEndpoint() {
   const response = await request(`${BASE_URL}/api/agents/${context.agentId}`, {
     method: 'DELETE',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 204) {
     throw new Error(`Expected 204, got ${response.status}`);
+  }
+}
+
+async function testMessagesBatchEndpoint() {
+  // Test with empty/invalid input
+  const emptyResponse = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: {
+      'X-API-Key': process.env.BACKEND_API_KEY || '',
+    },
+    body: JSON.stringify({ ids: [] }),
+  });
+
+  if (emptyResponse.status !== 400) {
+    throw new Error(`Expected 400 for empty ids, got ${emptyResponse.status}`);
+  }
+
+  // Test with non-existent IDs (should return empty array, not error)
+  const fakeIds = ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'];
+  const response = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: {
+      'X-API-Key': process.env.BACKEND_API_KEY || '',
+    },
+    body: JSON.stringify({ ids: fakeIds }),
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Expected 200, got ${response.status}: ${JSON.stringify(response.data)}`);
+  }
+
+  if (!Array.isArray(response.data.messages)) {
+    throw new Error('Expected messages array in response');
+  }
+
+  // Non-existent IDs should return empty array
+  if (response.data.messages.length !== 0) {
+    throw new Error(`Expected 0 messages for fake IDs, got ${response.data.messages.length}`);
   }
 }
 
@@ -428,17 +465,17 @@ async function testGenerateLLMPromptEndpoint() {
   const response = await request(`${BASE_URL}/api/generate-llm-judge-prompt`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
     body: JSON.stringify({
       goal: 'Test goal for prompt generation',
     }),
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
-  
+
   if (!response.data.prompt) {
     throw new Error('Generate prompt response missing prompt');
   }
@@ -451,14 +488,14 @@ async function testBlueprintsListEndpoint() {
 
   const response = await request(`${BASE_URL}/api/blueprints`, {
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200, got ${response.status}`);
   }
-  
+
   if (!Array.isArray(response.data)) {
     throw new Error('Blueprints response should be an array');
   }
@@ -472,18 +509,18 @@ async function testBlueprintsCreateEndpoint() {
   const response = await request(`${BASE_URL}/api/blueprints`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
     body: JSON.stringify({
       title: 'Test Blueprint',
       blueprint: 'This is a test blueprint for the API test suite',
     }),
   });
-  
+
   if (response.status !== 201) {
     throw new Error(`Expected 201, got ${response.status}: ${JSON.stringify(response.data)}`);
   }
-  
+
   if (!response.data.id) {
     throw new Error('Create blueprint response missing id');
   }
@@ -499,19 +536,21 @@ async function testBlueprintsSearchEndpoint() {
   const response = await request(`${BASE_URL}/api/blueprints/search`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
     body: JSON.stringify({
       goal: 'Test search query',
       limit: 3,
     }),
   });
-  
+
   // Accept 200 (success) or 500 (missing OPENROUTER_API_KEY) as valid
   if (response.status !== 200 && response.status !== 500) {
-    throw new Error(`Expected 200 or 500, got ${response.status}: ${JSON.stringify(response.data)}`);
+    throw new Error(
+      `Expected 200 or 500, got ${response.status}: ${JSON.stringify(response.data)}`
+    );
   }
-  
+
   if (response.status === 200 && !Array.isArray(response.data)) {
     throw new Error('Blueprints search response should be an array');
   }
@@ -525,10 +564,10 @@ async function testBlueprintsDeleteEndpoint() {
   const response = await request(`${BASE_URL}/api/blueprints/${context.blueprintId}`, {
     method: 'DELETE',
     headers: {
-      'Authorization': `Bearer ${context.accessToken}`,
+      Authorization: `Bearer ${context.accessToken}`,
     },
   });
-  
+
   if (response.status !== 204) {
     throw new Error(`Expected 204, got ${response.status}`);
   }
@@ -538,7 +577,7 @@ async function testBlueprintsDeleteEndpoint() {
 
 async function testUnauthorizedAccess() {
   const response = await request(`${BASE_URL}/api/agents`);
-  
+
   if (response.status !== 401) {
     throw new Error(`Expected 401 for unauthorized access, got ${response.status}`);
   }
@@ -547,10 +586,10 @@ async function testUnauthorizedAccess() {
 async function testInvalidToken() {
   const response = await request(`${BASE_URL}/api/agents`, {
     headers: {
-      'Authorization': 'Bearer invalid-token-12345',
+      Authorization: 'Bearer invalid-token-12345',
     },
   });
-  
+
   if (response.status !== 401) {
     throw new Error(`Expected 401 for invalid token, got ${response.status}`);
   }
@@ -567,7 +606,7 @@ async function testX402SpawnAgentRequiresPayment() {
       goal: 'Test agent from x402',
     }),
   });
-  
+
   if (response.status !== 402) {
     throw new Error(`Expected 402 Payment Required, got ${response.status}`);
   }
@@ -578,7 +617,7 @@ async function testX402TopupRequiresPayment() {
     method: 'POST',
     body: JSON.stringify({}),
   });
-  
+
   if (response.status !== 402) {
     throw new Error(`Expected 402 Payment Required, got ${response.status}`);
   }
@@ -588,7 +627,7 @@ async function testX402StatusEndpointNotFound() {
   // Status endpoint should return 404 for non-existent agent
   const fakeAgentId = '00000000-0000-0000-0000-000000000000';
   const response = await request(`${BASE_URL}/api/x402/agents/${fakeAgentId}/status`);
-  
+
   if (response.status !== 404) {
     throw new Error(`Expected 404 for non-existent agent, got ${response.status}`);
   }
@@ -601,11 +640,11 @@ async function testX402StatusEndpointValidAgent() {
     if (!context.accessToken) {
       throw new Error('No access token to create test agent');
     }
-    
+
     const createResponse = await request(`${BASE_URL}/api/agents`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${context.accessToken}`,
+        Authorization: `Bearer ${context.accessToken}`,
       },
       body: JSON.stringify({
         goal: 'Test agent for x402 status check',
@@ -617,21 +656,21 @@ async function testX402StatusEndpointValidAgent() {
         },
       }),
     });
-    
+
     if (createResponse.status !== 201) {
       throw new Error(`Failed to create test agent: ${createResponse.status}`);
     }
-    
+
     context.agentId = createResponse.data.agent_id;
   }
-  
+
   // Now test the x402 status endpoint (public, no auth required)
   const response = await request(`${BASE_URL}/api/x402/agents/${context.agentId}/status`);
-  
+
   if (response.status !== 200) {
     throw new Error(`Expected 200 for valid agent, got ${response.status}`);
   }
-  
+
   if (!response.data.agent_id || !response.data.status) {
     throw new Error('Status response missing required fields');
   }
@@ -641,16 +680,16 @@ async function testX402EndpointExists() {
   // Verify the x402 endpoints are mounted (even if they return 402)
   // Note: Agent creation is now unified at /api/agents (returns 402 without auth/payment)
   const endpoints = [
-    { method: 'POST', path: '/api/agents', expectedStatus: 402 },  // Unified endpoint
+    { method: 'POST', path: '/api/agents', expectedStatus: 402 }, // Unified endpoint
     { method: 'POST', path: '/api/x402/topup', expectedStatus: 402 },
   ];
-  
+
   for (const endpoint of endpoints) {
     const response = await request(`${BASE_URL}${endpoint.path}`, {
       method: endpoint.method,
       body: JSON.stringify({}),
     });
-    
+
     // Should get 402 (payment required), not 404 (not found)
     if (response.status === 404) {
       throw new Error(`x402 endpoint ${endpoint.path} not found (404)`);
@@ -676,7 +715,7 @@ async function testNoDoubleSlashesInURLs() {
     if (url.pathname.includes('//')) {
       throw new Error(`Double slash found in URL: ${url.pathname}`);
     }
-    
+
     // Also test with trailing slash on base URL
     const baseWithSlash = BASE_URL.endsWith('/') ? BASE_URL : `${BASE_URL}/`;
     const url2 = new URL(endpoint, baseWithSlash);
@@ -694,9 +733,7 @@ async function runAllTests() {
   console.log(`📡 Testing against: ${BASE_URL}\n`);
 
   // Sequential tests (require auth first)
-  const sequentialTests = [
-    { name: 'Authentication', fn: authenticate, group: 'auth' },
-  ];
+  const sequentialTests = [{ name: 'Authentication', fn: authenticate, group: 'auth' }];
 
   console.log('🔐 Running authentication tests...');
   for (const test of sequentialTests) {
@@ -742,6 +779,7 @@ async function runAllTests() {
     { name: 'Resume Agent', fn: testAgentResumeEndpoint, group: 'agent-workflow' },
     { name: 'Update Agent Status', fn: testAgentUpdateStatusEndpoint, group: 'agent-workflow' },
     { name: 'Delete Agent', fn: testAgentDeleteEndpoint, group: 'agent-workflow' },
+    { name: 'Messages Batch', fn: testMessagesBatchEndpoint, group: 'agent-workflow' },
   ];
 
   // Blueprint workflow tests (must run sequentially)
@@ -753,16 +791,12 @@ async function runAllTests() {
 
   // Run public tests in parallel
   console.log('\n📋 Running public endpoint tests...');
-  const publicResults = await Promise.all(
-    publicTests.map(test => runTest(test.name, test.fn))
-  );
+  const publicResults = await Promise.all(publicTests.map((test) => runTest(test.name, test.fn)));
   publicResults.forEach(printResult);
 
   // Run auth tests in parallel
   console.log('\n🔒 Running authenticated endpoint tests...');
-  const authResults = await Promise.all(
-    authTests.map(test => runTest(test.name, test.fn))
-  );
+  const authResults = await Promise.all(authTests.map((test) => runTest(test.name, test.fn)));
   authResults.forEach(printResult);
 
   // Run agent workflow tests sequentially
@@ -793,7 +827,7 @@ async function runAllTests() {
 
   // Collect all results
   const allResults = [
-    ...sequentialTests.map(t => ({ name: t.name, passed: true, duration: 0 })), // Auth already passed
+    ...sequentialTests.map((t) => ({ name: t.name, passed: true, duration: 0 })), // Auth already passed
     ...publicResults,
     ...authResults,
     ...agentWorkflowResults,
@@ -801,8 +835,8 @@ async function runAllTests() {
   ];
 
   // Print summary
-  const passed = allResults.filter(r => r.passed).length;
-  const failed = allResults.filter(r => !r.passed).length;
+  const passed = allResults.filter((r) => r.passed).length;
+  const failed = allResults.filter((r) => !r.passed).length;
   const totalDuration = allResults.reduce((sum, r) => sum + r.duration, 0);
 
   console.log('\n' + '='.repeat(60));
@@ -814,8 +848,8 @@ async function runAllTests() {
 
   if (failed > 0) {
     console.log('❌ FAILED TESTS:');
-    const failedTests: TestResult[] = allResults.filter(r => !r.passed);
-    failedTests.forEach(r => console.log(`   • ${r.name}: ${r.error || 'Unknown error'}`));
+    const failedTests: TestResult[] = allResults.filter((r) => !r.passed);
+    failedTests.forEach((r) => console.log(`   • ${r.name}: ${r.error || 'Unknown error'}`));
     console.log('');
     process.exit(1);
   }
@@ -835,11 +869,10 @@ function printResult(result: TestResult) {
 
 // Run the test suite
 if (require.main === module) {
-  runAllTests().catch(error => {
+  runAllTests().catch((error) => {
     console.error('\n💥 Test suite crashed:', error);
     process.exit(1);
   });
 }
 
 export { runAllTests };
-

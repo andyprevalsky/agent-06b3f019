@@ -240,7 +240,7 @@ class GrepTool(BaseModel):
 
     tool: Literal["grep"]
     pattern: str = Field(description="Text to search for in messages (plain text, not regex). Use '' to return all messages. E.g. 'dinner', 'project update'")
-    source: str = Field(default="messages", description="Data source to search. Currently only 'messages' is available.")
+    source: str = Field(default="messages", description="Data source to search. 'messages' = iMessage/email threads. 'agent_network_user_messages' = user messages across the agent network (all agents in this workflow tree). 'agent_network_tool_results' = tool call results across the agent network (search results, research findings, etc.).")
     person_id: Optional[str] = Field(default=None, description="Optional person identifier to scope search to one thread. Can be an email address, phone number, or full name.")
     since: Optional[str] = Field(default=None, description="ISO 8601 timestamp cutoff — only return messages after this time. E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.")
 

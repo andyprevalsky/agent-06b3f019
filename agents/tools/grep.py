@@ -87,7 +87,7 @@ class GrepManager(ToolManager):
 
             result = await execute_activity(
                 grep_activity,
-                args=[pattern, source, person_id, since, user_id],
+                args=[pattern, source, person_id, since, user_id, agent_id],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
                     maximum_attempts=2,
@@ -202,6 +202,7 @@ async def grep_activity(
     person_id: Optional[str] = None,
     since: Optional[str] = None,
     user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity: Search user's local data via backend POST /api/data/grep.
@@ -231,6 +232,8 @@ async def grep_activity(
             payload["person_id"] = person_id
         if user_id:
             payload["user_id"] = user_id
+        if agent_id and source.startswith("agent_network_"):
+            payload["agent_id"] = agent_id
 
         async with httpx.AsyncClient(timeout=25.0) as client:
             response = await client.post(

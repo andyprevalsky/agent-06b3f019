@@ -368,7 +368,30 @@ REQUIRED OUTPUT - gather this data before calling attempt_completion:
         """).rstrip()
 
     # ========================================================================
-    # 6. OUTPUT FORMAT
+    # 6. AGENT NETWORK & CONTEXT POINTERS
+    # ========================================================================
+    prompt += dedent("""
+
+
+# Agent Network & Context Pointers
+You are part of a network of agents working on interconnected tasks generated through recursive
+task decomposition. Your parent agent decomposed a larger goal into sub-tasks, and you may
+decompose your own tasks further into child agents.
+
+Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
+These reference the original data in the agent network — use them instead of rewriting:
+- PREFER passing @ref:message: pointers in tool arguments and goal strings over rewriting content
+- Do NOT paraphrase referenced content — the pointer preserves the original exactly
+- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring
+- Pointers are resolved automatically before each LLM call
+
+You can search across the agent network using grep:
+- source="agent_network_user_messages" — search user messages across all agents in this workflow
+- source="agent_network_tool_results" — search tool results (research findings, search results, etc.) across all agents
+    """).rstrip()
+
+    # ========================================================================
+    # 7. OUTPUT FORMAT
     # ========================================================================
     prompt += dedent("""
 
@@ -763,6 +786,15 @@ ATTACHED FILES (file_pointers)
 - Do NOT plan browser tasks to "download" attached files - just reference them by filename in sub-agent goals
 - Example: If file_pointer has `"original_filename": "rs.jpeg"`, use `attachments: ["rs.jpeg"]`
 
+CONTEXT POINTERS
+----------------
+When decomposing tasks, embed @ref:message: pointers in sub-task goals rather than
+summarizing the referenced data. This prevents information degradation across the agent network.
+- Messages and tool results include "Reference: @ref:message:<id>" pointers
+- Pass these pointers verbatim in sub-task goal strings
+- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference specific substrings
+- Pointers are resolved automatically when the child agent runs
+
 CRITICAL REMINDERS
 ------------------
 EPHEMERAL SESSIONS - spawn_browser_agent and spawn_claude_code_agent create NEW sessions each call.
@@ -833,6 +865,13 @@ GREP USAGE:
 - The 'since' parameter accepts ISO 8601 timestamps (e.g., "2025-06-01T00:00:00Z"). Use the current timestamp above to calculate relative time ranges.
 - Results return matching messages with surrounding context (like grep -C)
 - If grep returns no results, try different keywords or broaden the time range
+
+AGENT NETWORK SEARCH:
+You are part of a network of agents working on interconnected tasks via recursive task decomposition.
+You can search across the entire agent network's data:
+- source="agent_network_user_messages" — search what users said across all agents in this workflow tree
+- source="agent_network_tool_results" — search tool results from all agents (web searches, research, lookups, etc.)
+Use these to find data that other agents in the network have already gathered, avoiding redundant searches.
 
 QUALITY:
 - Be thorough — make multiple searches from different angles

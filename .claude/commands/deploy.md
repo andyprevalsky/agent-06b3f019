@@ -105,7 +105,25 @@ gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments/<COMMENT_ID>/replies -f b
 gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<original body>\n\n[IGNORED] style nit"
 ```
 
-## Step 5: Merge
+## Step 5: Archive plan (if applicable)
+
+Before merging, check if there's an active plan related to this branch's work:
+
+```bash
+ls docs/plans/active/ 2>/dev/null
+```
+
+If a related plan exists in `docs/plans/active/`:
+1. Move it to `docs/plans/completed/`:
+   ```bash
+   git mv docs/plans/active/<plan-file>.md docs/plans/completed/<plan-file>.md
+   ```
+2. Commit and push (no additional review needed for this change):
+   ```bash
+   git add docs/plans/completed/ && git commit -m "docs: archive plan to completed" && git push
+   ```
+
+## Step 6: Merge
 
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 
@@ -123,7 +141,7 @@ If `main` is already checked out in another worktree, do not force a branch dele
 git fetch origin main
 ```
 
-## Step 6: Wait for deploys
+## Step 7: Wait for deploys
 
 Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
 
@@ -145,11 +163,11 @@ If a deploy fails:
 1. Show the failure to the user
 2. If fixable, create a new fix commit, push, and loop back to Step 3 (new review cycle)
 
-## Step 7: New branch
+## Step 8: New branch
 
 Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
 
-## Step 8: Done
+## Step 9: Done
 
 After the new branch is created, report to the user:
 - PR URL

@@ -37,6 +37,18 @@ const VALID_SOURCES = {
     searchField: 'message',
     groupBy: 'personId',
   },
+  agent_network_user_messages: {
+    description: 'User messages across the agent network',
+    table: 'Message' as const,
+    searchField: 'text',
+    groupBy: 'agentId',
+  },
+  agent_network_tool_results: {
+    description: 'Tool call results across the agent network',
+    table: 'Message' as const,
+    searchField: 'text',
+    groupBy: 'agentId',
+  },
 } as const;
 
 type ValidSource = keyof typeof VALID_SOURCES;
@@ -88,6 +100,132 @@ router.post('/grep', authenticate, async (req: AuthRequest, res: Response) => {
         error: 'SOURCE_NOT_FOUND',
         message: `Unknown source: '${resolvedSource}'. Available sources: ${Object.keys(VALID_SOURCES).join(', ')}`,
         available_sources: Object.keys(VALID_SOURCES),
+      });
+    }
+
+    // Handle agent_network sources (different table + agent tree resolution)
+    if (
+      resolvedSource === 'agent_network_user_messages' ||
+      resolvedSource === 'agent_network_tool_results'
+    ) {
+      const { agent_id } = req.body;
+      if (!agent_id) {
+        return res.status(400).json({
+          error: 'MISSING_AGENT_ID',
+          message: 'agent_id is required for agent_network sources',
+        });
+      }
+
+      // Verify agent belongs to the requesting user
+      const agent = await prisma.agent.findFirst({
+        where: { id: agent_id, userId },
+        select: { id: true },
+      });
+      if (!agent) {
+        return res.status(403).json({
+          error: 'AGENT_NOT_FOUND',
+          message: 'Agent not found or does not belong to current user',
+        });
+      }
+
+      // Walk up to root agent (scoped to userId)
+      let currentId = agent_id;
+      const visited = new Set<string>();
+      while (currentId) {
+        if (visited.has(currentId)) break;
+        visited.add(currentId);
+        const parentAgent = await prisma.agent.findFirst({
+          where: { id: currentId, userId },
+          select: { parentAgentId: true },
+        });
+        if (!parentAgent?.parentAgentId) break;
+        currentId = parentAgent.parentAgentId;
+      }
+      const rootId = currentId;
+
+      // Walk down from root to find all agents in tree (BFS, scoped to userId)
+      const treeIds: string[] = [];
+      const seen = new Set<string>();
+      const queue = [rootId];
+      while (queue.length > 0) {
+        const batch = queue.splice(0, queue.length);
+        for (const id of batch) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          treeIds.push(id);
+        }
+        const children = await prisma.agent.findMany({
+          where: { parentAgentId: { in: batch }, userId },
+          select: { id: true },
+        });
+        queue.push(...children.filter((c) => !seen.has(c.id)).map((c) => c.id));
+      }
+
+      // Query Message table
+      const trimmedPattern = pattern.trim();
+      const agentNetworkLimit = Math.min(Math.max(parseInt(limit) || 20, 1), MAX_RESULTS);
+
+      const whereClause: any = {
+        agentId: { in: treeIds },
+        role: resolvedSource === 'agent_network_user_messages' ? 'USER' : 'TOOL',
+        ...(trimmedPattern.length > 0
+          ? { text: { contains: trimmedPattern, mode: 'insensitive' as const } }
+          : {}),
+      };
+
+      // For tool results, filter to FINISHED only
+      if (resolvedSource === 'agent_network_tool_results') {
+        whereClause.metadata = { path: ['toolStatus'], equals: 'FINISHED' };
+      }
+
+      const messages = await prisma.message.findMany({
+        where: whereClause,
+        orderBy: { createdAt: 'desc' },
+        take: agentNetworkLimit,
+        select: {
+          id: true,
+          text: true,
+          role: true,
+          agentId: true,
+          createdAt: true,
+        },
+      });
+
+      if (messages.length === 0) {
+        const elapsed = Date.now() - startTime;
+        console.log(
+          `[Data] grep: no matches for '${pattern}' in ${resolvedSource} (${treeIds.length} agents) [${elapsed}ms]`
+        );
+        return res.json({
+          matches: [],
+          total_matches: 0,
+          truncated: false,
+          message: `No matches for '${pattern}' in ${resolvedSource} (searched ${treeIds.length} agents in tree). Try different keywords.`,
+        });
+      }
+
+      // Format results with @ref:message pointers
+      const formattedMatches = messages.map((msg) => ({
+        agent_id: msg.agentId,
+        message_id: msg.id,
+        role: msg.role,
+        text: msg.text.length > 500 ? msg.text.substring(0, 500) + '...' : msg.text,
+        timestamp: msg.createdAt.toISOString(),
+        pointer: `@ref:message:${msg.id}`,
+      }));
+
+      const elapsed = Date.now() - startTime;
+      console.log(
+        `[Data] grep: '${pattern}' → ${messages.length} matches in ${resolvedSource} (${treeIds.length} agents) [${elapsed}ms]`
+      );
+
+      return res.json({
+        matches: formattedMatches,
+        total_matches: messages.length,
+        truncated: messages.length >= agentNetworkLimit,
+        pattern,
+        source: resolvedSource,
+        agents_in_tree: treeIds.length,
       });
     }
 
