@@ -70,17 +70,14 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 3: Wait for code reviews
 
-**Use a background sub-agent** to poll for the CodeRabbit check — do NOT poll in the main context. Launch an Agent with `run_in_background: true` that:
-1. Polls `gh pr checks <PR_NUMBER> --json name,state` every 30 seconds until the "CodeRabbit" check reaches `SUCCESS` state. **No timeout — keep waiting.**
-2. Once CodeRabbit completes, reads reviews from ALL three comment locations:
-   ```bash
-   gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
-   gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
-   gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
-   ```
-3. Returns the full review content back to the main context.
+Poll `gh pr checks <PR_NUMBER> --json name,state` every 30 seconds until the "CodeRabbit" check reaches `SUCCESS` state. **No timeout — keep waiting.**
 
-While the sub-agent polls, you are free to do other work. When notified of completion, continue to Step 4.
+Once CodeRabbit completes, read reviews from ALL three comment locations:
+```bash
+gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
+gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
+```
 
 ## Step 4: Handle review results
 
