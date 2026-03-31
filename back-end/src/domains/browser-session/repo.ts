@@ -1,0 +1,114 @@
+/**
+ * Browser-session domain repo — all Prisma calls.
+ */
+
+import { prisma } from '../../providers/database';
+
+/**
+ * Find an agent's proxy location fields by ID.
+ */
+export async function findAgentProxy(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { proxyCountry: true, proxyState: true, proxyCity: true },
+  });
+}
+
+/**
+ * Find a user's settings fields for the init response.
+ */
+export async function findUserSettings(userId: string) {
+  return prisma.user.findUnique({
+    where: { userId },
+    select: {
+      name: true,
+      phone: true,
+      addressLine1: true,
+      addressLine2: true,
+      city: true,
+      state: true,
+      postalCode: true,
+      country: true,
+      encryptedPaymentInformation: true,
+      systemName: true,
+      profilePicture: true,
+      customSystemPrompt: true,
+    },
+  });
+}
+
+/**
+ * Find all browser passwords for a user, ordered by last used descending.
+ */
+export async function findPasswords(userId: string) {
+  return prisma.browserPassword.findMany({
+    where: { userId },
+    select: {
+      origin: true,
+      username: true,
+      encryptedPassword: true,
+      dateLastUsed: true,
+    },
+    orderBy: {
+      dateLastUsed: 'desc',
+    },
+  });
+}
+
+/**
+ * Find a browser session by task ID (includes context).
+ */
+export async function findSessionByTaskId(taskId: string) {
+  return prisma.browserSession.findUnique({
+    where: { id: taskId },
+    include: { context: true },
+  });
+}
+
+/**
+ * Find a browser session by Steel session ID (includes context).
+ */
+export async function findSessionBySessionId(sessionId: string) {
+  return prisma.browserSession.findUnique({
+    where: { sessionId },
+    include: { context: true },
+  });
+}
+
+/**
+ * Find a user's browser context with active sessions.
+ */
+export async function findContextByUserId(userId: string) {
+  return prisma.browserContext.findUnique({
+    where: { userId },
+    include: {
+      sessions: {
+        where: { status: 'ACTIVE' },
+        take: 5,
+        orderBy: { createdAt: 'desc' },
+      },
+    },
+  });
+}
+
+/**
+ * Find localStorage data for a specific origin and user.
+ */
+export async function findLocalStorageOrigin(userId: string, origin: string) {
+  return prisma.localStorageOrigin.findUnique({
+    where: { userId_origin: { userId, origin } },
+  });
+}
+
+/**
+ * Update the injected origins record on a browser session.
+ */
+export async function updateInjectedOrigins(
+  sessionId: string,
+  injectedOrigins: Record<string, string>
+) {
+  return prisma.browserSession.update({
+    where: { sessionId },
+    data: { injectedOrigins },
+  });
+}

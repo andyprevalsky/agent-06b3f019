@@ -37,6 +37,7 @@ reviews:
     - "!**/*.lock"
     - "!**/package-lock.json"
     - "!**/pnpm-lock.yaml"
+    - "!back-end/src/routes/**"
 
   path_instructions:
     - path: "agents/**"

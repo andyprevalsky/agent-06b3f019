@@ -1,0 +1,82 @@
+/**
+ * Browser-session domain types — Zod schemas, interfaces, type aliases.
+ */
+
+import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// Request validation schemas
+// ---------------------------------------------------------------------------
+
+export const initSessionSchema = z.object({
+  user_id: z.string(),
+  agent_id: z.string().uuid(),
+  start_url: z.string().min(1),
+});
+
+export const closeSessionSchema = z.object({
+  session_id: z.string(),
+  pause: z.boolean().optional().default(false),
+  current_url: z.string().optional(), // Save current page URL for resume
+});
+
+export const resumeSessionSchema = z.object({
+  task_id: z.string().uuid(), // Use stable task ID instead of session_id
+});
+
+export const injectLocalStorageSchema = z.object({
+  origin: z.string().url(),
+});
+
+// ---------------------------------------------------------------------------
+// Inferred types
+// ---------------------------------------------------------------------------
+
+export type InitSessionInput = z.infer<typeof initSessionSchema>;
+export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
+export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
+export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+export class CdpInjectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CdpInjectionError';
+  }
+}
+
+export class SessionNoWsUrlError extends Error {
+  constructor() {
+    super('Session has no WebSocket URL for CDP injection');
+    this.name = 'SessionNoWsUrlError';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Response / domain types
+// ---------------------------------------------------------------------------
+
+export interface SerializedPassword {
+  origin: string;
+  username: string;
+  encryptedPassword: string;
+  dateLastUsed: number | null;
+}
+
+export interface UserSettings {
+  name: string | null;
+  phone: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
+  country: string | null;
+  encryptedPaymentInformation: string | null;
+  systemName: string | null;
+  profilePicture: string | null;
+  customSystemPrompt: string | null;
+}

@@ -1,0 +1,327 @@
+/**
+ * Integrations upload service — cacheStorage, passwords, and Apple passwords.
+ * Split from uploadService.ts for max-lines compliance.
+ */
+
+import crypto from 'crypto';
+import { IntegrationType, IntegrationStatus } from '@prisma/client';
+import { createLogger } from '../../providers/logger';
+import type { CacheStoragePayload, PasswordPayload, ApplePasswordEntry } from './types';
+import { RSA_PUBLIC_KEY_PEM } from './config';
+import * as repo from './repo';
+
+const log = createLogger('Integrations');
+
+/**
+ * Process CacheStorage upload.
+ */
+export async function processCacheStorageUpload(
+  userId: string,
+  cacheStorageData: CacheStoragePayload
+) {
+  log.info('Received Cache Storage origins', { count: cacheStorageData.origins.length, userId });
+
+  const origins = cacheStorageData.origins;
+  if (origins.length > 0) {
+    const values = origins
+      .map((_, i) =>
+        `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
+      )
+      .join(', ');
+
+    const params: (string | object)[] = [];
+    for (const origin of origins) {
+      params.push(userId, origin.origin, JSON.stringify(origin.caches), cacheStorageData.hashes[origin.origin] ?? '');
+    }
+
+    await repo.bulkUpsertCacheStorage(values, params);
+  }
+
+  log.info('Upserted Cache Storage origins', { count: origins.length, userId });
+
+  return { originCount: origins.length };
+}
+
+/**
+ * Process browser passwords upload.
+ */
+export async function processPasswordsUpload(userId: string, passwordData: PasswordPayload) {
+  log.info('Received passwords', { count: passwordData.passwords.length, userId });
+
+  if (passwordData.passwords.length === 0) {
+    return { passwordCount: 0 };
+  }
+
+  const deduplicatedPasswords = deduplicatePasswordsByOriginUsername(passwordData.passwords);
+  log.info('Deduplicated passwords', { count: deduplicatedPasswords.length });
+
+  await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
+  log.info('Upserted passwords', { count: deduplicatedPasswords.length, userId });
+
+  // Create integration records per browser source
+  const browserSources = new Set(deduplicatedPasswords.map((p) => p.browserSource));
+  for (const source of browserSources) {
+    const sourceCount = deduplicatedPasswords.filter((p) => p.browserSource === source).length;
+    await repo.upsertIntegration({
+      userId,
+      name: `${source}_passwords`,
+      type: IntegrationType.DATA_SOURCE,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      lastSyncAt: new Date(),
+      lastSuccessfulSyncAt: new Date(),
+      config: { browserSource: source, passwordCount: sourceCount, uploadedAt: new Date().toISOString() },
+    });
+    log.info('Upserted password integration', { integrationName: `${source}_passwords`, userId });
+  }
+
+  return { passwordCount: deduplicatedPasswords.length };
+}
+
+/** Deduplicate passwords by (origin, username), keeping most recently used. */
+function deduplicatePasswordsByOriginUsername<T extends { origin: string; username: string; dateLastUsed: number }>(
+  passwords: T[]
+): T[] {
+  const passwordMap = new Map<string, T>();
+  for (const pwd of passwords) {
+    const key = `${pwd.origin}|${pwd.username}`;
+    const existing = passwordMap.get(key);
+    if (existing === undefined || pwd.dateLastUsed > existing.dateLastUsed) {
+      passwordMap.set(key, pwd);
+    }
+  }
+  return Array.from(passwordMap.values());
+}
+
+/** Bulk upsert password entries. */
+async function bulkUpsertPasswordEntries(
+  userId: string,
+  passwords: Array<{
+    origin: string;
+    username: string;
+    encryptedPassword: string;
+    dateLastUsed: number | null;
+    dateCreated: number | null;
+    browserSource: string;
+  }>
+) {
+  const values = passwords
+    .map((_, i) =>
+      `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`
+    )
+    .join(', ');
+
+  const params: (string | number | null)[] = [];
+  for (const pwd of passwords) {
+    params.push(userId, pwd.origin, pwd.username, pwd.encryptedPassword, pwd.dateLastUsed, pwd.dateCreated, pwd.browserSource);
+  }
+
+  await repo.bulkUpsertPasswords(values, params);
+}
+
+/**
+ * Encrypt a password using RSA-2048 + AES-256-GCM hybrid encryption.
+ */
+export function encryptPasswordForStorage(password: string): string {
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const ciphertext = Buffer.concat([encrypted, authTag]);
+
+  const encryptedAesKey = crypto.publicEncrypt(
+    {
+      key: RSA_PUBLIC_KEY_PEM,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+    },
+    aesKey
+  );
+
+  const envelope = {
+    version: 1,
+    encrypted_aes_key: encryptedAesKey.toString('base64'),
+    iv: iv.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+
+  return Buffer.from(JSON.stringify(envelope)).toString('base64');
+}
+
+/** Parse the CSV header and return column indices. */
+function parseAppleCsvHeader(header: string[]) {
+  const normalized = header.map((h) => h.trim().toLowerCase().replace(/"/g, ''));
+  return {
+    titleIdx: normalized.findIndex((h) => h === 'title'),
+    urlIdx: normalized.findIndex((h) => h === 'url'),
+    usernameIdx: normalized.findIndex((h) => h === 'username'),
+    passwordIdx: normalized.findIndex((h) => h === 'password'),
+    notesIdx: normalized.findIndex((h) => h === 'notes'),
+    otpAuthIdx: normalized.findIndex((h) => h === 'otpauth'),
+  };
+}
+
+/** Parse the CSV body into rows, respecting quotes. */
+function parseCsvRows(csvContent: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = '';
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < csvContent.length) {
+    const char = csvContent[i];
+
+    if (char === '"') {
+      if (inQuotes && csvContent[i + 1] === '"') {
+        currentField += '"';
+        i += 2;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      i++;
+      continue;
+    }
+
+    if (!inQuotes) {
+      if (char === delimiter) {
+        currentRow.push(currentField);
+        currentField = '';
+        i++;
+        continue;
+      }
+      if (char === '\r') {
+        i++;
+        continue;
+      }
+      if (char === '\n') {
+        currentRow.push(currentField);
+        rows.push(currentRow);
+        currentRow = [];
+        currentField = '';
+        i++;
+        continue;
+      }
+    }
+
+    currentField += char;
+    i++;
+  }
+
+  if (currentField !== '' || currentRow.length > 0) {
+    currentRow.push(currentField);
+    rows.push(currentRow);
+  }
+
+  return rows;
+}
+
+/**
+ * Parse Apple Passwords export file.
+ */
+export function parseApplePasswordsCsv(csvContent: string): ApplePasswordEntry[] {
+  const firstNewline = csvContent.indexOf('\n');
+  if (firstNewline === -1) {
+    throw new Error('File must have at least a header row and one data row');
+  }
+  const firstLine = csvContent.substring(0, firstNewline).replace(/\r$/, '');
+  const delimiter = firstLine.includes('\t') ? '\t' : ',';
+
+  const rows = parseCsvRows(csvContent, delimiter);
+
+  if (rows.length < 2) {
+    throw new Error('File must have at least a header row and one data row');
+  }
+
+  const { titleIdx, urlIdx, usernameIdx, passwordIdx, notesIdx, otpAuthIdx } =
+    parseAppleCsvHeader(rows[0]);
+
+  if (urlIdx === -1 || usernameIdx === -1 || passwordIdx === -1) {
+    throw new Error('File must contain URL, Username, and Password columns');
+  }
+
+  const passwords: ApplePasswordEntry[] = [];
+
+  for (let rowIdx = 1; rowIdx < rows.length; rowIdx++) {
+    const values = rows[rowIdx];
+    if (values.length === 1 && values[0].trim() === '') continue;
+
+    const url = values[urlIdx]?.trim() ?? '';
+    const username = values[usernameIdx]?.trim() ?? '';
+    const password = values[passwordIdx]?.trim() ?? '';
+
+    if (url === '' || username === '' || password === '') continue;
+
+    passwords.push({
+      title: titleIdx >= 0 ? values[titleIdx]?.trim() ?? '' : '',
+      url,
+      username,
+      password,
+      notes: notesIdx >= 0 ? values[notesIdx]?.trim() ?? '' : '',
+      otpAuth: otpAuthIdx >= 0 ? values[otpAuthIdx]?.trim() ?? '' : '',
+    });
+  }
+
+  return passwords;
+}
+
+/**
+ * Process Apple Passwords CSV upload.
+ */
+export async function processApplePasswordsUpload(userId: string, csvContent: string) {
+  const passwords = parseApplePasswordsCsv(csvContent);
+
+  if (passwords.length === 0) {
+    throw new Error('No valid passwords found in CSV');
+  }
+
+  log.info('Parsed Apple passwords', { count: passwords.length, userId });
+
+  const now = Date.now();
+  const encryptedPasswords = passwords.map((p) => {
+    let origin = p.url;
+    try {
+      const urlObj = new URL(p.url);
+      origin = urlObj.origin;
+    } catch {
+      // Keep original URL if parsing fails
+    }
+
+    return {
+      origin,
+      username: p.username,
+      encryptedPassword: encryptPasswordForStorage(p.password),
+      dateLastUsed: now,
+      dateCreated: now,
+      browserSource: 'apple_passwords',
+    };
+  });
+
+  // Deduplicate by (origin, username)
+  const passwordMap = new Map<string, (typeof encryptedPasswords)[0]>();
+  for (const pwd of encryptedPasswords) {
+    const key = `${pwd.origin}|${pwd.username}`;
+    if (!passwordMap.has(key)) {
+      passwordMap.set(key, pwd);
+    }
+  }
+  const deduplicatedPasswords = Array.from(passwordMap.values());
+  log.info('Deduplicated Apple passwords', { count: deduplicatedPasswords.length });
+
+  if (deduplicatedPasswords.length > 0) {
+    await bulkUpsertPasswordEntries(userId, deduplicatedPasswords);
+    log.info('Imported Apple passwords', { count: deduplicatedPasswords.length, userId });
+  }
+
+  await repo.upsertIntegration({
+    userId,
+    name: 'apple_passwords',
+    type: IntegrationType.DATA_SOURCE,
+    status: IntegrationStatus.CONNECTED,
+    config: { passwordCount: deduplicatedPasswords.length, lastImportAt: new Date().toISOString() },
+  });
+
+  return { passwordCount: deduplicatedPasswords.length };
+}

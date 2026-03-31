@@ -1,0 +1,83 @@
+// @ts-expect-error - vcards-js doesn't have type declarations
+import vCardsJS from 'vcards-js';
+import * as repo from './repo';
+import { createLogger } from '../../providers/logger';
+import {
+  ROSE_PHONE,
+  ROSE_EMAIL,
+  ROSE_ORG,
+  ROSE_URL,
+  ROSE_BIRTHDAY,
+  DEFAULT_SYSTEM_NAME,
+  DEFAULT_PHOTO_BASE64,
+} from './config';
+
+const log = createLogger('VCard');
+
+interface VCard {
+  firstName: string;
+  lastName: string;
+  cellPhone: string;
+  email: string;
+  organization: string;
+  url: string;
+  birthday: Date;
+  photo: { embedFromString: (data: string, type: string) => void };
+  getFormattedString: () => string;
+}
+
+function applyDefaultPhoto(vCard: VCard) {
+  vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
+}
+
+function buildBaseVCard(name: string): VCard {
+  const vCard = vCardsJS();
+  vCard.firstName = name;
+  vCard.lastName = '';
+  vCard.cellPhone = ROSE_PHONE;
+  vCard.email = ROSE_EMAIL;
+  vCard.organization = ROSE_ORG;
+  vCard.url = ROSE_URL;
+  vCard.birthday = ROSE_BIRTHDAY;
+  applyDefaultPhoto(vCard);
+  return vCard;
+}
+
+/**
+ * Generate the default Rose vCard string.
+ */
+export function generateRoseVCard(): string {
+  const vCard = buildBaseVCard(DEFAULT_SYSTEM_NAME);
+  return vCard.getFormattedString();
+}
+
+/**
+ * Generate a personalized vCard for a user.
+ * Falls back to default Rose vCard on error.
+ */
+export async function generatePersonalizedVCard(userId: string): Promise<{
+  content: string;
+  filename: string;
+}> {
+  try {
+    const user = await repo.findUserCustomization(userId);
+    const systemName =
+      user?.systemName !== null && user?.systemName !== undefined && user.systemName !== ''
+        ? user.systemName
+        : DEFAULT_SYSTEM_NAME;
+    const vCard = buildBaseVCard(systemName);
+    const sanitized = systemName
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '-')
+      .replace(/-{2,}/g, '-')
+      .slice(0, 64);
+    const filename = `${sanitized !== '' ? sanitized : 'rose'}.vcf`;
+    return { content: vCard.getFormattedString(), filename };
+  } catch (error) {
+    log.error('Failed to generate personalized vCard', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    // Fall back to default Rose vCard on error
+    return { content: generateRoseVCard(), filename: 'rose.vcf' };
+  }
+}

@@ -63,7 +63,6 @@ domains/*/routes.ts  → imports from own service, own types, providers/* (auth)
 Verify before starting:
 
 1. **Blackbox tests exist** for this domain (`back-end/src/tests/blackbox/<domain>.blackbox.ts`). If not, tell the user to run `/create-domain-blackbox-tests $ARGUMENTS` first and stop.
-2. **ESLint strict rules pass** for the domain's current route file. If not, tell the user to run `/setup-formatter-and-linter $ARGUMENTS` first and stop.
 
 ## Step 0: One-time infrastructure setup
 
@@ -337,25 +336,56 @@ Run the structural test:
 cd back-end && npx jest src/tests/structural/layer-deps.test.ts
 ```
 
-## Step 12: Format and lint all domain files
+## Step 12: Format, lint, and enforce strict rules
 
-Run Prettier and ESLint on every file in the new domain folder:
+This step integrates the full formatter/linter setup. Do NOT skip any sub-step.
+
+### 12a. Run Prettier
+
+```bash
+cd back-end && npx prettier --write src/domains/$ARGUMENTS/*.ts
+```
+
+### 12b. Run ESLint auto-fix (base rules first)
+
+```bash
+cd back-end && npx eslint --fix src/domains/$ARGUMENTS/*.ts
+```
+
+### 12c. Add domain files to strict enforcement
+
+Add ALL files in the domain to `STRICT_DOMAIN_FILES` in `back-end/eslint.config.mjs`. Remove the old route file entry if it was previously listed. Include any split service files (e.g., `agentLifecycleService.ts`).
+
+### 12d. Fix remaining strict rule violations
+
+Run ESLint under strict rules and fix every error manually:
+
+```bash
+cd back-end && npx eslint src/domains/$ARGUMENTS/*.ts
+```
+
+Strict rules enforced on domain files:
+
+| Rule | Fix |
+|---|---|
+| `max-lines` (300) | Extract helpers or split the file |
+| `max-lines-per-function` (80) | Extract sub-functions |
+| `no-floating-promises` | Add `await` or `void` prefix |
+| `no-misused-promises` | Don't pass async functions where sync callbacks are expected |
+| `strict-boolean-expressions` | Use explicit comparisons (`!== null`, `!== undefined`, `.length > 0`) |
+| `consistent-type-imports` | Change `import { Foo }` to `import type { Foo }` for type-only imports |
+
+**Do NOT add eslint-disable comments.** Fix the actual code. The only exception is if a fix would change observable behavior — document why and get user approval.
+
+### 12e. Verify clean
+
+Loop until BOTH report 0 errors:
 
 ```bash
 cd back-end
-npx prettier --write src/domains/$ARGUMENTS/*.ts
-npx eslint --fix src/domains/$ARGUMENTS/*.ts
-```
-
-Then add ALL new domain files to `STRICT_DOMAIN_FILES` in `back-end/eslint.config.mjs`. Remove the old route file entry if it was previously listed.
-
-Check for remaining errors under strict rules:
-
-```bash
+npx prettier --check src/domains/$ARGUMENTS/*.ts
 npx eslint src/domains/$ARGUMENTS/*.ts
 ```
-
-If there are remaining errors, fix them manually. Loop until `npx eslint` and `npx prettier --check` both report 0 errors on the domain files.
 
 ## Step 13: Run blackbox tests
 
@@ -366,6 +396,8 @@ cd back-end && npm run test:api
 Run the FULL suite — server.ts imports changed, so all domains could be affected.
 
 If tests fail, the refactor introduced a behavior change. **Fix the domain code, not the tests.** The behavior must be identical.
+
+**Do NOT modify prompts, system messages, or any LLM-facing strings.** This includes agent system prompts, tool descriptions, user-facing error messages sent to LLMs, and any string that ends up in an LLM context window. If a lint rule flags code inside a prompt string, suppress with an eslint-disable comment rather than altering the prompt content.
 
 ## Step 14: Report
 

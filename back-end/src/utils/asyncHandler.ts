@@ -4,7 +4,7 @@ type AsyncMiddleware<T extends Request = Request> = (
   req: T,
   res: Response,
   next: NextFunction
-) => Promise<void>;
+) => Promise<void | Response>;
 
 /**
  * Wraps an async Express handler/middleware so that rejected promises

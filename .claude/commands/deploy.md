@@ -83,15 +83,16 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 
 Look across all three endpoints for review feedback from CodeRabbit. It may post findings as formal reviews or regular comments.
 
-- **APPROVED** with no critical issues → proceed to Step 5.
-- **CHANGES_REQUESTED** or any comment flagging **critical** issues → fix them, push, go back to Step 3.
-- **No critical issues found** → proceed to Step 5.
+- **APPROVED** with no critical issues → proceed to Step 4b.
+- **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, go back to Step 3.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → **STOP and escalate to the user.** Do NOT proceed to merge. Tell the user CodeRabbit skipped the review, explain why (file count, etc.), and ask how they want to proceed (e.g., filter paths, split PR, or merge without review).
+- **No issues found** → proceed to Step 4b.
 
-Skip menial/style nits. Focus on correctness, bugs, and security issues.
+**Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 - `[FIXED] <short solution description>` — if you fixed the issue
-- `[IGNORED] <reason>` — if you're skipping it (style nit, not applicable, etc.)
+- `[IGNORED] <reason>` — ONLY for pure style nits with zero correctness/security impact
 
 Use `gh api` to post replies:
 ```bash
@@ -101,6 +102,33 @@ gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments/<COMMENT_ID>/replies -f b
 # Reply to an issue comment (regular PR comment)
 gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<original body>\n\n[IGNORED] style nit"
 ```
+
+## Step 4b: Pre-flight checks
+
+Before merging, run these checks locally to ensure nothing is broken:
+
+```bash
+cd back-end
+
+# 1. TypeScript compilation
+npx tsc --noEmit
+
+# 2. ESLint on changed files
+CHANGED_TS=$(git diff --name-only origin/main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
+npx eslint $CHANGED_TS
+
+# 3. Prettier on changed files
+npx prettier --check $CHANGED_TS
+
+# 4. Blackbox tests (start backend if not running, run tests, stop backend)
+npx tsx watch src/server.ts &
+# Wait for backend to be ready
+for i in $(seq 1 30); do curl -s http://localhost:3001/health > /dev/null 2>&1 && break; sleep 1; done
+npm run test:api
+lsof -ti :3001 | xargs kill -9 2>/dev/null
+```
+
+If any check fails, fix the issue, commit, push, and go back to Step 3.
 
 ## Step 5: Archive plan (if applicable)
 
@@ -139,6 +167,7 @@ git fetch origin main
 ```
 
 ## Step 7: Wait for deploys
+
 
 Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
 

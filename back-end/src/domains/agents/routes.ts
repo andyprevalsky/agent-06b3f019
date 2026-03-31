@@ -1,0 +1,298 @@
+/**
+ * Agents routes — thin controller layer.
+ * Parse request, call service, send response.
+ */
+
+import { type Response, Router } from 'express';
+import { z } from 'zod';
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
+import { asyncHandler } from '../../utils/asyncHandler';
+import { createLogger } from '../../providers/logger';
+import { createAgentSchema, updateStatusSchema, updateAgentSchema } from './types';
+import * as lifecycleService from './agentLifecycleService';
+import * as controlService from './agentControlService';
+import * as queryService from './agentQueryService';
+import messageRoutes from './routes.messages';
+
+const log = createLogger('Agents');
+const router = Router();
+
+const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function noCacheHeaders(res: Response): void {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+}
+
+function handleRouteError(
+  res: Response,
+  error: unknown,
+  msg: string,
+  ctx?: Record<string, string>
+): void {
+  if (error instanceof z.ZodError) {
+    res.status(400).json({ error: 'Invalid request body', details: error.errors });
+    return;
+  }
+  log.error(msg, {
+    ...ctx,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  res.status(500).json({ error: msg });
+}
+
+// ---------------------------------------------------------------------------
+// Query routes
+// ---------------------------------------------------------------------------
+
+router.get(
+  '/',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      noCacheHeaders(res);
+      const result = await queryService.listAgents(req.userId!);
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch agents');
+    }
+  })
+);
+
+router.get(
+  '/tree',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const { busId } = req.query;
+      if (typeof busId !== 'string' || busId === '') {
+        res.status(400).json({ error: 'busId query parameter is required' });
+        return;
+      }
+      res.json(await queryService.getAgentTree(busId));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch agent tree');
+    }
+  })
+);
+
+router.get(
+  '/:id',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      noCacheHeaders(res);
+      const userId = req.isInternal === true ? undefined : req.userId;
+      const result = await queryService.getAgentDetail(req.params.id, userId);
+      if (result === null) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.get(
+  '/:id/ancestors',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      res.json(await queryService.getAncestors(req.params.id));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch ancestors', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.get(
+  '/:id/status',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await queryService.getAgentStatus(req.params.id);
+      if (result === null) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to get agent status', { agent_id: req.params.id });
+    }
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Lifecycle routes
+// ---------------------------------------------------------------------------
+
+router.post(
+  '/',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const body = createAgentSchema.parse(req.body);
+      const userId = req.userId ?? body.user_id;
+      if (userId === undefined || userId === null || userId === '') {
+        res.status(401).json({ error: 'Unauthorized: user_id required' });
+        return;
+      }
+      const result = await lifecycleService.createAgent(body, userId, req.isInternal === true, req);
+      res.status(201).json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to create agent');
+    }
+  })
+);
+
+router.delete(
+  '/:id',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const userId = req.isInternal === true ? undefined : req.userId;
+      const found = await lifecycleService.deleteAgent(req.params.id, userId);
+      if (!found) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      res.status(204).send();
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to delete agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.patch(
+  '/:id/status',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const body = updateStatusSchema.parse(req.body);
+      const updated = await controlService.updateAgentStatus(req.params.id, body);
+      if (updated === null) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      const u = updated as Record<string, unknown>;
+      res.json({
+        agent_id: u.id,
+        status: u.status,
+        status_message: u.statusMessage,
+        progress: u.progress,
+        token_count: u.tokenCount,
+        tokens_in: u.tokensIn,
+        tokens_out: u.tokensOut,
+        context_size: u.contextSize,
+        message_count: u.messageCount,
+        updated_at: u.updatedAt,
+      });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update agent status', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.patch(
+  '/:id',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const userId = req.isInternal === true ? undefined : req.userId;
+      const body = updateAgentSchema.parse(req.body);
+      const result = await controlService.updateAgentConfig(req.params.id, body, userId);
+      if ('error' in result) {
+        const rb: Record<string, unknown> = { error: result.error };
+        if ('current_cost_cents' in result) {
+          rb.current_cost_cents = result.current_cost_cents;
+        }
+        res.status(result.status!).json(rb);
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to update agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.post(
+  '/:id/start-agent',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await controlService.startAgentMode(req.params.id, req.userId!);
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to start agent mode', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.post(
+  '/:id/pause',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await controlService.pauseAgentForUser(req.params.id, req.userId!);
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json({ success: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to pause agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.post(
+  '/:id/resume',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await controlService.resumeAgentForUser(req.params.id, req.userId!);
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json({ success: true });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to resume agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+router.post(
+  '/:id/restart',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const userId = req.isInternal === true ? undefined : req.userId;
+      const result = await controlService.restartAgent(req.params.id, userId);
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to restart agent', { agent_id: req.params.id });
+    }
+  })
+);
+
+// Mount message, attachment, signal, and schema routes
+router.use(messageRoutes);
+
+export default router;

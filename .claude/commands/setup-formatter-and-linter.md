@@ -77,6 +77,8 @@ For each remaining error, fix it manually:
 
 **Do NOT add eslint-disable comments.** Fix the actual code. The only exception is if a fix would change observable behavior — document why and get user approval.
 
+**Do NOT modify prompts, system messages, or any LLM-facing strings.** This includes agent system prompts, tool descriptions, user-facing error messages sent to LLMs, and any string that ends up in an LLM context window. If a lint rule flags code inside a prompt string, suppress with an eslint-disable comment (this is the one allowed exception) rather than altering the prompt content.
+
 ## Step 5: Verify blackbox tests pass
 
 Run the domain's blackbox tests:

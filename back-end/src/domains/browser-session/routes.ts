@@ -1,0 +1,319 @@
+/**
+ * Browser-session routes — thin controller layer.
+ *
+ * POST /api/browser-session/init                     - Initialize browser session
+ * POST /api/browser-session/close                    - Close/pause browser session
+ * POST /api/browser-session/resume                   - Resume paused browser task
+ * GET  /api/browser-session/task/:taskId             - Get task info
+ * GET  /api/browser-session/context/:userId          - Get user's browser context
+ * GET  /api/browser-session/:sessionId               - Get session info
+ * POST /api/browser-session/:sessionId/files         - Upload file to session
+ * GET  /api/browser-session/:sessionId/files/list    - List session files
+ * POST /api/browser-session/:sessionId/inject-localStorage - Inject localStorage
+ */
+
+import { type RequestHandler, type Response, Router } from 'express';
+import { type AuthRequest, authenticate } from '../../providers/auth';
+import { createLogger } from '../../providers/logger';
+import { SteelRateLimitError } from '../../providers/steel';
+import { asyncHandler } from '../../utils/asyncHandler';
+import { upload } from './config';
+import {
+  initSession,
+  closeBrowserSession,
+  resumeBrowserSession,
+  getTaskInfo,
+  getContext,
+  getSessionById,
+  uploadFile,
+  listFiles,
+  injectLocalStorage,
+  SessionNotFoundError,
+  SessionNoUserError,
+  SessionNoWsUrlError,
+  CdpInjectionError,
+} from './service';
+import {
+  initSessionSchema,
+  closeSessionSchema,
+  resumeSessionSchema,
+  injectLocalStorageSchema,
+} from './types';
+
+const log = createLogger('BrowserSession');
+
+const router = Router();
+
+/**
+ * POST /api/browser-session/init
+ * Initialize or get browser session for user.
+ * Automatically injects user's stored Chrome cookies if available.
+ * Fast operation - just creates session and injects cookies.
+ */
+router.post(
+  '/init',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { user_id, agent_id, start_url } = initSessionSchema.parse(req.body);
+
+      const result = await initSession(user_id, agent_id, start_url);
+
+      res.json({ success: true, ...result });
+    } catch (error) {
+      if (error instanceof SteelRateLimitError) {
+        log.warn('Steel rate limit hit during session init');
+        res.status(429).json({
+          error: 'steel_rate_limit',
+          message: 'Browser session rate limit exceeded. Retry after delay.',
+        });
+        return;
+      }
+      log.error('Failed to init browser session', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to initialize browser session',
+      });
+    }
+  })
+);
+
+/**
+ * POST /api/browser-session/close
+ * Close a browser session (stops billing).
+ * @param pause - If true, session is PAUSED (resumable). If false, CLOSED (terminal).
+ * Fast operation.
+ */
+router.post(
+  '/close',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { session_id, pause, current_url } = closeSessionSchema.parse(req.body);
+
+      const result = await closeBrowserSession(session_id, pause, current_url);
+
+      res.json({ success: true, ...result });
+    } catch (error) {
+      log.error('Failed to close browser session', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to close browser session',
+      });
+    }
+  })
+);
+
+/**
+ * POST /api/browser-session/resume
+ * Resume a paused browser task by creating a new session with the same context.
+ * Automatically injects user's stored Chrome cookies if available.
+ * Fast operation.
+ */
+router.post(
+  '/resume',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { task_id } = resumeSessionSchema.parse(req.body);
+
+      const result = await resumeBrowserSession(task_id);
+
+      res.json({ success: true, ...result });
+    } catch (error) {
+      if (error instanceof SteelRateLimitError) {
+        log.warn('Steel rate limit hit during session resume');
+        res.status(429).json({
+          error: 'steel_rate_limit',
+          message: 'Browser session rate limit exceeded. Retry after delay.',
+        });
+        return;
+      }
+      log.error('Failed to resume browser task', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to resume browser task',
+      });
+    }
+  })
+);
+
+/**
+ * GET /api/browser-session/task/:taskId
+ * Get current session info for a task.
+ * Includes user's passwords for type interception.
+ */
+router.get(
+  '/task/:taskId',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { taskId } = req.params;
+
+      const result = await getTaskInfo(taskId);
+
+      if (!result) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      res.json(result);
+    } catch (error) {
+      log.error('Failed to get session info', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to get session info',
+      });
+    }
+  })
+);
+
+/**
+ * GET /api/browser-session/context/:userId
+ * Get user's browser context info.
+ */
+router.get(
+  '/context/:userId',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { userId } = req.params;
+
+      const context = await getContext(userId);
+
+      res.json({ context });
+    } catch (error) {
+      log.error('Failed to get context', { error: String(error) });
+      res.status(500).json({ error: 'Failed to get context' });
+    }
+  })
+);
+
+/**
+ * GET /api/browser-session/:sessionId
+ * Get session info.
+ */
+router.get(
+  '/:sessionId',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+
+      const session = await getSessionById(sessionId);
+
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      res.json({ session });
+    } catch (error) {
+      log.error('Failed to get session', { error: String(error) });
+      res.status(500).json({ error: 'Failed to get session' });
+    }
+  })
+);
+
+/**
+ * POST /api/browser-session/:sessionId/files
+ * Upload a file to a Steel browser session.
+ * The file becomes available in the session's VM environment for use with file inputs.
+ */
+router.post(
+  '/:sessionId/files',
+  authenticate,
+  upload.single('file') as RequestHandler,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+
+      if (!req.file) {
+        res.status(400).json({ error: 'No file provided' });
+        return;
+      }
+
+      const result = await uploadFile(
+        sessionId,
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype
+      );
+
+      res.json({ success: true, ...result });
+    } catch (error) {
+      log.error('Failed to upload file to session', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to upload file to session',
+      });
+    }
+  })
+);
+
+/**
+ * GET /api/browser-session/:sessionId/files/list
+ * List all files in a Steel browser session.
+ * Returns files that have been downloaded by the browser or uploaded.
+ */
+router.get(
+  '/:sessionId/files/list',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+
+      const result = await listFiles(sessionId);
+
+      res.json({ success: true, ...result });
+    } catch (error) {
+      log.error('Failed to list session files', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to list session files',
+      });
+    }
+  })
+);
+
+/**
+ * POST /api/browser-session/:sessionId/inject-localStorage
+ * Inject localStorage for a specific origin if not already injected or data has changed.
+ * Called by browser agent after navigation to inject user's localStorage.
+ *
+ * Uses LocalStorageOrigin table for O(1) lookup by origin.
+ */
+router.post(
+  '/:sessionId/inject-localStorage',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+      const { origin } = injectLocalStorageSchema.parse(req.body);
+
+      const result = await injectLocalStorage(sessionId, origin);
+
+      res.json(result);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        res.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof SessionNoUserError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof SessionNoWsUrlError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof CdpInjectionError) {
+        res.status(500).json({
+          error: 'Failed to inject localStorage via CDP',
+          details: error.message,
+        });
+        return;
+      }
+      log.error('Failed to inject localStorage', { error: String(error) });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to inject localStorage',
+      });
+    }
+  })
+);
+
+export default router;

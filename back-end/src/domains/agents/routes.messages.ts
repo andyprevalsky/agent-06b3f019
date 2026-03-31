@@ -1,0 +1,190 @@
+/**
+ * Agent message, attachment, signal, and schema routes.
+ * Mounted by routes.ts.
+ */
+
+import { type Response, Router } from 'express';
+import { z } from 'zod';
+import multer from 'multer';
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
+import { asyncHandler } from '../../utils/asyncHandler';
+import { MAX_FILE_SIZE } from '../../providers/storage';
+import { createLogger } from '../../providers/logger';
+import { postMessageSchema, generateSchemaRequestSchema } from './types';
+import * as controlService from './agentControlService';
+import * as messageService from './agentMessageService';
+
+const log = createLogger('Agents');
+const router = Router({ mergeParams: true });
+const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE },
+});
+
+function handleRouteError(
+  res: Response,
+  error: unknown,
+  msg: string,
+  ctx?: Record<string, string>
+): void {
+  if (error instanceof z.ZodError) {
+    res.status(400).json({ error: 'Invalid request body', details: error.errors });
+    return;
+  }
+  log.error(msg, {
+    ...ctx,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  res.status(500).json({ error: msg });
+}
+
+// POST /:id/messages
+router.post(
+  '/:id/messages',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const body = postMessageSchema.parse(req.body);
+      const result = await messageService.postMessage(
+        req.params.id,
+        body,
+        req.isInternal === true,
+        req.userId
+      );
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.status(201).json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to post message', { agent_id: req.params.id });
+    }
+  })
+);
+
+// POST /:id/attachments
+router.post(
+  '/:id/attachments',
+  auth,
+  upload.single('file'),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      if (req.file === undefined) {
+        res.status(400).json({ error: 'No file uploaded' });
+        return;
+      }
+      const result = await messageService.uploadAttachment(req.userId!, req.params.id, req.file);
+      res.status(201).json(result);
+    } catch (error) {
+      log.error('Upload attachment error', {
+        agent_id: req.params.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res
+        .status(500)
+        .json({
+          error: 'Failed to upload attachment',
+          details: error instanceof Error ? error.message : 'Unknown error',
+        });
+    }
+  })
+);
+
+// GET /:id/attachments/:fileId/url
+router.get(
+  '/:id/attachments/:fileId/url',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const storagePath = req.query.storage_path;
+      if (typeof storagePath !== 'string' || storagePath === '') {
+        res.status(400).json({ error: 'storage_path query parameter is required' });
+        return;
+      }
+      const result = await messageService.getAttachmentSignedUrl(req.userId!, storagePath);
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      log.error('Get signed URL error', {
+        agent_id: req.params.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res
+        .status(500)
+        .json({
+          error: 'Failed to generate signed URL',
+          details: error instanceof Error ? error.message : 'Unknown error',
+        });
+    }
+  })
+);
+
+// POST /:id/signal/signup_completed
+router.post(
+  '/:id/signal/signup_completed',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await controlService.signalWorkflow(
+        req.params.id,
+        req.userId!,
+        'signup_completed'
+      );
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to signal signup completed', {
+        agent_id: req.params.id,
+      });
+    }
+  })
+);
+
+// POST /:id/signal/signup_dismissed
+router.post(
+  '/:id/signal/signup_dismissed',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await controlService.signalWorkflow(
+        req.params.id,
+        req.userId!,
+        'signup_dismissed'
+      );
+      if ('error' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to signal signup dismissed', {
+        agent_id: req.params.id,
+      });
+    }
+  })
+);
+
+// POST /generate-response-schema
+router.post(
+  '/generate-response-schema',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const body = generateSchemaRequestSchema.parse(req.body);
+      const { schema, tokensIn, tokensOut } = await messageService.generateSchema(body.goal);
+      res.json({ schema, tokensIn, tokensOut });
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to generate response schema');
+    }
+  })
+);
+
+export default router;

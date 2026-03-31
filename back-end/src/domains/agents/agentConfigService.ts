@@ -1,0 +1,179 @@
+/**
+ * Agent config service — update agent configuration (model, tools, verifier, price limit).
+ */
+
+import { getTemporalClient } from '../../providers/temporal';
+import { broadcastAgentUpdate } from '../../providers/chat';
+import { createLogger } from '../../providers/logger';
+import type { UpdateAgentBody } from './types';
+import * as repo from './repo';
+
+const log = createLogger('Agents');
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Build the agent update data from the request body. */
+function buildAgentUpdateData(body: UpdateAgentBody): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  if (body.model !== undefined && body.model !== '') {
+    data.model = body.model;
+  }
+  if (body.reasoning_max_tokens !== undefined) {
+    data.reasoningMaxTokens = body.reasoning_max_tokens;
+  }
+  if (body.tools_in_use !== undefined) {
+    data.toolsInUse = body.tools_in_use;
+  }
+  if (body.progress !== undefined) {
+    data.progress = body.progress;
+  }
+  if (body.message_count !== undefined) {
+    data.messageCount = body.message_count;
+  }
+  if (body.response_schema !== undefined) {
+    data.responseSchema = body.response_schema;
+  }
+  if (body.tree_cost_cents !== undefined) {
+    data.treeCostCents = body.tree_cost_cents;
+  }
+  if (body.own_cost_cents !== undefined) {
+    data.ownCostCents = body.own_cost_cents;
+  }
+  if (body.status !== undefined) {
+    data.status = body.status;
+  }
+  if (body.write_lock_enabled !== undefined) {
+    data.writeLockEnabled = body.write_lock_enabled;
+  }
+  return data;
+}
+
+/** Handle price limit update with validation and workflow signal. */
+async function handlePriceLimitUpdate(
+  agentId: string,
+  body: UpdateAgentBody,
+  agent: { treeCostCents: number; status: string; temporalWorkflowId: string | null },
+  data: Record<string, unknown>
+): Promise<{ error: string; status: number; current_cost_cents: number } | null> {
+  if (body.price_limit_cents === undefined) {
+    return null;
+  }
+
+  if (body.price_limit_cents < agent.treeCostCents) {
+    return {
+      error: 'New limit must be >= current cost',
+      status: 400,
+      current_cost_cents: agent.treeCostCents,
+    };
+  }
+
+  data.priceLimitCents = body.price_limit_cents;
+
+  if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId !== null) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('price_limit_increased', {
+        new_limit_cents: body.price_limit_cents,
+      });
+      log.info('Signaled price_limit_increased to workflow', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agentId,
+      });
+    } catch (error) {
+      log.error('Failed to signal price_limit_increased', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return null;
+}
+
+/** Format an agent record into the API response shape. */
+function formatAgentResponse(agent: NonNullable<Awaited<ReturnType<typeof repo.findAgentWithFullRelations>>>) {
+  return {
+    agent: {
+      agent_id: agent.id,
+      goal: agent.goal,
+      model: agent.model,
+      reasoning_max_tokens: agent.reasoningMaxTokens,
+      progress: agent.progress,
+      status: agent.status,
+      status_message: agent.statusMessage,
+      temporal_workflow_id: agent.temporalWorkflowId,
+      token_count: agent.tokenCount,
+      tokens_in: agent.tokensIn,
+      tokens_out: agent.tokensOut,
+      context_size: agent.contextSize,
+      message_count: agent.messageCount,
+      price_limit_cents: agent.priceLimitCents,
+      tree_cost_cents: agent.treeCostCents,
+      created_at: agent.createdAt,
+      updated_at: agent.updatedAt,
+      write_lock_enabled: agent.writeLockEnabled,
+      verifier:
+        agent.verifier !== null
+          ? {
+              type: agent.verifier.type,
+              llm_judge_prompt: agent.verifier.llmJudgePrompt,
+            }
+          : null,
+      tools: agent.tools.map((at) => ({
+        id: at.tool.id,
+        name: at.tool.name,
+        description: at.tool.description,
+      })),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Update agent config
+// ---------------------------------------------------------------------------
+
+export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, userId?: string) {
+  const agent = await repo.findAgentWithVerifier(agentId, userId);
+
+  if (!agent) {
+    return { error: 'Agent not found', status: 404 };
+  }
+
+  const agentUpdateData = buildAgentUpdateData(body);
+
+  const priceLimitError = await handlePriceLimitUpdate(agentId, body, agent, agentUpdateData);
+  if (priceLimitError !== null) {
+    return priceLimitError;
+  }
+
+  if (Object.keys(agentUpdateData).length > 0) {
+    await repo.updateAgent(agentId, agentUpdateData);
+
+    if (body.tree_cost_cents !== undefined) {
+      await broadcastAgentUpdate(agentId, {
+        treeCostCents: body.tree_cost_cents,
+      });
+    }
+  }
+
+  if (body.tool_ids !== undefined) {
+    await repo.deleteAgentTools(agentId);
+    await repo.createAgentTools(agentId, body.tool_ids);
+  }
+
+  if (
+    body.verifier_prompt !== undefined &&
+    body.verifier_prompt !== '' &&
+    agent.verifier !== null
+  ) {
+    await repo.updateVerifierPrompt(agent.verifier.id, body.verifier_prompt);
+  }
+
+  const updatedAgent = await repo.findAgentWithFullRelations(agentId);
+
+  return formatAgentResponse(updatedAgent!);
+}

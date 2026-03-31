@@ -1,0 +1,219 @@
+/**
+ * Data domain repo — all Prisma calls for data search and summary.
+ */
+
+import { prisma } from '../../providers/database';
+
+/**
+ * Resolve a person identifier (UUID, email, phone, or name) to a person ID.
+ * Returns the person's id or null if not found.
+ */
+export async function resolvePersonId(
+  personIdentifier: string,
+  userId: string
+): Promise<string | null> {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    personIdentifier
+  );
+
+  let person;
+  if (isUuid) {
+    person = await prisma.person.findFirst({
+      where: { id: personIdentifier, userId },
+      select: { id: true },
+    });
+  } else {
+    // Try email, phone, or name match
+    person = await prisma.person.findFirst({
+      where: {
+        userId,
+        OR: [
+          { email: { equals: personIdentifier, mode: 'insensitive' } },
+          { phoneNumber: personIdentifier },
+          { firstName: { equals: personIdentifier, mode: 'insensitive' } },
+          {
+            AND: [
+              { firstName: { equals: personIdentifier.split(' ')[0], mode: 'insensitive' } },
+              {
+                lastName: {
+                  equals: personIdentifier.split(' ').slice(1).join(' '),
+                  mode: 'insensitive',
+                },
+              },
+            ],
+          },
+        ],
+      },
+      select: { id: true },
+    });
+  }
+
+  return person?.id ?? null;
+}
+
+/**
+ * Search message records by pattern with optional person and time filters.
+ */
+export async function searchMessages(params: {
+  userId: string;
+  trimmedPattern: string;
+  cutoffTime: Date;
+  personId?: string;
+  limit: number;
+}) {
+  const { userId, trimmedPattern, cutoffTime, personId, limit } = params;
+
+  return prisma.messageRecord.findMany({
+    where: {
+      person: { userId },
+      ...(trimmedPattern.length > 0
+        ? { message: { contains: trimmedPattern, mode: 'insensitive' as const } }
+        : {}),
+      timestamp: { gte: cutoffTime },
+      ...(personId !== undefined ? { personId } : {}),
+    },
+    orderBy: { timestamp: 'desc' },
+    take: limit,
+    select: {
+      id: true,
+      personId: true,
+      channel: true,
+      from: true,
+      to: true,
+      timestamp: true,
+      message: true,
+      person: {
+        select: {
+          firstName: true,
+          lastName: true,
+          phoneNumber: true,
+          email: true,
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Count total messages for a user within a time range.
+ */
+export async function countMessages(userId: string, cutoffTime: Date): Promise<number> {
+  return prisma.messageRecord.count({
+    where: {
+      person: { userId },
+      timestamp: { gte: cutoffTime },
+    },
+  });
+}
+
+/**
+ * Count threads (persons with messages) for a user within a time range.
+ */
+export async function countThreads(userId: string, cutoffTime: Date): Promise<number> {
+  return prisma.person.count({
+    where: {
+      userId,
+      messageRecords: { some: { timestamp: { gte: cutoffTime } } },
+    },
+  });
+}
+
+/**
+ * Fetch context messages around matches in a specific thread (person).
+ */
+export async function fetchContextMessages(params: {
+  personId: string;
+  userId: string;
+  contextStart: Date;
+  contextEnd: Date;
+  takeLimit: number;
+}) {
+  const { personId, userId, contextStart, contextEnd, takeLimit } = params;
+
+  return prisma.messageRecord.findMany({
+    where: {
+      personId,
+      person: { userId },
+      timestamp: { gte: contextStart, lte: contextEnd },
+    },
+    orderBy: { timestamp: 'asc' },
+    take: takeLimit,
+    select: {
+      id: true,
+      channel: true,
+      from: true,
+      to: true,
+      timestamp: true,
+      message: true,
+    },
+  });
+}
+
+/**
+ * Count all messages for a user (no time filter).
+ */
+export async function countAllMessages(userId: string): Promise<number> {
+  return prisma.messageRecord.count({
+    where: { person: { userId } },
+  });
+}
+
+/**
+ * Get all threads (persons with messages) with stats for summary.
+ */
+export async function getThreadsWithStats(userId: string) {
+  return prisma.person.findMany({
+    where: {
+      userId,
+      messageRecords: { some: {} },
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      phoneNumber: true,
+      _count: { select: { messageRecords: true } },
+      messageRecords: {
+        select: { timestamp: true, channel: true },
+        orderBy: { timestamp: 'desc' },
+        take: 1,
+      },
+    },
+    orderBy: {
+      messageRecords: { _count: 'desc' },
+    },
+  });
+}
+
+/**
+ * Get channel breakdown (message count per channel) for a user.
+ */
+export async function getChannelCounts(userId: string) {
+  return prisma.messageRecord.groupBy({
+    by: ['channel'],
+    where: { person: { userId } },
+    _count: true,
+  });
+}
+
+/**
+ * Get the oldest message for a user.
+ */
+export async function getOldestMessage(userId: string) {
+  return prisma.messageRecord.findFirst({
+    where: { person: { userId } },
+    orderBy: { timestamp: 'asc' },
+    select: { timestamp: true },
+  });
+}
+
+/**
+ * Get the newest message for a user.
+ */
+export async function getNewestMessage(userId: string) {
+  return prisma.messageRecord.findFirst({
+    where: { person: { userId } },
+    orderBy: { timestamp: 'desc' },
+    select: { timestamp: true },
+  });
+}

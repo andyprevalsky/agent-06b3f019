@@ -12,11 +12,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Paths are relative globs from back-end/.
  */
 const STRICT_DOMAIN_FILES = [
-  'src/domains/attention-requests/types.ts',
-  'src/domains/attention-requests/config.ts',
-  'src/domains/attention-requests/repo.ts',
-  'src/domains/attention-requests/service.ts',
-  'src/domains/attention-requests/routes.ts',
+  // ── All domain files (catches splits like routes.messages.ts, service.validation.ts, etc.) ──
+  'src/domains/**/*.ts',
+  // ── Shared providers and utils ──
   'src/providers/credits.ts',
   'src/utils/log.ts',
   'src/providers/logger.ts',
