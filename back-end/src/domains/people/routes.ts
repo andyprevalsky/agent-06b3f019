@@ -60,7 +60,9 @@ router.post(
         res.status(400).json({ error: error.message });
         return;
       }
-      log.error('Error searching people', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error searching people', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to search people',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -95,7 +97,9 @@ router.post(
         res.status(400).json({ error: error.message });
         return;
       }
-      log.error('Error creating person', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error creating person', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to create person',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -120,17 +124,30 @@ router.get(
 
       const pageStr = req.query.page;
       const limitStr = req.query.limit;
+      const parsedPage = typeof pageStr === 'string' ? parseInt(pageStr, 10) : undefined;
+      const parsedLimit = typeof limitStr === 'string' ? parseInt(limitStr, 10) : undefined;
+      const page =
+        parsedPage !== undefined && Number.isInteger(parsedPage) && parsedPage > 0
+          ? parsedPage
+          : undefined;
+      const limit =
+        parsedLimit !== undefined && Number.isInteger(parsedLimit) && parsedLimit > 0
+          ? parsedLimit
+          : undefined;
       const result = await listPeople(userId, {
-        page: typeof pageStr === 'string' ? parseInt(pageStr, 10) : undefined,
-        limit: typeof limitStr === 'string' ? parseInt(limitStr, 10) : undefined,
+        page,
+        limit,
         sort: typeof req.query.sort === 'string' ? req.query.sort : undefined,
-        sortDirection: typeof req.query.sortDirection === 'string' ? req.query.sortDirection : undefined,
+        sortDirection:
+          typeof req.query.sortDirection === 'string' ? req.query.sortDirection : undefined,
         search: typeof req.query.search === 'string' ? req.query.search : undefined,
       });
 
       res.json(result);
     } catch (error) {
-      log.error('Error fetching people', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error fetching people', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to fetch people',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -147,7 +164,11 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const userId = req.isInternal === true ? (req.body.user_id as string | undefined) : req.user?.id;
+      const internalUserId =
+        req.isInternal === true && typeof req.body?.user_id === 'string'
+          ? req.body.user_id.trim()
+          : undefined;
+      const userId = req.isInternal === true ? internalUserId : req.user?.id;
       if (userId === undefined || userId === null || userId === '') {
         res.status(401).json({ error: 'User not authenticated' });
         return;
@@ -160,7 +181,9 @@ router.post(
         res.status(400).json({ error: error.message });
         return;
       }
-      log.error('Error fetching message history', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error fetching message history', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to fetch message history',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -185,14 +208,26 @@ router.get(
 
       const limitStr = req.query.limit;
       const daysStr = req.query.days;
+      const parsedMsgLimit = typeof limitStr === 'string' ? parseInt(limitStr, 10) : undefined;
+      const parsedDays = typeof daysStr === 'string' ? parseInt(daysStr, 10) : undefined;
+      const msgLimit =
+        parsedMsgLimit !== undefined && Number.isInteger(parsedMsgLimit) && parsedMsgLimit > 0
+          ? parsedMsgLimit
+          : undefined;
+      const days =
+        parsedDays !== undefined && Number.isInteger(parsedDays) && parsedDays > 0
+          ? parsedDays
+          : undefined;
       const result = await getRecentMessages(userId, {
-        limit: typeof limitStr === 'string' ? parseInt(limitStr, 10) : undefined,
-        days: typeof daysStr === 'string' ? parseInt(daysStr, 10) : undefined,
+        limit: msgLimit,
+        days,
       });
 
       res.json(result);
     } catch (error) {
-      log.error('Error fetching recent messages', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error fetching recent messages', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to fetch recent messages',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -222,7 +257,9 @@ router.get(
         res.status(404).json({ error: error.message });
         return;
       }
-      log.error('Error fetching person', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error fetching person', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to fetch person',
         details: error instanceof Error ? error.message : 'Unknown error',
@@ -252,7 +289,9 @@ router.delete(
         res.status(404).json({ error: error.message });
         return;
       }
-      log.error('Error deleting person', { error: error instanceof Error ? error.message : String(error) });
+      log.error('Error deleting person', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({
         error: 'Failed to delete person',
         details: error instanceof Error ? error.message : 'Unknown error',

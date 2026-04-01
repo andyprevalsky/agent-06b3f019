@@ -29,12 +29,8 @@ router.get(
       log.error('Models endpoint error', {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({
         error: 'Failed to fetch models',
-        details: errorMessage,
-        hasOpenRouterKey:
-          process.env.OPENROUTER_API_KEY !== undefined && process.env.OPENROUTER_API_KEY !== '',
       });
     }
   })

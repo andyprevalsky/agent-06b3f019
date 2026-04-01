@@ -75,9 +75,10 @@ For each remaining error, fix it manually:
 - **`max-lines`**: Extract helpers or split the file
 - **`max-lines-per-function`**: Extract sub-functions
 
-**Do NOT add eslint-disable comments.** Fix the actual code. The only exception is if a fix would change observable behavior — document why and get user approval.
-
-**Do NOT modify prompts, system messages, or any LLM-facing strings.** This includes agent system prompts, tool descriptions, user-facing error messages sent to LLMs, and any string that ends up in an LLM context window. If a lint rule flags code inside a prompt string, suppress with an eslint-disable comment (this is the one allowed exception) rather than altering the prompt content.
+**eslint-disable policy** (ordered by priority):
+1. **Prompt strings**: If a lint rule flags code inside an LLM-facing string (system prompts, tool descriptions, messages sent to LLMs), suppress with `eslint-disable` + a comment explaining it's a prompt string. **Never modify prompt content to satisfy a lint rule.**
+2. **Behavior-changing fixes**: If a lint fix would change observable runtime behavior, add `eslint-disable` with a comment explaining why, and get user approval before proceeding.
+3. **Everything else**: Fix the actual code. Do NOT add eslint-disable comments — fix the root cause instead.
 
 ## Step 5: Verify blackbox tests pass
 

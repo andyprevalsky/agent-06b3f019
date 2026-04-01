@@ -5,7 +5,12 @@
 
 import * as repo from './repo';
 import type { FormattedMessage, PersonMatch } from './types';
-import { DEFAULT_MESSAGE_LIMIT, DEFAULT_RECENT_DAYS, MAX_RECENT_DAYS, DEFAULT_RECENT_LIMIT } from './config';
+import {
+  DEFAULT_MESSAGE_LIMIT,
+  DEFAULT_RECENT_DAYS,
+  MAX_RECENT_DAYS,
+  DEFAULT_RECENT_LIMIT,
+} from './config';
 import { ValidationError } from './service';
 
 // ---------------------------------------------------------------------------
@@ -44,7 +49,17 @@ function resolveIdentifiers(body: PersonMessageBody) {
     lastName.trim().length > 0;
   const hasName = hasFirstName;
 
-  return { phone, email, firstName, lastName, hasPhone, hasEmail, hasFirstName, hasLastName, hasName };
+  return {
+    phone,
+    email,
+    firstName,
+    lastName,
+    hasPhone,
+    hasEmail,
+    hasFirstName,
+    hasLastName,
+    hasName,
+  };
 }
 
 function buildWhereConditions(

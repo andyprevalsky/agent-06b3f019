@@ -25,6 +25,7 @@ router.post(
     try {
       const result = await service.handleInboundSms({
         body: req.body,
+        rawBody: (req as unknown as { rawBody?: string }).rawBody,
         surgeSignatureHeader: req.headers['surge-signature'] as string | undefined,
       });
       res.json(result);

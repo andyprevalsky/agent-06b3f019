@@ -132,8 +132,15 @@ async function handleNewUser(
     name: fullName ?? undefined,
   });
 
-  await createSignupBonusCredit(userId);
-  log.info('Created signup bonus credit', { user_id: userId });
+  try {
+    await createSignupBonusCredit(userId);
+    log.info('Created signup bonus credit', { user_id: userId });
+  } catch (error) {
+    log.error('Failed to create signup bonus credit (user can still sign in)', {
+      user_id: userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   if (anonymousUserId !== undefined && anonymousUserId !== '' && anonymousUserId !== userId) {
     await mergeAnonymousUserResources(anonymousUserId, userId);
@@ -171,9 +178,19 @@ async function handleExistingUser(
   if (existingUser.isAnonymous) {
     updates.isAnonymous = false;
     await repo.updateUser(userId, updates);
-    await createSignupBonusCredit(userId);
-    log.info('Converted anonymous user to authenticated, gave signup bonus', {
+    let bonusGranted = true;
+    try {
+      await createSignupBonusCredit(userId);
+    } catch (error) {
+      bonusGranted = false;
+      log.error('Failed to create signup bonus credit (user can still sign in)', {
+        user_id: userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    log.info('Converted anonymous user to authenticated', {
       user_id: userId,
+      bonusGranted,
     });
   } else if (Object.keys(updates).length > 0) {
     await repo.updateUser(userId, updates);

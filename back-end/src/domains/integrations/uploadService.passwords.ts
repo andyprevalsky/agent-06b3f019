@@ -24,14 +24,20 @@ export async function processCacheStorageUpload(
   const origins = cacheStorageData.origins;
   if (origins.length > 0) {
     const values = origins
-      .map((_, i) =>
-        `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
+      .map(
+        (_, i) =>
+          `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
       )
       .join(', ');
 
     const params: (string | object)[] = [];
     for (const origin of origins) {
-      params.push(userId, origin.origin, JSON.stringify(origin.caches), cacheStorageData.hashes[origin.origin] ?? '');
+      params.push(
+        userId,
+        origin.origin,
+        JSON.stringify(origin.caches),
+        cacheStorageData.hashes[origin.origin] ?? ''
+      );
     }
 
     await repo.bulkUpsertCacheStorage(values, params);
@@ -70,7 +76,11 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
       isActive: true,
       lastSyncAt: new Date(),
       lastSuccessfulSyncAt: new Date(),
-      config: { browserSource: source, passwordCount: sourceCount, uploadedAt: new Date().toISOString() },
+      config: {
+        browserSource: source,
+        passwordCount: sourceCount,
+        uploadedAt: new Date().toISOString(),
+      },
     });
     log.info('Upserted password integration', { integrationName: `${source}_passwords`, userId });
   }
@@ -79,9 +89,9 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
 }
 
 /** Deduplicate passwords by (origin, username), keeping most recently used. */
-function deduplicatePasswordsByOriginUsername<T extends { origin: string; username: string; dateLastUsed: number }>(
-  passwords: T[]
-): T[] {
+function deduplicatePasswordsByOriginUsername<
+  T extends { origin: string; username: string; dateLastUsed: number },
+>(passwords: T[]): T[] {
   const passwordMap = new Map<string, T>();
   for (const pwd of passwords) {
     const key = `${pwd.origin}|${pwd.username}`;
@@ -106,14 +116,23 @@ async function bulkUpsertPasswordEntries(
   }>
 ) {
   const values = passwords
-    .map((_, i) =>
-      `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`
+    .map(
+      (_, i) =>
+        `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`
     )
     .join(', ');
 
   const params: (string | number | null)[] = [];
   for (const pwd of passwords) {
-    params.push(userId, pwd.origin, pwd.username, pwd.encryptedPassword, pwd.dateLastUsed, pwd.dateCreated, pwd.browserSource);
+    params.push(
+      userId,
+      pwd.origin,
+      pwd.username,
+      pwd.encryptedPassword,
+      pwd.dateLastUsed,
+      pwd.dateCreated,
+      pwd.browserSource
+    );
   }
 
   await repo.bulkUpsertPasswords(values, params);
@@ -235,8 +254,9 @@ export function parseApplePasswordsCsv(csvContent: string): ApplePasswordEntry[]
     throw new Error('File must have at least a header row and one data row');
   }
 
-  const { titleIdx, urlIdx, usernameIdx, passwordIdx, notesIdx, otpAuthIdx } =
-    parseAppleCsvHeader(rows[0]);
+  const { titleIdx, urlIdx, usernameIdx, passwordIdx, notesIdx, otpAuthIdx } = parseAppleCsvHeader(
+    rows[0]
+  );
 
   if (urlIdx === -1 || usernameIdx === -1 || passwordIdx === -1) {
     throw new Error('File must contain URL, Username, and Password columns');
@@ -255,12 +275,12 @@ export function parseApplePasswordsCsv(csvContent: string): ApplePasswordEntry[]
     if (url === '' || username === '' || password === '') continue;
 
     passwords.push({
-      title: titleIdx >= 0 ? values[titleIdx]?.trim() ?? '' : '',
+      title: titleIdx >= 0 ? (values[titleIdx]?.trim() ?? '') : '',
       url,
       username,
       password,
-      notes: notesIdx >= 0 ? values[notesIdx]?.trim() ?? '' : '',
-      otpAuth: otpAuthIdx >= 0 ? values[otpAuthIdx]?.trim() ?? '' : '',
+      notes: notesIdx >= 0 ? (values[notesIdx]?.trim() ?? '') : '',
+      otpAuth: otpAuthIdx >= 0 ? (values[otpAuthIdx]?.trim() ?? '') : '',
     });
   }
 

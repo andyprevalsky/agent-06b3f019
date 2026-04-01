@@ -91,15 +91,14 @@ router.get(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId =
-      req.user?.id ??
-      (req.isInternal === true ? (req.headers['x-user-id'] as string) : undefined);
+      req.user?.id ?? (req.isInternal === true ? (req.headers['x-user-id'] as string) : undefined);
     if (userId === undefined || userId === null || userId === '') {
       return res
         .status(400)
         .json({ error: 'Missing user ID. Use JWT auth or x-user-id header with API key.' });
     }
     const sinceParam = req.query.since as string;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 100);
 
     if (sinceParam === undefined || sinceParam === null || sinceParam === '') {
       return res.status(400).json({ error: 'Missing required query param: since (ISO timestamp)' });
@@ -199,7 +198,9 @@ router.post(
         return res.status(400).json({ error: 'Gmail token expired', message: error.message });
       }
       if (error instanceof service.GmailAuthFailedError) {
-        return res.status(400).json({ error: 'Gmail authentication failed', message: error.message });
+        return res
+          .status(400)
+          .json({ error: 'Gmail authentication failed', message: error.message });
       }
       throw error;
     }

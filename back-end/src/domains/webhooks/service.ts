@@ -109,7 +109,8 @@ async function unpauseUserAgents(userId: string): Promise<void> {
         const client = await getTemporalClient();
         const handle = client.workflow.getHandle(agent.temporalWorkflowId);
         await handle.signal('resume');
-        log.info('Sent unpause signal to workflow', {
+        await repo.updateAgentStatus(agent.id, 'ACTIVE');
+        log.info('Unpaused agent and sent resume signal', {
           workflow_id: agent.temporalWorkflowId,
           agent_id: agent.id,
         });
@@ -166,7 +167,7 @@ async function autoGenerateApiKeyIfNeeded(userId: string): Promise<void> {
       return;
     }
 
-    const apiKey = crypto.randomUUID().replace(/-/g, '');
+    const apiKey = crypto.randomBytes(32).toString('base64url');
 
     const { error: insertError } = await supabase.from('RoseApiKey').insert({
       userId,

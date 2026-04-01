@@ -101,7 +101,10 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   ]);
 
   const proxyGeo: ProxyGeoLocation =
-    agent !== null && agent !== undefined && agent.proxyCountry !== null && agent.proxyCountry !== ''
+    agent !== null &&
+    agent !== undefined &&
+    agent.proxyCountry !== null &&
+    agent.proxyCountry !== ''
       ? {
           country: agent.proxyCountry,
           ...(agent.proxyState !== null && agent.proxyState !== ''
@@ -209,6 +212,12 @@ export async function resumeBrowserSession(taskId: string) {
 // ---------------------------------------------------------------------------
 // Get task info
 // ---------------------------------------------------------------------------
+
+/** Get the owner userId for a task, used for ownership checks. */
+export async function getTaskOwnerUserId(taskId: string): Promise<string | undefined> {
+  const session = await repo.findSessionByTaskId(taskId);
+  return session?.context?.userId ?? undefined;
+}
 
 export async function getTaskInfo(taskId: string) {
   const session = await repo.findSessionByTaskId(taskId);
@@ -344,8 +353,7 @@ export async function injectLocalStorage(sessionId: string, origin: string) {
   }
 
   // 3. Check if already injected with same hash
-  const injectedOrigins =
-    (session.injectedOrigins as Record<string, string> | null) ?? {};
+  const injectedOrigins = (session.injectedOrigins as Record<string, string> | null) ?? {};
   const injectedHash: string | undefined = injectedOrigins[origin];
 
   if (injectedHash !== undefined && injectedHash === currentHash) {
@@ -363,7 +371,10 @@ export async function injectLocalStorage(sessionId: string, origin: string) {
   // 5. Update session with injected origin and hash
   const updatedInjectedOrigins = {
     ...injectedOrigins,
-    [origin]: currentHash !== null && currentHash !== undefined && currentHash !== '' ? currentHash : 'unknown',
+    [origin]:
+      currentHash !== null && currentHash !== undefined && currentHash !== ''
+        ? currentHash
+        : 'unknown',
   };
 
   await repo.updateInjectedOrigins(sessionId, updatedInjectedOrigins);

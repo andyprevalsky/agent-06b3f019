@@ -132,7 +132,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     goal,
     attachments,
     normalizedRepoUrl,
-    user_id
+    effectiveUserId
   );
 
   return {

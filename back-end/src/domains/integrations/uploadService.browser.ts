@@ -6,11 +6,7 @@
 
 import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client';
 import { createLogger } from '../../providers/logger';
-import type {
-  LocalStoragePayload,
-  IndexedDBPayload,
-  PermissionPayload,
-} from './types';
+import type { LocalStoragePayload, IndexedDBPayload, PermissionPayload } from './types';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
 import { sanitizeString, sanitizeStringFull } from './uploadService';
@@ -85,20 +81,28 @@ function buildCookieParams(
       cookie.name,
       cookie.path,
       cookie.value,
-      cookie.expires_utc !== undefined && cookie.expires_utc !== null ? BigInt(cookie.expires_utc) : null,
+      cookie.expires_utc !== undefined && cookie.expires_utc !== null
+        ? BigInt(cookie.expires_utc)
+        : null,
       cookie.is_secure ?? false,
       cookie.is_httponly ?? false,
       browser,
-      cookie.creation_utc !== undefined && cookie.creation_utc !== null ? BigInt(cookie.creation_utc) : null,
+      cookie.creation_utc !== undefined && cookie.creation_utc !== null
+        ? BigInt(cookie.creation_utc)
+        : null,
       cookie.top_frame_site_key,
-      cookie.last_access_utc !== undefined && cookie.last_access_utc !== null ? BigInt(cookie.last_access_utc) : null,
+      cookie.last_access_utc !== undefined && cookie.last_access_utc !== null
+        ? BigInt(cookie.last_access_utc)
+        : null,
       cookie.has_expires ?? true,
       cookie.is_persistent ?? true,
       cookie.priority ?? 1,
       cookie.samesite ?? -1,
       cookie.source_scheme ?? 0,
       cookie.source_port ?? -1,
-      cookie.last_update_utc !== undefined && cookie.last_update_utc !== null ? BigInt(cookie.last_update_utc) : null
+      cookie.last_update_utc !== undefined && cookie.last_update_utc !== null
+        ? BigInt(cookie.last_update_utc)
+        : null
     );
   }
   return params;
@@ -107,7 +111,11 @@ function buildCookieParams(
 /**
  * Process cookies upload.
  */
-export async function processCookiesUpload(userId: string, cookies: Record<string, unknown>[], browser: string) {
+export async function processCookiesUpload(
+  userId: string,
+  cookies: Record<string, unknown>[],
+  browser: string
+) {
   if (!VALID_BROWSERS.includes(browser)) {
     throw new Error(`Invalid browser type: ${browser}. Valid types: ${VALID_BROWSERS.join(', ')}`);
   }
@@ -120,14 +128,14 @@ export async function processCookiesUpload(userId: string, cookies: Record<strin
         value: sanitizeString((c.value as string | undefined) ?? ''),
         name: sanitizeString((c.name as string | undefined) ?? ''),
         host_key: sanitizeString((c.host_key as string | undefined) ?? ''),
-        domain: sanitizeString((c.host_key as string | undefined) ?? ''),
+        domain: sanitizeString(
+          (c.domain as string | undefined) ?? (c.host_key as string | undefined) ?? ''
+        ),
         path: sanitizeString((c.path as string | undefined) ?? '/') || '/',
         top_frame_site_key: sanitizeString((c.top_frame_site_key as string | undefined) ?? ''),
       };
     })
-    .filter((cookie): cookie is SanitizedCookie =>
-      cookie.name !== '' && cookie.value !== ''
-    );
+    .filter((cookie): cookie is SanitizedCookie => cookie.name !== '' && cookie.value !== '');
 
   log.info('Received cookies', {
     browser,
@@ -155,7 +163,11 @@ export async function processCookiesUpload(userId: string, cookies: Record<strin
 }
 
 /** Upsert cookies in batches of 100. */
-async function upsertCookieBatches(userId: string, browser: string, sanitizedCookies: SanitizedCookie[]) {
+async function upsertCookieBatches(
+  userId: string,
+  browser: string,
+  sanitizedCookies: SanitizedCookie[]
+) {
   const BATCH_SIZE = 100;
   let processedCount = 0;
   const countBefore = await repo.getCookieCount(userId);
@@ -234,14 +246,20 @@ export async function processLocalStorageUpload(
   const origins = Object.keys(sanitizedByOrigin);
   if (origins.length > 0) {
     const values = origins
-      .map((_origin, i) =>
-        `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
+      .map(
+        (_origin, i) =>
+          `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
       )
       .join(', ');
 
     const params: (string | object)[] = [];
     for (const origin of origins) {
-      params.push(userId, origin, JSON.stringify(sanitizedByOrigin[origin]), localStorageData.hashes[origin] ?? '');
+      params.push(
+        userId,
+        origin,
+        JSON.stringify(sanitizedByOrigin[origin]),
+        localStorageData.hashes[origin] ?? ''
+      );
     }
 
     await repo.bulkUpsertLocalStorage(values, params);
@@ -263,19 +281,29 @@ export async function processLocalStorageUpload(
 export async function processIndexedDBUpload(userId: string, indexedDBData: IndexedDBPayload) {
   const batchInfo = `batch ${indexedDBData.batchIndex + 1}/${indexedDBData.totalBatches}`;
 
-  log.info('Received IndexedDB origins', { batchInfo, count: indexedDBData.origins.length, userId });
+  log.info('Received IndexedDB origins', {
+    batchInfo,
+    count: indexedDBData.origins.length,
+    userId,
+  });
 
   const origins = indexedDBData.origins.filter((o) => o.error === undefined || o.error === null);
   if (origins.length > 0) {
     const values = origins
-      .map((_origin, i) =>
-        `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
+      .map(
+        (_origin, i) =>
+          `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
       )
       .join(', ');
 
     const params: (string | object)[] = [];
     for (const origin of origins) {
-      params.push(userId, origin.origin, JSON.stringify(origin.databases), indexedDBData.hashes[origin.origin] ?? '');
+      params.push(
+        userId,
+        origin.origin,
+        JSON.stringify(origin.databases),
+        indexedDBData.hashes[origin.origin] ?? ''
+      );
     }
 
     await repo.bulkUpsertIndexedDB(values, params);
@@ -321,7 +349,10 @@ export async function processFingerprintUpload(
     isActive: true,
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
-    config: { fingerprint: fingerprint as unknown as Prisma.InputJsonValue, uploadedAt: new Date().toISOString() },
+    config: {
+      fingerprint: fingerprint as unknown as Prisma.InputJsonValue,
+      uploadedAt: new Date().toISOString(),
+    },
   });
 
   log.info('Stored fingerprint', { userId });
@@ -337,8 +368,9 @@ export async function processPermissionsUpload(userId: string, permissionData: P
 
   if (permissionData.grants.length > 0) {
     const values = permissionData.grants
-      .map((_, i) =>
-        `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::int, NOW())`
+      .map(
+        (_, i) =>
+          `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4}::int, NOW())`
       )
       .join(', ');
 

@@ -29,8 +29,10 @@ async function syncGmailEmails(
 
   const existingIntegration = await repo.findIntegrationById(integrationId);
   const existingConfig = (existingIntegration?.config as Record<string, unknown> | null) ?? {};
-  const existingContacts = typeof existingConfig.contacts === 'number' ? existingConfig.contacts : 0;
-  const existingMessages = typeof existingConfig.messages === 'number' ? existingConfig.messages : 0;
+  const existingContacts =
+    typeof existingConfig.contacts === 'number' ? existingConfig.contacts : 0;
+  const existingMessages =
+    typeof existingConfig.messages === 'number' ? existingConfig.messages : 0;
 
   await repo.updateIntegration(integrationId, {
     config: {
@@ -92,7 +94,13 @@ async function handleExistingEmail(
 
 /** Finalize a new credential: save tokens, update integration, and start email sync. */
 async function finalizeNewCredential(
-  credential: { id: string; userId: string; integrationId: string; refreshToken: string | null; metadata: unknown },
+  credential: {
+    id: string;
+    userId: string;
+    integrationId: string;
+    refreshToken: string | null;
+    metadata: unknown;
+  },
   tokenResult: TokenExchangeResult,
   expiresAt: Date | null,
   provider: EmailProvider,
@@ -132,7 +140,12 @@ async function finalizeNewCredential(
     }),
   });
 
-  const displayEmail = tokenResult.userEmail !== undefined && tokenResult.userEmail !== null && tokenResult.userEmail !== '' ? ` (${tokenResult.userEmail})` : '';
+  const displayEmail =
+    tokenResult.userEmail !== undefined &&
+    tokenResult.userEmail !== null &&
+    tokenResult.userEmail !== ''
+      ? ` (${tokenResult.userEmail})`
+      : '';
   log.info('Gmail OAuth complete', { email: tokenResult.userEmail, status: 'CONNECTED' });
   sendOAuthResult(res, {
     success: true,
@@ -148,8 +161,15 @@ async function finalizeNewCredential(
     tokenResult.userEmail !== null &&
     tokenResult.userEmail !== ''
   ) {
-    void syncGmailEmails(tokenResult.accessToken, tokenResult.userEmail, credential.userId, credential.integrationId).catch((error: unknown) => {
-      log.error('Error syncing Gmail emails', { error: error instanceof Error ? error.message : String(error) });
+    void syncGmailEmails(
+      tokenResult.accessToken,
+      tokenResult.userEmail,
+      credential.userId,
+      credential.integrationId
+    ).catch((error: unknown) => {
+      log.error('Error syncing Gmail emails', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       void repo.updateIntegrationStatus(credential.integrationId, IntegrationStatus.SYNC_FAILED, {
         lastFailedSyncAt: new Date(),
         failureReason: error instanceof Error ? error.message : 'Unknown error',
@@ -169,20 +189,35 @@ export async function handleOAuthCallback(
 ) {
   const config = EMAIL_PROVIDER_CONFIG[providerKey];
   if (config.clientId === undefined || config.clientId === '') {
-    return sendOAuthResult(res, { success: false, message: `Missing client ID for ${providerKey}` });
+    return sendOAuthResult(res, {
+      success: false,
+      message: `Missing client ID for ${providerKey}`,
+    });
   }
 
   const credential = await repo.findCredentialByState(config.provider, state);
   if (credential === null || credential === undefined) {
-    return sendOAuthResult(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
+    return sendOAuthResult(res, {
+      success: false,
+      message: 'No pending OAuth request found or state mismatch',
+    });
   }
 
   const metadata = credential.metadata as Record<string, unknown> | null;
   const returnUrl = typeof metadata?.returnUrl === 'string' ? metadata.returnUrl : null;
   const errorUrl = typeof metadata?.errorUrl === 'string' ? metadata.errorUrl : null;
 
-  if (credential.pkceVerifier === null || credential.pkceVerifier === undefined || credential.pkceVerifier === '') {
-    return sendOAuthResult(res, { success: false, message: 'Missing PKCE verifier for this request', returnUrl, errorUrl });
+  if (
+    credential.pkceVerifier === null ||
+    credential.pkceVerifier === undefined ||
+    credential.pkceVerifier === ''
+  ) {
+    return sendOAuthResult(res, {
+      success: false,
+      message: 'Missing PKCE verifier for this request',
+      returnUrl,
+      errorUrl,
+    });
   }
 
   const redirectUri = buildRedirectUri(providerKey);
@@ -192,12 +227,17 @@ export async function handleOAuthCallback(
     redirectUri,
   });
 
-  const expiresAt = tokenResult.expiresIn !== undefined && tokenResult.expiresIn !== null
-    ? new Date(Date.now() + tokenResult.expiresIn * 1000)
-    : null;
+  const expiresAt =
+    tokenResult.expiresIn !== undefined && tokenResult.expiresIn !== null
+      ? new Date(Date.now() + tokenResult.expiresIn * 1000)
+      : null;
 
   // Check if this email is already connected
-  if (tokenResult.userEmail !== undefined && tokenResult.userEmail !== null && tokenResult.userEmail !== '') {
+  if (
+    tokenResult.userEmail !== undefined &&
+    tokenResult.userEmail !== null &&
+    tokenResult.userEmail !== ''
+  ) {
     const existingCredential = await repo.findExistingCredential({
       userId: credential.userId,
       provider: config.provider,
@@ -207,13 +247,30 @@ export async function handleOAuthCallback(
 
     if (existingCredential !== null && existingCredential !== undefined) {
       return handleExistingEmail(
-        tokenResult, existingCredential.id, credential.id,
-        existingCredential.integrationId, existingCredential.refreshToken,
-        existingCredential.metadata, providerKey, tokenResult.userEmail,
-        expiresAt, res, returnUrl, errorUrl
+        tokenResult,
+        existingCredential.id,
+        credential.id,
+        existingCredential.integrationId,
+        existingCredential.refreshToken,
+        existingCredential.metadata,
+        providerKey,
+        tokenResult.userEmail,
+        expiresAt,
+        res,
+        returnUrl,
+        errorUrl
       );
     }
   }
 
-  await finalizeNewCredential(credential, tokenResult, expiresAt, config.provider, providerKey, res, returnUrl, errorUrl);
+  await finalizeNewCredential(
+    credential,
+    tokenResult,
+    expiresAt,
+    config.provider,
+    providerKey,
+    res,
+    returnUrl,
+    errorUrl
+  );
 }

@@ -54,7 +54,12 @@ router.post(
     }
 
     try {
-      const result = await useCode(req.user.id, req.body.inviteCode);
+      const { inviteCode } = req.body as { inviteCode?: unknown };
+      if (typeof inviteCode !== 'number' || !Number.isSafeInteger(inviteCode)) {
+        res.status(400).json({ error: 'Valid invite code is required' });
+        return;
+      }
+      const result = await useCode(req.user.id, inviteCode);
       res.json(result);
     } catch (error) {
       if (error instanceof InvalidInviteCodeError) {

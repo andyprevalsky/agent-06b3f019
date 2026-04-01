@@ -1,26 +1,36 @@
 import { type Response, Router } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { queueMessage, popNextMessage, ValidationError } from './service';
 
 const log = createLogger('iMessage');
 const router = Router();
+const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
 /**
  * POST /api/imessage/queue
- * Auth: API Key (internal - called by agent worker)
+ * Auth: API Key (internal - called by agent worker) or Bearer token
  *
  * Adds an iMessage to the queue for the mac app to send.
+ * Internal callers (API key) may pass user_id in the body.
+ * User-authenticated callers use their own userId.
  */
 router.post(
   '/queue',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
-    const { user_id, agent_id, phone_number, message } = req.body;
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
+    const { agent_id, phone_number, message } = req.body;
+    const userId = req.isInternal === true ? req.body.user_id : req.userId;
+
+    if (userId === undefined || userId === '') {
+      res.status(401).json({ error: 'Unauthorized: user_id required' });
+      return;
+    }
 
     try {
-      const entry = await queueMessage(user_id, agent_id, phone_number, message);
+      const entry = await queueMessage(userId, agent_id, phone_number, message);
       res.json({
         success: true,
         queue_id: entry.id,

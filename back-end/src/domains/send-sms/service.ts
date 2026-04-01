@@ -211,5 +211,8 @@ async function dispatchByEventType(
         priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
       });
       break;
+
+    default:
+      log.warn('Unknown event type, skipping', { eventType: data.event_type });
   }
 }

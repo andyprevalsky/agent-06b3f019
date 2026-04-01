@@ -28,13 +28,8 @@ router.post(
       log.error('Generate prompt error', {
         error: error instanceof Error ? error.message : String(error),
       });
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({
         error: 'Failed to generate prompt',
-        details: errorMessage,
-        hasOpenRouterKey:
-          typeof process.env.OPENROUTER_API_KEY === 'string' &&
-          process.env.OPENROUTER_API_KEY.length > 0,
       });
     }
   })

@@ -267,6 +267,7 @@ export function routeToSupervisor(
 
 export interface InboundSmsInput {
   body: Record<string, unknown>;
+  rawBody?: string;
   surgeSignatureHeader: string | undefined;
 }
 
@@ -285,7 +286,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     signingSecret !== '' &&
     process.env.NODE_ENV === 'production'
   ) {
-    const rawBody = typeof input.body === 'string' ? input.body : JSON.stringify(input.body);
+    const rawBody = input.rawBody ?? JSON.stringify(input.body);
     if (!validateSurgeSignature(input.surgeSignatureHeader, rawBody, signingSecret)) {
       log.error('Invalid Surge signature', {
         headers:

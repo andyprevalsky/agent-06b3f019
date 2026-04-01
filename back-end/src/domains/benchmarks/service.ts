@@ -7,7 +7,24 @@ const log = createLogger('Benchmarks');
 // Read once at startup — task definitions are static
 let cachedTasks: unknown[] | null = null;
 try {
-  cachedTasks = JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
+  const parsed: unknown = JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
+  if (!Array.isArray(parsed)) {
+    log.error('Benchmark tasks file is not an array');
+  } else {
+    const valid = parsed.every(
+      (t: unknown) =>
+        typeof t === 'object' &&
+        t !== null &&
+        'id' in t &&
+        'goal' in t &&
+        typeof (t as Record<string, unknown>).id === 'string'
+    );
+    if (!valid) {
+      log.error('Benchmark tasks file contains malformed entries');
+    } else {
+      cachedTasks = parsed;
+    }
+  }
 } catch (err) {
   log.error('Failed to load benchmark tasks at startup', {
     error: err instanceof Error ? err.message : String(err),

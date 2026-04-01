@@ -6,9 +6,18 @@
 import { IntegrationType, IntegrationStatus } from '@prisma/client';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
-import { type ContactWithMessages, parseIMessageData } from '../../services/integrations/iMessageParser';
-import { type WhatsAppContactWithMessages, parseWhatsAppData } from '../../services/integrations/whatsappParser';
-import { type TelegramContactWithMessages, parseTelegramData } from '../../services/integrations/telegramParser';
+import {
+  type ContactWithMessages,
+  parseIMessageData,
+} from '../../services/integrations/iMessageParser';
+import {
+  type WhatsAppContactWithMessages,
+  parseWhatsAppData,
+} from '../../services/integrations/whatsappParser';
+import {
+  type TelegramContactWithMessages,
+  parseTelegramData,
+} from '../../services/integrations/telegramParser';
 
 // Re-export types needed by routes
 export type { ContactWithMessages } from '../../services/integrations/iMessageParser';
@@ -26,9 +35,6 @@ async function updateMessagingIntegration(
   jobId: string,
   accessedAt: string | undefined
 ) {
-  const existingContacts = (existingConfig.contacts as number | undefined) ?? 0;
-  const existingMessages = (existingConfig.messages as number | undefined) ?? 0;
-
   await repo.updateIntegration(integrationId, {
     status: IntegrationStatus.CONNECTED,
     isActive: true,
@@ -36,8 +42,8 @@ async function updateMessagingIntegration(
     lastSuccessfulSyncAt: new Date(),
     config: {
       ...existingConfig,
-      contacts: existingContacts + contacts.length,
-      messages: existingMessages + totalMessages,
+      contacts: contacts.length,
+      messages: totalMessages,
       lastJobId: jobId,
       lastUploadedAt: new Date().toISOString(),
       lastFrontendAccessAt:
@@ -50,11 +56,7 @@ async function updateMessagingIntegration(
 }
 
 /** Handle failed messaging import. */
-async function handleMessagingFailure(
-  integrationId: string,
-  error: unknown,
-  platform: string
-) {
+async function handleMessagingFailure(integrationId: string, error: unknown, platform: string) {
   log.error(`Error processing ${platform} payload`, {
     error: error instanceof Error ? error.message : String(error),
   });
@@ -75,7 +77,11 @@ export async function processIMessageUpload(
 ) {
   const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
 
-  log.info('Received iMessage payload', { userId, contacts: contacts.length, messages: totalMessages });
+  log.info('Received iMessage payload', {
+    userId,
+    contacts: contacts.length,
+    messages: totalMessages,
+  });
 
   const integration = await repo.upsertIntegrationForUpload({
     userId,
@@ -95,7 +101,14 @@ export async function processIMessageUpload(
     try {
       await parseIMessageData(userId, contacts, jobId);
       const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(integration.id, existingConfig, contacts, totalMessages, jobId, accessedAt);
+      await updateMessagingIntegration(
+        integration.id,
+        existingConfig,
+        contacts,
+        totalMessages,
+        jobId,
+        accessedAt
+      );
     } catch (error: unknown) {
       await handleMessagingFailure(integration.id, error, 'iMessage');
     }
@@ -114,7 +127,11 @@ export async function processWhatsAppUpload(
 ) {
   const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
 
-  log.info('Received WhatsApp payload', { userId, contacts: contacts.length, messages: totalMessages });
+  log.info('Received WhatsApp payload', {
+    userId,
+    contacts: contacts.length,
+    messages: totalMessages,
+  });
 
   const integration = await repo.upsertIntegrationForUpload({
     userId,
@@ -133,7 +150,14 @@ export async function processWhatsAppUpload(
     try {
       await parseWhatsAppData(userId, contacts, jobId);
       const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(integration.id, existingConfig, contacts, totalMessages, jobId, accessedAt);
+      await updateMessagingIntegration(
+        integration.id,
+        existingConfig,
+        contacts,
+        totalMessages,
+        jobId,
+        accessedAt
+      );
     } catch (error: unknown) {
       await handleMessagingFailure(integration.id, error, 'WhatsApp');
     }
@@ -171,7 +195,11 @@ export async function processTelegramUpload(
 ) {
   const totalMessages = contacts.reduce((sum, contact) => sum + (contact.messages?.length ?? 0), 0);
 
-  log.info('Received Telegram payload', { userId, contacts: contacts.length, messages: totalMessages });
+  log.info('Received Telegram payload', {
+    userId,
+    contacts: contacts.length,
+    messages: totalMessages,
+  });
 
   const integration = await repo.upsertIntegrationForUpload({
     userId,
@@ -190,7 +218,14 @@ export async function processTelegramUpload(
     try {
       await parseTelegramData(userId, contacts, jobId);
       const existingConfig = (integration.config as Record<string, unknown> | null) ?? {};
-      await updateMessagingIntegration(integration.id, existingConfig, contacts, totalMessages, jobId, accessedAt);
+      await updateMessagingIntegration(
+        integration.id,
+        existingConfig,
+        contacts,
+        totalMessages,
+        jobId,
+        accessedAt
+      );
     } catch (error: unknown) {
       await handleMessagingFailure(integration.id, error, 'Telegram');
     }

@@ -1,6 +1,11 @@
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import { SUPABASE_URL, SUPABASE_JWT_SECRET, SESSION_EXPIRES_IN } from './config';
+import {
+  SUPABASE_URL,
+  SUPABASE_JWT_SECRET,
+  SESSION_EXPIRES_IN,
+  REFRESH_TOKEN_EXPIRES_IN,
+} from './config';
 import type { SessionTokens, AnonymousSessionResult } from './types';
 
 export class AuthConfigError extends Error {
@@ -22,7 +27,7 @@ export function generateSupabaseSession(userId: string, phone: string): SessionT
 
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + SESSION_EXPIRES_IN;
-  const refreshExpiresAt = now + SESSION_EXPIRES_IN;
+  const refreshExpiresAt = now + REFRESH_TOKEN_EXPIRES_IN;
 
   const sessionId = uuidv4();
   const accessPayload = {

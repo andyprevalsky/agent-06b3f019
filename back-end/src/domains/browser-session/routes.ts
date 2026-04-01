@@ -14,6 +14,7 @@
 
 import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { SteelRateLimitError } from '../../providers/steel';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -23,6 +24,7 @@ import {
   closeBrowserSession,
   resumeBrowserSession,
   getTaskInfo,
+  getTaskOwnerUserId,
   getContext,
   getSessionById,
   uploadFile,
@@ -43,6 +45,7 @@ import {
 const log = createLogger('BrowserSession');
 
 const router = Router();
+const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
 /**
  * POST /api/browser-session/init
@@ -52,12 +55,17 @@ const router = Router();
  */
 router.post(
   '/init',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     try {
       const { user_id, agent_id, start_url } = initSessionSchema.parse(req.body);
+      const userId = req.isInternal === true ? user_id : req.userId;
+      if (userId === undefined || userId === '') {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
 
-      const result = await initSession(user_id, agent_id, start_url);
+      const result = await initSession(userId, agent_id, start_url);
 
       res.json({ success: true, ...result });
     } catch (error) {
@@ -142,10 +150,18 @@ router.post(
  */
 router.get(
   '/task/:taskId',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     try {
       const { taskId } = req.params;
+
+      if (req.isInternal !== true) {
+        const ownerUserId = await getTaskOwnerUserId(taskId);
+        if (ownerUserId !== req.userId) {
+          res.status(404).json({ error: 'Session not found' });
+          return;
+        }
+      }
 
       const result = await getTaskInfo(taskId);
 
@@ -170,10 +186,15 @@ router.get(
  */
 router.get(
   '/context/:userId',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     try {
       const { userId } = req.params;
+
+      if (req.isInternal !== true && userId !== req.userId) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
 
       const context = await getContext(userId);
 

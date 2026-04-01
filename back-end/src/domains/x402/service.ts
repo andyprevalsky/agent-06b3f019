@@ -88,7 +88,10 @@ export async function getAgentStatus(agentId: string) {
     credits_remaining: usage.remaining,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
-    recent_messages: messages,
+    recent_messages: messages.map((m) => ({
+      role: m.role,
+      timestamp: m.timestamp,
+    })),
     available_endpoints: getX402Endpoints(agent.id),
   };
 }

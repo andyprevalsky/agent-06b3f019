@@ -68,19 +68,25 @@ export async function getMyCode(userId: string): Promise<MyCodeResponse> {
 
   // If user doesn't exist or doesn't have an invite code, create one
   if (user === null || user.inviteCode === null || user.inviteCode === undefined) {
-    let inviteCode!: number;
-    let isUnique = false;
-
-    // Keep generating until we get a unique code
-    while (!isUnique) {
-      inviteCode = generateInviteCode();
-      const taken = await repo.isInviteCodeTaken(inviteCode);
-      if (!taken) {
-        isUnique = true;
+    // Retry loop: generate + persist atomically, retry on unique constraint collision (P2002)
+    const MAX_ATTEMPTS = 100;
+    let claimed = false;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS && !claimed; attempt++) {
+      const inviteCode = generateInviteCode();
+      try {
+        user = await repo.upsertUserInviteCode(userId, inviteCode);
+        claimed = true;
+      } catch (error) {
+        // P2002 = unique constraint violation (another user claimed this code)
+        const isPrismaConflict =
+          error instanceof Error && 'code' in error && (error as { code: string }).code === 'P2002';
+        if (!isPrismaConflict) throw error;
+        // Code was taken — retry with a new code
       }
     }
-
-    user = await repo.upsertUserInviteCode(userId, inviteCode);
+    if (!claimed || user === null) {
+      throw new Error('Failed to generate unique invite code after maximum attempts');
+    }
   }
 
   const usesRemaining = Math.max(0, MAX_INVITE_CODE_USES - user.inviteCodeUses);

@@ -38,11 +38,7 @@ router.post(
         return res.status(400).json({ error: 'No file uploaded' });
       }
 
-      if (
-        integrationType === undefined ||
-        integrationType === null ||
-        integrationType === ''
-      ) {
+      if (integrationType === undefined || integrationType === null || integrationType === '') {
         return res.status(400).json({ error: 'integrationType is required' });
       }
 
@@ -57,7 +53,9 @@ router.post(
         try {
           fs.unlinkSync(req.file.path);
         } catch (cleanupError: unknown) {
-          log.error('Error cleaning up file', { error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
+          log.error('Error cleaning up file', {
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          });
         }
       }
       throw error;
@@ -138,7 +136,9 @@ router.post(
         try {
           fs.unlinkSync(req.file.path);
         } catch (cleanupError: unknown) {
-          log.error('Error cleaning up file', { error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
+          log.error('Error cleaning up file', {
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          });
         }
       }
       throw error;
@@ -191,7 +191,9 @@ router.post(
         try {
           fs.unlinkSync(req.file.path);
         } catch (cleanupError: unknown) {
-          log.error('Error cleaning up file', { error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
+          log.error('Error cleaning up file', {
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          });
         }
       }
       throw error;

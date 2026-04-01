@@ -6,6 +6,7 @@ import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client'
 import fetch from 'node-fetch';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
+import { getAdminPhone } from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -126,7 +127,12 @@ export async function updateIntegration(
     throw new IntegrationNotFoundError(name);
   }
   const updateData: Record<string, unknown> = {};
-  if (updates.status !== undefined) updateData.status = updates.status;
+  if (updates.status !== undefined) {
+    if (!Object.values(IntegrationStatus).includes(updates.status as IntegrationStatus)) {
+      throw new Error(`Invalid integration status: ${updates.status}`);
+    }
+    updateData.status = updates.status;
+  }
   if (updates.isActive !== undefined) updateData.isActive = updates.isActive;
   if (updates.config !== undefined) updateData.config = updates.config;
   return repo.updateIntegration(existing.id, updateData);
@@ -150,7 +156,15 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
 
   const allCredentials = integrations
     .flatMap((i) => i.emailCredentials)
-    .filter((c) => c.refreshToken !== null && c.refreshToken !== undefined && c.refreshToken !== '');
+    .filter(
+      (c) =>
+        c.refreshToken !== null &&
+        c.refreshToken !== undefined &&
+        c.refreshToken !== '' &&
+        c.accessToken !== null &&
+        c.accessToken !== undefined &&
+        c.accessToken !== ''
+    );
   if (allCredentials.length === 0) throw new GmailCredentialsNotFoundError();
 
   const perAccountLimit = Math.ceil(limit / allCredentials.length);
@@ -159,19 +173,33 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
       try {
         const accessToken = await getValidAccessToken(credential);
         if (accessToken === null || accessToken === undefined || accessToken === '') {
-          log.warn('Failed to get access token', { credentialId: credential.id, email: credential.email });
+          log.warn('Failed to get access token', {
+            credentialId: credential.id,
+            email: credential.email,
+          });
           return [];
         }
         return await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
       } catch (err: unknown) {
-        log.warn('Failed to fetch from Gmail', { email: credential.email, error: err instanceof Error ? err.message : String(err) });
+        log.warn('Failed to fetch from Gmail', {
+          email: credential.email,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return [];
       }
     })
   );
 
-  const emails = emailArrays.flat().sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, limit);
-  log.info('Fetched emails', { count: emails.length, accounts: allCredentials.length, since: since.toISOString(), userId });
+  const emails = emailArrays
+    .flat()
+    .sort((a, b) => b.date.getTime() - a.date.getTime())
+    .slice(0, limit);
+  log.info('Fetched emails', {
+    count: emails.length,
+    accounts: allCredentials.length,
+    since: since.toISOString(),
+    userId,
+  });
   return emails;
 }
 
@@ -182,34 +210,58 @@ export async function sendEmail(
   const { refreshGmailToken, buildRawEmail } = await import('./oauthService');
   const credential = await repo.findGmailCredentialForSend(userId, params.fromEmail);
 
-  if (credential === null || credential === undefined || credential.accessToken === null || credential.accessToken === undefined) {
+  if (
+    credential === null ||
+    credential === undefined ||
+    credential.accessToken === null ||
+    credential.accessToken === undefined
+  ) {
     const creds = await repo.findAvailableGmailEmails(userId);
-    const available = creds.map((c) => c.email).filter((e): e is string => e !== null && e !== undefined && e !== '');
+    const available = creds
+      .map((c) => c.email)
+      .filter((e): e is string => e !== null && e !== undefined && e !== '');
     throw new GmailAccountNotFoundError(params.fromEmail, available);
   }
 
   let accessToken = credential.accessToken;
-  const isExpired = credential.expiresAt !== null && credential.expiresAt !== undefined && new Date(credential.expiresAt) <= new Date();
+  const isExpired =
+    credential.expiresAt !== null &&
+    credential.expiresAt !== undefined &&
+    new Date(credential.expiresAt) <= new Date();
 
   if (isExpired) {
     log.info('Access token expired, refreshing', { userId });
-    const newToken = await refreshGmailToken({ id: credential.id, refreshToken: credential.refreshToken });
-    if (newToken === null || newToken === undefined || newToken === '') throw new GmailTokenExpiredError();
+    const newToken = await refreshGmailToken({
+      id: credential.id,
+      refreshToken: credential.refreshToken,
+    });
+    if (newToken === null || newToken === undefined || newToken === '')
+      throw new GmailTokenExpiredError();
     accessToken = newToken;
   }
 
-  const integrationConfig = (credential.integration?.config as Record<string, unknown> | null) ?? {};
+  const integrationConfig =
+    (credential.integration?.config as Record<string, unknown> | null) ?? {};
   const senderEmail = credential.email ?? (integrationConfig.connectedEmail as string | undefined);
   if (senderEmail === undefined || senderEmail === null || senderEmail === '') {
     throw new Error('Unable to determine sender email address');
   }
 
-  const rawMessage = buildRawEmail({ from: senderEmail, to: params.to, cc: params.cc, subject: params.subject, body: params.body });
-  const gmailResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ raw: rawMessage }),
+  const rawMessage = buildRawEmail({
+    from: senderEmail,
+    to: params.to,
+    cc: params.cc,
+    subject: params.subject,
+    body: params.body,
   });
+  const gmailResponse = await fetch(
+    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: rawMessage }),
+    }
+  );
 
   if (!gmailResponse.ok) {
     const errorData = (await gmailResponse.json()) as Record<string, unknown>;
@@ -237,12 +289,16 @@ export async function sendPasswordRequest(userId: string, request: string) {
   const user = await repo.findUserById(userId);
   const userName = user?.name ?? user?.phone ?? userId;
   const message = `\uD83D\uDD11 Password integration request from ${userName}: ${request.trim()}`;
-  const result = await sendSms('+19729777432', message);
+  const result = await sendSms(getAdminPhone(), message);
   if (!result.success) {
     log.error('Failed to send feature request SMS', { error: result.error });
     throw new Error('Failed to send request');
   }
-  log.info('Password integration request sent', { userId, userName, request: request.substring(0, 50) });
+  log.info('Password integration request sent', {
+    userId,
+    userName,
+    request: request.substring(0, 50),
+  });
 }
 
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
@@ -278,7 +334,11 @@ export async function getClaudeCodeToken(
   }
   const poolResult = await fetchPoolToken(excludePoolTokenIds);
   if (poolResult === null || poolResult === undefined) throw new NoTokensAvailableError();
-  return { accessToken: poolResult.accessToken, source: 'pool' as const, poolTokenId: poolResult.poolTokenId };
+  return {
+    accessToken: poolResult.accessToken,
+    source: 'pool' as const,
+    poolTokenId: poolResult.poolTokenId,
+  };
 }
 
 export async function markTokenRateLimited(
@@ -289,15 +349,27 @@ export async function markTokenRateLimited(
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
       throw new Error('Missing poolTokenId for source=pool');
     }
-    await markPoolTokenRateLimited(params.poolTokenId, { rateLimitedUntil: params.rateLimitedUntil });
-    return { ok: true, source, poolTokenId: params.poolTokenId, rateLimitedUntil: params.rateLimitedUntil ?? null };
+    await markPoolTokenRateLimited(params.poolTokenId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+    });
+    return {
+      ok: true,
+      source,
+      poolTokenId: params.poolTokenId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+    };
   }
   if (source === 'user') {
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
     await markUserTokenRateLimited(params.userId, { rateLimitedUntil: params.rateLimitedUntil });
-    return { ok: true, source, userId: params.userId, rateLimitedUntil: params.rateLimitedUntil ?? null };
+    return {
+      ok: true,
+      source,
+      userId: params.userId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+    };
   }
   throw new Error('Invalid source. Must be "pool" or "user".');
 }

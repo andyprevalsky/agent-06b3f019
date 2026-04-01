@@ -21,9 +21,15 @@ router.post(
     const { data, iv, key } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -56,8 +62,12 @@ router.get(
   '/claude-code/credentials/token',
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId =
-      req.isInternal === true ? (req.headers['x-user-id'] as string) : req.user?.id;
+    const internalHeaderUserId = req.headers['x-user-id'];
+    const internalUserId =
+      typeof internalHeaderUserId === 'string' && internalHeaderUserId.trim() !== ''
+        ? internalHeaderUserId.trim()
+        : undefined;
+    const userId = req.isInternal === true ? internalUserId : req.user?.id;
 
     if (userId === undefined || userId === null || userId === '') {
       return res.status(400).json({ error: 'Missing user ID' });

@@ -115,9 +115,11 @@ export function sanitizeStringFull(str: string): string {
   const chars = [...sanitized];
   const filtered: string[] = [];
   for (let i = 0; i < chars.length; i++) {
-    const code = chars[i].charCodeAt(0);
+    // Use codePointAt to correctly handle astral characters (e.g. emoji)
+    // charCodeAt would return the high surrogate for astral chars and incorrectly drop them
+    const code = chars[i].codePointAt(0)!;
     if (code >= 0xd800 && code <= 0xdbff) {
-      const nextCode = chars[i + 1]?.charCodeAt(0);
+      const nextCode = chars[i + 1]?.codePointAt(0);
       if (nextCode !== undefined && nextCode >= 0xdc00 && nextCode <= 0xdfff) {
         filtered.push(chars[i], chars[i + 1]);
         i++;

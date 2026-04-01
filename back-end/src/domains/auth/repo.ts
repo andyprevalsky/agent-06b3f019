@@ -2,10 +2,16 @@ import { prisma } from '../../providers/database';
 
 /**
  * Find an existing user by phone number (tries both +prefix and no-prefix variants).
+ * Normalizes input by stripping spaces, dashes, and parentheses before querying.
  */
 export async function findUserByPhone(phone: string) {
-  const phoneWithPlus = phone.startsWith('+') ? phone : `+${phone}`;
-  const phoneWithoutPlus = phone.startsWith('+') ? phone.slice(1) : phone;
+  const normalized = phone.replace(/[\s\-()]/g, '');
+  const digitsOnly = normalized.replace(/\+/g, '');
+  if (digitsOnly.length === 0) {
+    return null;
+  }
+  const phoneWithPlus = normalized.startsWith('+') ? normalized : `+${normalized}`;
+  const phoneWithoutPlus = normalized.startsWith('+') ? normalized.slice(1) : normalized;
 
   return prisma.user.findFirst({
     where: {

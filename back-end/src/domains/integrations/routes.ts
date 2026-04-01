@@ -30,8 +30,7 @@ router.get(
   '/',
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const userId =
-      req.isInternal === true ? (req.headers['x-user-id'] as string) : req.user?.id;
+    const userId = req.isInternal === true ? (req.headers['x-user-id'] as string) : req.user?.id;
 
     if (userId === undefined || userId === null || userId === '') {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -51,8 +50,12 @@ router.post(
     const { name, type } = req.body;
 
     if (
-      (name === undefined || name === null || name === '') ||
-      (type === undefined || type === null || type === '')
+      name === undefined ||
+      name === null ||
+      name === '' ||
+      type === undefined ||
+      type === null ||
+      type === ''
     ) {
       return res.status(400).json({ error: 'name and type are required' });
     }

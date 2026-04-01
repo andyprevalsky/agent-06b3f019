@@ -295,21 +295,33 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
     await deleteAgentRecursive(child.id);
   }
   await cleanupAgentSessions(agentId);
-  try {
-    const client = await getTemporalClient();
-    const handle = client.workflow.getHandle(agentId);
-    await handle.terminate('Agent deleted by user');
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (
-      msg.includes('not found') ||
-      msg.includes('already completed') ||
-      msg.includes('terminated')
-    ) {
-      log.info('No active workflow to terminate', { agent_id: agentId, reason: msg });
-    } else {
-      log.warn('Failed to terminate workflow', { agent_id: agentId, error: msg });
+  if (agent.temporalWorkflowId !== null) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.terminate('Agent deleted by user');
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (
+        msg.includes('not found') ||
+        msg.includes('already completed') ||
+        msg.includes('terminated')
+      ) {
+        log.info('No active workflow to terminate', {
+          agent_id: agentId,
+          workflow_id: agent.temporalWorkflowId,
+          reason: msg,
+        });
+      } else {
+        log.warn('Failed to terminate workflow', {
+          agent_id: agentId,
+          workflow_id: agent.temporalWorkflowId,
+          error: msg,
+        });
+      }
     }
+  } else {
+    log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
   }
   await repo.deleteAttentionRequests(agentId);
   await repo.softDeleteAgent(agentId);

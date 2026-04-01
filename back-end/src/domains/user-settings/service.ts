@@ -112,8 +112,21 @@ export async function patchUserSettings(userId: string, body: UpdateUserBody) {
   const existingUser = await repo.findUser(userId);
 
   if (!existingUser) {
-    const user = await repo.createUser(userId, body);
-    return toMutationResponse(user);
+    try {
+      const user = await repo.createUser(userId, body);
+      return toMutationResponse(user);
+    } catch (error: unknown) {
+      // Handle race condition: another request created the user first
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error as { code: string }).code === 'P2002'
+      ) {
+        const user = await repo.partialUpdateUser(userId, body);
+        return toMutationResponse(user);
+      }
+      throw error;
+    }
   }
 
   const user = await repo.partialUpdateUser(userId, body);

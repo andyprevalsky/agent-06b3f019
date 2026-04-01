@@ -230,3 +230,13 @@ export async function getMessagesBatch(ids: unknown, userId: string) {
 export async function generateSchema(goal: string) {
   return generateResponseSchema(goal);
 }
+
+// ---------------------------------------------------------------------------
+// Batch fetch messages
+// ---------------------------------------------------------------------------
+
+/** Fetch messages by IDs, scoped to the requesting user. */
+export async function batchFetchMessages(ids: string[], userId: string) {
+  const messages = await repo.findMessagesByIds(ids, userId);
+  return { messages };
+}

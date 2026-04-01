@@ -143,11 +143,24 @@ export async function findOrCreateUser(
     return { usedInviteCode: user.usedInviteCode, isNew: false };
   }
 
-  const created = await prisma.user.create({
-    data: { userId },
-    select: { usedInviteCode: true },
-  });
-  log.info('Created user record', { userId });
-
-  return { usedInviteCode: created.usedInviteCode, isNew: true };
+  try {
+    const created = await prisma.user.create({
+      data: { userId },
+      select: { usedInviteCode: true },
+    });
+    log.info('Created user record', { userId });
+    return { usedInviteCode: created.usedInviteCode, isNew: true };
+  } catch (error) {
+    // Handle race condition: another request created the user between findUnique and create
+    if (error instanceof Error && 'code' in error && (error as { code: string }).code === 'P2002') {
+      const existing = await prisma.user.findUnique({
+        where: { userId },
+        select: { usedInviteCode: true },
+      });
+      if (existing) {
+        return { usedInviteCode: existing.usedInviteCode, isNew: false };
+      }
+    }
+    throw error;
+  }
 }

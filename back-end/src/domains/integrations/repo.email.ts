@@ -30,10 +30,12 @@ export async function createEmailCredential(params: {
 }
 
 export async function findCredentialByState(provider: EmailProvider, stateToken: string) {
+  const STATE_TOKEN_TTL_MS = 5 * 60 * 1000; // 5 minutes
   return prisma.emailIntegrationCredential.findFirst({
     where: {
       provider,
       stateToken,
+      createdAt: { gte: new Date(Date.now() - STATE_TOKEN_TTL_MS) },
     },
   });
 }
@@ -131,7 +133,8 @@ export async function updateEmailCredentialToken(
     data: {
       accessToken: data.accessToken,
       expiresAt: data.expiresAt,
-      ...(data.refreshToken !== undefined && data.refreshToken !== '' && { refreshToken: data.refreshToken }),
+      ...(data.refreshToken !== undefined &&
+        data.refreshToken !== '' && { refreshToken: data.refreshToken }),
     },
   });
 }

@@ -170,6 +170,13 @@ export const CHROME_EPOCH_OFFSET_MICROSECONDS = 11644473600n * 1000000n;
 // Cache TTL for authenticated domains (5 minutes)
 export const AUTH_DOMAINS_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// Admin phone number for password integration requests — must be set in env
+export function getAdminPhone(): string {
+  const phone = process.env.ADMIN_PHONE;
+  if (!phone) throw new Error('ADMIN_PHONE env var is required');
+  return phone;
+}
+
 // Multer upload limits
 export const UPLOAD_LIMITS = {
   fileSize: 500 * 1024 * 1024, // 500MB max file size

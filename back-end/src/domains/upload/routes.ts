@@ -73,9 +73,10 @@ router.get(
   authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
-    const storagePath = req.query.storage_path as string;
+    const storagePath =
+      typeof req.query.storage_path === 'string' ? req.query.storage_path : undefined;
 
-    if (!storagePath) {
+    if (storagePath === undefined || storagePath === '') {
       res.status(400).json({ error: 'storage_path query parameter is required' });
       return;
     }

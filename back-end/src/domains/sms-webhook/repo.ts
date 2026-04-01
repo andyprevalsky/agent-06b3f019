@@ -44,13 +44,18 @@ export async function findActiveSmsAgents(userId: string) {
   });
 }
 
-/** Soft-delete an agent and all its children */
+/** Soft-delete an agent and all descendants (children, grandchildren, etc.) */
 export async function softDeleteAgentAndChildren(agentId: string) {
-  return prisma.agent.updateMany({
-    where: {
-      OR: [{ id: agentId }, { parentAgentId: agentId }],
-      deletedAt: null,
-    },
-    data: { deletedAt: new Date() },
-  });
+  // Use recursive CTE to find all descendants, then soft-delete them all
+  await prisma.$executeRaw`
+    WITH RECURSIVE descendants AS (
+      SELECT id FROM "Agent" WHERE id = ${agentId} AND "deletedAt" IS NULL
+      UNION ALL
+      SELECT a.id FROM "Agent" a
+      JOIN descendants d ON a."parentAgentId" = d.id
+      WHERE a."deletedAt" IS NULL
+    )
+    UPDATE "Agent" SET "deletedAt" = NOW()
+    WHERE id IN (SELECT id FROM descendants)
+  `;
 }

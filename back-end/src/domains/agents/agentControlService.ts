@@ -176,16 +176,31 @@ export async function restartAgent(agentId: string, userId?: string) {
     return { error: 'Agent has no verifier configured', status: 400 };
   }
 
-  const client = await getTemporalClient();
-  try {
-    const handle = client.workflow.getHandle(agentId);
-    await handle.terminate('Restarting with new worker code');
-    log.info('Terminated workflow for restart', { agent_id: agentId });
-  } catch (e: unknown) {
-    log.warn('Could not terminate workflow for restart', {
-      agent_id: agentId,
-      error: e instanceof Error ? e.message : String(e),
-    });
+  if (agent.temporalWorkflowId !== null) {
+    const client = await getTemporalClient();
+    try {
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.terminate('Restarting with new worker code');
+      log.info('Terminated workflow for restart', {
+        agent_id: agentId,
+        workflow_id: agent.temporalWorkflowId,
+      });
+    } catch (e: unknown) {
+      const isNotFound = e instanceof Error && e.name === 'WorkflowNotFoundError';
+      if (isNotFound) {
+        log.info('Workflow already terminated/not found, proceeding with restart', {
+          agent_id: agentId,
+          workflow_id: agent.temporalWorkflowId,
+        });
+      } else {
+        log.error('Failed to terminate workflow for restart, aborting to prevent duplicates', {
+          agent_id: agentId,
+          workflow_id: agent.temporalWorkflowId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return { error: 'Failed to terminate existing workflow', status: 500 };
+      }
+    }
   }
 
   await new Promise((resolve) => setTimeout(resolve, 500));

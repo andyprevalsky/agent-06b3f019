@@ -51,7 +51,9 @@ export async function processGenericUpload(
         // Clean up file
         fs.unlinkSync(file.path);
       } catch (error: unknown) {
-        log.error('Error processing integration', { error: error instanceof Error ? error.message : String(error) });
+        log.error('Error processing integration', {
+          error: error instanceof Error ? error.message : String(error),
+        });
         await repo.updateIntegrationStatus(integration.id, IntegrationStatus.SYNC_FAILED, {
           lastSyncAt: new Date(),
           lastFailedSyncAt: new Date(),
@@ -91,7 +93,9 @@ export async function processLinkedInUpload(userId: string, filePath: string, fi
 
     return { jobId, contacts: result.contacts, messages: result.messages };
   } catch (parseError: unknown) {
-    log.error('LinkedIn parse/import error', { error: parseError instanceof Error ? parseError.message : String(parseError) });
+    log.error('LinkedIn parse/import error', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+    });
 
     await repo.updateIntegrationStatus(integration.id, IntegrationStatus.SYNC_FAILED, {
       lastSyncAt: new Date(),

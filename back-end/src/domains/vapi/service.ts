@@ -24,7 +24,22 @@ export class VapiApiError extends Error {
   }
 }
 
+/** Fetch wrapper that converts AbortError (timeout) into VapiApiError. */
+async function fetchVapi(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new VapiApiError(504, 'VAPI request timed out');
+    }
+    throw err;
+  }
+}
+
 function getRandomPhoneNumberId(): string {
+  if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) {
+    throw new VapiNotConfiguredError();
+  }
   const index = Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length);
   return OUTBOUND_PHONE_NUMBER_POOL[index];
 }
@@ -119,37 +134,41 @@ export async function initiateCall(
   const normalizedSchema = normalizeJsonSchema(output_schema);
 
   // Create outbound call via Vapi API
-  const response = await fetch(`${VAPI_BASE_URL}/call`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${vapiPrivateKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      phoneNumberId: phoneNumberId,
-      customer: {
-        number: normalizedPhone,
+  const response = await fetchVapi(
+    `${VAPI_BASE_URL}/call`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${vapiPrivateKey}`,
+        'Content-Type': 'application/json',
       },
-      assistant: {
-        model: {
-          provider: 'openai',
-          model: 'gpt-4o',
-          messages: [{ role: 'system', content: fullSystemPrompt }],
+      body: JSON.stringify({
+        phoneNumberId: phoneNumberId,
+        customer: {
+          number: normalizedPhone,
         },
-        voice: {
-          provider: '11labs',
-          voiceId: 'paula', // Default voice - can be made configurable later
-        },
-        firstMessage: 'Hello, how are you today?',
-        analysisPlan: {
-          structuredDataPlan: {
-            enabled: true,
-            schema: normalizedSchema,
+        assistant: {
+          model: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            messages: [{ role: 'system', content: fullSystemPrompt }],
+          },
+          voice: {
+            provider: '11labs',
+            voiceId: 'paula', // Default voice - can be made configurable later
+          },
+          firstMessage: 'Hello, how are you today?',
+          analysisPlan: {
+            structuredDataPlan: {
+              enabled: true,
+              schema: normalizedSchema,
+            },
           },
         },
-      },
-    }),
-  });
+      }),
+    },
+    30_000
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -183,12 +202,16 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
   }
 
   // Get call status from Vapi API
-  const response = await fetch(`${VAPI_BASE_URL}/call/${callId}`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${vapiPrivateKey}`,
+  const response = await fetchVapi(
+    `${VAPI_BASE_URL}/call/${callId}`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${vapiPrivateKey}`,
+      },
     },
-  });
+    15_000
+  );
 
   if (!response.ok) {
     const errorText = await response.text();

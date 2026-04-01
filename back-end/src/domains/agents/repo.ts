@@ -14,6 +14,7 @@ export {
   createGithubRepoAccess,
   deleteAgentTools,
   createAgentTools,
+  replaceAgentTools,
   updateVerifierPrompt,
 } from './repoMutations';
 

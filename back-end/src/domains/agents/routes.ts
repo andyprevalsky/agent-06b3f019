@@ -36,7 +36,7 @@ function handleRouteError(
   ctx?: Record<string, string>
 ): void {
   if (error instanceof z.ZodError) {
-    res.status(400).json({ error: 'Invalid request body', details: error.errors });
+    res.status(400).json({ error: 'Invalid request body', details: error.issues });
     return;
   }
   log.error(msg, {
@@ -56,7 +56,11 @@ router.get(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       noCacheHeaders(res);
-      const result = await queryService.listAgents(req.userId!);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await queryService.listAgents(req.userId);
       res.json(result);
     } catch (error) {
       handleRouteError(res, error, 'Failed to fetch agents');
@@ -213,7 +217,7 @@ router.patch(
         if ('current_cost_cents' in result) {
           rb.current_cost_cents = result.current_cost_cents;
         }
-        res.status(result.status!).json(rb);
+        res.status(result.status ?? 500).json(rb);
         return;
       }
       res.json(result);
@@ -228,9 +232,13 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await controlService.startAgentMode(req.params.id, req.userId!);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await controlService.startAgentMode(req.params.id, req.userId);
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json(result);
@@ -245,9 +253,13 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await controlService.pauseAgentForUser(req.params.id, req.userId!);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await controlService.pauseAgentForUser(req.params.id, req.userId);
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json({ success: true });
@@ -262,9 +274,13 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await controlService.resumeAgentForUser(req.params.id, req.userId!);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await controlService.resumeAgentForUser(req.params.id, req.userId);
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json({ success: true });
@@ -282,7 +298,7 @@ router.post(
       const userId = req.isInternal === true ? undefined : req.userId;
       const result = await controlService.restartAgent(req.params.id, userId);
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json(result);

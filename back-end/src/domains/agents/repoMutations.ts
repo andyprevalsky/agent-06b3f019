@@ -142,6 +142,16 @@ export async function createAgentTools(agentId: string, toolIds: string[]) {
   });
 }
 
+/** Replace tool assignments atomically — delete old, create new in one transaction. */
+export async function replaceAgentTools(agentId: string, toolIds: string[]) {
+  return prisma.$transaction(async (tx) => {
+    await tx.agentTool.deleteMany({ where: { agentId } });
+    await tx.agentTool.createMany({
+      data: toolIds.map((toolId) => ({ agentId, toolId })),
+    });
+  });
+}
+
 /** Update a verifier's LLM judge prompt. */
 export async function updateVerifierPrompt(verifierId: string, llmJudgePrompt: string) {
   return prisma.verifier.update({

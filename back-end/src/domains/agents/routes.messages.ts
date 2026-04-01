@@ -30,7 +30,7 @@ function handleRouteError(
   ctx?: Record<string, string>
 ): void {
   if (error instanceof z.ZodError) {
-    res.status(400).json({ error: 'Invalid request body', details: error.errors });
+    res.status(400).json({ error: 'Invalid request body', details: error.issues });
     return;
   }
   log.error(msg, {
@@ -69,6 +69,10 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
       const body = postMessageSchema.parse(req.body);
       const result = await messageService.postMessage(
         req.params.id,
@@ -77,7 +81,7 @@ router.post(
         req.userId
       );
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.status(201).json(result);
@@ -98,7 +102,11 @@ router.post(
         res.status(400).json({ error: 'No file uploaded' });
         return;
       }
-      const result = await messageService.uploadAttachment(req.userId!, req.params.id, req.file);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await messageService.uploadAttachment(req.userId, req.params.id, req.file);
       res.status(201).json(result);
     } catch (error) {
       log.error('Upload attachment error', {
@@ -124,9 +132,13 @@ router.get(
         res.status(400).json({ error: 'storage_path query parameter is required' });
         return;
       }
-      const result = await messageService.getAttachmentSignedUrl(req.userId!, storagePath);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await messageService.getAttachmentSignedUrl(req.userId, storagePath);
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json(result);
@@ -149,13 +161,17 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
+      if (!req.userId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
       const result = await controlService.signalWorkflow(
         req.params.id,
-        req.userId!,
+        req.userId,
         'signup_completed'
       );
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json(result);
@@ -173,13 +189,17 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
+      if (!req.userId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
       const result = await controlService.signalWorkflow(
         req.params.id,
-        req.userId!,
+        req.userId,
         'signup_dismissed'
       );
       if ('error' in result) {
-        res.status(result.status!).json({ error: result.error });
+        res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
       res.json(result);
@@ -202,6 +222,40 @@ router.post(
       res.json({ schema, tokensIn, tokensOut });
     } catch (error) {
       handleRouteError(res, error, 'Failed to generate response schema');
+    }
+  })
+);
+
+// POST /messages/batch — batch fetch messages by IDs
+router.post(
+  '/messages/batch',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const ids = (req.body as { ids?: unknown } | null)?.ids;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        res.status(400).json({ error: 'ids must be a non-empty array' });
+        return;
+      }
+      if (!ids.every((id): id is string => typeof id === 'string' && id.trim() !== '')) {
+        res.status(400).json({ error: 'ids must contain only non-empty strings' });
+        return;
+      }
+      if (ids.length > 50) {
+        res.status(400).json({ error: 'Maximum 50 IDs per batch request' });
+        return;
+      }
+      const userId =
+        req.userId ??
+        (req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : undefined);
+      if (!userId) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+      const result = await messageService.batchFetchMessages(ids, userId);
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch messages');
     }
   })
 );

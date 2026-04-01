@@ -96,8 +96,16 @@ const PORT = process.env.PORT || 3001;
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
 
-// SMS Webhook from Surge (JSON body)
-app.use('/api/sms', express.json(), smsWebhookRouter);
+// SMS Webhook from Surge (JSON body, preserve raw body for HMAC signature verification)
+app.use(
+  '/api/sms',
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+    },
+  }),
+  smsWebhookRouter
+);
 
 // Middleware
 app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads

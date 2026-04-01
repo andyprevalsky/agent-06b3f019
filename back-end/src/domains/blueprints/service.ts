@@ -106,11 +106,18 @@ export async function searchByGoal(
     return [];
   }
 
-  // Calculate cosine similarity
-  const withSimilarity = blueprintsWithEmbeddings.map((bp) => {
-    const score = cosineSimilarity(queryEmbedding, bp.embedding as number[]);
-    return { ...bp, similarity: score };
-  });
+  // Calculate cosine similarity (skip blueprints with mismatched embedding dimensions)
+  const withSimilarity: Array<(typeof blueprintsWithEmbeddings)[number] & { similarity: number }> =
+    [];
+  for (const bp of blueprintsWithEmbeddings) {
+    const embedding = bp.embedding as unknown;
+    if (!Array.isArray(embedding) || embedding.length !== queryEmbedding.length) {
+      log.warn('Skipping blueprint with incompatible embedding', { id: bp.id });
+      continue;
+    }
+    const score = cosineSimilarity(queryEmbedding, embedding as number[]);
+    withSimilarity.push({ ...bp, similarity: score });
+  }
 
   // Filter by threshold, sort, and strip internal fields
   return withSimilarity
@@ -218,7 +225,7 @@ export async function submitFeedback(
       rating: params.rating,
       issueType: params.issueType ?? null,
       comment: params.comment ?? null,
-      helpImprove: params.helpImprove ?? true,
+      helpImprove: params.helpImprove ?? false,
       agentId: params.agentId,
       submittedAt: new Date().toISOString(),
     },

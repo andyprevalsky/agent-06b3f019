@@ -205,6 +205,7 @@ export async function listModels(): Promise<{
   }
 
   const response = await fetch('https://openrouter.ai/api/v1/models', {
+    signal: AbortSignal.timeout(15_000),
     headers: {
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       'HTTP-Referer': process.env.BACKEND_URL ?? 'https://navi-j9a9.onrender.com',

@@ -71,31 +71,14 @@ async function handlePriceLimitUpdate(
 
   data.priceLimitCents = body.price_limit_cents;
 
-  if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId !== null) {
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('price_limit_increased', {
-        new_limit_cents: body.price_limit_cents,
-      });
-      log.info('Signaled price_limit_increased to workflow', {
-        workflow_id: agent.temporalWorkflowId,
-        agent_id: agentId,
-      });
-    } catch (error) {
-      log.error('Failed to signal price_limit_increased', {
-        workflow_id: agent.temporalWorkflowId,
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
+  // Signal is sent AFTER DB update in updateAgentConfig to ensure persistence first
   return null;
 }
 
 /** Format an agent record into the API response shape. */
-function formatAgentResponse(agent: NonNullable<Awaited<ReturnType<typeof repo.findAgentWithFullRelations>>>) {
+function formatAgentResponse(
+  agent: NonNullable<Awaited<ReturnType<typeof repo.findAgentWithFullRelations>>>
+) {
   return {
     agent: {
       agent_id: agent.id,
@@ -161,8 +144,7 @@ export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, 
   }
 
   if (body.tool_ids !== undefined) {
-    await repo.deleteAgentTools(agentId);
-    await repo.createAgentTools(agentId, body.tool_ids);
+    await repo.replaceAgentTools(agentId, body.tool_ids);
   }
 
   if (
@@ -171,6 +153,31 @@ export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, 
     agent.verifier !== null
   ) {
     await repo.updateVerifierPrompt(agent.verifier.id, body.verifier_prompt);
+  }
+
+  // Signal Temporal AFTER all DB writes to ensure persistence first
+  if (
+    body.price_limit_cents !== undefined &&
+    agent.status === 'COST_LIMIT_REACHED' &&
+    agent.temporalWorkflowId !== null
+  ) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('price_limit_increased', {
+        new_limit_cents: body.price_limit_cents,
+      });
+      log.info('Signaled price_limit_increased to workflow', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agentId,
+      });
+    } catch (error) {
+      log.error('Failed to signal price_limit_increased', {
+        workflow_id: agent.temporalWorkflowId,
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   const updatedAgent = await repo.findAgentWithFullRelations(agentId);

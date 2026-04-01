@@ -8,7 +8,11 @@ import {
   getEmbedding,
   buildPersonEmbeddingText,
 } from '../../providers/embeddings';
-import { type PersonData, findCollision, mergePersonRecords } from '../../providers/personCollision';
+import {
+  type PersonData,
+  findCollision,
+  mergePersonRecords,
+} from '../../providers/personCollision';
 import * as repo from './repo';
 import { ALLOWED_SORT_COLUMNS, type PaginationInfo } from './types';
 import { DEFAULT_PEOPLE_LIMIT, MAX_PEOPLE_LIMIT, DEFAULT_SEARCH_LIMIT } from './config';
@@ -117,7 +121,11 @@ export async function createOrMergePerson(userId: string, personData: PersonData
 
   const collision = await findCollision(userId, personData);
 
-  if (collision.isDuplicate && collision.existingPersonId !== undefined && collision.existingPersonId !== null) {
+  if (
+    collision.isDuplicate &&
+    collision.existingPersonId !== undefined &&
+    collision.existingPersonId !== null
+  ) {
     const merged = await mergePersonRecords(collision.existingPersonId, personData);
     const signals = buildMergedSignals(merged, personData);
     const embeddingText = buildPersonEmbeddingText(signals);

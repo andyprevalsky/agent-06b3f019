@@ -96,7 +96,9 @@ async function fetchGmailUserEmail(accessToken: string): Promise<string | undefi
       return userinfo.email;
     }
   } catch (err: unknown) {
-    log.error('Failed to fetch Gmail user info', { error: err instanceof Error ? err.message : String(err) });
+    log.error('Failed to fetch Gmail user info', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return undefined;
 }
@@ -105,10 +107,15 @@ async function fetchGmailUserEmail(accessToken: string): Promise<string | undefi
 function decodeEmailFromIdToken(idToken: string): string | undefined {
   try {
     const [, payloadB64] = idToken.split('.');
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8')) as Record<string, unknown>;
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8')) as Record<
+      string,
+      unknown
+    >;
     return typeof payload.email === 'string' ? payload.email : undefined;
   } catch (err: unknown) {
-    log.error('Failed to decode id_token', { error: err instanceof Error ? err.message : String(err) });
+    log.error('Failed to decode id_token', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return undefined;
   }
 }
@@ -121,7 +128,10 @@ export const exchangeProviderCode = async (
   if (config.clientId === undefined || config.clientId === '') {
     throw new Error(`Missing client ID for provider ${provider}`);
   }
-  if (config.requiresClientSecret === true && (config.clientSecret === undefined || config.clientSecret === '')) {
+  if (
+    config.requiresClientSecret === true &&
+    (config.clientSecret === undefined || config.clientSecret === '')
+  ) {
     throw new Error(`Missing client secret for provider ${provider}`);
   }
 
@@ -198,9 +208,16 @@ export const sendOAuthResult = (
 ) => {
   const redirectTarget = opts.success
     ? opts.returnUrl
-    : (opts.errorUrl !== undefined && opts.errorUrl !== null && opts.errorUrl !== '' ? opts.errorUrl : opts.returnUrl);
+    : opts.errorUrl !== undefined && opts.errorUrl !== null && opts.errorUrl !== ''
+      ? opts.errorUrl
+      : opts.returnUrl;
 
-  if (redirectTarget !== undefined && redirectTarget !== null && redirectTarget !== '' && isAllowedRedirectUrl(redirectTarget)) {
+  if (
+    redirectTarget !== undefined &&
+    redirectTarget !== null &&
+    redirectTarget !== '' &&
+    isAllowedRedirectUrl(redirectTarget)
+  ) {
     const url = new URL(redirectTarget);
     url.searchParams.set('oauth_result', opts.success ? 'success' : 'error');
     url.searchParams.set('message', opts.message);
@@ -244,7 +261,10 @@ export async function startEmailOAuth(
   if (config.clientId === undefined || config.clientId === '') {
     throw new Error(`Missing client ID for ${providerKey}`);
   }
-  if (config.requiresClientSecret === true && (config.clientSecret === undefined || config.clientSecret === '')) {
+  if (
+    config.requiresClientSecret === true &&
+    (config.clientSecret === undefined || config.clientSecret === '')
+  ) {
     throw new Error(`Missing client secret for ${providerKey}`);
   }
 
@@ -287,12 +307,21 @@ export async function refreshGmailToken(credential: {
   id: string;
   refreshToken: string | null;
 }): Promise<string | null> {
-  if (credential.refreshToken === null || credential.refreshToken === undefined || credential.refreshToken === '') {
+  if (
+    credential.refreshToken === null ||
+    credential.refreshToken === undefined ||
+    credential.refreshToken === ''
+  ) {
     return null;
   }
 
   const config = EMAIL_PROVIDER_CONFIG.gmail;
-  if (config.clientId === undefined || config.clientId === '' || config.clientSecret === undefined || config.clientSecret === '') {
+  if (
+    config.clientId === undefined ||
+    config.clientId === '' ||
+    config.clientSecret === undefined ||
+    config.clientSecret === ''
+  ) {
     log.error('Missing client ID or secret for token refresh');
     return null;
   }
@@ -317,9 +346,8 @@ export async function refreshGmailToken(credential: {
       return null;
     }
 
-    const expiresAt = typeof json.expires_in === 'number'
-      ? new Date(Date.now() + json.expires_in * 1000)
-      : null;
+    const expiresAt =
+      typeof json.expires_in === 'number' ? new Date(Date.now() + json.expires_in * 1000) : null;
 
     await repo.updateEmailCredentialToken(credential.id, {
       accessToken: json.access_token,
@@ -329,7 +357,9 @@ export async function refreshGmailToken(credential: {
 
     return json.access_token;
   } catch (error: unknown) {
-    log.error('Error refreshing token', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Error refreshing token', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }

@@ -1,3 +1,4 @@
+import type { AgentStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 export async function upsertUser(userId: string) {
@@ -53,5 +54,12 @@ export async function findPausedAgents(userId: string) {
       status: 'PAUSED',
       deletedAt: null,
     },
+  });
+}
+
+export async function updateAgentStatus(agentId: string, status: AgentStatus) {
+  return prisma.agent.update({
+    where: { id: agentId },
+    data: { status },
   });
 }

@@ -15,7 +15,7 @@ router.get('/', (req, res) => {
     res.json({ tasks });
   } catch (error) {
     if (error instanceof TasksUnavailableError) {
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'Benchmark tasks unavailable' });
       return;
     }
     throw error;

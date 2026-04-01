@@ -45,8 +45,8 @@ router.post(
         res.status(400).json({ error: 'tool_name is required' });
         return;
       }
-      if (typeof total_cost_cents !== 'number') {
-        res.status(400).json({ error: 'total_cost_cents must be a number' });
+      if (!Number.isFinite(total_cost_cents) || total_cost_cents < 0) {
+        res.status(400).json({ error: 'total_cost_cents must be a non-negative number' });
         return;
       }
       if (!Array.isArray(usage_items)) {

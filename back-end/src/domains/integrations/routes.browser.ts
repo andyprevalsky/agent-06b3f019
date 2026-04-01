@@ -43,9 +43,15 @@ router.post(
     }
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -67,7 +73,7 @@ router.post(
     const result = await service.processCookiesUpload(
       userId,
       cookies as Record<string, unknown>[],
-      browser as string,
+      browser as string
     );
 
     return res.json({
@@ -92,9 +98,15 @@ router.post(
     const { data, iv, key, compressed } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -102,7 +114,10 @@ router.post(
     let localStorageData: LocalStoragePayload;
     try {
       localStorageData = await service.decryptCompressedPayload<LocalStoragePayload>(
-        data, iv, key, compressed
+        data,
+        iv,
+        key,
+        compressed
       );
     } catch (decryptError: unknown) {
       log.error('localStorage decryption/decompression failed', {
@@ -136,9 +151,15 @@ router.post(
     const { data, iv, key, compressed } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -146,7 +167,10 @@ router.post(
     let indexedDBData: IndexedDBPayload;
     try {
       indexedDBData = await service.decryptCompressedPayload<IndexedDBPayload>(
-        data, iv, key, compressed
+        data,
+        iv,
+        key,
+        compressed
       );
     } catch (decryptError: unknown) {
       log.error('IndexedDB decryption/decompression failed', {
@@ -180,9 +204,15 @@ router.post(
     const { data, iv, key } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -226,9 +256,15 @@ router.post(
     const { data, iv, key } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -268,9 +304,15 @@ router.post(
     const { data, iv, key, compressed } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
@@ -278,7 +320,10 @@ router.post(
     let cacheStorageData: CacheStoragePayload;
     try {
       cacheStorageData = await service.decryptCompressedPayload<CacheStoragePayload>(
-        data, iv, key, compressed
+        data,
+        iv,
+        key,
+        compressed
       );
     } catch (decryptError: unknown) {
       log.error('CacheStorage decryption failed', {
@@ -312,9 +357,15 @@ router.post(
     const { data, iv, key } = req.body;
 
     if (
-      data === undefined || data === null || data === '' ||
-      iv === undefined || iv === null || iv === '' ||
-      key === undefined || key === null || key === ''
+      data === undefined ||
+      data === null ||
+      data === '' ||
+      iv === undefined ||
+      iv === null ||
+      iv === '' ||
+      key === undefined ||
+      key === null ||
+      key === ''
     ) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }

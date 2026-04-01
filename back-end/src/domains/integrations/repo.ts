@@ -61,7 +61,9 @@ export async function getAuthenticatedDomains(userId: string): Promise<string[]>
       nowMicroseconds
     )
     .catch((err) => {
-      log.error('Domains query failed', { error: err instanceof Error ? err.message : String(err) });
+      log.error('Domains query failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return [] as { domain: string }[];
     });
 
@@ -103,15 +105,19 @@ export async function upsertIntegration(params: {
       status: params.status ?? IntegrationStatus.NOT_CONNECTED,
       ...(params.isActive !== undefined && { isActive: params.isActive }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
-      ...(params.lastSuccessfulSyncAt !== undefined && { lastSuccessfulSyncAt: params.lastSuccessfulSyncAt }),
+      ...(params.lastSuccessfulSyncAt !== undefined && {
+        lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
+      }),
     },
     update: {
       type: params.type,
       config: params.config ?? {},
-      status: params.status ?? IntegrationStatus.CONNECTED,
-      isActive: params.isActive ?? true,
+      ...(params.status !== undefined && { status: params.status }),
+      ...(params.isActive !== undefined && { isActive: params.isActive }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
-      ...(params.lastSuccessfulSyncAt !== undefined && { lastSuccessfulSyncAt: params.lastSuccessfulSyncAt }),
+      ...(params.lastSuccessfulSyncAt !== undefined && {
+        lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
+      }),
     },
   });
 }
@@ -142,15 +148,19 @@ export async function upsertIntegrationRaw(params: {
       status: params.status ?? IntegrationStatus.NOT_CONNECTED,
       ...(params.isActive !== undefined && { isActive: params.isActive }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
-      ...(params.lastSuccessfulSyncAt !== undefined && { lastSuccessfulSyncAt: params.lastSuccessfulSyncAt }),
+      ...(params.lastSuccessfulSyncAt !== undefined && {
+        lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
+      }),
     },
     update: {
       type: params.type,
       config: params.config ?? {},
-      status: params.status ?? IntegrationStatus.CONNECTED,
-      isActive: params.isActive ?? true,
+      ...(params.status !== undefined && { status: params.status }),
+      ...(params.isActive !== undefined && { isActive: params.isActive }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
-      ...(params.lastSuccessfulSyncAt !== undefined && { lastSuccessfulSyncAt: params.lastSuccessfulSyncAt }),
+      ...(params.lastSuccessfulSyncAt !== undefined && {
+        lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
+      }),
       ...params.updateExtra,
     },
   });

@@ -10,10 +10,12 @@ const log = createLogger('BrowserSessionCdp');
 export async function injectLocalStorageViaCdp(
   wsUrl: string,
   entries: { key: string; value: string }[],
-  origin: string,
+  origin: string
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports -- dynamic import type
-  let browser: Awaited<ReturnType<typeof import('playwright')['chromium']['connectOverCDP']>> | null = null;
+  let browser: Awaited<
+    ReturnType<(typeof import('playwright'))['chromium']['connectOverCDP']>
+  > | null = null;
   try {
     const { chromium } = await import('playwright');
     browser = await chromium.connectOverCDP(wsUrl);
@@ -42,7 +44,9 @@ export async function injectLocalStorageViaCdp(
     log.info('Injected localStorage entries', { origin, count: entries.length });
   } catch (cdpError) {
     if (cdpError instanceof CdpInjectionError) throw cdpError;
-    log.error('Failed to inject via CDP', { error: cdpError instanceof Error ? cdpError.message : String(cdpError) });
+    log.error('Failed to inject via CDP', {
+      error: cdpError instanceof Error ? cdpError.message : String(cdpError),
+    });
     throw new CdpInjectionError(cdpError instanceof Error ? cdpError.message : 'Unknown error');
   } finally {
     if (browser) {
