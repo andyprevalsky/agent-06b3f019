@@ -160,6 +160,24 @@
     "start_phase": "plan"
   },
   {
+    "name": "outreach-batch",
+    "title": "Outreach in Batch",
+    "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_sub_agent_for_each to spawn one sub-agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_sub_agent_for_each when spawning a sub agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
+    "eval_prompt": "Agent read the CSV attachment, spawned one sub-agent per row using spawn_sub_agent_for_each, each sub-agent researched the person and sent a personalized cold email from a@roselabs.ai centered on ML research feedback. Emails are short, personable, avoid AI-sounding language, and attempt to find commonalities. Approval requests were triggered for each outreach message.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent", "message_person"],
+    "tags": ["attachment", "for-each", "approval", "outreach", "batch"],
+    "price_limit_cents": 2000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": "vcs-and-angels.csv",
+    "approval_handling": "prompt_user",
+    "start_phase": "plan",
+    "row_start": 41,
+    "row_end": 50
+  },
+  {
     "name": "build-boxing-payment",
     "title": "Build New Boxing Payment Flow",
     "prompt": "My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.\nWe need to create and host a site that can be accessed via QR code or direct link.\n\nThe site should include:\n- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, Adult Sparring Consent, Minor Sparring Consent). Signing is required for the liability waivers (adult and minor). The sparring consent waivers are included for reference but don't need to be part of the payment flow.\n- I've also attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.\n- The classes are:\n  Boxing $225/month\n  Muay Thai $225/month\n  MMA $245/month\n  Jiujitsu $185/month\n  Kids Program $185/month\n  Unlimited classes $285/month\n- We need to support discount codes for Boxing & Muay Thai\n\nThe flow will be:\n1. Pick your classes\n2. Sign your waivers and agree to the billing & membership terms (required checkboxes)\n3. Pay for the classes\n4. Get a confirmation email\n5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers\n\nHere are the Stripe API keys:\\nSTRIPE_SECRET_KEY_TEST={{STRIPE_SECRET_KEY_TEST}}\\nSTRIPE_PUBLISHABLE_KEY_TEST={{STRIPE_PUBLISHABLE_KEY_TEST}}\\nSTRIPE_SECRET_KEY_PRODUCTION={{STRIPE_SECRET_KEY_PRODUCTION}}\\nSTRIPE_PUBLISHABLE_KEY_PRODUCTION={{STRIPE_PUBLISHABLE_KEY_PRODUCTION}}\n\nYou can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).\n\nMake sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.\n\nReturn to me:\n- A link to the hosted site\n- A QR Code for the hosted site\n- A discount code that can be used exclusively for Boxing & Muay Thai purchases",

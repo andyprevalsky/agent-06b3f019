@@ -23,6 +23,8 @@ class BenchmarkTask:
     approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
     attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
+    row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
+    row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -61,4 +63,5 @@ def list_all_tasks() -> None:
         all_attach = t.attachments or ([t.attachment] if t.attachment else [])
         attach = f" [attachments: {', '.join(all_attach)}]" if all_attach else ""
         approval = f" [approval: {t.approval_handling}]" if t.approval_handling else ""
-        print(f"  {t.name:<25} {t.title:<35} tags=[{tags}]{attach}{approval}")
+        rows = f" [rows: {t.row_start}-{t.row_end}]" if t.row_start is not None else ""
+        print(f"  {t.name:<25} {t.title:<35} tags=[{tags}]{attach}{approval}{rows}")

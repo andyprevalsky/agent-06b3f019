@@ -27,8 +27,10 @@ Auto-debug mode:
 
 import argparse
 import asyncio
+import csv
 import json
 import os
+import tempfile
 
 import sys
 import time
@@ -484,13 +486,18 @@ async def poll_agent(
                 except Exception as e:
                     print(f"    ⚠ Auto-reply failed: {e}")
 
-        # Handle approval requests
+        # Handle approval requests (check entire agent tree, not just root)
+        tree_agent_ids = {agent_id}  # always include root
+        if last_tree_stats.get("all_agents"):
+            tree_agent_ids.update(
+                a.get("agent_id", "") for a in last_tree_stats["all_agents"] if a.get("agent_id")
+            )
         if task.approval_handling in ("auto_approve", "ignore", "prompt_user"):
             try:
                 pending = await get_attention_requests(base_url)
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
-                    if req_agent_id == agent_id and not req.get("response"):
+                    if req_agent_id in tree_agent_ids and not req.get("response"):
                         approvals_triggered += 1
                         req_id = req.get("id")
                         if task.approval_handling == "auto_approve":
@@ -600,6 +607,39 @@ def evaluate_task(
 
 
 # ============================================================
+# CSV row slicing
+# ============================================================
+
+def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
+    """
+    Slice a CSV file to only include data rows [row_start, row_end] (1-indexed, inclusive).
+    Returns path to a temp CSV file with the header + sliced rows.
+    """
+    with open(filepath, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = list(reader)
+
+    # Convert to 0-indexed
+    start_idx = row_start - 1
+    end_idx = row_end  # inclusive, so don't subtract 1
+    sliced = rows[start_idx:end_idx]
+
+    if not sliced:
+        raise ValueError(f"No rows in range [{row_start}, {row_end}] (CSV has {len(rows)} data rows)")
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", prefix="benchmark-slice-", delete=False, newline=""
+    )
+    writer = csv.writer(tmp)
+    writer.writerow(header)
+    writer.writerows(sliced)
+    tmp.close()
+    print(f"    ✂ Sliced CSV rows {row_start}-{row_end} ({len(sliced)} rows) → {os.path.basename(tmp.name)}")
+    return tmp.name
+
+
+# ============================================================
 # Run a single task
 # ============================================================
 
@@ -622,6 +662,8 @@ async def run_single_task(
     start_time = datetime.now(timezone.utc)
     agent_id = ""
 
+    temp_csv_paths: list = []  # track temp files for cleanup
+
     try:
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
@@ -633,6 +675,11 @@ async def run_single_task(
                 filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
                 if not os.path.exists(filepath):
                     raise FileNotFoundError(f"Test asset not found: {filepath}")
+
+                # Slice CSV if row_start/row_end are set
+                if filepath.endswith(".csv") and task.row_start is not None and task.row_end is not None:
+                    filepath = slice_csv(filepath, task.row_start, task.row_end)
+                    temp_csv_paths.append(filepath)
 
                 print(f"    Uploading {attach_filename}...")
                 fp = await upload_attachment(base_url, agent_id, filepath)
@@ -739,6 +786,12 @@ async def run_single_task(
             failure_reason=str(e),
             logs=logs,
         )
+    finally:
+        for tmp in temp_csv_paths:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # ============================================================
@@ -806,6 +859,14 @@ async def main_async(args):
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
+
+    # Apply CLI row overrides to all tasks
+    if args.row_start is not None or args.row_end is not None:
+        for t in tasks:
+            if args.row_start is not None:
+                t.row_start = args.row_start
+            if args.row_end is not None:
+                t.row_end = args.row_end
 
     # Authenticate
     print("\n  Authenticating...")
@@ -918,6 +979,18 @@ def main():
         "--ci",
         action="store_true",
         help="CI mode: exit with non-zero status if any task fails",
+    )
+    parser.add_argument(
+        "--row-start",
+        type=int,
+        default=None,
+        help="Override task row_start — slice CSV attachments starting at this 1-indexed data row",
+    )
+    parser.add_argument(
+        "--row-end",
+        type=int,
+        default=None,
+        help="Override task row_end — slice CSV attachments ending at this 1-indexed data row (inclusive)",
     )
     args = parser.parse_args()
 

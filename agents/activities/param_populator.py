@@ -128,6 +128,10 @@ The goal string is its ONLY source of information. You MUST embed ALL relevant d
 BAD: "Book the boxing class" — sub-agent has no idea which class, where, or for whom
 GOOD: "Book the 6pm Tuesday boxing class at Dallas MMA (2000 Main St). Name: Andy, phone: 555-1234. Monthly membership, $150/mo."
 
+SUB-AGENT TOOLS:
+Sub-agents have access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),
+wait_for, call_phone_number, message_person, attempt_completion, add_memory.
+
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)
 - Controls which user context sections the sub-agent receives
@@ -159,6 +163,10 @@ SELF-CONTAINED GOAL (CRITICAL):
 Each for_each child has NO access to your conversation or prior context.
 The goal string (combined with the per-item context) is their ONLY information.
 Embed ALL relevant user preferences, constraints, and instructions in the goal.
+
+FOR_EACH CHILD TOOLS:
+Each child has access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),
+wait_for, call_phone_number, message_person, attempt_completion, add_memory.
 
 CONTEXT GATES (compute optimization):
 - Optional: context_gates (object with boolean values, default all true)
