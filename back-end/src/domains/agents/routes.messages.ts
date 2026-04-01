@@ -40,6 +40,29 @@ function handleRouteError(
   res.status(500).json({ error: msg });
 }
 
+// POST /messages/batch — batch fetch messages by IDs (context pointer resolution)
+router.post(
+  '/messages/batch',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const userId = req.userId ?? (req.headers['x-user-id'] as string | undefined);
+      if (userId === undefined || userId === null) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+      const result = await messageService.getMessagesBatch(req.body.ids, userId);
+      if ('error' in result && 'status' in result) {
+        res.status(result.status!).json({ error: result.error });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to fetch messages batch');
+    }
+  })
+);
+
 // POST /:id/messages
 router.post(
   '/:id/messages',
@@ -82,12 +105,10 @@ router.post(
         agent_id: req.params.id,
         error: error instanceof Error ? error.message : String(error),
       });
-      res
-        .status(500)
-        .json({
-          error: 'Failed to upload attachment',
-          details: error instanceof Error ? error.message : 'Unknown error',
-        });
+      res.status(500).json({
+        error: 'Failed to upload attachment',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
   })
 );
@@ -114,12 +135,10 @@ router.get(
         agent_id: req.params.id,
         error: error instanceof Error ? error.message : String(error),
       });
-      res
-        .status(500)
-        .json({
-          error: 'Failed to generate signed URL',
-          details: error instanceof Error ? error.message : 'Unknown error',
-        });
+      res.status(500).json({
+        error: 'Failed to generate signed URL',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
   })
 );

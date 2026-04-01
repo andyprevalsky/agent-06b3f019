@@ -16,6 +16,7 @@ import {
   PersonNotFoundError,
   InvalidSinceError,
 } from './service';
+import { grepAgentNetwork, MissingAgentIdError, AgentNotFoundError } from './agentNetworkService';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Data');
@@ -48,7 +49,14 @@ router.post(
         return;
       }
 
-      const result = await grep(userId, req.body);
+      // Dispatch agent_network sources to dedicated handler
+      const source = req.body.source as string | undefined;
+      const isAgentNetwork =
+        source === 'agent_network_user_messages' || source === 'agent_network_tool_results';
+
+      const result = isAgentNetwork
+        ? await grepAgentNetwork(userId, req.body)
+        : await grep(userId, req.body);
 
       const elapsed = Date.now() - startTime;
       log.info(`grep [${elapsed}ms]`);
@@ -75,6 +83,14 @@ router.post(
       }
       if (error instanceof InvalidSinceError) {
         res.status(400).json({ error: 'INVALID_SINCE', message: error.message });
+        return;
+      }
+      if (error instanceof MissingAgentIdError) {
+        res.status(400).json({ error: 'MISSING_AGENT_ID', message: error.message });
+        return;
+      }
+      if (error instanceof AgentNotFoundError) {
+        res.status(403).json({ error: 'AGENT_NOT_FOUND', message: error.message });
         return;
       }
 

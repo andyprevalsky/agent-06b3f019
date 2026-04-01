@@ -425,6 +425,7 @@ async function testMessagesBatchEndpoint() {
     method: 'POST',
     headers: {
       'X-API-Key': process.env.BACKEND_API_KEY || '',
+      'X-User-Id': context.userId || '',
     },
     body: JSON.stringify({ ids: [] }),
   });
@@ -439,6 +440,7 @@ async function testMessagesBatchEndpoint() {
     method: 'POST',
     headers: {
       'X-API-Key': process.env.BACKEND_API_KEY || '',
+      'X-User-Id': context.userId || '',
     },
     body: JSON.stringify({ ids: fakeIds }),
   });

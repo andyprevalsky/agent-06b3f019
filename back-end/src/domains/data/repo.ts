@@ -2,6 +2,7 @@
  * Data domain repo — all Prisma calls for data search and summary.
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 /**
@@ -215,5 +216,92 @@ export async function getNewestMessage(userId: string) {
     where: { person: { userId } },
     orderBy: { timestamp: 'desc' },
     select: { timestamp: true },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agent network queries
+// ---------------------------------------------------------------------------
+
+/** Verify an agent belongs to the requesting user. */
+export async function findAgentByIdAndUser(agentId: string, userId: string) {
+  return prisma.agent.findFirst({
+    where: { id: agentId, userId },
+    select: { id: true },
+  });
+}
+
+/** Walk up from an agent to the root, returning the root agent ID. Scoped to userId. */
+export async function findRootAgentId(agentId: string, userId: string): Promise<string> {
+  let currentId = agentId;
+  let lastVerifiedId = agentId;
+  const visited = new Set<string>();
+  while (currentId) {
+    if (visited.has(currentId)) break;
+    visited.add(currentId);
+    const agent = await prisma.agent.findFirst({
+      where: { id: currentId, userId },
+      select: { parentAgentId: true },
+    });
+    if (agent === null) break; // Agent not owned by userId — stop at last verified
+    lastVerifiedId = currentId;
+    if (agent.parentAgentId === undefined || agent.parentAgentId === null) break;
+    currentId = agent.parentAgentId;
+  }
+  return lastVerifiedId;
+}
+
+/** BFS walk from root to collect all agent IDs in the tree. Scoped to userId. */
+export async function findAgentTreeIds(rootId: string, userId: string): Promise<string[]> {
+  const treeIds: string[] = [];
+  const seen = new Set<string>();
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const batch = queue.splice(0, queue.length);
+    for (const id of batch) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      treeIds.push(id);
+    }
+    const children = await prisma.agent.findMany({
+      where: { parentAgentId: { in: batch }, userId },
+      select: { id: true },
+    });
+    queue.push(...children.filter((c) => !seen.has(c.id)).map((c) => c.id));
+  }
+  return treeIds;
+}
+
+/** Search agent network messages by pattern across a set of agent IDs. */
+export async function searchAgentNetworkMessages(params: {
+  agentIds: string[];
+  pattern: string;
+  role: 'USER' | 'TOOL';
+  limit: number;
+}) {
+  const { agentIds, pattern, role, limit } = params;
+
+  const whereClause: Prisma.MessageWhereInput = {
+    agentId: { in: agentIds },
+    role,
+    ...(pattern.length > 0 ? { text: { contains: pattern, mode: 'insensitive' as const } } : {}),
+  };
+
+  // For tool results, filter to FINISHED only
+  if (role === 'TOOL') {
+    whereClause.metadata = { path: ['toolStatus'], equals: 'FINISHED' };
+  }
+
+  return prisma.message.findMany({
+    where: whereClause,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit,
+    select: {
+      id: true,
+      text: true,
+      role: true,
+      agentId: true,
+      createdAt: true,
+    },
   });
 }

@@ -215,6 +215,22 @@ export async function findMessages(agentId: string) {
   });
 }
 
+/** Batch fetch messages by IDs, scoped to a user's agents. */
+export async function findMessagesByIds(ids: string[], userId: string) {
+  return prisma.message.findMany({
+    where: {
+      id: { in: ids },
+      role: { in: ['USER', 'TOOL'] },
+      agent: { userId },
+    },
+    select: {
+      id: true,
+      text: true,
+      role: true,
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tool usage
 // ---------------------------------------------------------------------------

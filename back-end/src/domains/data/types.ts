@@ -11,6 +11,18 @@ export const VALID_SOURCES = {
     searchField: 'message',
     groupBy: 'personId',
   },
+  agent_network_user_messages: {
+    description: 'User messages across the agent network',
+    table: 'Message' as const,
+    searchField: 'text',
+    groupBy: 'agentId',
+  },
+  agent_network_tool_results: {
+    description: 'Tool call results across the agent network',
+    table: 'Message' as const,
+    searchField: 'text',
+    groupBy: 'agentId',
+  },
 } as const;
 
 export type ValidSource = keyof typeof VALID_SOURCES;
@@ -43,6 +55,23 @@ export interface GrepParams {
   since?: string;
   limit?: string | number;
   person_id?: string;
+  agent_id?: string;
+}
+
+export interface AgentNetworkMatch {
+  agent_id: string;
+  message_id: string;
+  role: string;
+  text: string;
+  timestamp: string;
+  pointer: string;
+}
+
+export interface AgentNetworkGrepResult {
+  matches: AgentNetworkMatch[];
+  total_matches: number;
+  truncated: boolean;
+  message?: string;
 }
 
 export interface GrepNoMatchResult {

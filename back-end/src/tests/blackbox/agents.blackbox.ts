@@ -1622,6 +1622,105 @@ test('POST /:id/signal/signup_dismissed — happy path (no workflow)', async () 
   await deleteTestAgent(agentId, session.user.id);
 });
 
+// ========================= POST /messages/batch ============================
+
+test('POST /messages/batch — no auth → 401', async () => {
+  const res = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    body: JSON.stringify({ ids: [] }),
+  });
+  assertStatus(res.status, 401, res.data);
+});
+
+test('POST /messages/batch — empty ids → 400', async () => {
+  const session = await createAnonymousSession('batch-empty');
+  const res = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ ids: [] }),
+  });
+  assertStatus(res.status, 400, res.data);
+  trackedUserIds.add(session.user.id);
+});
+
+test('POST /messages/batch — nonexistent IDs → 200 empty', async () => {
+  const session = await createAnonymousSession('batch-fake');
+  const fakeIds = ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'];
+  const res = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ ids: fakeIds }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { messages: unknown[] };
+  if (!Array.isArray(body.messages)) {
+    throw new Error('Expected messages array in response');
+  }
+  if (body.messages.length !== 0) {
+    throw new Error(`Expected 0 messages for fake IDs, got ${body.messages.length}`);
+  }
+  trackedUserIds.add(session.user.id);
+});
+
+test('POST /messages/batch — over 50 IDs → 400', async () => {
+  const session = await createAnonymousSession('batch-over50');
+  trackedUserIds.add(session.user.id);
+  const ids = Array.from(
+    { length: 51 },
+    (_, i) => `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`
+  );
+  const res = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ ids }),
+  });
+  assertStatus(res.status, 400, res.data);
+});
+
+test('POST /messages/batch — returns real messages scoped to user', async () => {
+  const session = await createAnonymousSession('batch-real');
+  trackedUserIds.add(session.user.id);
+
+  // Create agent + post a USER message
+  const createRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ goal: 'batch test agent' }),
+  });
+  assertStatus(createRes.status, 201, createRes.data);
+  const agentId = (createRes.data as { agent_id: string }).agent_id;
+  trackedAgentIds.add(agentId);
+
+  const msgRes = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ message: 'batch test message content', role: 'USER' }),
+  });
+  assertStatus(msgRes.status, 201, msgRes.data);
+  const messageId = (msgRes.data as { message_id: string }).message_id;
+
+  // Batch fetch that message
+  const batchRes = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
+    body: JSON.stringify({ ids: [messageId] }),
+  });
+  assertStatus(batchRes.status, 200, batchRes.data);
+  const body = batchRes.data as { messages: { id: string; text: string; role: string }[] };
+  if (body.messages.length !== 1) {
+    throw new Error(`Expected 1 message, got ${body.messages.length}`);
+  }
+  if (body.messages[0].id !== messageId) {
+    throw new Error(`Expected message id ${messageId}, got ${body.messages[0].id}`);
+  }
+  if (body.messages[0].text !== 'batch test message content') {
+    throw new Error(`Unexpected text: ${body.messages[0].text}`);
+  }
+  if (body.messages[0].role !== 'USER') {
+    throw new Error(`Expected role USER, got ${body.messages[0].role}`);
+  }
+});
+
 // ========================= POST /generate-response-schema ==================
 
 test('POST /generate-response-schema — no auth → 401', async () => {
