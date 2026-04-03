@@ -146,6 +146,7 @@ async def run_agent(
     blueprint_queried = False
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
+    no_tool_count = 0  # Track consecutive iterations with no tool calls
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -316,13 +317,16 @@ async def run_agent(
             pre_resolved_ids = None
             file_pointer_dicts = extract_file_pointer_dicts(context)
             if file_pointer_dicts:
-                resolved_list = await execute_activity(
-                    resolve_attachments_activity,
-                    args=[file_pointer_dicts],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                pre_resolved_ids = set(resolved_list) if resolved_list else None
+                try:
+                    resolved_list = await execute_activity(
+                        resolve_attachments_activity,
+                        args=[file_pointer_dicts],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    pre_resolved_ids = set(resolved_list) if resolved_list else None
+                except Exception as e:
+                    logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
             # Store context in shared memory — call_llm_activity will build messages inside
             _pending_llm_context[agent_id] = (context, current_system_prompt, pre_resolved_ids)
             messages = None  # Signals to use shared state path below
@@ -442,9 +446,9 @@ async def run_agent(
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
                     args=[agent_id, model, tools, reasoning_max_tokens, agent_id, stream_id, task_id, current_claude_token, call_site_label],
-                    start_to_close_timeout=timedelta(seconds=120),
+                    start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=3),
-                    heartbeat_timeout=timedelta(seconds=30),
+                    heartbeat_timeout=timedelta(seconds=60),
                 )
                 
                 # Reconstruct result object from activity response
@@ -877,7 +881,42 @@ async def run_agent(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "metadata": {"verifierMessage": True}
                 })
-    
+
+        # Handle no-tool-calls: if LLM returned text but no tools, nudge it
+        if not tool_calls and not attempt_completion_tool:
+            no_tool_count += 1
+            logger.warning(f"LLM returned no tool calls (iteration {iteration}, count={no_tool_count})")
+
+            if no_tool_count >= 3:
+                logger.error(f"LLM failed to call tools {no_tool_count} times — returning error")
+                return {
+                    "status": "error",
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "message": f"LLM returned no tool calls {no_tool_count} consecutive times",
+                }
+
+            if is_plan_loop:
+                nudge = (
+                    "You MUST call tools to make progress. Available tools: set_plan, attempt_completion, spawn_agent (explore), send_message_to_user. "
+                    "Start by calling set_plan with your execution plan, then call attempt_completion."
+                )
+            else:
+                nudge = (
+                    "You MUST call tools to make progress. Review the plan and call the appropriate tool to continue execution."
+                )
+            context.append({
+                "role": "SYSTEM",
+                "text": nudge,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            # Reset no-tool counter on successful tool call
+            no_tool_count = 0
+
     # Clean up shared state before exiting loop
     _pending_llm_context.pop(agent_id, None)
 
