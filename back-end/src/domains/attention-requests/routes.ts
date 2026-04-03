@@ -1,7 +1,6 @@
 import { Router, type Response } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { authenticate, type AuthRequest } from '../../providers/auth';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import * as service from './service';
@@ -47,10 +46,14 @@ router.post(
 
 router.get(
   '/',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req, res) => {
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await service.listForUser(req.user!.id);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await service.listForUser(req.userId);
       res.json(result);
     } catch (error) {
       log.error('Failed to fetch attention requests', { error: errMsg(error) });
@@ -61,10 +64,14 @@ router.get(
 
 router.get(
   '/count',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req, res) => {
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await service.countForUser(req.user!.id);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await service.countForUser(req.userId);
       res.json(result);
     } catch (error) {
       log.error('Failed to count attention requests', { error: errMsg(error) });
@@ -93,11 +100,15 @@ router.get(
 
 router.post(
   '/:id/respond',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req, res) => {
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
       const data = respondSchema.parse(req.body);
-      const result = await service.respond(req.params.id, req.user!.id, data);
+      const result = await service.respond(req.params.id, req.userId, data);
       res.json(result);
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -116,10 +127,14 @@ router.post(
 
 router.post(
   '/:id/skip',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req, res) => {
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const result = await service.skip(req.params.id, req.user!.id);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const result = await service.skip(req.params.id, req.userId);
       res.json(result);
     } catch (error) {
       if (error instanceof NotFoundError || error instanceof ForbiddenError) {
@@ -134,12 +149,16 @@ router.post(
 
 router.post(
   '/:id/reject',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req, res) => {
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
       const body = req.body as Record<string, unknown>;
       const message = typeof body?.message === 'string' ? body.message : undefined;
-      const result = await service.reject(req.params.id, req.user!.id, message);
+      const result = await service.reject(req.params.id, req.userId, message);
       res.json(result);
     } catch (error) {
       if (error instanceof NotFoundError || error instanceof ForbiddenError) {
