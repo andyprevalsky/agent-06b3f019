@@ -3,11 +3,9 @@
  * Split from oauthService.ts for max-lines compliance.
  */
 
-import type { Response } from 'express';
-import { type EmailProvider, IntegrationStatus } from '@prisma/client';
+import { IntegrationStatus, mergeJson, type EmailProvider, type OAuthResponse, type EmailProviderSlug, type TokenExchangeResult } from './types';
 import { createLogger } from '../../providers/logger';
 import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrations/gmailParser';
-import { type EmailProviderSlug, type TokenExchangeResult, mergeJson } from './types';
 import { EMAIL_PROVIDER_CONFIG } from './config';
 import * as repo from './repo';
 import { exchangeProviderCode, buildRedirectUri, sendOAuthResult } from './oauthService';
@@ -63,7 +61,7 @@ async function handleExistingEmail(
   providerKey: EmailProviderSlug,
   email: string,
   expiresAt: Date | null,
-  res: Response,
+  res: OAuthResponse,
   returnUrl: string | null,
   errorUrl: string | null
 ): Promise<void> {
@@ -105,7 +103,7 @@ async function finalizeNewCredential(
   expiresAt: Date | null,
   provider: EmailProvider,
   providerKey: EmailProviderSlug,
-  res: Response,
+  res: OAuthResponse,
   returnUrl: string | null,
   errorUrl: string | null
 ): Promise<void> {
@@ -178,6 +176,36 @@ async function finalizeNewCredential(
   }
 }
 
+/** Validate credential and extract metadata URLs. Returns null + sends error if invalid. */
+async function validateOAuthCredential(
+  providerKey: EmailProviderSlug,
+  state: string,
+  res: OAuthResponse
+) {
+  const config = EMAIL_PROVIDER_CONFIG[providerKey];
+  if (config.clientId === undefined || config.clientId === '') {
+    sendOAuthResult(res, { success: false, message: `Missing client ID for ${providerKey}` });
+    return null;
+  }
+
+  const credential = await repo.findCredentialByState(config.provider, state);
+  if (credential === null || credential === undefined) {
+    sendOAuthResult(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
+    return null;
+  }
+
+  const metadata = credential.metadata as Record<string, unknown> | null;
+  const returnUrl = typeof metadata?.returnUrl === 'string' ? metadata.returnUrl : null;
+  const errorUrl = typeof metadata?.errorUrl === 'string' ? metadata.errorUrl : null;
+
+  if (credential.pkceVerifier === null || credential.pkceVerifier === undefined || credential.pkceVerifier === '') {
+    sendOAuthResult(res, { success: false, message: 'Missing PKCE verifier for this request', returnUrl, errorUrl });
+    return null;
+  }
+
+  return { config, credential, returnUrl, errorUrl };
+}
+
 /**
  * Handle the OAuth callback: exchange code, update credentials, sync emails.
  */
@@ -185,45 +213,16 @@ export async function handleOAuthCallback(
   providerKey: EmailProviderSlug,
   code: string,
   state: string,
-  res: Response
+  res: OAuthResponse
 ) {
-  const config = EMAIL_PROVIDER_CONFIG[providerKey];
-  if (config.clientId === undefined || config.clientId === '') {
-    return sendOAuthResult(res, {
-      success: false,
-      message: `Missing client ID for ${providerKey}`,
-    });
-  }
-
-  const credential = await repo.findCredentialByState(config.provider, state);
-  if (credential === null || credential === undefined) {
-    return sendOAuthResult(res, {
-      success: false,
-      message: 'No pending OAuth request found or state mismatch',
-    });
-  }
-
-  const metadata = credential.metadata as Record<string, unknown> | null;
-  const returnUrl = typeof metadata?.returnUrl === 'string' ? metadata.returnUrl : null;
-  const errorUrl = typeof metadata?.errorUrl === 'string' ? metadata.errorUrl : null;
-
-  if (
-    credential.pkceVerifier === null ||
-    credential.pkceVerifier === undefined ||
-    credential.pkceVerifier === ''
-  ) {
-    return sendOAuthResult(res, {
-      success: false,
-      message: 'Missing PKCE verifier for this request',
-      returnUrl,
-      errorUrl,
-    });
-  }
+  const validated = await validateOAuthCredential(providerKey, state, res);
+  if (validated === null) return;
+  const { config, credential, returnUrl, errorUrl } = validated;
 
   const redirectUri = buildRedirectUri(providerKey);
   const tokenResult = await exchangeProviderCode(providerKey, {
     code,
-    codeVerifier: credential.pkceVerifier,
+    codeVerifier: credential.pkceVerifier!,
     redirectUri,
   });
 
@@ -233,44 +232,24 @@ export async function handleOAuthCallback(
       : null;
 
   // Check if this email is already connected
-  if (
-    tokenResult.userEmail !== undefined &&
-    tokenResult.userEmail !== null &&
-    tokenResult.userEmail !== ''
-  ) {
+  if (tokenResult.userEmail !== undefined && tokenResult.userEmail !== null && tokenResult.userEmail !== '') {
     const existingCredential = await repo.findExistingCredential({
-      userId: credential.userId,
-      provider: config.provider,
-      email: tokenResult.userEmail,
-      excludeId: credential.id,
+      userId: credential.userId, provider: config.provider,
+      email: tokenResult.userEmail, excludeId: credential.id,
     });
 
     if (existingCredential !== null && existingCredential !== undefined) {
       return handleExistingEmail(
-        tokenResult,
-        existingCredential.id,
-        credential.id,
-        existingCredential.integrationId,
-        existingCredential.refreshToken,
-        existingCredential.metadata,
-        providerKey,
-        tokenResult.userEmail,
-        expiresAt,
-        res,
-        returnUrl,
-        errorUrl
+        tokenResult, existingCredential.id, credential.id,
+        existingCredential.integrationId, existingCredential.refreshToken,
+        existingCredential.metadata, providerKey, tokenResult.userEmail,
+        expiresAt, res, returnUrl, errorUrl
       );
     }
   }
 
   await finalizeNewCredential(
-    credential,
-    tokenResult,
-    expiresAt,
-    config.provider,
-    providerKey,
-    res,
-    returnUrl,
-    errorUrl
+    credential, tokenResult, expiresAt, config.provider,
+    providerKey, res, returnUrl, errorUrl
   );
 }

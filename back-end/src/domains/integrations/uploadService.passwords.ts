@@ -4,9 +4,8 @@
  */
 
 import crypto from 'crypto';
-import { IntegrationType, IntegrationStatus } from '@prisma/client';
+import { type CacheStoragePayload, type PasswordPayload, type ApplePasswordEntry, IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';
-import type { CacheStoragePayload, PasswordPayload, ApplePasswordEntry } from './types';
 import { RSA_PUBLIC_KEY_PEM } from './config';
 import * as repo from './repo';
 

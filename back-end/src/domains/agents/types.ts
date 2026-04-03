@@ -3,6 +3,7 @@
  */
 
 import { z } from 'zod';
+export type { Prisma } from '@prisma/client';
 
 // FilePointer schema for validation - all files stored in Supabase Storage
 export const filePointerSchema = z.object({

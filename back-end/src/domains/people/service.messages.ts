@@ -4,14 +4,13 @@
  */
 
 import * as repo from './repo';
-import type { FormattedMessage, PersonMatch } from './types';
+import { type FormattedMessage, type PersonMatch, ValidationError } from './types';
 import {
   DEFAULT_MESSAGE_LIMIT,
   DEFAULT_RECENT_DAYS,
   MAX_RECENT_DAYS,
   DEFAULT_RECENT_LIMIT,
 } from './config';
-import { ValidationError } from './service';
 
 // ---------------------------------------------------------------------------
 // Helpers

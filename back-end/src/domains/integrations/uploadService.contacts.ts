@@ -4,7 +4,7 @@
  */
 
 import fs from 'fs';
-import { IntegrationType, IntegrationStatus } from '@prisma/client';
+import { IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { parseVcfContent, importVcfContacts } from '../../services/integrations/vcfParser';

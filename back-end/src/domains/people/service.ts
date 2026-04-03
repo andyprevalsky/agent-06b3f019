@@ -14,7 +14,7 @@ import {
   mergePersonRecords,
 } from '../../providers/personCollision';
 import * as repo from './repo';
-import { ALLOWED_SORT_COLUMNS, type PaginationInfo } from './types';
+import { ALLOWED_SORT_COLUMNS, type PaginationInfo, ValidationError, NotFoundError } from './types';
 import { DEFAULT_PEOPLE_LIMIT, MAX_PEOPLE_LIMIT, DEFAULT_SEARCH_LIMIT } from './config';
 
 // Re-export message functions from the split file
@@ -272,20 +272,5 @@ export async function deletePerson(id: string, userId: string) {
   await repo.deletePerson(id);
 }
 
-// ---------------------------------------------------------------------------
-// Error classes
-// ---------------------------------------------------------------------------
-
-export class ValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ValidationError';
-  }
-}
-
-export class NotFoundError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'NotFoundError';
-  }
-}
+// Re-export error classes so existing consumers of service.ts still work
+export { ValidationError, NotFoundError } from './types';

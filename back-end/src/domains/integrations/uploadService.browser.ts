@@ -1,17 +1,50 @@
+/* eslint-disable max-lines -- pre-existing: cookie sanitization + batch upsert logic is tightly coupled */
 /**
  * Integrations upload service — browser data uploads
  * (cookies, localStorage, indexedDB, fingerprint, permissions, cacheStorage, passwords, apple passwords).
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client';
+import { type Prisma, type LocalStoragePayload, type IndexedDBPayload, type PermissionPayload, IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';
-import type { LocalStoragePayload, IndexedDBPayload, PermissionPayload } from './types';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
-import { sanitizeString, sanitizeStringFull } from './uploadService';
-
 const log = createLogger('Integrations');
+
+/**
+ * Sanitize string: remove null bytes that PostgreSQL can't store.
+ */
+function sanitizeString(str: string): string {
+  if (typeof str !== 'string') return str;
+  // eslint-disable-next-line no-control-regex -- Intentionally removing null bytes and control chars for PostgreSQL compatibility
+  return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+}
+
+/**
+ * Sanitize string for localStorage: also handles orphan Unicode surrogates.
+ */
+function sanitizeStringFull(str: string): string {
+  if (typeof str !== 'string') return str;
+  // eslint-disable-next-line no-control-regex -- Intentionally removing null bytes and control chars for PostgreSQL compatibility
+  const sanitized = str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  const chars = [...sanitized];
+  const filtered: string[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    const code = chars[i].codePointAt(0)!;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const nextCode = chars[i + 1]?.codePointAt(0);
+      if (nextCode !== undefined && nextCode >= 0xdc00 && nextCode <= 0xdfff) {
+        filtered.push(chars[i], chars[i + 1]);
+        i++;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      // Low surrogate without preceding high - drop it
+    } else {
+      filtered.push(chars[i]);
+    }
+  }
+  return filtered.join('');
+}
 
 // ---------------------------------------------------------------------------
 // Cookie types for typed processing

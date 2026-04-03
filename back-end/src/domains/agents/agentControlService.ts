@@ -2,11 +2,10 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
-import type { Prisma } from '@prisma/client';
 import { getTemporalClient, startAgentWorkflow } from '../../providers/temporal';
 import { broadcastAgentUpdate, broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
-import type { UpdateStatusBody } from './types';
+import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
 export { updateAgentConfig } from './agentConfigService';

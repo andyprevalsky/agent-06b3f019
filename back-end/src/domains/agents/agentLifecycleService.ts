@@ -2,14 +2,13 @@
  * Agent lifecycle service — create and delete agents.
  */
 
-import type { Request } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPricing';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { setResponseSchema } from '../../providers/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
-import { getClientIP, getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
@@ -49,7 +48,7 @@ Scoring Instructions:
 }
 
 /** Fetch model pricing and resolve geolocation. */
-async function resolveCreateMetadata(model: string, req: Request) {
+async function resolveCreateMetadata(model: string, clientIP: string | null) {
   const pricing = await getModelPricing(model);
   let tokenInPriceMicrodollars: number | null = null;
   let tokenOutPriceMicrodollars: number | null = null;
@@ -59,7 +58,6 @@ async function resolveCreateMetadata(model: string, req: Request) {
     tokenOutPriceMicrodollars = dollarsToMicrodollars(pricing.completion);
   }
 
-  const clientIP = getClientIP(req);
   let proxyGeo = DEFAULT_GEOLOCATION;
   if (clientIP !== null) {
     const geo = await getGeoFromIP(clientIP);
@@ -188,7 +186,7 @@ export async function createAgent(
   body: CreateAgentBody,
   userId: string,
   isInternal: boolean,
-  req: Request
+  clientIP: string | null
 ) {
   if (isInternal) {
     body.goal = resolvePromptSecrets(body.goal);
@@ -199,7 +197,7 @@ export async function createAgent(
       : generateVerifierPrompt(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const, llm_judge_prompt: verifierPrompt };
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
-    await resolveCreateMetadata(body.model, req);
+    await resolveCreateMetadata(body.model, clientIP);
   const isSubAgent = body.parent_agent_id !== undefined;
   const agentId = uuidv4();
   const agent = await repo.createAgentTransaction({

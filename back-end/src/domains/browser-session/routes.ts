@@ -17,8 +17,8 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { SteelRateLimitError } from '../../providers/steel';
+import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { upload } from './config';
 import {
   initSession,
   closeBrowserSession,
@@ -41,6 +41,11 @@ import {
   resumeSessionSchema,
   injectLocalStorageSchema,
 } from './types';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
 
 const log = createLogger('BrowserSession');
 

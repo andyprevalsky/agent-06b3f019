@@ -6,6 +6,7 @@
 import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
+import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { createAgentSchema, updateStatusSchema, updateAgentSchema } from './types';
@@ -148,7 +149,13 @@ router.post(
         res.status(401).json({ error: 'Unauthorized: user_id required' });
         return;
       }
-      const result = await lifecycleService.createAgent(body, userId, req.isInternal === true, req);
+      const clientIP = getClientIP(req);
+      const result = await lifecycleService.createAgent(
+        body,
+        userId,
+        req.isInternal === true,
+        clientIP
+      );
       res.status(201).json(result);
     } catch (error) {
       handleRouteError(res, error, 'Failed to create agent');

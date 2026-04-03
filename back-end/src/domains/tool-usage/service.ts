@@ -2,9 +2,14 @@
  * Tool-usage domain service — business logic for saving and querying tool usage.
  */
 
-import type { Prisma } from '@prisma/client';
 import * as repo from './repo';
-import type { SaveToolUsageInput, ToolUsageCreated, ToolUsageSummary, UsageItem } from './types';
+import type {
+  Prisma,
+  SaveToolUsageInput,
+  ToolUsageCreated,
+  ToolUsageSummary,
+  UsageItem,
+} from './types';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('ToolUsage');

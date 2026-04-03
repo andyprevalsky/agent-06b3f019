@@ -40,3 +40,21 @@ export interface PaginationInfo {
   total: number;
   totalPages: number;
 }
+
+// ---------------------------------------------------------------------------
+// Error classes (shared across service files to avoid circular imports)
+// ---------------------------------------------------------------------------
+
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}

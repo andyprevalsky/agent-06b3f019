@@ -3,10 +3,9 @@
  */
 
 import OpenAI from 'openai';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, BlueprintMetadata } from './types';
 import { createLogger } from '../../providers/logger';
 import { SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT, EMBEDDING_MODEL } from './config';
-import type { BlueprintMetadata } from './types';
 import * as repo from './repo';
 
 const log = createLogger('Blueprints');

@@ -2,6 +2,8 @@
  * Tool-usage domain types — interfaces and type aliases.
  */
 
+export type { Prisma } from '@prisma/client';
+
 export interface SaveToolUsageInput {
   agent_id: string;
   user_id: string;

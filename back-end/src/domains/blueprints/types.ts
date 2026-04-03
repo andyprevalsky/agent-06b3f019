@@ -2,6 +2,8 @@
  * Blueprints domain types — interfaces and type aliases.
  */
 
+export type { Prisma } from '@prisma/client';
+
 export interface BlueprintFeedback {
   rating: number;
   issueType: string | null;

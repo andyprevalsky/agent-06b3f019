@@ -1,5 +1,15 @@
 import type { EmailProvider, Prisma } from '@prisma/client';
 
+// Re-export Prisma types for other layers (keeps @prisma/client out of service files)
+export { IntegrationType, IntegrationStatus, EmailProvider } from '@prisma/client';
+export type { Prisma } from '@prisma/client';
+
+/** Minimal response interface so service files don't depend on Express. */
+export interface OAuthResponse {
+  redirect(url: string): void;
+  status(code: number): { send(body: string): void };
+}
+
 export type EmailProviderSlug = 'gmail' | 'yahoo';
 
 export interface EmailProviderConfig {

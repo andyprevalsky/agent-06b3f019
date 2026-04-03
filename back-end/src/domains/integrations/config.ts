@@ -1,5 +1,4 @@
-import { EmailProvider } from '@prisma/client';
-import type { EmailProviderConfig, EmailProviderSlug } from './types';
+import { type EmailProviderConfig, type EmailProviderSlug, EmailProvider } from './types';
 
 export const BACKEND_BASE_URL = (process.env.BACKEND_URL ?? 'http://localhost:3001').replace(
   /\/$/,
@@ -172,8 +171,9 @@ export const AUTH_DOMAINS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Admin phone number for password integration requests — must be set in env
 export function getAdminPhone(): string {
-  const phone = process.env.ADMIN_PHONE;
-  if (!phone) throw new Error('ADMIN_PHONE env var is required');
+  const phone = process.env.ADMIN_PHONE?.trim();
+  if (phone === undefined || phone === null || phone === '')
+    throw new Error('ADMIN_PHONE env var is required');
   return phone;
 }
 

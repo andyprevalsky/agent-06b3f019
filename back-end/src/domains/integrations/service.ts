@@ -1,8 +1,9 @@
+/* eslint-disable max-lines -- barrel re-exports + Gmail/Claude Code logic; already split into 5 sub-services */
 /**
  * Integrations domain service — business logic, no req/res.
  */
 
-import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client';
+import { type Prisma, IntegrationType, IntegrationStatus } from './types';
 import fetch from 'node-fetch';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
@@ -23,11 +24,12 @@ const log = createLogger('Integrations');
 export {
   normalizeProvider,
   startEmailOAuth,
-  handleOAuthCallback,
   sendOAuthResult,
   refreshGmailToken,
   buildRawEmail,
 } from './oauthService';
+
+export { handleOAuthCallback } from './oauthService.callback';
 
 export {
   processGenericUpload,

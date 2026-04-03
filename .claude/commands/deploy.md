@@ -120,7 +120,10 @@ npx eslint $CHANGED_TS
 # 3. Prettier on changed files
 npx prettier --check $CHANGED_TS
 
-# 4. Blackbox tests (start backend if not running, run tests, stop backend)
+# 4. Structural tests (no server needed — static analysis)
+npm run test:structural
+
+# 5. Blackbox tests (start backend if not running, run tests, stop backend)
 npx tsx watch src/server.ts &
 # Wait for backend to be ready
 for i in $(seq 1 30); do curl -s http://localhost:3001/health > /dev/null 2>&1 && break; sleep 1; done

@@ -1,12 +1,12 @@
+/* eslint-disable max-lines -- pre-existing: OAuth flow requires PKCE + token exchange + redirect + refresh in one module */
 /**
  * OAuth service — auth URL generation, token exchange, PKCE, and helpers.
  */
 
 import crypto from 'crypto';
 import fetch from 'node-fetch';
-import type { Response } from 'express';
 import { createLogger } from '../../providers/logger';
-import type { EmailProviderSlug, TokenExchangeResult } from './types';
+import type { EmailProviderSlug, TokenExchangeResult, OAuthResponse } from './types';
 import { EMAIL_PROVIDER_CONFIG, BACKEND_BASE_URL, ALLOWED_REDIRECT_PATTERNS } from './config';
 import * as repo from './repo';
 
@@ -21,9 +21,6 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
-
-// Re-export callback handler so consumers don't need to change imports
-export { handleOAuthCallback } from './oauthService.callback';
 
 // ---------------------------------------------------------------------------
 // PKCE + helpers
@@ -203,7 +200,7 @@ export function isAllowedRedirectUrl(url: string): boolean {
 }
 
 export const sendOAuthResult = (
-  res: Response,
+  res: OAuthResponse,
   opts: { success: boolean; message: string; returnUrl?: string | null; errorUrl?: string | null }
 ) => {
   const redirectTarget = opts.success

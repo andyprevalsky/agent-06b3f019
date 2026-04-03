@@ -3,7 +3,7 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import { IntegrationType, IntegrationStatus } from '@prisma/client';
+import { IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import {

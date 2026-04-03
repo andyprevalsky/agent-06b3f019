@@ -3,7 +3,7 @@
  * Split from service.ts for max-lines compliance.
  */
 
-import { IntegrationType } from '@prisma/client';
+import { IntegrationType } from './types';
 
 export class InvalidIntegrationTypeError extends Error {
   constructor(_type: string) {
