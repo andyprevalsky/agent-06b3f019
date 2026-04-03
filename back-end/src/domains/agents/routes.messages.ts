@@ -69,7 +69,7 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (req.userId === undefined) {
+      if (req.userId === undefined && req.isInternal !== true) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
