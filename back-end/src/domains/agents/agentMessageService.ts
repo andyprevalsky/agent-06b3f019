@@ -208,8 +208,8 @@ export async function getAttachmentSignedUrl(userId: string, storagePath: string
 
 const MAX_BATCH_SIZE = 50;
 
-/** Fetch messages by IDs for context pointer resolution. Scoped to user's agents. */
-export async function getMessagesBatch(ids: unknown, userId: string) {
+/** Fetch messages by IDs for context pointer resolution. Optionally scoped to user's agents. */
+export async function getMessagesBatch(ids: unknown, userId?: string) {
   if (!Array.isArray(ids) || ids.length === 0) {
     return { error: 'ids must be a non-empty array', status: 400 };
   }
@@ -218,7 +218,11 @@ export async function getMessagesBatch(ids: unknown, userId: string) {
     return { error: `Maximum ${MAX_BATCH_SIZE} IDs per batch request`, status: 400 };
   }
 
-  const messages = await repo.findMessagesByIds(ids as string[], userId);
+  if (!ids.every((id): id is string => typeof id === 'string' && id.trim() !== '')) {
+    return { error: 'ids must contain only non-empty strings', status: 400 };
+  }
+
+  const messages = await repo.findMessagesByIds(ids, userId);
   return { messages };
 }
 
@@ -235,8 +239,8 @@ export async function generateSchema(goal: string) {
 // Batch fetch messages
 // ---------------------------------------------------------------------------
 
-/** Fetch messages by IDs, scoped to the requesting user. */
-export async function batchFetchMessages(ids: string[], userId: string) {
+/** Fetch messages by IDs, optionally scoped to the requesting user. */
+export async function batchFetchMessages(ids: string[], userId?: string) {
   const messages = await repo.findMessagesByIds(ids, userId);
   return { messages };
 }

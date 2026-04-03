@@ -137,7 +137,7 @@ async def create_agent(
     body: dict = {
         "goal": task.prompt,
         "model": "rose-labs/rose-1-lite",
-        "source": "WEB",
+        "source": "MAC_APP",
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",

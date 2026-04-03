@@ -46,12 +46,14 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const userId = req.userId ?? (req.headers['x-user-id'] as string | undefined);
-      if (userId === undefined || userId === null) {
+      const userId =
+        req.userId ??
+        (req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : undefined);
+      if ((userId === undefined || userId === null) && req.isInternal !== true) {
         res.status(401).json({ error: 'User not authenticated' });
         return;
       }
-      const result = await messageService.getMessagesBatch(req.body.ids, userId);
+      const result = await messageService.getMessagesBatch(req.body.ids, userId ?? undefined);
       if ('error' in result && 'status' in result) {
         res.status(result.status!).json({ error: result.error });
         return;
@@ -161,7 +163,7 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (!req.userId) {
+      if (req.userId === undefined || req.userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -189,7 +191,7 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (!req.userId) {
+      if (req.userId === undefined || req.userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -226,38 +228,5 @@ router.post(
   })
 );
 
-// POST /messages/batch — batch fetch messages by IDs
-router.post(
-  '/messages/batch',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const ids = (req.body as { ids?: unknown } | null)?.ids;
-      if (!Array.isArray(ids) || ids.length === 0) {
-        res.status(400).json({ error: 'ids must be a non-empty array' });
-        return;
-      }
-      if (!ids.every((id): id is string => typeof id === 'string' && id.trim() !== '')) {
-        res.status(400).json({ error: 'ids must contain only non-empty strings' });
-        return;
-      }
-      if (ids.length > 50) {
-        res.status(400).json({ error: 'Maximum 50 IDs per batch request' });
-        return;
-      }
-      const userId =
-        req.userId ??
-        (req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : undefined);
-      if (!userId) {
-        res.status(401).json({ error: 'User not authenticated' });
-        return;
-      }
-      const result = await messageService.batchFetchMessages(ids, userId);
-      res.json(result);
-    } catch (error) {
-      handleRouteError(res, error, 'Failed to fetch messages');
-    }
-  })
-);
 
 export default router;
