@@ -90,7 +90,13 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 12. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content.
 
-13. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
+13. **Sync Conductor workspace name on branch change** - Whenever you switch or create a branch, update the Conductor workspace display name to match:
+   ```bash
+   sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
+     "UPDATE workspaces SET pr_title = '$(git branch --show-current)' WHERE directory_name = '$(basename \"$PWD\")'"
+   ```
+
+14. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
 
 ## Plans
 
