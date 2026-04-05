@@ -566,7 +566,6 @@ def evaluate_task(
     agent = data.get("agent", {})
     status = agent.get("status", "UNKNOWN")
     messages = data.get("messages", [])
-    progress = agent.get("progress", 0)
 
     # Chat mode: just needs ASSISTANT response
     if task.is_chat_mode:
@@ -599,9 +598,15 @@ def evaluate_task(
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
         return False, "Expected approval requests but none were triggered"
 
-    # Progress score check (verifier gave a score)
-    if progress < 0.5:
-        return False, f"Low progress score: {progress:.2f}"
+    # Check for tool errors
+    tool_errors = [
+        m for m in messages
+        if isinstance(m.get("metadata"), dict)
+        and m["metadata"].get("toolStatus") == "ERROR"
+    ]
+    if tool_errors:
+        tool_names = [m["metadata"].get("toolName", "unknown") for m in tool_errors]
+        return False, f"Tool errors detected: {', '.join(tool_names)}"
 
     return True, None
 
