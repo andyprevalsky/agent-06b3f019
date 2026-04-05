@@ -49,6 +49,8 @@ Using the same `$CHANGED_TS` from Step 1 (skip if empty):
 
 If there are remaining errors, fix them manually. Loop until `npx eslint` reports 0 errors.
 
+**CRITICAL: You must reach 0 errors across ALL files in `$CHANGED_TS`. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** If a file is in the diff, you own every error in it. This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
+
 If any files were modified by this step, stage and commit them (can combine with Step 1's commit if both ran together).
 
 ## Step 3: TypeScript type check
@@ -57,7 +59,7 @@ If any files were modified by this step, stage and commit them (can combine with
 cd back-end && npx tsc --noEmit
 ```
 
-Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding.
+Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
 
 ## Step 4: Structural tests + fix
 
