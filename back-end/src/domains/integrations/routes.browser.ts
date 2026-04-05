@@ -28,6 +28,20 @@ const upload = multer({
   limits: UPLOAD_LIMITS,
 });
 
+function hasEncryptedFields(body: Record<string, unknown>): body is {
+  data: string;
+  iv: string;
+  key: string;
+  [k: string]: unknown;
+} {
+  const { data, iv, key } = body;
+  return (
+    data !== undefined && data !== null && data !== '' &&
+    iv !== undefined && iv !== null && iv !== '' &&
+    key !== undefined && key !== null && key !== ''
+  );
+}
+
 /** POST /api/integrations/cookies/upload */
 router.post(
   '/cookies/upload',
@@ -43,17 +57,7 @@ router.post(
       });
     }
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -98,17 +102,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key, compressed } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -151,17 +145,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key, compressed } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -204,17 +188,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -256,17 +230,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -304,17 +268,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key, compressed } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
@@ -357,17 +311,7 @@ router.post(
     const userId = req.user!.id;
     const { data, iv, key } = req.body;
 
-    if (
-      data === undefined ||
-      data === null ||
-      data === '' ||
-      iv === undefined ||
-      iv === null ||
-      iv === '' ||
-      key === undefined ||
-      key === null ||
-      key === ''
-    ) {
+    if (!hasEncryptedFields(req.body)) {
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 

@@ -162,7 +162,7 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (!req.userId) {
+      if (req.userId === undefined || req.userId === null) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -190,7 +190,7 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (!req.userId) {
+      if (req.userId === undefined || req.userId === null) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -249,7 +249,7 @@ router.post(
       const userId =
         req.userId ??
         (req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : undefined);
-      if (!userId) {
+      if (userId === undefined || userId === null) {
         res.status(401).json({ error: 'User not authenticated' });
         return;
       }

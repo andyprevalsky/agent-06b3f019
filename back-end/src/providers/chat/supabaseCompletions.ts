@@ -50,7 +50,7 @@ export interface CompletionOptions {
     json_schema: {
       name: string;
       strict: boolean;
-      schema: Record<string, any>;
+      schema: Record<string, unknown>;
     };
   };
   claude_token?: string;
@@ -197,9 +197,9 @@ async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncIterable<
           try {
             const chunk = JSON.parse(data) as CompletionChunk;
             yield chunk;
-          } catch (e) {
+          } catch {
             // Skip invalid JSON (could be partial or debug data)
-            console.warn('[SupabaseCompletions] Failed to parse chunk:', data.substring(0, 100));
+            log.warn('Failed to parse chunk', { data: data.substring(0, 100) });
           }
         }
       }

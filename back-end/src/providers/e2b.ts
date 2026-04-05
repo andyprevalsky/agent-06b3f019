@@ -1,17 +1,20 @@
 import { Sandbox } from 'e2b';
 import { prisma } from './database';
+import { createLogger } from './logger';
 import { FilePointer, uploadToStorage, downloadFromStorage } from './storage';
 import mime from 'mime-types';
 import { v4 as uuidv4 } from 'uuid';
 import { fetchClaudeCodeCredentials } from './claudeCredentials';
 
+const log = createLogger('E2B');
+
 // Validate required environment variables
 if (!process.env.E2B_API_KEY) {
-  console.warn('E2B_API_KEY environment variable not set - Claude Code sessions disabled');
+  log.warn('E2B_API_KEY environment variable not set - Claude Code sessions disabled');
 }
 
 if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
-  console.warn(
+  log.warn(
     'E2B_CLAUDE_CODE_TEMPLATE_ID environment variable not set - Claude Code sessions disabled'
   );
 }
@@ -41,7 +44,7 @@ export async function createClaudeCodeSession(
   githubRepoUrl?: string,
   userId?: string
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
-  console.log(`[E2B] Creating Claude Code session for agent ${agentId}...`);
+  log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
     throw new Error('E2B environment variables not configured');
@@ -59,7 +62,7 @@ export async function createClaudeCodeSession(
     if (credentials) {
       envs.CLAUDE_CODE_CREDENTIALS = credentials;
       usingPerUserCredentials = true;
-      console.log(`[E2B] Using per-user Claude Code credentials for agent ${agentId}`);
+      log.info(`Using per-user Claude Code credentials for agent ${agentId}`);
     }
   }
 
@@ -70,7 +73,7 @@ export async function createClaudeCodeSession(
       );
     }
     envs.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    console.log(`[E2B] Using shared ANTHROPIC_API_KEY for agent ${agentId}`);
+    log.info(`Using shared ANTHROPIC_API_KEY for agent ${agentId}`);
   }
 
   // Add GitHub config if repo specified
@@ -80,7 +83,7 @@ export async function createClaudeCodeSession(
     }
     envs.GITHUB_REPO_URL = githubRepoUrl;
     envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    console.log(`[E2B] GitHub repo configured: ${githubRepoUrl}`);
+    log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
   // Generate taskId upfront
@@ -93,12 +96,12 @@ export async function createClaudeCodeSession(
     envs,
   });
 
-  console.log(`[E2B] Created sandbox: ${sandbox.sandboxId}`);
+  log.info(`Created sandbox: ${sandbox.sandboxId}`);
 
   // Upload attachments to sandbox if provided
   const uploadedFiles: string[] = [];
   if (attachments && attachments.length > 0) {
-    console.log(`[E2B] Uploading ${attachments.length} attachments to sandbox...`);
+    log.info(`Uploading ${attachments.length} attachments to sandbox`);
 
     // Create attachments and output directories
     await sandbox.commands.run(`mkdir -p ${ATTACHMENTS_DIR} ${OUTPUT_DIR}`);
@@ -113,13 +116,15 @@ export async function createClaudeCodeSession(
         const blob = new Blob([content]);
         await sandbox.files.write(remotePath, blob);
         uploadedFiles.push(remotePath);
-        console.log(`[E2B] Uploaded: ${fp.original_filename} (${content.length} bytes)`);
+        log.info(`Uploaded: ${fp.original_filename} (${content.length} bytes)`);
       } catch (err) {
-        console.error(`[E2B] Failed to upload ${fp.original_filename}:`, err);
+        log.error(`Failed to upload ${fp.original_filename}`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
-    console.log(`[E2B] Uploaded ${uploadedFiles.length}/${attachments.length} files`);
+    log.info(`Uploaded ${uploadedFiles.length}/${attachments.length} files`);
   }
 
   // Get WebSocket URL for the frontend to connect to
@@ -133,10 +138,14 @@ export async function createClaudeCodeSession(
       background: true,
       timeoutMs: 0,
     })
-    .catch((err) => console.error(`[E2B] Failed to start WS server:`, err));
+    .catch((err) =>
+      log.error('Failed to start WS server', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    );
 
   // Wait for WS server to be ready
-  console.log(`[E2B] Waiting for WebSocket server to start...`);
+  log.info('Waiting for WebSocket server to start');
   const startTime = Date.now();
 
   // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not a retry-on-error pattern
@@ -149,7 +158,7 @@ export async function createClaudeCodeSession(
       });
       if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
         const elapsedMs = Date.now() - startTime;
-        console.log(`[E2B] WebSocket server ready in ${elapsedMs}ms`);
+        log.info(`WebSocket server ready in ${elapsedMs}ms`);
         break;
       }
     } catch {
@@ -159,7 +168,7 @@ export async function createClaudeCodeSession(
 
   const totalElapsed = Date.now() - startTime;
   if (totalElapsed >= WS_READY_TIMEOUT_MS) {
-    console.warn(`[E2B] WebSocket server readiness check timed out after ${totalElapsed}ms`);
+    log.warn(`WebSocket server readiness check timed out after ${totalElapsed}ms`);
   }
 
   // Create DB record with real values (no placeholders)
@@ -174,7 +183,7 @@ export async function createClaudeCodeSession(
     },
   });
 
-  console.log(`[E2B] Session ready: ${taskId}, WS: ${wsUrl}`);
+  log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
 
   return {
     wsUrl,
@@ -238,7 +247,7 @@ export async function closeClaudeCodeSession(
   agentId?: string,
   additionalPaths?: string[]
 ): Promise<{ outputFiles: FilePointer[]; usage?: ClaudeCodeUsage }> {
-  console.log(`[E2B] Closing Claude Code session ${taskId}...`);
+  log.info(`Closing Claude Code session ${taskId}`);
 
   const session = await prisma.claudeCodeSession.findUnique({
     where: { id: taskId },
@@ -268,7 +277,7 @@ export async function closeClaudeCodeSession(
 
       if (findJsonlResult.stdout && findJsonlResult.stdout.trim()) {
         const jsonlFiles = findJsonlResult.stdout.split('\n').filter((f) => f.trim());
-        console.log(`[E2B] Found ${jsonlFiles.length} JSONL files for usage extraction`);
+        log.info(`Found ${jsonlFiles.length} JSONL files for usage extraction`);
 
         const totalUsage: ClaudeCodeUsage = {
           inputTokens: 0,
@@ -285,25 +294,29 @@ export async function closeClaudeCodeSession(
             totalUsage.outputTokens += fileUsage.outputTokens;
             totalUsage.cacheReadInputTokens += fileUsage.cacheReadInputTokens;
             totalUsage.cacheCreationInputTokens += fileUsage.cacheCreationInputTokens;
-            console.log(
-              `[E2B] Parsed usage from ${jsonlFile}: in=${fileUsage.inputTokens}, out=${fileUsage.outputTokens}`
+            log.info(
+              `Parsed usage from ${jsonlFile}: in=${fileUsage.inputTokens}, out=${fileUsage.outputTokens}`
             );
           } catch (readErr) {
-            console.error(`[E2B] Failed to read JSONL file ${jsonlFile}:`, readErr);
+            log.error(`Failed to read JSONL file ${jsonlFile}`, {
+              error: readErr instanceof Error ? readErr.message : String(readErr),
+            });
           }
         }
 
         if (totalUsage.inputTokens > 0 || totalUsage.outputTokens > 0) {
           usage = totalUsage;
-          console.log(
-            `[E2B] Total Claude Code usage: in=${usage.inputTokens}, out=${usage.outputTokens}, cache_read=${usage.cacheReadInputTokens}, cache_create=${usage.cacheCreationInputTokens}`
+          log.info(
+            `Total Claude Code usage: in=${usage.inputTokens}, out=${usage.outputTokens}, cache_read=${usage.cacheReadInputTokens}, cache_create=${usage.cacheCreationInputTokens}`
           );
         }
       } else {
-        console.log(`[E2B] No JSONL files found for usage extraction`);
+        log.info('No JSONL files found for usage extraction');
       }
     } catch (usageErr) {
-      console.error(`[E2B] Failed to extract Claude Code usage:`, usageErr);
+      log.error('Failed to extract Claude Code usage', {
+        error: usageErr instanceof Error ? usageErr.message : String(usageErr),
+      });
     }
 
     // Extract output files if userId and agentId provided
@@ -345,27 +358,31 @@ export async function closeClaudeCodeSession(
                 created_at: new Date().toISOString(),
               });
 
-              console.log(`[E2B] Extracted output file: ${filename} (${content.length} bytes)`);
+              log.info(`Extracted output file: ${filename} (${content.length} bytes)`);
             } catch (fileErr) {
-              console.error(`[E2B] Failed to extract file ${filename}:`, fileErr);
+              log.error(`Failed to extract file ${filename}`, {
+                error: fileErr instanceof Error ? fileErr.message : String(fileErr),
+              });
             }
           }
         }
 
-        console.log(`[E2B] Extracted ${outputFiles.length} output files from ${OUTPUT_DIR}`);
+        log.info(`Extracted ${outputFiles.length} output files from ${OUTPUT_DIR}`);
       } catch (extractErr) {
-        console.error(`[E2B] Failed to extract output files:`, extractErr);
+        log.error('Failed to extract output files', {
+          error: extractErr instanceof Error ? extractErr.message : String(extractErr),
+        });
       }
 
       // Also extract any additional file paths specified (e.g., from verifier structured_response)
       if (additionalPaths && additionalPaths.length > 0) {
-        console.log(`[E2B] Extracting ${additionalPaths.length} additional file paths...`);
+        log.info(`Extracting ${additionalPaths.length} additional file paths`);
 
         for (const filePath of additionalPaths) {
           // Skip if already extracted (might be in output dir)
           const filename = filePath.split('/').pop() || '';
           if (outputFiles.some((f) => f.original_filename === filename)) {
-            console.log(`[E2B] Skipping ${filename} - already extracted from ${OUTPUT_DIR}`);
+            log.info(`Skipping ${filename} - already extracted from ${OUTPUT_DIR}`);
             continue;
           }
 
@@ -376,7 +393,7 @@ export async function closeClaudeCodeSession(
               { timeoutMs: 3000 }
             );
             if (!checkResult.stdout?.includes('EXISTS')) {
-              console.log(`[E2B] File not found: ${filePath}`);
+              log.info(`File not found: ${filePath}`);
               continue;
             }
 
@@ -402,9 +419,11 @@ export async function closeClaudeCodeSession(
               created_at: new Date().toISOString(),
             });
 
-            console.log(`[E2B] Extracted additional file: ${filePath} (${content.length} bytes)`);
+            log.info(`Extracted additional file: ${filePath} (${content.length} bytes)`);
           } catch (fileErr) {
-            console.error(`[E2B] Failed to extract additional file ${filePath}:`, fileErr);
+            log.error(`Failed to extract additional file ${filePath}`, {
+              error: fileErr instanceof Error ? fileErr.message : String(fileErr),
+            });
           }
         }
       }
@@ -412,9 +431,11 @@ export async function closeClaudeCodeSession(
 
     // Kill the sandbox
     await sandbox.kill();
-    console.log(`[E2B] Killed sandbox: ${session.sandboxId}`);
+    log.info(`Killed sandbox: ${session.sandboxId}`);
   } catch (error) {
-    console.error(`[E2B] Failed to kill sandbox:`, error);
+    log.error('Failed to kill sandbox', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     // Continue to update DB even if kill fails
   }
 
@@ -427,7 +448,7 @@ export async function closeClaudeCodeSession(
     },
   });
 
-  console.log(`[E2B] Session closed: ${taskId}`);
+  log.info(`Session closed: ${taskId}`);
 
   return { outputFiles, usage };
 }

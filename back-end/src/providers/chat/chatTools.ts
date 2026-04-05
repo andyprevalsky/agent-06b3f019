@@ -20,7 +20,14 @@ export interface WebSearchResult {
 /**
  * Format Parallel AI search results into a readable answer.
  */
-function formatSearchResults(results: any[]): string {
+interface SearchResult {
+  title?: string;
+  snippet?: string;
+  url?: string;
+  excerpts?: string[];
+}
+
+function formatSearchResults(results: SearchResult[]): string {
   if (!results || results.length === 0) {
     return 'No results found.';
   }
@@ -55,7 +62,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
     }
 
     let lastError: Error | null = null;
-    let data: { results?: any[] } | null = null;
+    let data: { results?: SearchResult[] } | null = null;
 
     // eslint-disable-next-line no-restricted-syntax -- retry is interleaved with per-attempt HTTP status branching and response parsing
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -89,7 +96,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
           throw lastError;
         }
 
-        data = (await response.json()) as { results?: any[] };
+        data = (await response.json()) as { results?: SearchResult[] };
         if (attempt > 1) {
           log.info(`Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
         }
@@ -121,7 +128,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
     const answer = formatSearchResults(results);
 
     // Extract sources
-    const sources = results.filter((r: any) => r.url).map((r: any) => r.url);
+    const sources = results.filter((r): r is SearchResult & { url: string } => r.url !== undefined).map((r) => r.url);
 
     log.info('Search complete', {
       answerLength: answer.length,
