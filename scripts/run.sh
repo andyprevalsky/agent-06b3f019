@@ -1,6 +1,14 @@
 #!/bin/bash
 set -eo pipefail
 
+# Parse flags
+BENCHMARK_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --benchmark) BENCHMARK_MODE=true ;;
+  esac
+done
+
 if [ -z "$CONDUCTOR_PORT" ]; then
   echo '❌ CONDUCTOR_PORT not set. Run via Conductor.'
   exit 1
@@ -101,11 +109,13 @@ run_service() {
 run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
 PIDS+=($!); NAMES+=("back-end")
 
-run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
-PIDS+=($!); NAMES+=("front-end")
+if ! $BENCHMARK_MODE; then
+  run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+  PIDS+=($!); NAMES+=("front-end")
 
-run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
-PIDS+=($!); NAMES+=("mac-app")
+  run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
+  PIDS+=($!); NAMES+=("mac-app")
+fi
 
 run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT ./scripts/run_local_worker.sh' &
 PIDS+=($!); NAMES+=("agents")

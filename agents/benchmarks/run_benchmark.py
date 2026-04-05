@@ -30,6 +30,8 @@ import asyncio
 import csv
 import json
 import os
+import signal
+import subprocess
 import tempfile
 
 import sys
@@ -65,6 +67,81 @@ _conductor_port = os.environ.get("CONDUCTOR_PORT", "3001")
 DEFAULT_BASE_URL = os.environ.get(
     "BENCHMARK_BASE_URL", f"http://localhost:{_conductor_port}"
 )
+
+# ---------------------------------------------------------------------------
+# Local service lifecycle (run.sh --benchmark)
+# ---------------------------------------------------------------------------
+_run_sh_process: Optional[subprocess.Popen] = None
+
+
+def _kill_run_sh():
+    """Kill the run.sh process tree."""
+    global _run_sh_process
+    if _run_sh_process and _run_sh_process.poll() is None:
+        print("  🛑 Stopping local services...")
+        # Send SIGTERM to the process group so run.sh's trap fires
+        try:
+            os.killpg(os.getpgid(_run_sh_process.pid), signal.SIGTERM)
+        except OSError:
+            _run_sh_process.terminate()
+        try:
+            _run_sh_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(_run_sh_process.pid), signal.SIGKILL)
+        _run_sh_process = None
+
+
+def start_local_services() -> bool:
+    """Start run.sh --benchmark and wait for backend to be ready.
+
+    Returns True if services started successfully.
+    """
+    global _run_sh_process
+
+    conductor_port = os.environ.get("CONDUCTOR_PORT")
+    workspace_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    if not conductor_port or not workspace_name:
+        print("  ⚠ CONDUCTOR_PORT/CONDUCTOR_WORKSPACE_NAME not set — cannot start local services")
+        return False
+
+    # Kill any existing run.sh for this workspace
+    _kill_run_sh()
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    run_sh = os.path.join(repo_root, "scripts", "run.sh")
+
+    env = {**os.environ, "CONDUCTOR_PORT": conductor_port, "CONDUCTOR_WORKSPACE_NAME": workspace_name}
+    _run_sh_process = subprocess.Popen(
+        ["bash", run_sh, "--benchmark"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,  # own process group for clean kill
+    )
+
+    # Register cleanup
+    import atexit
+    atexit.register(_kill_run_sh)
+
+    # Wait for backend to be ready (up to 60s)
+    health_url = f"http://localhost:{conductor_port}/health"
+    for i in range(60):
+        if _run_sh_process.poll() is not None:
+            print(f"  ❌ run.sh exited early (code={_run_sh_process.returncode})")
+            return False
+        try:
+            resp = httpx.get(health_url, timeout=2)
+            if resp.status_code == 200:
+                print(f"  ✅ Local services ready (port {conductor_port})")
+                return True
+        except (httpx.ConnectError, httpx.ReadTimeout):
+            pass
+        time.sleep(1)
+
+    print("  ❌ Timeout waiting for local backend")
+    _kill_run_sh()
+    return False
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
 # Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
@@ -878,6 +955,14 @@ async def main_async(args):
 
     base_url = args.url.rstrip("/")
 
+    # Start local services when running against localhost (not --url to prod)
+    is_local = "localhost" in base_url or "127.0.0.1" in base_url
+    if is_local:
+        print("\n  Starting local services (back-end + agents + research)...")
+        if not start_local_services():
+            print("  ❌ Failed to start local services. Aborting.")
+            sys.exit(1)
+
     tasks = resolve_tasks(args)
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
@@ -947,6 +1032,10 @@ async def main_async(args):
     finally:
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
+
+        # Stop local services if we started them
+        if is_local:
+            _kill_run_sh()
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
