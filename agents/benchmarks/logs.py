@@ -796,6 +796,31 @@ def format_tree_diagnostics(
               if info.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
     if failed:
         lines.append(f"  Failed agents: {', '.join(a[:12] for a in failed)}")
+
+    # Verdict: collect all error/anomaly signals across the tree
+    verdict_reasons = []
+    for aid, info in tree_logs.items():
+        short = aid[:12]
+        status = info.get("status", "")
+        if status in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"):
+            verdict_reasons.append(f"{short} status={status}")
+        logs = info.get("logs", {})
+        msgs = logs.get("messages", [])
+        # Tool errors
+        for m in msgs:
+            meta = m.get("metadata", {})
+            if isinstance(meta, dict) and meta.get("toolStatus") == "ERROR":
+                tool = meta.get("toolName", "?")
+                verdict_reasons.append(f"{short} ❌ {tool} ERROR")
+        # Anomalies
+        for a in _detect_anomalies(msgs):
+            verdict_reasons.append(f"{short} {a}")
+
+    lines.append("")
+    if verdict_reasons:
+        lines.append(f"  🔴 ACTION REQUIRED — {'; '.join(verdict_reasons[:5])}")
+    else:
+        lines.append("  🟢 HEALTHY")
     lines.append("=" * 60)
 
     return "\n".join(lines)

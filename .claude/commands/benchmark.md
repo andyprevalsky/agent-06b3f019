@@ -85,16 +85,21 @@ Use the diagnostics tool:
 python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
 
-This shows: agent tree status, message counts, tool distribution, errors, anomalies (infinite loops, stalls, stuck tools, time gaps).
+This shows: agent tree status, message counts, tool distribution, errors, anomalies (infinite loops, stalls, stuck tools, time gaps). The output ends with a verdict line:
+- `🟢 HEALTHY` — no issues detected, continue monitoring
+- `🔴 ACTION REQUIRED — <reasons>` — issues detected
 
-**What to watch for:**
-- `INFINITE LOOP` — agent repeating the same message/tool call
+**Decision rule after each poll:**
+- If the verdict is `🔴 ACTION REQUIRED` → **IMMEDIATELY go to Step 4** (pause + diagnose). No exceptions. Do not "wait another cycle." Do not rationalize.
+- If the verdict is `🟢 HEALTHY` → continue monitoring (next poll in 60s)
+
+The verdict aggregates these signals across the entire agent tree:
+- `❌` tool errors (toolStatus == ERROR)
 - `STUCK` — tool IN_PROGRESS without FINISHED
 - `TIME GAP` — 3+ minutes between messages (stalled LLM call)
+- `INFINITE LOOP` — same message repeated 4+ times
 - `HIGH TOOL COUNT` — one tool called 15+ times
-- Tool errors (❌) in the tree
-- Worker/backend/research log errors
-- 120s with no new messages on any sub-agent = stall = actionable error
+- Terminal agent status (FAILED, COST_LIMIT_REACHED, OUT_OF_CREDITS)
 
 **What NOT to use for monitoring:**
 - `progress` field — dead variable, ignore it
@@ -132,7 +137,7 @@ If `prompt_user`, show the approval request to the user and wait for their respo
 
 ## Step 4: On error — Pause and diagnose
 
-When you detect an error (from monitoring or agent reaching terminal failure state):
+When diagnostics show `🔴 ACTION REQUIRED` (or agent reaches a terminal status):
 
 1. **Pause the root agent:**
    ```bash
@@ -211,7 +216,7 @@ On `COMPLETED`:
 
 1. **NEVER stop the loop** unless waiting for user approval or celebrating (Step 9).
 2. **NEVER fire-and-forget** — monitor every 60s while the benchmark runs.
-3. **120s stall = error** — if any sub-agent has no new messages for 120s, treat as actionable.
+3. **`🔴 ACTION REQUIRED` = immediate Step 4** — any anomaly (STUCK, TIME GAP, INFINITE LOOP, HIGH TOOL COUNT) or tool error in the verdict means pause immediately.
 4. **Only 1 agent alive** — delete old agents before starting new ones.
 5. **Never auto-approve** — approval requests from the agent always go to the user (unless task says `auto_approve`).
 6. **Fix log pipeline first** — if logs are broken, fix that before debugging agent issues.

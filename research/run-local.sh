@@ -58,9 +58,7 @@ port = ${RESEARCH_DB_PORT}
 enabled = false
 
 [analytics]
-enabled = true
-port = ${RESEARCH_ANALYTICS_PORT}
-vector_port = ${RESEARCH_VECTOR_PORT}
+enabled = false
 
 [inbucket]
 enabled = true
