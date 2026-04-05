@@ -174,8 +174,8 @@
     "attachment": "vcs-and-angels.csv",
     "approval_handling": "prompt_user",
     "start_phase": "plan",
-    "row_start": 41,
-    "row_end": 50
+    "row_start": 51,
+    "row_end": 70
   },
   {
     "name": "build-boxing-payment",
