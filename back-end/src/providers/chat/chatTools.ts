@@ -3,6 +3,10 @@
  * Uses Parallel AI's Search API.
  */
 
+import { createLogger } from '../logger';
+
+const log = createLogger('WebSearch');
+
 // Retry config
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 1000;
@@ -42,7 +46,7 @@ function formatSearchResults(results: any[]): string {
  * This is the same approach used by the Python implementation.
  */
 export async function executeWebSearch(query: string): Promise<WebSearchResult> {
-  console.log('[WebSearch] Executing search', { query });
+  log.info('Executing search', { query });
 
   try {
     const apiKey = process.env.PARRALLEL_API_KEY;
@@ -53,6 +57,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
     let lastError: Error | null = null;
     let data: { results?: any[] } | null = null;
 
+    // eslint-disable-next-line no-restricted-syntax -- retry is interleaved with per-attempt HTTP status branching and response parsing
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const response = await fetch('https://api.parallel.ai/v1beta/search', {
@@ -75,9 +80,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
           lastError = new Error(`Parallel AI Search API error ${response.status}: ${errorText}`);
           if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
             const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-            console.warn(
-              `[WebSearch] Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
-            );
+            log.warn(`Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`);
             await new Promise((r) => setTimeout(r, backoff));
             continue;
           }
@@ -86,7 +89,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
 
         data = (await response.json()) as { results?: any[] };
         if (attempt > 1) {
-          console.log(`[WebSearch] Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
+          log.info(`Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
         }
         break;
       } catch (error) {
@@ -96,10 +99,9 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
           !lastError.message.startsWith('Parallel AI Search API error')
         ) {
           const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-          console.warn(
-            `[WebSearch] Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms:`,
-            lastError.message
-          );
+          log.warn(`Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`, {
+            error: lastError.message,
+          });
           await new Promise((r) => setTimeout(r, backoff));
           continue;
         }
@@ -119,7 +121,7 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
     // Extract sources
     const sources = results.filter((r: any) => r.url).map((r: any) => r.url);
 
-    console.log('[WebSearch] Search complete', {
+    log.info('Search complete', {
       answerLength: answer.length,
       sourceCount: sources.length,
     });
@@ -129,7 +131,9 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
       sources,
     };
   } catch (error) {
-    console.error('[WebSearch] Error executing search:', error);
+    log.error('Error executing search', {
+      error: error instanceof Error ? error.message : String(error),
+    });
 
     // Return error message instead of fallback
     return {

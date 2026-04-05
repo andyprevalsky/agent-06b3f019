@@ -2,7 +2,7 @@
  * Agent lifecycle service — create and delete agents.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPricing';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
@@ -25,6 +25,7 @@ const log = createLogger('Agents');
 export function resolvePromptSecrets(text: string): string {
   return text.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (_match, varName: string) => {
     const envKey = `PROMPT_SECRET_${varName}`;
+    // eslint-disable-next-line no-restricted-syntax -- dynamic env key computed at runtime; can't enumerate in config.ts
     const value = process.env[envKey];
     if (value !== undefined && value !== '') {
       log.info(`Resolved prompt secret: {{${varName}}}`);
@@ -199,7 +200,7 @@ export async function createAgent(
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP);
   const isSubAgent = body.parent_agent_id !== undefined;
-  const agentId = uuidv4();
+  const agentId = randomUUID();
   const agent = await repo.createAgentTransaction({
     agentId,
     userId,

@@ -1,6 +1,9 @@
 import { Sandbox } from 'e2b';
 import { prisma } from './database';
+import { createLogger } from './logger';
 import { closeSession } from './steel';
+
+const log = createLogger('Cleanup');
 
 /**
  * Clean up all active E2B sandboxes and Steel browser sessions for an agent.
@@ -18,27 +21,25 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
 
     if (activeBrowserSessions.length > 0) {
-      console.log(
-        `[Cleanup] Closing ${activeBrowserSessions.length} Steel session(s) for agent ${agentId}`
+      log.info(
+        `Closing ${activeBrowserSessions.length} Steel session(s) for agent ${agentId}`
       );
     }
 
     for (const session of activeBrowserSessions) {
       try {
         await closeSession(session.sessionId, false);
-        console.log(`[Cleanup] Closed Steel session ${session.sessionId}`);
+        log.info(`Closed Steel session ${session.sessionId}`);
       } catch (error) {
-        console.warn(
-          `[Cleanup] Failed to close Steel session ${session.sessionId}:`,
-          error instanceof Error ? error.message : String(error)
-        );
+        log.warn(`Failed to close Steel session ${session.sessionId}`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   } catch (error) {
-    console.warn(
-      `[Cleanup] Failed to query Steel sessions for agent ${agentId}:`,
-      error instanceof Error ? error.message : String(error)
-    );
+    log.warn(`Failed to query Steel sessions for agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   // --- E2B Claude Code sessions ---
@@ -52,8 +53,8 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
 
     if (activeCodeSessions.length > 0) {
-      console.log(
-        `[Cleanup] Killing ${activeCodeSessions.length} E2B sandbox(es) for agent ${agentId}`
+      log.info(
+        `Killing ${activeCodeSessions.length} E2B sandbox(es) for agent ${agentId}`
       );
     }
 
@@ -63,12 +64,11 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
           apiKey: process.env.E2B_API_KEY,
         });
         await sandbox.kill();
-        console.log(`[Cleanup] Killed E2B sandbox ${session.sandboxId}`);
+        log.info(`Killed E2B sandbox ${session.sandboxId}`);
       } catch (error) {
-        console.warn(
-          `[Cleanup] Failed to kill E2B sandbox ${session.sandboxId}:`,
-          error instanceof Error ? error.message : String(error)
-        );
+        log.warn(`Failed to kill E2B sandbox ${session.sandboxId}`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
 
       try {
@@ -80,16 +80,14 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
           },
         });
       } catch (dbError) {
-        console.warn(
-          `[Cleanup] Failed to update E2B session DB status ${session.id}:`,
-          dbError instanceof Error ? dbError.message : String(dbError)
-        );
+        log.warn(`Failed to update E2B session DB status ${session.id}`, {
+          error: dbError instanceof Error ? dbError.message : String(dbError),
+        });
       }
     }
   } catch (error) {
-    console.warn(
-      `[Cleanup] Failed to query E2B sessions for agent ${agentId}:`,
-      error instanceof Error ? error.message : String(error)
-    );
+    log.warn(`Failed to query E2B sessions for agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }

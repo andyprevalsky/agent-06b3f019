@@ -51,6 +51,7 @@ async function validateSessionConnection(wsUrl: string): Promise<boolean> {
 
   console.log(`  🔍 Validating session connection (up to ${WS_CONNECTION_RETRIES} attempts)...`);
 
+  // eslint-disable-next-line no-restricted-syntax -- CDP connection validation manages browser object lifecycle (connect/close) per attempt
   for (let attempt = 1; attempt <= WS_CONNECTION_RETRIES; attempt++) {
     let browser;
 

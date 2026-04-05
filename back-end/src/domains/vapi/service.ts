@@ -1,4 +1,4 @@
-import { VAPI_BASE_URL, OUTBOUND_PHONE_NUMBER_POOL, BASE_SYSTEM_PROMPT } from './config';
+import { VAPI_BASE_URL, VAPI_PRIVATE_KEY, OUTBOUND_PHONE_NUMBER_POOL, BASE_SYSTEM_PROMPT } from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
 import { createLogger } from '../../providers/logger';
@@ -115,7 +115,7 @@ export async function initiateCall(
 ): Promise<{ success: true; call_id: string; status: string }> {
   const { to, system_prompt, output_schema } = body;
 
-  const vapiPrivateKey = process.env.VAPI_PRIVATE_KEY;
+  const vapiPrivateKey = VAPI_PRIVATE_KEY;
   if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
     log.error('VAPI_PRIVATE_KEY not configured');
     throw new VapiNotConfiguredError();
@@ -195,7 +195,7 @@ export async function initiateCall(
  * Poll call status from Vapi
  */
 export async function getCallStatus(callId: string): Promise<Record<string, unknown>> {
-  const vapiPrivateKey = process.env.VAPI_PRIVATE_KEY;
+  const vapiPrivateKey = VAPI_PRIVATE_KEY;
   if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
     log.error('VAPI_PRIVATE_KEY not configured');
     throw new VapiNotConfiguredError();

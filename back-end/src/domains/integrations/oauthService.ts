@@ -3,8 +3,7 @@
  * OAuth service — auth URL generation, token exchange, PKCE, and helpers.
  */
 
-import crypto from 'crypto';
-import fetch from 'node-fetch';
+import { randomBytes, createHash } from '../../providers/crypto';
 import { createLogger } from '../../providers/logger';
 import type { EmailProviderSlug, TokenExchangeResult, OAuthResponse } from './types';
 import { EMAIL_PROVIDER_CONFIG, BACKEND_BASE_URL, ALLOWED_REDIRECT_PATTERNS } from './config';
@@ -29,11 +28,11 @@ function escapeHtml(str: string): string {
 const base64UrlEncode = (buffer: Buffer) =>
   buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 
-export const generateCodeVerifier = () => base64UrlEncode(crypto.randomBytes(32));
-export const generateStateToken = () => base64UrlEncode(crypto.randomBytes(24));
+export const generateCodeVerifier = () => base64UrlEncode(randomBytes(32));
+export const generateStateToken = () => base64UrlEncode(randomBytes(24));
 
 export const createCodeChallenge = (verifier: string) =>
-  base64UrlEncode(crypto.createHash('sha256').update(verifier).digest());
+  base64UrlEncode(createHash('sha256').update(verifier).digest());
 
 export const normalizeProvider = (provider?: string): EmailProviderSlug | null => {
   if (provider === undefined || provider === null || provider === '') return null;

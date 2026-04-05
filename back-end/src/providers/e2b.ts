@@ -139,6 +139,7 @@ export async function createClaudeCodeSession(
   console.log(`[E2B] Waiting for WebSocket server to start...`);
   const startTime = Date.now();
 
+  // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not a retry-on-error pattern
   while (Date.now() - startTime < WS_READY_TIMEOUT_MS) {
     await new Promise((resolve) => setTimeout(resolve, WS_READY_POLL_INTERVAL_MS));
     try {

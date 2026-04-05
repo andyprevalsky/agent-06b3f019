@@ -3,7 +3,7 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import crypto from 'crypto';
+import { randomBytes, createCipheriv, publicEncrypt, constants } from '../../providers/crypto';
 import { type CacheStoragePayload, type PasswordPayload, type ApplePasswordEntry, IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';
 import { RSA_PUBLIC_KEY_PEM } from './config';
@@ -141,18 +141,18 @@ async function bulkUpsertPasswordEntries(
  * Encrypt a password using RSA-2048 + AES-256-GCM hybrid encryption.
  */
 export function encryptPasswordForStorage(password: string): string {
-  const aesKey = crypto.randomBytes(32);
-  const iv = crypto.randomBytes(12);
+  const aesKey = randomBytes(32);
+  const iv = randomBytes(12);
 
-  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
   const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   const ciphertext = Buffer.concat([encrypted, authTag]);
 
-  const encryptedAesKey = crypto.publicEncrypt(
+  const encryptedAesKey = publicEncrypt(
     {
       key: RSA_PUBLIC_KEY_PEM,
-      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: 'sha256',
     },
     aesKey

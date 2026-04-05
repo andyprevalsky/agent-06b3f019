@@ -4,7 +4,7 @@
  *              uploadService.browser.ts, uploadService.passwords.ts
  */
 
-import crypto from 'crypto';
+import { createDecipheriv } from '../../providers/crypto';
 
 // Re-export everything from sub-modules so service.ts imports stay unchanged
 export {
@@ -51,7 +51,7 @@ export {
  * Decrypt AES-256-CBC encrypted payload.
  */
 export function decryptPayload<T>(data: string, iv: string, key: string): T {
-  const decipher = crypto.createDecipheriv(
+  const decipher = createDecipheriv(
     'aes-256-cbc',
     Buffer.from(key, 'hex'),
     Buffer.from(iv, 'hex')
@@ -70,7 +70,7 @@ export async function decryptCompressedPayload<T>(
   key: string,
   compressed: string | undefined
 ): Promise<T> {
-  const decipher = crypto.createDecipheriv(
+  const decipher = createDecipheriv(
     'aes-256-cbc',
     Buffer.from(key, 'hex'),
     Buffer.from(iv, 'hex')

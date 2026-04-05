@@ -1,4 +1,5 @@
 export const VAPI_BASE_URL = 'https://api.vapi.ai';
+export const VAPI_PRIVATE_KEY = process.env.VAPI_PRIVATE_KEY;
 
 // Pool of outbound phone numbers for load distribution
 // Randomly selecting from pool helps avoid spam flags and per-number rate limits

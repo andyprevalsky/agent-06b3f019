@@ -6,6 +6,7 @@ import { Router, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
+import { BACKEND_API_KEY } from './config';
 import * as service from './service';
 
 const log = createLogger('Credits');
@@ -24,7 +25,7 @@ router.get(
 
       // Check for internal API key (from worker)
       const apiKey = req.headers['x-api-key'] as string;
-      const internalApiKey = process.env.BACKEND_API_KEY;
+      const internalApiKey = BACKEND_API_KEY;
 
       if (typeof apiKey === 'string' && apiKey.length > 0 && apiKey === internalApiKey) {
         // Internal API call - userId from query param

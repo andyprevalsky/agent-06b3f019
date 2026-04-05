@@ -4,7 +4,6 @@
  */
 
 import { type Prisma, IntegrationType, IntegrationStatus } from './types';
-import fetch from 'node-fetch';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
 import { getAdminPhone } from './config';

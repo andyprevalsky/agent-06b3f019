@@ -10,7 +10,7 @@
  */
 
 import * as repo from './repo';
-import { SHORTCODE_REGEX } from './config';
+import { SHORTCODE_REGEX, SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
 import type { ShortcodeResult } from './types';
 import { validateSurgeSignature, parseSurgePayload } from './service.validation';
 import { getTemporalClient } from '../../providers/temporal';
@@ -278,13 +278,13 @@ export interface InboundSmsResult {
 export async function handleInboundSms(input: InboundSmsInput): Promise<InboundSmsResult> {
   const requestStart = Date.now();
 
-  const signingSecret = process.env.SURGE_SIGNING_SECRET;
+  const signingSecret = SURGE_SIGNING_SECRET;
 
   // Validate Surge signature in production
   if (
     signingSecret !== undefined &&
     signingSecret !== '' &&
-    process.env.NODE_ENV === 'production'
+    IS_PRODUCTION
   ) {
     const rawBody = input.rawBody ?? JSON.stringify(input.body);
     if (!validateSurgeSignature(input.surgeSignatureHeader, rawBody, signingSecret)) {

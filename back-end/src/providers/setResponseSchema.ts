@@ -5,6 +5,10 @@
 
 import { z } from 'zod';
 import { prisma } from './database';
+import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
+
+const log = createLogger('ResponseSchema');
 
 // Use local Supabase functions in development, production URL otherwise
 const SUPABASE_FUNCTIONS_URL =
@@ -220,11 +224,9 @@ SUPPORTED TYPES:
       const tokensOut = data.usage?.completion_tokens || 0;
 
       const durationMs = Date.now() - startTime;
-      console.log('✅ Generated response schema via Rose Lite', {
+      log.info('Generated response schema via Rose Lite', {
         goal: goal.substring(0, 50),
-        reasoning: result.reasoning,
         fieldCount: result.fields.length,
-        fields: result.fields.map((f) => f.name),
         tokensIn,
         tokensOut,
         durationMs,
@@ -248,10 +250,10 @@ SUPPORTED TYPES:
       lastError = error;
       const shouldRetry = attempt < maxGenerationAttempts && isRetryableSchemaError(error);
 
-      console.warn('⚠️ Response schema generation attempt failed', {
+      log.warn('Response schema generation attempt failed', {
         attempt,
         maxGenerationAttempts,
-        error: error instanceof Error ? error.message : error,
+        error: error instanceof Error ? error.message : String(error),
         shouldRetry,
       });
 
@@ -280,52 +282,47 @@ function sleep(ms: number): Promise<void> {
  * This function runs in the background (fire-and-forget).
  */
 export async function setResponseSchema(agentId: string): Promise<void> {
-  console.log('📋 setResponseSchema called', { agentId });
-  const maxRetries = 4;
-  const baseDelayMs = 100;
+  log.info('setResponseSchema called', { agentId });
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      console.log(`📋 setResponseSchema attempt ${attempt + 1}/${maxRetries}`, { agentId });
-      // Fetch agent goal from DB
-      const agent = await prisma.agent.findUnique({
-        where: { id: agentId },
-        select: { goal: true, tokensIn: true, tokensOut: true },
-      });
+  try {
+    await retryWithBackoff(
+      async () => {
+        // Fetch agent goal from DB
+        const agent = await prisma.agent.findUnique({
+          where: { id: agentId },
+          select: { goal: true, tokensIn: true, tokensOut: true },
+        });
 
-      if (!agent) {
-        console.error(`❌ Agent ${agentId} not found, cannot set response schema`);
-        return;
+        if (!agent) {
+          log.error(`Agent ${agentId} not found, cannot set response schema`);
+          return;
+        }
+
+        // Generate schema using Rose Lite
+        const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal);
+
+        // Update agent with schema and token usage
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: {
+            responseSchema: schema,
+            tokensIn: agent.tokensIn + tokensIn,
+            tokensOut: agent.tokensOut + tokensOut,
+          },
+        });
+
+        log.info(`Set response schema for agent ${agentId}`);
+      },
+      {
+        maxRetries: 4,
+        initialBackoffMs: 100,
+        isRetryable: () => true,
+        component: 'ResponseSchema',
       }
-
-      // Generate schema using Rose Lite
-      const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal);
-
-      // Update agent with schema and token usage
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: {
-          responseSchema: schema,
-          tokensIn: agent.tokensIn + tokensIn,
-          tokensOut: agent.tokensOut + tokensOut,
-        },
-      });
-
-      console.log(`✅ Set response schema for agent ${agentId}`);
-      return;
-    } catch (error) {
-      const delayMs = baseDelayMs * Math.pow(2, attempt);
-      console.error(
-        `❌ Failed to set response schema for agent ${agentId} (attempt ${attempt + 1}/${maxRetries})`,
-        error instanceof Error ? error.message : error
-      );
-
-      if (attempt < maxRetries - 1) {
-        console.log(`⏳ Retrying in ${delayMs}ms...`);
-        await sleep(delayMs);
-      }
-    }
+    );
+  } catch (error) {
+    log.error(`Exhausted retries for setting response schema on agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
-
-  console.error(`❌ Exhausted retries for setting response schema on agent ${agentId}`);
 }

@@ -98,6 +98,8 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 14. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
 
+15. **Cross-cutting concerns must flow through `providers/`** - Domain code must never directly use infrastructure (raw `fetch`, `process.env`, retry loops, npm clients like `stripe`/`ioredis`). Use the canonical provider. Run `/enforce-canonical-utility` to audit and enforce via ESLint.
+
 ## Plans
 
 All implementation plans live in `docs/plans/` (checked into the repo):

@@ -17,6 +17,7 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { SteelRateLimitError } from '../../providers/steel';
+// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {

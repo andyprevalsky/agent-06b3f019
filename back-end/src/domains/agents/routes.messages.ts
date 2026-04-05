@@ -5,6 +5,7 @@
 
 import { type Response, Router } from 'express';
 import { z } from 'zod';
+// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';

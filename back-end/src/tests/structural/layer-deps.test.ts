@@ -15,6 +15,10 @@
  *   8. No circular imports within domains
  *   9. server.ts wires from domains/, not routes/
  *
+ * Cross-cutting concern enforcement (canonical utilities) is handled by
+ * ESLint custom rules in eslint.config.mjs, not by structural tests.
+ * See /enforce-canonical-utility skill.
+ *
  * Usage:
  *   npx tsx src/tests/structural/layer-deps.test.ts
  */

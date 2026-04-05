@@ -9,7 +9,7 @@
  *   Signed payload: "<timestamp>.<raw_body>"
  */
 
-import crypto from 'crypto';
+import { createHmac, timingSafeEqual } from '../../providers/crypto';
 import type { ParsedSurgeMessage } from './types';
 import { createLogger } from '../../providers/logger';
 
@@ -58,7 +58,7 @@ export function validateSurgeSignature(
   // Reconstruct signed payload: "<timestamp>.<raw_body>"
   const signedPayload = `${timestamp}.${rawBody}`;
 
-  const hmac = crypto.createHmac('sha256', signingSecret);
+  const hmac = createHmac('sha256', signingSecret);
   hmac.update(signedPayload, 'utf-8');
   const expectedSignature = hmac.digest('hex');
 
@@ -67,7 +67,7 @@ export function validateSurgeSignature(
   if (sigBuffer.length !== expectedBuffer.length) {
     return false;
   }
-  return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+  return timingSafeEqual(sigBuffer, expectedBuffer);
 }
 
 /**

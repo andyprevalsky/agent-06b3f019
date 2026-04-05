@@ -44,6 +44,7 @@ export const prisma =
         const maxRetries = 3;
         let lastError;
 
+        // eslint-disable-next-line no-restricted-syntax -- Prisma $extends middleware can't use retryWithBackoff (wraps query(args) inside $allOperations)
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
           try {
             return await query(args);

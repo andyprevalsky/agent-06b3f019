@@ -2,6 +2,7 @@
  * Browser-session domain config — constants, defaults, env reads.
  */
 
+// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured in domain config
 import multer from 'multer';
 
 // Configure multer for file uploads (store in memory)

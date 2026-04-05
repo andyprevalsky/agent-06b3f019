@@ -1,0 +1,155 @@
+/**
+ * Canonical retry utilities.
+ *
+ * ALL retry/backoff logic in the codebase must use these functions.
+ * Hand-rolled retry loops are banned by ESLint no-restricted-syntax
+ * rules in eslint.config.mjs.
+ *
+ * Two flavors:
+ *   retryWithBackoff  — for network/API calls with exponential backoff
+ *   retryOnCollision  — for unique-constraint collisions (immediate retry)
+ */
+
+import { createLogger } from './logger';
+
+const log = createLogger('Retry');
+
+// ── Types ──
+
+export interface RetryOptions {
+  /** Maximum number of attempts (default: 3) */
+  maxRetries?: number;
+  /** Initial backoff delay in ms (default: 1000). Doubles each attempt. */
+  initialBackoffMs?: number;
+  /** Fixed backoff delays per attempt. Overrides exponential if provided. */
+  fixedDelays?: number[];
+  /** HTTP status codes that should trigger a retry (default: 408, 429, 502, 503, 504) */
+  retryableStatusCodes?: Set<number>;
+  /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
+  isRetryable?: (error: unknown) => boolean;
+  /** Component name for log messages (default: 'Retry') */
+  component?: string;
+}
+
+export interface CollisionRetryOptions {
+  /** Maximum collision retry attempts (default: 5) */
+  maxAttempts?: number;
+  /** Prisma error code that signals a collision (default: 'P2002') */
+  collisionCode?: string;
+  /** Component name for log messages */
+  component?: string;
+}
+
+// ── Default retryable status codes ──
+
+const DEFAULT_RETRYABLE_STATUS_CODES = new Set([408, 429, 502, 503, 504]);
+
+// ── Helpers ──
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getBackoffDelay(attempt: number, opts: RetryOptions): number {
+  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+    return opts.fixedDelays[attempt - 1];
+  }
+  const base = opts.initialBackoffMs ?? 1000;
+  return base * Math.pow(2, attempt - 1);
+}
+
+function defaultIsRetryable(error: unknown): boolean {
+  // Network errors (fetch throws on connection refused, timeout, etc.)
+  if (error instanceof TypeError) return true;
+  // Errors with a retryable flag
+  if (error instanceof Error && 'retryable' in error) return (error as { retryable: boolean }).retryable;
+  return false;
+}
+
+// ── Exported utilities ──
+
+/**
+ * Retry an async operation with exponential backoff.
+ *
+ * Usage:
+ *   const result = await retryWithBackoff(() => fetch(url), {
+ *     maxRetries: 3,
+ *     initialBackoffMs: 1000,
+ *     component: 'SupabaseCompletions',
+ *   });
+ */
+export async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  opts: RetryOptions = {}
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 3;
+  const component = opts.component ?? 'Retry';
+  const isRetryable = opts.isRetryable ?? defaultIsRetryable;
+
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await fn();
+
+      if (attempt > 1) {
+        log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
+      }
+
+      return result;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < maxRetries && isRetryable(error)) {
+        const delay = getBackoffDelay(attempt, opts);
+        log.warn(`${component}: attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await sleep(delay);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Retry an operation that may hit a unique-constraint collision (Prisma P2002).
+ * No backoff — retries immediately with a new generated value.
+ *
+ * Usage:
+ *   const code = await retryOnCollision(() => createShortcode(), {
+ *     maxAttempts: 5,
+ *     component: 'SMS Shortcode',
+ *   });
+ */
+export async function retryOnCollision<T>(
+  fn: () => Promise<T>,
+  opts: CollisionRetryOptions = {}
+): Promise<T> {
+  const maxAttempts = opts.maxAttempts ?? 5;
+  const collisionCode = opts.collisionCode ?? 'P2002';
+  const component = opts.component ?? 'Retry';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      const isPrismaCollision =
+        error instanceof Error &&
+        'code' in error &&
+        (error as { code: string }).code === collisionCode;
+
+      if (!isPrismaCollision || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      log.warn(`${component}: collision on attempt ${attempt}/${maxAttempts}, retrying`);
+    }
+  }
+
+  throw new Error(`${component}: failed to generate unique value after ${maxAttempts} attempts`);
+}

@@ -16,3 +16,5 @@ export const DEFAULT_SEARCH_LIMIT = 3;
 
 /** OpenAI embedding model used for blueprint embeddings */
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
+
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
