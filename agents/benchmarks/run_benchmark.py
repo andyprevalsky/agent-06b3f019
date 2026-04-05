@@ -197,7 +197,7 @@ async def get_attention_requests(base_url: str) -> list:
         )
         if resp.status_code == 200:
             data = resp.json()
-            # API returns {"requests": [...]} — unwrap
+            # Handle both bare list and {requests: [...]} envelope
             if isinstance(data, dict):
                 return data.get("requests", [])
             return data
@@ -207,14 +207,30 @@ async def get_attention_requests(base_url: str) -> list:
 async def respond_to_attention_request(
     base_url: str, request_id: str, response: str
 ) -> None:
-    """POST /api/attention-requests/:id/respond"""
+    """Approve or reject an attention request.
+
+    Uses /respond for approvals and /reject for denials, because the
+    workflow checks for the __REJECTED__ sentinel (only sent by /reject).
+    """
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        await client.post(
-            f"{base_url}/api/attention-requests/{request_id}/respond",
-            headers=headers,
-            json={"response": response},
-        )
+        if response == "denied":
+            resp = await client.post(
+                f"{base_url}/api/attention-requests/{request_id}/reject",
+                headers=headers,
+                json={},
+            )
+        else:
+            resp = await client.post(
+                f"{base_url}/api/attention-requests/{request_id}/respond",
+                headers=headers,
+                json={"response": response},
+            )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Failed to respond to attention request {request_id}: "
+                f"status={resp.status_code} body={resp.text[:200]}"
+            )
 
 
 async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
@@ -502,7 +518,7 @@ async def poll_agent(
                 pending = await get_attention_requests(base_url)
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
-                    if req_agent_id in tree_agent_ids and not req.get("response"):
+                    if req_agent_id in tree_agent_ids and not req.get("answered"):
                         approvals_triggered += 1
                         req_id = req.get("id")
                         if task.approval_handling == "auto_approve":
@@ -517,10 +533,7 @@ async def poll_agent(
                                 question = req.get("question", req.get("message", "(no details)"))
                                 print(f"\n    🔔 APPROVAL REQUIRED: {question[:200]}")
                                 if not sys.stdin.isatty():
-                                    print(f"    ⚠ Non-interactive environment — auto-denying {req_id[:8]}")
-                                    await respond_to_attention_request(
-                                        base_url, req_id, "denied"
-                                    )
+                                    print(f"    ⏸ Non-interactive environment — skipping {req_id[:8]} (leave for user to review)")
                                     continue
                                 loop = asyncio.get_event_loop()
                                 answer = (await loop.run_in_executor(None, input, "    Approve? [y/n]: ")).strip().lower()

@@ -49,7 +49,7 @@ router.post(
       const userId =
         req.userId ??
         (req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : undefined);
-      if ((userId === undefined || userId === null) && req.isInternal !== true) {
+      if ((userId === undefined || userId === '') && req.isInternal !== true) {
         res.status(401).json({ error: 'User not authenticated' });
         return;
       }
@@ -65,13 +65,14 @@ router.post(
   })
 );
 
+
 // POST /:id/messages
 router.post(
   '/:id/messages',
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      if (req.userId === undefined && req.isInternal !== true) {
+      if ((req.userId === undefined || req.userId === '') && req.isInternal !== true) {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -104,7 +105,7 @@ router.post(
         res.status(400).json({ error: 'No file uploaded' });
         return;
       }
-      if (req.userId === undefined) {
+      if (req.userId === undefined || req.userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
@@ -134,7 +135,7 @@ router.get(
         res.status(400).json({ error: 'storage_path query parameter is required' });
         return;
       }
-      if (req.userId === undefined) {
+      if (req.userId === undefined || req.userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
