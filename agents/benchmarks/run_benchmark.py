@@ -3,7 +3,7 @@
 """
 Agent Benchmark Harness
 
-Spawns real agents against prod (or localhost), polls for completion,
+Spawns real agents against localhost (or prod via --url), polls for completion,
 evaluates pass/fail, handles approvals, retries transient failures,
 and stores results for comparison.
 
@@ -60,9 +60,10 @@ from benchmarks.logs import (
     load_env_var, start_fly_log_collector, stop_fly_log_collector,
 )
 
-# Defaults — benchmarks run against PROD by default (no local services needed)
+# Defaults — benchmarks run against localhost by default (local services must be running)
+_conductor_port = os.environ.get("CONDUCTOR_PORT", "3001")
 DEFAULT_BASE_URL = os.environ.get(
-    "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
+    "BENCHMARK_BASE_URL", f"http://localhost:{_conductor_port}"
 )
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
