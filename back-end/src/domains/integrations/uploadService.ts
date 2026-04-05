@@ -51,11 +51,7 @@ export {
  * Decrypt AES-256-CBC encrypted payload.
  */
 export function decryptPayload<T>(data: string, iv: string, key: string): T {
-  const decipher = createDecipheriv(
-    'aes-256-cbc',
-    Buffer.from(key, 'hex'),
-    Buffer.from(iv, 'hex')
-  );
+  const decipher = createDecipheriv('aes-256-cbc', Buffer.from(key, 'hex'), Buffer.from(iv, 'hex'));
   let decrypted = decipher.update(data, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return JSON.parse(decrypted) as T;
@@ -70,11 +66,7 @@ export async function decryptCompressedPayload<T>(
   key: string,
   compressed: string | undefined
 ): Promise<T> {
-  const decipher = createDecipheriv(
-    'aes-256-cbc',
-    Buffer.from(key, 'hex'),
-    Buffer.from(iv, 'hex')
-  );
+  const decipher = createDecipheriv('aes-256-cbc', Buffer.from(key, 'hex'), Buffer.from(iv, 'hex'));
 
   const decryptedBuffer = Buffer.concat([
     decipher.update(Buffer.from(data, 'hex')),

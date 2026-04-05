@@ -126,7 +126,9 @@ export async function createStreamingCompletion(
         const errorText = await response.text();
         if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
           const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-          log.warn(`Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`);
+          log.warn(
+            `Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
+          );
           await new Promise((r) => setTimeout(r, backoff));
           lastError = new Error(`Supabase completions failed: ${response.status} ${errorText}`);
           continue;

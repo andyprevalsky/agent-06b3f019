@@ -80,7 +80,9 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
           lastError = new Error(`Parallel AI Search API error ${response.status}: ${errorText}`);
           if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
             const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-            log.warn(`Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`);
+            log.warn(
+              `Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
+            );
             await new Promise((r) => setTimeout(r, backoff));
             continue;
           }

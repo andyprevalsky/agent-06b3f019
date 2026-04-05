@@ -270,7 +270,7 @@ export async function closeClaudeCodeSession(
         const jsonlFiles = findJsonlResult.stdout.split('\n').filter((f) => f.trim());
         console.log(`[E2B] Found ${jsonlFiles.length} JSONL files for usage extraction`);
 
-        let totalUsage: ClaudeCodeUsage = {
+        const totalUsage: ClaudeCodeUsage = {
           inputTokens: 0,
           outputTokens: 0,
           cacheReadInputTokens: 0,

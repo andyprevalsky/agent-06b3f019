@@ -21,9 +21,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
 
     if (activeBrowserSessions.length > 0) {
-      log.info(
-        `Closing ${activeBrowserSessions.length} Steel session(s) for agent ${agentId}`
-      );
+      log.info(`Closing ${activeBrowserSessions.length} Steel session(s) for agent ${agentId}`);
     }
 
     for (const session of activeBrowserSessions) {
@@ -53,9 +51,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
 
     if (activeCodeSessions.length > 0) {
-      log.info(
-        `Killing ${activeCodeSessions.length} E2B sandbox(es) for agent ${agentId}`
-      );
+      log.info(`Killing ${activeCodeSessions.length} E2B sandbox(es) for agent ${agentId}`);
     }
 
     for (const session of activeCodeSessions) {

@@ -1,4 +1,9 @@
-import { VAPI_BASE_URL, VAPI_PRIVATE_KEY, OUTBOUND_PHONE_NUMBER_POOL, BASE_SYSTEM_PROMPT } from './config';
+import {
+  VAPI_BASE_URL,
+  VAPI_PRIVATE_KEY,
+  OUTBOUND_PHONE_NUMBER_POOL,
+  BASE_SYSTEM_PROMPT,
+} from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
 import { createLogger } from '../../providers/logger';

@@ -62,7 +62,8 @@ function defaultIsRetryable(error: unknown): boolean {
   // Network errors (fetch throws on connection refused, timeout, etc.)
   if (error instanceof TypeError) return true;
   // Errors with a retryable flag
-  if (error instanceof Error && 'retryable' in error) return (error as { retryable: boolean }).retryable;
+  if (error instanceof Error && 'retryable' in error)
+    return (error as { retryable: boolean }).retryable;
   return false;
 }
 

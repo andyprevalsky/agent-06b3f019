@@ -281,11 +281,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
   const signingSecret = SURGE_SIGNING_SECRET;
 
   // Validate Surge signature in production
-  if (
-    signingSecret !== undefined &&
-    signingSecret !== '' &&
-    IS_PRODUCTION
-  ) {
+  if (signingSecret !== undefined && signingSecret !== '' && IS_PRODUCTION) {
     const rawBody = input.rawBody ?? JSON.stringify(input.body);
     if (!validateSurgeSignature(input.surgeSignatureHeader, rawBody, signingSecret)) {
       log.error('Invalid Surge signature', {

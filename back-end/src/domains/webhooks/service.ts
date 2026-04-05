@@ -6,14 +6,9 @@ import { getUserUsage } from '../../providers/credits';
 import { createLogger } from '../../providers/logger';
 import { getTemporalClient } from '../../providers/temporal';
 import * as repo from './repo';
-import {
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  STRIPE_WEBHOOK_SECRET,
-} from './config';
+import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, STRIPE_WEBHOOK_SECRET } from './config';
 
 const log = createLogger('Webhooks');
-
 
 /**
  * Verify and construct a Stripe webhook event from raw body + signature

@@ -4,7 +4,13 @@
  */
 
 import { randomBytes, createCipheriv, publicEncrypt, constants } from '../../providers/crypto';
-import { type CacheStoragePayload, type PasswordPayload, type ApplePasswordEntry, IntegrationType, IntegrationStatus } from './types';
+import {
+  type CacheStoragePayload,
+  type PasswordPayload,
+  type ApplePasswordEntry,
+  IntegrationType,
+  IntegrationStatus,
+} from './types';
 import { createLogger } from '../../providers/logger';
 import { RSA_PUBLIC_KEY_PEM } from './config';
 import * as repo from './repo';

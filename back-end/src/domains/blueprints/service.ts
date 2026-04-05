@@ -6,7 +6,12 @@
 import OpenAI from 'openai';
 import type { Prisma, BlueprintMetadata } from './types';
 import { createLogger } from '../../providers/logger';
-import { SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT, EMBEDDING_MODEL, OPENAI_API_KEY } from './config';
+import {
+  SIMILARITY_THRESHOLD,
+  DEFAULT_SEARCH_LIMIT,
+  EMBEDDING_MODEL,
+  OPENAI_API_KEY,
+} from './config';
 import * as repo from './repo';
 
 const log = createLogger('Blueprints');

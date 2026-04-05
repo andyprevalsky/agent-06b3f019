@@ -164,9 +164,7 @@ export async function fetchPoolToken(
     const config = poolIntegration.config as Record<string, unknown> | null;
     const encryptedCredentials = config?.encryptedCredentials as string | undefined;
     if (!encryptedCredentials) {
-      log.error(
-        `Pool integration ${poolIntegration.id} missing encryptedCredentials`
-      );
+      log.error(`Pool integration ${poolIntegration.id} missing encryptedCredentials`);
       return null;
     }
 
@@ -179,9 +177,7 @@ export async function fetchPoolToken(
     const parsed = JSON.parse(decrypted);
     const oauth = parsed?.claudeAiOauth;
     if (!oauth?.accessToken) {
-      log.error(
-        `Pool integration ${poolIntegration.id} missing accessToken`
-      );
+      log.error(`Pool integration ${poolIntegration.id} missing accessToken`);
       return null;
     }
 

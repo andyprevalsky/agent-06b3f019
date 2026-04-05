@@ -1,10 +1,6 @@
 import { stripe } from '../../providers/stripe';
 import * as repo from './repo';
-import {
-  IS_PRODUCTION,
-  RETURN_URL_PRODUCTION,
-  RETURN_URL_DEVELOPMENT,
-} from './config';
+import { IS_PRODUCTION, RETURN_URL_PRODUCTION, RETURN_URL_DEVELOPMENT } from './config';
 
 export class NotFoundError extends Error {
   constructor(msg: string) {
