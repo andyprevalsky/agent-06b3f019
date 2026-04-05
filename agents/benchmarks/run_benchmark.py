@@ -195,7 +195,11 @@ async def get_attention_requests(base_url: str) -> list:
             f"{base_url}/api/attention-requests", headers=headers
         )
         if resp.status_code == 200:
-            return resp.json()
+            data = resp.json()
+            # API returns {"requests": [...]} — unwrap
+            if isinstance(data, dict):
+                return data.get("requests", [])
+            return data
         return []
 
 
