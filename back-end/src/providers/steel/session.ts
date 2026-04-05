@@ -2,11 +2,11 @@
  * Steel session management — create, close, resume, validate.
  */
 
-import Steel from "steel-sdk";
-import { prisma } from "../database";
-import { logJson } from "../../utils/log";
-import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from "../geoip";
-import { SteelRateLimitError, type FingerprintData, log } from "./types";
+import Steel from 'steel-sdk';
+import { prisma } from '../database';
+import { logJson } from '../../utils/log';
+import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
+import { SteelRateLimitError, type FingerprintData, log } from './types';
 
 // Validate required environment variables
 if (!process.env.STEEL_API_KEY) {
@@ -278,7 +278,9 @@ export async function createSessionWithContext(
       };
     } catch (error) {
       // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
-      const status = (error as Record<string, unknown>)?.status ?? (error as Record<string, unknown>)?.statusCode;
+      const status =
+        (error as Record<string, unknown>)?.status ??
+        (error as Record<string, unknown>)?.statusCode;
       if (status === 429) {
         const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
         log.info(`  ⚠️ Steel rate limit (429): ${msg}`);
@@ -313,7 +315,9 @@ export async function closeSession(
     // Release the Steel session
     await steel.sessions.release(sessionId);
   } catch (error) {
-    log.error('Failed to close session in Steel', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Failed to close session in Steel', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     // Continue to update DB even if Steel call fails
   }
 
@@ -452,7 +456,9 @@ export async function resumeSession(
           log.info(`  ✅ Navigation complete`);
           await browser.close();
         } catch (navError) {
-          log.error('Failed to navigate to saved URL', { error: navError instanceof Error ? navError.message : String(navError) });
+          log.error('Failed to navigate to saved URL', {
+            error: navError instanceof Error ? navError.message : String(navError),
+          });
         }
       }
 
@@ -482,7 +488,9 @@ export async function resumeSession(
         savedUrl: oldSession.currentUrl || oldSession.startUrl || undefined,
       };
     } catch (error) {
-      const status = (error as Record<string, unknown>)?.status ?? (error as Record<string, unknown>)?.statusCode;
+      const status =
+        (error as Record<string, unknown>)?.status ??
+        (error as Record<string, unknown>)?.statusCode;
       if (status === 429) {
         const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
         log.info(`  ⚠️ Steel rate limit (429): ${msg}`);
@@ -536,7 +544,9 @@ export async function closeAllActiveSessions(): Promise<number> {
       await closeSession(session.sessionId);
       closedCount++;
     } catch (error) {
-      log.error(`Failed to close session ${session.sessionId}`, { error: error instanceof Error ? error.message : String(error) });
+      log.error(`Failed to close session ${session.sessionId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

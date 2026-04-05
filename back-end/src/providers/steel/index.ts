@@ -2,8 +2,8 @@
  * Steel provider — browser session management via Steel.dev API.
  */
 
-export { SteelRateLimitError } from "./types";
-export type { SteelFileInfo } from "./types";
+export { SteelRateLimitError } from './types';
+export type { SteelFileInfo } from './types';
 export {
   getOrCreateContext,
   createSessionWithContext,
@@ -11,6 +11,6 @@ export {
   resumeSession,
   getSession,
   closeAllActiveSessions,
-} from "./session";
-export { injectUserData } from "./injection";
-export { uploadFileToSession, listSessionFiles, getFingerprintInjectionData } from "./files";
+} from './session';
+export { injectUserData } from './injection';
+export { uploadFileToSession, listSessionFiles, getFingerprintInjectionData } from './files';

@@ -2,9 +2,9 @@
  * Steel provider types and error classes.
  */
 
-import { createLogger } from "../logger";
+import { createLogger } from '../logger';
 
-export const log = createLogger("Steel");
+export const log = createLogger('Steel');
 
 /**
  * Thrown when Steel.dev returns HTTP 429 (concurrent session limit reached).

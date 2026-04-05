@@ -2,9 +2,9 @@
  * Steel browser data injection — cookies, fingerprint, localStorage, IndexedDB, permissions, cacheStorage.
  */
 
-import { prisma } from "../database";
-import { buildFingerprintScript } from "./injectionScripts";
-import { type FingerprintData, log } from "./types";
+import { prisma } from '../database';
+import { buildFingerprintScript } from './injectionScripts';
+import { type FingerprintData, log } from './types';
 
 export async function injectUserData(
   sessionId: string,
@@ -153,7 +153,9 @@ export async function injectUserData(
             log.info(`  [cookies] ✅ Injected (${Date.now() - startTime}ms)`);
             cookieResult = { injected: true, cookieCount: validCookies.length };
           } catch (error) {
-            log.error('Failed to inject cookies', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject cookies', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -222,12 +224,13 @@ export async function injectUserData(
             // 2d. Inject comprehensive JS fingerprint spoofing script
             const fingerprintScript = buildFingerprintScript(fp);
 
-
             await context.addInitScript(fingerprintScript);
             log.info(`  [fingerprint] ✅ Injected (${Date.now() - startTime}ms)`);
             fingerprintResult = { injected: true };
           } catch (error) {
-            log.error('Failed to inject fingerprint', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject fingerprint', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -286,7 +289,9 @@ export async function injectUserData(
             log.info(`  [localStorage] ✅ Injected (${Date.now() - startTime}ms)`);
             localStorageResult = { injected: true, originCount: localStorageOrigins.length };
           } catch (error) {
-            log.error('Failed to inject localStorage', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject localStorage', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -418,7 +423,9 @@ export async function injectUserData(
             log.info(`  [indexedDB] ✅ Injected (${Date.now() - startTime}ms)`);
             indexedDBResult = { injected: true, originCount: indexedDBOrigins.length };
           } catch (error) {
-            log.error('Failed to inject indexedDB', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject indexedDB', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -496,7 +503,9 @@ export async function injectUserData(
             log.info(`  [permissions] ✅ Injected (${Date.now() - startTime}ms)`);
             permissionsResult = { injected: true, grantCount: permissions.length };
           } catch (error) {
-            log.error('Failed to inject permissions', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject permissions', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -556,7 +565,9 @@ export async function injectUserData(
             log.info(`  [cacheStorage] ✅ Injected (${Date.now() - startTime}ms)`);
             cacheStorageResult = { injected: true, originCount: cacheStorageOrigins.length };
           } catch (error) {
-            log.error('Failed to inject cacheStorage', { error: error instanceof Error ? error.message : String(error) });
+            log.error('Failed to inject cacheStorage', {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         })()
       );
@@ -595,7 +606,9 @@ export async function injectUserData(
             `  [scrollbar] ✅ CSS injected for consistent 1280x800 viewport (${Date.now() - startTime}ms)`
           );
         } catch (error) {
-          log.error('Failed to inject scrollbar CSS', { error: error instanceof Error ? error.message : String(error) });
+          log.error('Failed to inject scrollbar CSS', {
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       })()
     );

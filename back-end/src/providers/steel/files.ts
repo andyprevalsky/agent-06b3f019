@@ -2,9 +2,9 @@
  * Steel file operations and fingerprint data retrieval.
  */
 
-import { prisma } from "../database";
-import { steel } from "./session";
-import { type FingerprintData, type SteelFileInfo, log } from "./types";
+import { prisma } from '../database';
+import { steel } from './session';
+import { type FingerprintData, type SteelFileInfo, log } from './types';
 
 /**
  * Upload a file to an active Steel session.
@@ -40,7 +40,9 @@ export async function uploadFileToSession(
       size: uploadedFile.size || fileBuffer.length,
     };
   } catch (error) {
-    log.error(`Failed to upload file '${filename}'`, { error: error instanceof Error ? error.message : String(error) });
+    log.error(`Failed to upload file '${filename}'`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw error;
   }
 }
@@ -60,12 +62,11 @@ export async function listSessionFiles(sessionId: string): Promise<SteelFileInfo
 
     // Steel SDK returns an object with data or files array, extract it
     const response = filesResponse as unknown as Record<string, unknown>;
-    const files: SteelFileInfo[] = (
+    const files: SteelFileInfo[] =
       (response.data as SteelFileInfo[]) ||
       (response.files as SteelFileInfo[]) ||
       (filesResponse as unknown as SteelFileInfo[]) ||
-      []
-    );
+      [];
 
     log.info(`Found ${files.length} file(s)`);
     for (const file of files) {
@@ -78,7 +79,9 @@ export async function listSessionFiles(sessionId: string): Promise<SteelFileInfo
       lastModified: f.lastModified,
     }));
   } catch (error) {
-    log.error('Failed to list files', { error: error instanceof Error ? error.message : String(error) });
+    log.error('Failed to list files', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     // Return empty array on error (session may have no files)
     return [];
   }

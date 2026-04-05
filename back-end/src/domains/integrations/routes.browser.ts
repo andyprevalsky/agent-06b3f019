@@ -36,9 +36,15 @@ function hasEncryptedFields(body: Record<string, unknown>): body is {
 } {
   const { data, iv, key } = body;
   return (
-    data !== undefined && data !== null && data !== '' &&
-    iv !== undefined && iv !== null && iv !== '' &&
-    key !== undefined && key !== null && key !== ''
+    data !== undefined &&
+    data !== null &&
+    data !== '' &&
+    iv !== undefined &&
+    iv !== null &&
+    iv !== '' &&
+    key !== undefined &&
+    key !== null &&
+    key !== ''
   );
 }
 

@@ -42,7 +42,9 @@ export interface CollisionRetryOptions {
 
 // ── Default retryable status codes ──
 
-export const DEFAULT_RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([408, 429, 502, 503, 504]);
+export const DEFAULT_RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
+  408, 429, 502, 503, 504,
+]);
 
 // ── Helpers ──
 

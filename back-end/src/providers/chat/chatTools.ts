@@ -128,7 +128,9 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
     const answer = formatSearchResults(results);
 
     // Extract sources
-    const sources = results.filter((r): r is SearchResult & { url: string } => r.url !== undefined).map((r) => r.url);
+    const sources = results
+      .filter((r): r is SearchResult & { url: string } => r.url !== undefined)
+      .map((r) => r.url);
 
     log.info('Search complete', {
       answerLength: answer.length,
