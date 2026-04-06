@@ -1,9 +1,9 @@
 # Rose Labs
 
 AI agent platform with model racing infrastructure.
-- Production: https://roselabs.ai
-- Backend API: https://navi-j9a9.onrender.com
-- API Docs: https://docs.roselabs.ai
+- Prod: https://roselabs.ai
+- API: https://navi-j9a9.onrender.com
+- Docs: https://docs.roselabs.ai
 
 ## Architecture
 
@@ -17,337 +17,96 @@ docs/          → API documentation (Mintlify)
 ```
 
 **Key entry points:**
-- `front-end/src/App.tsx` - React app
-- `back-end/src/server.ts` - Express server
-- `agents/worker.py` - Temporal worker
-- `agents/workflows/agent_workflow.py` - Core agent logic
-- `back-end/prisma/schema.prisma` - Database schema (source of truth)
-- `research/supabase/functions/completions/index.ts` - Rose model racing endpoint
-- `mac-app/main/index.ts` - Electron main process
-- `docs/mint.json` - Mintlify docs config
+- `front-end/src/App.tsx` — React app
+- `back-end/src/server.ts` — Express server
+- `agents/worker.py` — Temporal worker
+- `agents/workflows/agent_workflow.py` — Core agent logic
+- `back-end/prisma/schema.prisma` — Database schema (source of truth)
+- `research/supabase/functions/completions/index.ts` — Rose model racing endpoint
+- `mac-app/main/index.ts` — Electron main process
+- `docs/mint.json` — Mintlify docs config
 
-**Mac app releases:** PRs that include `mac-app/` changes should be labeled `MAC-APP-RELEASE`. When a PR with this label is merged, CI automatically bumps the patch version, creates a git tag, and pushes it — which triggers the full release workflow (build, sign, notarize, upload). No manual tagging needed. You can also trigger a release manually by pushing a git tag (e.g., `git tag v1.0.14 && git push origin v1.0.14`). **Any `front-end/` changes also require a mac-app version bump** (new git tag push) so the Electron app rebuilds with the updated frontend.
+Mac app releases: PRs with `mac-app/` changes need `MAC-APP-RELEASE` label. **Any `front-end/` changes also require a mac-app version bump** (new git tag push).
 
-## Development
+## External Context
 
-Run all services via Conductor (see `conductor.json`).
+| Resource | Access |
+|----------|--------|
+| Agent logs | `agents/navi-worker-log.txt` |
+| Backend logs | `back-end/backend-logs.log` |
+| Frontend logs | `front-end/frontend-logs.log` |
+| Mac App logs | `mac-app/mac-app-console-logs.log` |
+| Mac App IPC logs | `mac-app/mac-app-ipc-logs.log` |
+| Research logs | `research/research-logs.log` |
+| Docs logs | `docs/docs-logs.log` |
+| Prod logs (Render/Fly/Supabase) | `docs/internal/prod-logs.md` |
+| LLM call map (all call sites, context gates, token estimates) | `docs/internal/llm-call-map.md` |
+| DB schema | `back-end/prisma/schema.prisma` |
+| Realtime message types | `front-end/src/lib/realtime-types.ts` |
+| Benchmark CLI & prod log review | `agents/benchmarks/README.md` |
+| Plans (active) | `docs/plans/active/` |
+| Plans (completed) | `docs/plans/completed/` |
+| Query DB | `npx tsx back-end/scripts/query-db.ts` (modify as needed) |
+| Backend debug scripts | `back-end/scripts/*.ts` |
+| Agent test scripts | `agents/scripts/*.sh` |
+| Rose API routes | `back-end/src/domains/agents/routes.ts` |
+| API key auth | `back-end/src/providers/hybridAuth.ts` |
+| Completions endpoint | `research/supabase/functions/completions/index.ts` |
 
-**Tests:**
-```bash
-cd back-end && npm run test:api         # Backend API tests
-cd agents && python tests/run_all_tests.py  # Agent tool tests
-cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
-```
+## Guidelines
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference and **prod log review instructions** (how to read Render/Fly.io/Supabase logs from benchmark runs). Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks run against **prod** by default — no local services needed. Before running `--auto` mode, read the docstring at the top of `agents/benchmarks/run_benchmark.py` to understand the full auto-debug-fix-deploy loop.
+### Development
+- **TDD loop** — don't return until tests pass: `while tests_failing: fix_errors(); run_tests()`
+- **Test commands:** `cd back-end && npm run test:api` · `cd agents && python tests/run_all_tests.py` · `cd agents && python tests/e2e/run_e2e_tests.py --basic`
+- **API changes require tests** — add to `back-end/src/tests/api-test-suite.ts`
+- **Benchmarks** run against **prod** by default. CLI: `cd agents && python benchmarks/run_benchmark.py --list`. Read docstring before `--auto` mode.
+- **Search before implementing** — find similar patterns in the codebase first (e.g., study existing tools before adding a new one)
+- **No fallbacks during development** — they obscure whether the primary path actually works
 
-## Log Files
+### Architecture
+- **Cross-cutting concerns flow through `providers/`** — domain code never uses raw `fetch`, `process.env`, retry loops, or npm clients directly
+- **Zod schema changes require approval** — propose before implementing
+- **Defensive fixes are a red flag** — fix root causes, not symptoms
+- **Frontend state diagrams required** — comment at top of stateful components; keep updated when modifying state flow
+- **Feature changes require diagrams** — show how the change fits into system context before writing code
 
-Check these when errors occur:
-- **Agents:** `agents/navi-worker-log.txt`
-- **Backend:** `back-end/backend-logs.log`
-- **Frontend:** `front-end/frontend-logs.log`
-- **Mac App (console):** `mac-app/mac-app-console-logs.log`
-- **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
-- **Research (edge functions):** `research/research-logs.log`
-- **Docs:** `docs/docs-logs.log`
-
-**Prod logs (for benchmark agents):** Benchmark runs auto-collect logs from 3 prod sources into the result JSON (`agents/benchmarks/runs/*.json`):
-- **Render (backend):** HTTP request logs filtered by `agent_id` — via `RENDER_API_KEY` in `back-end/.env`
-- **Fly.io (worker):** Agent execution logs (structlog JSON with `agent_id`) — streamed in real-time via `flyctl logs` during benchmark runs, needs `FLY_API_TOKEN` in `agents/.env`
-- **Supabase (research):** Rose API gateway logs (completions, API key validation) — via `SUPABASE_ACCESS_TOKEN` in `agents/.env`
-
-See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippets to inspect these.
-
-## Critical Rules
-
-1. **TDD loop** - Don't return until tests pass:
-   ```
-   while tests_failing:
-       fix_errors()
-       run_tests()
-   ```
-
-2. **API changes require tests** - Add to `back-end/src/tests/api-test-suite.ts`
-
-3. **No .md files** - Never create markdown docs unless explicitly requested
-
-4. **Zod schema changes require approval** - Propose changes before implementing
-
-5. **Defensive fixes are a red flag** - Fix root causes, not symptoms
-
-6. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
-
-7. **No fallbacks during development** - When testing a new integration, don't add fallback paths; they obscure whether the primary path actually works
-
-8. **Frontend state diagrams required** - All frontend components must have a state machine diagram as a comment at the top of the file; reference and keep this diagram up to date when modifying state flow
-
-9. **Feature changes require diagrams** - When implementing any feature, include a diagram showing how the change fits into the system context before writing code.
-
-10. **Pauses are user-initiated, not fixes** - When debugging, NEVER assume a pause caused a bug/crash. The user sends a pause AFTER noticing something wrong. Pauses are the symptom reporter, not the cause.
-
-11. **Short timeouts, check logs** - Never set bash timeouts longer than 5 minutes; use short timeouts and check task output periodically to ensure long-running tasks complete smoothly.
-
-12. **Do NOT over-truncate** - Never aggressively truncate content, especially important context flows. Truncate SPARINGLY and only when necessary to fit content inside a frontend component (e.g., chip/bubble UI with limited space). When in doubt, keep the full content.
-
-13. **Sync Conductor workspace name on branch change** - Whenever you switch or create a branch, update the Conductor workspace display name to match:
-   ```bash
-   sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-     "UPDATE workspaces SET pr_title = '$(git branch --show-current)' WHERE directory_name = '$(basename \"$PWD\")'"
-   ```
-
-14. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
-
-15. **Cross-cutting concerns must flow through `providers/`** - Domain code must never directly use infrastructure (raw `fetch`, `process.env`, retry loops, npm clients like `stripe`/`ioredis`). Use the canonical provider. Run `/enforce-canonical-utility` to audit and enforce via ESLint.
-
-16. **NEVER use broad process kills** - `pkill -f worker.py`, `pkill -f "npx tsx"`, `pkill -f "run.sh"`, or any pattern-based kill will murder processes in OTHER Conductor workspaces. Only kill by port:
-    ```bash
-    for port in $BACKEND_PORT $HEALTH_PORT $RESEARCH_PORT; do
-        lsof -ti :$port 2>/dev/null | xargs kill -9 2>/dev/null || true
-    done
-    ```
-
-17. **"Pre-existing" is never an excuse** - If a test, smoke test, or benchmark fails, fix it — even if the failure predates your changes. Never skip, bypass, or rationalize a failing check by calling it "pre-existing." A red build is a red build.
-
-## Plans
-
-All implementation plans live in `docs/plans/` (checked into the repo):
-- `docs/plans/active/` — plans currently being implemented
-- `docs/plans/completed/` — plans that have been shipped
-
-Plan filenames should be kept in sync with the description of the task (kebab-case, e.g., `context-pointers.md`).
-
-**Before modifying a file**, check `docs/plans/completed/` for plans that touched those files. Read them to understand implicit business functionality and ensure changes don't break it.
-
-The `/deploy` skill automatically moves the related plan from `active/` to `completed/` before merging (if one exists).
-
-## Temporal/Agent Patterns
-
-- Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`
-- Activities must be **idempotent** - safe on retry
+### Temporal/Agent Patterns
+- Workflows must be **deterministic** — no random, no wall-clock time, use `workflow.now()`
+- Activities must be **idempotent** — safe on retry
 - Error handling: catch → format → yield error event → **don't raise**
 - See `agents/tools/base.py` for ToolManager pattern
+- `agents/tools/spawn_agent.py` imports MUST be at module level (Temporal sandbox restriction — lazy imports trigger `threading.Lock` errors)
 
-## Logging Guidelines
+### Logging
+- Always log: HTTP requests, external calls, workflow events, tool execution, DB mutations, errors
+- Format: `[Component]` prefix, include IDs, truncate payloads to 200 chars
 
-Always log these events (use `[Component]` prefix, include IDs, truncate payloads to 200 chars):
-1. **HTTP requests** - method, path, body, response status, duration
-2. **External calls** - Temporal, LLM, third-party APIs (request + response)
-3. **Workflow events** - phase transitions, signals, completion/failure
-4. **Tool execution** - tool name, input summary, output summary, duration
-5. **DB mutations** - table, operation, record ID
-6. **Errors** - message, stack, context (agentId, userId)
+### Plans
+- All plans live in `docs/plans/` — `active/` for in-progress, `completed/` for shipped. Filenames: kebab-case matching the task (e.g., `context-pointers.md`).
+- **Before modifying a file**, check `docs/plans/completed/` for plans that touched it
+- Plans must have **automated verification** — no manual steps. Ask for resources if needed.
+- `/deploy` automatically moves plans from `active/` to `completed/`
 
-## Test Credentials (Dev)
+### Database
+- **ORM:** Prisma. **RLS:** enabled on all tables. Schema changes: edit `back-end/prisma/schema.prisma`, then migrate.
+- **Realtime:** Supabase DB triggers auto-broadcast INSERT/UPDATE for `Message`/`Agent` tables — no manual broadcasting needed
 
+### Rose API
+- Docs: https://docs.roselabs.ai (localhost:3002 in dev)
+- Completions: `research/supabase/functions/completions/index.ts` · Agents: `back-end/src/domains/agents/routes.ts` · Auth: `back-end/src/providers/hybridAuth.ts`
+
+### Test Credentials (Dev)
 - Supabase URL: `https://kzlurqihzaolhzsbkctf.supabase.co`
-- Test phone: `+19729777432`
-- Test OTP: `181818`
+- Test phone: `+19729777432` · OTP: `181818`
 - Backend API Key: `AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=`
+- Real user ID: `1f85ff25-6e29-4c1b-8739-f917bd101a30` (Andy Prevalsky)
 
-**Query backend locally:**
-```bash
-curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="
-```
-
-## Database
-
-- **ORM:** Prisma
-- **RLS:** Enabled on all tables - users only see their own data
-- **Realtime:** Supabase DB triggers automatically broadcast INSERT/UPDATE events for `Message` and `Agent` tables to the frontend via Supabase Realtime channels. Manual broadcasting is not needed for DB mutations.
-- Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
-- **Query DB:** `npx tsx back-end/scripts/query-db.ts` (modify script as needed)
-
-## Supabase Realtime Messages
-
-All realtime and tool message types are defined in `front-end/src/lib/realtime-types.ts`.
-
-## Rose API
-
-Public API for agents and completions. Docs: https://docs.roselabs.ai (localhost:3002 in dev)
-
-- `docs/` - Mintlify API documentation
-- `research/supabase/functions/completions/index.ts` - Completions endpoint (model racing)
-- `back-end/src/routes/agents.ts` - Agents API (create, poll, pause/resume)
-- `back-end/src/middleware/hybridAuth.ts` - API key authentication
-
-**Test files:**
-- `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
-- `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
-- `research/supabase/functions/completions/test-exact-payload-replay.mjs` - replays a real captured structured-streaming request body from `test-prod-request-body.json`
-- `research/supabase/functions/completions/test-prod-request-body.json` - real captured request-body fixture used by `test-exact-payload-replay.mjs`
-
-## Production Logs (Render)
-
-Fetch backend prod logs via Render API:
-```bash
-# Recent logs (last 50)
-curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-  "https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=50&direction=backward" \
-  | python3 -c "import sys,json; [print(l['message']) for l in json.load(sys.stdin)['logs']]"
-```
-
-Env vars are in `back-end/.env`:
-- `RENDER_API_KEY` - Render API token
-- `RENDER_SERVICE_ID` - `srv-d3jga77diees73cgrvk0`
-- `RENDER_OWNER_ID` - `tea-csppgi56l47c73djvpig`
-
-## Autonomous Agent Testing
-
-When testing agent features (new tools, explore agent, spawn_agent, etc.), follow this loop:
-
-**1. Look up the real user ID:**
-```bash
-cd back-end && npx tsx scripts/dump-sms-context.ts  # userId for phone +19729777432
-```
-Real user ID: `1f85ff25-6e29-4c1b-8739-f917bd101a30` (Andy Prevalsky)
-
-**2. Create an agent:**
-```bash
-curl -s -X POST "http://localhost:3001/api/agents" \
-  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
-  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
-  -H "Content-Type: application/json" \
-  -d '{"goal": "...", "start_phase": "plan"}'
-```
-Use `"start_phase": "plan"` to bypass chat mode and go directly into the Temporal workflow (plan → execute).
-Use `"start_phase": "execute"` to skip planning too. Omit `start_phase` for normal chat mode.
-
-**3. Poll messages every 10 seconds via GET agent detail:**
-```bash
-curl -s "http://localhost:3001/api/agents/{agent_id}" \
-  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
-  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
-```
-Messages are in the response under `.messages[]`. Each message has `role`, `message`, and `metadata` (JSON with `toolName`, `toolStatus`, `title`, etc.).
-
-**4. On ANY unexpected behavior, IMMEDIATELY follow this strict sequence (no exceptions):**
-
-```
-Step 1: DELETE the agent (stop bleeding tokens)
-   curl -s -X DELETE "http://localhost:3001/api/agents/{agent_id}" \
-     -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
-     -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
-
-Step 2: KILL the run script (stop all services)
-   pkill -f worker.py; pkill -f "npx tsx watch"; pkill -f "npx vite"; pkill -f electron
-   lsof -ti :3001 | xargs kill -9  # force-free the port if needed
-
-Step 3: READ logs and DIAGNOSE
-   - Read agents/navi-worker-log.txt for tracebacks/errors
-   - Query DB if needed to get raw message data
-   - Identify the ROOT CAUSE before writing any code
-
-Step 4: FIX the root cause in code
-
-Step 5: RESTART the run script (resets log files, picks up code changes)
-   CONDUCTOR_PORT=3001 CONDUCTOR_WORKSPACE_NAME=managua-v1 bash scripts/run.sh
-   Wait for "Worker started, waiting for tasks..." in the log
-
-Step 6: Create a NEW agent and go back to step 3 (poll messages)
-```
-
-**CRITICAL: Do NOT skip steps or reorder them.** Especially:
-- Do NOT continue polling a failed agent — delete it FIRST
-- Do NOT make fixes without killing the run script FIRST (workers don't hot-reload)
-- Do NOT restart the run script without reading logs FIRST (you'll just hit the same error)
-
-**Key gotchas:**
-- Temporal workers don't hot-reload — must kill and restart after code changes
-- Old agents can't resume after code changes (Temporal nondeterminism error) — always create fresh
-- The `run.sh` script sets `TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME` which overrides `back-end/.env`
-- `spawn_agent.py` imports MUST be at module level (not lazy inside methods) because it runs inside Temporal's workflow sandbox. Lazy imports trigger `threading.Lock` errors.
-
-## LLM Call Map
-
-Every LLM call in the agent pipeline, ordered by execution flow.
-
-### Agent Pipeline (agents/, runs inside Temporal)
-
-| # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
-|---|-----------|-------|------------|-------------|---------------------|-------------|
-| A1 | **Main Loop (PLAN)** `loop/run_agent.py` → `call_llm_activity` | agent.model | YES | no | `build_system_prompt` (2k) + user_context (200-15k) + 4 PLAN tool schemas (500t) + conversation + blueprints | 3-20k |
-| A2 | **Planner LLM** `helpers/llm.py:call_planner_llm_activity` | agent.model | YES | no | `build_planner_system_prompt` (3k) + user_context + conversation. **skip_cache=True** | 5-15k |
-| A3 | **Verifier (PLAN)** `helpers/llm.py:check_progress` | agent.model | YES | no | `build_verifier_prompt` (500t) + full conversation (USER+TOOL only, no SYSTEM/ASSISTANT) | 3-40k |
-| A4 | **Main Loop (EXECUTE)** `loop/run_agent.py` → `call_llm_activity` | agent.model | YES | no | `build_system_prompt` (2k) + user_context (200-15k) + 6 EXECUTE tool schemas (800t) + full conversation + DAG results | 5-80k |
-| A5 | **Verifier (EXECUTE)** `helpers/llm.py:check_progress` | agent.model | YES | no | Same as A3 but with execute-phase conversation | 5-80k |
-
-### Sub-Agent LLM Calls (spawned from EXECUTE phase)
-
-| # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
-|---|-----------|-------|------------|-------------|---------------------|-------------|
-| S1 | **Explore Agent** `tools/spawn_agent.py` → `run_agent` | rose-1-lite | **NO** | no | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k |
-| S2 | **Browser Agent** `tools/spawn_browser_agent_v3.py` → `call_llm_structured_streaming` | agent.model | YES | no | `build_browser_system_prompt` (400t) + step history + screenshots (multimodal, heavy) | 5-30k |
-| S3 | **Sub-Agent** spawns full workflow (A1-A5 repeat) | parent.model | YES | no | Inherits parent user_context (gatable via context_gates) + own conversation | recursive |
-
-### Tool-Level LLM Calls (inside activities)
-
-| # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
-|---|-----------|-------|------------|-------------|---------------------|-------------|
-| T1 | **message_person** `tools/message_person.py` → `call_llm` | agent.model | **NO** | no | system prompt with conversation history + person thread + user message | 1-5k |
-| T2 | **Deep Research** `tools/deep_research.py` → Perplexity API | sonar-deep-research | N/A | N/A | system prompt + query (separate provider, separate billing) | ~500 in, 8k out |
-
-### claudeAuth Flow
-- User's Claude OAuth token fetched at workflow start (`fetch_claude_max_token_activity`)
-- Passed to Rose completions endpoint as `claude_token` param
-- Rose routes directly to Anthropic API, skipping racing ($0 cost to Rose)
-- Detected in response: `actual_model` ending with `-claude` suffix (e.g. `claude-sonnet-4-6-claude`)
-- Refreshed before EXECUTE phase in case it expired during PLAN
-
-### Context Gates per LLM Call
-
-Each LLM call site, the context chunks it receives, and which `context_gates` key controls each chunk.
-
-**Gate keys:** `user_profile`, `authenticated_sessions`, `integrations`, `recent_communications`, `network`, `custom_system_prompt`, `shared_files`
-
-| LLM Call | Context Chunk | Gate Key | Est. Tokens | Notes |
-|----------|--------------|----------|-------------|-------|
-| **A1/A4 Main Loop** | user profile (name, phone, address) | `user_profile` | 50-100 | Via `get_user_context` → `build_system_prompt` |
-| | authenticated browser sessions | `authenticated_sessions` | 20-50 | |
-| | connected integrations (Gmail) | `integrations` | 20-30 | |
-| | 200 recent messages (24h) | `recent_communications` | 2-10k | **Heaviest chunk** |
-| | 2000 contacts network | `network` | 5-15k | **Heaviest chunk** |
-| | custom system prompt | `custom_system_prompt` | 0-500 | User personality injection |
-| | file attachment resolution | `shared_files` | variable | Base64 images, text files |
-| | system prompt (identity, phase, tools, rules) | *always on* | 2-3k | `build_system_prompt` |
-| | conversation history | *always on* | 1-50k | Grows per iteration |
-| | blueprints | *always on* | 0-2k | Iteration 1 only |
-| **A2 Planner** | user_context (pre-gated) | *inherits parent gates* | 0-15k | Same gates as A1 |
-| | planner system prompt | *always on* | 3k | `build_planner_system_prompt` |
-| | conversation history | *always on* | 1-10k | |
-| **A3/A5 Verifier** | verifier system prompt | *always on* | 500 | `build_verifier_prompt` |
-| | full conversation (USER+TOOL) | *always on* | 3-80k | No gates, no truncation |
-| **S1 Explore** | 500-contact network metadata | `network` | 5-15k | Via `fetch_full_network_metadata` |
-| | local message thread summary | `recent_communications` | 0-2k | Via `fetch_local_data_summary` |
-| | explore system prompt | *always on* | 300 | `EXPLORE_AGENT_SYSTEM_PROMPT` |
-| | 4 tool schemas | *always on* | 400 | web_search, web_fetch, grep, attempt_completion |
-| **S2 Browser** | browser system prompt | *always on* | 400 | `build_browser_system_prompt` |
-| | step history + screenshots | *always on* | 5-30k | No user context, no gates |
-| **S3 Sub-Agent** | *all chunks from A1* | *inherits parent gates* | recursive | Gates set by parent's `spawn_agent` call |
-| **T1 message_person** | cross-contact voice sample | `recent_communications` | 1-5k | `fetch_recent_messages_activity` |
-| | 1-on-1 thread with person | *always on* | 0-3k | Always needed for context |
-| | Exa person enrichment | *always on* | 0-1k | Always needed for personalization |
-| **T2 Deep Research** | system prompt + query | *always on* | ~500 | Perplexity, separate billing |
-
-### Remaining Waste (not gatable)
-1. **A3/A5 Verifier** - Gets full conversation with no truncation. On long runs (20+ iterations) this balloons to 40-80k. Not yet gated.
-2. **T1 message_person** - `call_llm` doesn't pass `claude_token`. Small per-call cost.
-3. **Schema gen** (`setResponseSchema.ts`) - Forces Rose Ultra for a simple task. Rose Lite would suffice.
-
-## CodeRabbit Review
-
-PRs are reviewed by CodeRabbit (`.coderabbit.yaml`). After creating a PR:
-```
-1. Push branch + create PR
-2. Poll check status via `gh pr checks <N> --json name,state`
-   - Wait for "CodeRabbit" check to reach SUCCESS (poll every 30s)
-3. Read the review:
-   - `gh api repos/<owner/repo>/pulls/<N>/reviews` → bot reviews
-   - `gh api repos/<owner/repo>/pulls/<N>/comments` → inline comments
-4. Fix critical/major issues from CodeRabbit comments, push, go to step 2
-5. Skip trivial nitpicks
-```
-
-## Ralph Instructions
-
-- If the next step is to check a log file, make sure to call the tool. NEVER ask the user to check a log file for you.
+### Misc
+- **No .md files** unless explicitly requested
+- **Do NOT over-truncate** — truncate SPARINGLY, only for space-constrained UI
+- **Short bash timeouts** (max 5 min) — check task output periodically
+- **Pauses are user-initiated, not fixes** — never assume a pause caused a bug/crash
+- **Sync Conductor workspace name on branch change:** `sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db "UPDATE workspaces SET pr_title = '$(git branch --show-current)' WHERE directory_name = '$(basename \"$PWD\")'"`
+- If the next step is to check a log file, **call the tool yourself** — NEVER ask the user to check it
+- Temporal workers don't hot-reload — must kill and restart after code changes. Old agents can't resume after code changes (nondeterminism error) — always create fresh.
+- `run.sh` sets `TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME` (overrides `back-end/.env`)
