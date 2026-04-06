@@ -23,6 +23,7 @@ cd agents && python benchmarks/run_benchmark.py --list
 - Benchmarks run against **prod** (`https://navi-j9a9.onrender.com`) — no local services needed.
 - Working directory: `cd agents` (all commands below assume this)
 - Task argument: `$ARGUMENTS` (the benchmark task name, e.g. `build-boxing-payment`)
+- If you need a local smoke reproduction before or after the prod run, start services with `bash scripts/run.sh --benchmark`. That mode skips `front-end` and `mac-app`; benchmark/smoke runs should never boot either UI service.
 
 ## Step 1: Clean up old agents
 
@@ -59,14 +60,23 @@ python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 
 This shows: agent tree status, message counts, tool distribution, errors, anomalies (infinite loops, stalls, stuck tools, time gaps).
 
-**What to watch for:**
-- `INFINITE LOOP` — agent repeating the same message/tool call
+The output ends with a verdict line:
+- `🟢 HEALTHY` — no issues detected, continue monitoring
+- `🔴 ACTION REQUIRED — <reasons>` — issues detected
+
+**Decision rule after each poll:**
+- If the verdict is `🔴 ACTION REQUIRED` → **IMMEDIATELY go to Step 4** (pause + diagnose). No exceptions. Do not "wait another cycle." Do not rationalize.
+- If the total message count is unchanged from the previous poll after 60s → **IMMEDIATELY go to Step 4**. Treat this as a stall even if the verdict is `🟢 HEALTHY`.
+- Otherwise → continue monitoring (next poll in 60s)
+
+The verdict aggregates these signals across the entire agent tree:
+- `❌` tool errors (toolStatus == ERROR)
 - `STUCK` — tool IN_PROGRESS without FINISHED
 - `TIME GAP` — 3+ minutes between messages (stalled LLM call)
+- `INFINITE LOOP` — same message repeated 4+ times
 - `HIGH TOOL COUNT` — one tool called 15+ times
-- Tool errors (❌) in the tree
 - Worker/backend/research log errors
-- 120s with no new messages on any sub-agent = stall = actionable error
+- Terminal agent status (FAILED, COST_LIMIT_REACHED, OUT_OF_CREDITS)
 
 **What NOT to use for monitoring:**
 - `progress` field — dead variable, ignore it
@@ -84,7 +94,7 @@ Report cost & elapsed time to the user regularly.
 
 ## Step 4: On error — Pause and diagnose
 
-When you detect an error (from monitoring or benchmark completion):
+When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across polls, or the agent reaches a terminal status:
 
 1. **Pause the root agent:**
    ```bash
@@ -137,7 +147,7 @@ After user approves:
 
 ## Step 7: Deploy
 
-Run `/deploy` to push the fix, create a PR, wait for review, merge, and wait for deploys to complete. The deploy skill handles the full PR → review → merge → deploy loop.
+Run `/deploy` to push the fix, create a PR, wait for review, merge, and wait for deploys to complete. The deploy skill handles the full PR → review → merge → deploy loop, and its local smoke step must use `bash scripts/run.sh --benchmark`.
 
 ## Step 8: Rerun benchmark
 
@@ -157,7 +167,7 @@ On `COMPLETED`:
 
 1. **NEVER stop the loop** unless waiting for user approval or celebrating (Step 9).
 2. **NEVER fire-and-forget** — monitor every 60s while the benchmark runs.
-3. **120s stall = error** — if any sub-agent has no new messages for 120s, treat as actionable.
+3. **`🔴 ACTION REQUIRED` or stalled message count = immediate Step 4** — any verdict anomaly, tool error, log error, terminal status, or 120s message stall means pause immediately.
 4. **Only 1 agent alive** — delete old agents before starting new ones.
 5. **Never auto-approve** — approval requests from the agent always go to the user.
 6. **Fix log pipeline first** — if logs are broken, fix that before debugging agent issues.

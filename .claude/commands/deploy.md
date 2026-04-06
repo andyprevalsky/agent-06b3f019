@@ -73,40 +73,34 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 5: Spin up local services
 
-Spin up a port-isolated backend + research stack for testing. Use a high base port (4501) to avoid colliding with any running Conductor workspace. Set `TEMPORAL_TASK_QUEUE` to an isolated queue so workflows don't leak into other environments.
-
-Only spin up what the tests need — **backend, research, and worker**. No frontend, mac-app.
+Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
 
 ```bash
-# Port isolation (mirrors run.sh pattern: base, base+1, base+2, ...)
-export SMOKE_PORT=4501          # backend
-export SMOKE_HEALTH_PORT=4503   # worker health check
-export SMOKE_RESEARCH_PORT=4504 # research (Supabase edge functions)
-export SMOKE_QUEUE=navi-agent-tasks-deploy-smoke
+# Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
+if [ -z "$CONDUCTOR_PORT" ]; then
+  echo "CONDUCTOR_PORT must be set (run this from Conductor)." >&2
+  exit 1
+fi
 
-# 1. Start research (Supabase edge functions — needs Docker)
-cd "$(git rev-parse --show-toplevel)/research"
-RESEARCH_PORT=$SMOKE_RESEARCH_PORT ./run-local.sh 2>&1 | tee research-logs.log &
-RESEARCH_PID=$!
+export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
+export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
+export SMOKE_RESEARCH_URL="http://localhost:$((CONDUCTOR_PORT + 3))"
 
-# Wait for research to be ready
-for i in $(seq 1 60); do curl -s http://localhost:$SMOKE_RESEARCH_PORT/functions/v1/completions > /dev/null 2>&1 && break; sleep 2; done
+cd "$(git rev-parse --show-toplevel)"
+DISABLE_GMAIL_SYNC=1 bash scripts/run.sh --benchmark 2>&1 | tee .context/deploy-smoke.log &
+RUN_SH_PID=$!
 
-# 2. Start backend
-cd "$(git rev-parse --show-toplevel)/back-end"
-DISABLE_GMAIL_SYNC=1 PORT=$SMOKE_PORT TEMPORAL_TASK_QUEUE=$SMOKE_QUEUE npx tsx watch src/server.ts 2>&1 | tee backend-logs.log &
-BACKEND_PID=$!
-
-# Wait for backend to be ready
-for i in $(seq 1 30); do curl -s http://localhost:$SMOKE_PORT/health > /dev/null 2>&1 && break; sleep 1; done
+# Wait for backend, worker health, and research to be ready
+for i in $(seq 1 60); do curl -s "$SMOKE_BASE_URL/health" > /dev/null 2>&1 && break; sleep 2; done
+for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && break; sleep 2; done
+for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
 **Teardown helper** (use after Step 5 failures or after Step 6 completes):
 ```bash
-lsof -ti :$SMOKE_PORT | xargs kill -9 2>/dev/null || true  # backend
-kill $WORKER_PID 2>/dev/null || true                        # worker (if started)
-kill $RESEARCH_PID 2>/dev/null || true                      # research
-(cd research/supabase && supabase stop 2>/dev/null) || true  # Supabase containers
+kill $RUN_SH_PID 2>/dev/null || true
+wait $RUN_SH_PID 2>/dev/null || true
+(cd research/supabase && supabase stop 2>/dev/null) || true
 ```
 
 ## Step 5a: Blackbox API tests + fix
@@ -115,31 +109,20 @@ With the backend running from Step 5:
 
 ```bash
 cd back-end
-TEST_BASE_URL=http://localhost:$SMOKE_PORT npm run test:api
+TEST_BASE_URL=$SMOKE_BASE_URL npm run test:api
 ```
 
 If tests fail, run the teardown helper, fix the issue, and re-run from the top of the Test Loop.
 
 ## Step 6: Smoke benchmarks + fix
 
-With backend + research still running, start a local Temporal worker on the same isolated queue and run the smoke benchmark suite:
+With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
 
 ```bash
-# Start local Temporal worker on the isolated queue, pointing at local backend + research
-cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-TEMPORAL_TASK_QUEUE=$SMOKE_QUEUE \
-  BACKEND_API_URL=http://localhost:$SMOKE_PORT \
-  HEALTH_CHECK_PORT=$SMOKE_HEALTH_PORT \
-  ENVIRONMENT=development \
-  RESEARCH_PORT=$SMOKE_RESEARCH_PORT \
-  python worker.py 2>&1 | tee navi-worker-log.txt &
-WORKER_PID=$!
-
-# Wait for worker to be ready
-for i in $(seq 1 30); do grep -q "started" navi-worker-log.txt 2>/dev/null && break; sleep 1; done
-
 # Run smoke benchmarks against local backend
-python benchmarks/run_benchmark.py --suite smoke --ci --parallel --url http://localhost:$SMOKE_PORT
+cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
+BENCHMARK_BASE_URL=$SMOKE_BASE_URL \
+  python benchmarks/run_benchmark.py --suite smoke --ci --parallel
 ```
 
 This runs 3 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 3 tasks concurrently.
