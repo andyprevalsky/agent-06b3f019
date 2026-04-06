@@ -125,7 +125,7 @@ BENCHMARK_BASE_URL=$SMOKE_BASE_URL \
   python benchmarks/run_benchmark.py --suite smoke --ci --parallel
 ```
 
-This runs 3 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 3 tasks concurrently.
+This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
 **After benchmarks complete (pass or fail), run the teardown helper from Step 5.**
 
