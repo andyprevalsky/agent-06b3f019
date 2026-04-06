@@ -182,9 +182,15 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 9: Wait for code review
 
-Poll `gh pr checks <PR_NUMBER> --json name,state` every 30 seconds until the "CodeRabbit" check reaches `SUCCESS` state. **No timeout — keep waiting.**
+Wait for **all** PR checks to finish — not just CodeRabbit. Poll every 30 seconds:
 
-Once CodeRabbit completes, read reviews from ALL three comment locations:
+```bash
+gh pr checks <PR_NUMBER> --json name,state
+```
+
+Keep waiting until every check has a terminal state (`SUCCESS`, `FAILURE`, `CANCELLED`, `SKIPPED`, `ERROR` — anything other than `PENDING` or `IN_PROGRESS`). **No timeout — keep waiting.**
+
+Once all checks have completed, read reviews from ALL three comment locations:
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
@@ -244,7 +250,7 @@ If a related plan exists in `docs/plans/active/`:
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 
 ```bash
-gh pr merge <PR_NUMBER> --squash
+gh pr merge <PR_NUMBER> --merge
 ```
 
 If `main` can be checked out in this worktree, switch back to main and pull:
