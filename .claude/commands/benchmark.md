@@ -97,62 +97,32 @@ curl -s -X POST "$BASE_URL/api/agents/<agent_id>/attachments" \
   -F "file=@front-end/public/test-assets/<attachment_path>"
 ```
 
-Then post the file pointers as a message so the agent can see them.
-
-## Step 3: Monitor every 60 seconds
-
-**You MUST poll every 60 seconds. Never fire-and-forget.**
-
-Use the diagnostics tool:
-
+Then post the file pointers as a message using the `attachments` field (NOT `metadata`):
 ```bash
-python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url $BASE_URL
-```
-
-This shows: agent tree status, message counts, tool distribution, errors, anomalies (infinite loops, stalls, stuck tools, time gaps).
-
-The output ends with a verdict line:
-- `🟢 HEALTHY` — no issues detected, continue monitoring
-- `🔴 ACTION REQUIRED — <reasons>` — issues detected
-
-**Decision rule after each poll:**
-- If the verdict is `🔴 ACTION REQUIRED` → **IMMEDIATELY go to Step 4** (pause + diagnose). No exceptions. Do not "wait another cycle." Do not rationalize.
-- If the total message count is unchanged from the previous poll after 60s → **IMMEDIATELY go to Step 4**. Treat this as a stall even if the verdict is `🟢 HEALTHY`.
-- Otherwise → continue monitoring (next poll in 60s)
-
-The verdict aggregates these signals across the entire agent tree:
-- `❌` tool errors (toolStatus == ERROR)
-- `STUCK` — tool IN_PROGRESS without FINISHED
-- `TIME GAP` — 3+ minutes between messages (stalled LLM call)
-- `INFINITE LOOP` — same message repeated 4+ times
-- `HIGH TOOL COUNT` — one tool called 15+ times
-- Worker/backend/research log errors
-- Terminal agent status (FAILED, COST_LIMIT_REACHED, OUT_OF_CREDITS)
-
-**What NOT to use for monitoring:**
-- `progress` field — dead variable, ignore it
-- Raw API polling — use `agent_logs.py` instead
-
-**Cost tracking:**
-```bash
-curl -s "$BASE_URL/api/agents/tree?busId=<agent_id>" \
+curl -s -X POST "$BASE_URL/api/agents/<agent_id>/messages" \
   -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
   -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'{a[\"agent_id\"][:12]} cost={a.get(\"tree_cost_cents\",0)}c msgs={a.get(\"message_count\",0)} [{a[\"status\"]}]') for a in d['agents']]"
+  -H "Content-Type: application/json" \
+  -d '{"message": "[Files attached]", "attachments": [<file_pointer_objects_from_upload>]}'
 ```
+The backend creates separate DB messages with `filePointer` field for each attachment. The agent's `extract_attachments_from_context()` reads `filePointer` from the top level of each message — NOT from metadata.
 
-Report cost & elapsed time to the user regularly.
+## Step 3: Monitor (blocking script)
 
-**Approval handling:**
-Check for pending approval requests and surface them to the user:
+**Do NOT poll manually.** Use the `benchmark_monitor.py` script — it polls every 60s, prints colored status lines, and exits when a stop condition is reached:
+
 ```bash
-curl -s "$BASE_URL/api/attention-requests" \
-  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
-  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
-  | python3 -c "import json,sys; reqs=json.load(sys.stdin).get('requests',[]); [print(f'id={r[\"id\"]} agent={r[\"agent_id\"][:12]} q={r[\"question\"][:150]}') for r in reqs if not r.get('answered')]"
+python benchmarks/benchmark_monitor.py <agent_id> --url $BASE_URL --interval 60
 ```
 
-If the task's `approval_handling` is `auto_approve`, respond automatically:
+**Run this as a blocking bash call** (with a long timeout, e.g. 600000ms / 10min). The script handles all polling, stall detection, anomaly detection, and approval checking automatically. It prints a formatted status cell every 60s showing the full agent tree with per-agent idle times, costs, and anomalies.
+
+**Exit codes:**
+- `0` — COMPLETED → go to **Step 9** (celebrate)
+- `1` — ACTION REQUIRED (error, stall, terminal failure) → go to **Step 4** (pause + diagnose)
+- `2` — APPROVAL NEEDED → handle approval, then re-run the monitor
+
+**On exit code 2 (approval needed):** The monitor output shows the approval request details. If the task's `approval_handling` is `auto_approve`, respond automatically:
 ```bash
 curl -s -X POST "$BASE_URL/api/attention-requests/<request_id>/respond" \
   -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
@@ -160,8 +130,10 @@ curl -s -X POST "$BASE_URL/api/attention-requests/<request_id>/respond" \
   -H "Content-Type: application/json" \
   -d '{"response": "Approved"}'
 ```
-
 If `prompt_user`, show the approval request to the user and wait for their response. **Never auto-approve when `prompt_user` is set.**
+Then re-run the monitor script to continue watching.
+
+**If the monitor script times out** (bash timeout), just re-run it — it's stateless and will pick up where it left off.
 
 ## Step 4: On error — Pause and diagnose
 
@@ -269,3 +241,4 @@ On `COMPLETED`:
 10. **Respect the mode** — use `$BASE_URL` for all API calls. In local mode, ensure local services are running. In prod mode, do NOT start or manage local services.
 11. **Claude drives the loop** — do NOT delegate to `run_benchmark.py` for monitoring/approval/polling. You (Claude) execute each step directly using curl, `agent_logs.py`, and the task definition from `tasks.json`. Use `run_benchmark.py` only for `--list`.
 12. **No front-end or mac-app** — benchmarks only need back-end + agents + research. In prod mode, no local services at all.
+13. **Zero intervention after spawn** — once an agent is created with its attachments and file pointers posted, NEVER send additional user messages to help it (e.g., pasting CSV content, clarifying instructions). Benchmark tasks are designed to complete in one pass with only the initial prompt and attachments. If the agent can't read its attachments or gets stuck, that is a **real bug** — diagnose and fix the code, don't work around it by manually feeding data.

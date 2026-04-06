@@ -107,6 +107,8 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
     done
     ```
 
+17. **"Pre-existing" is never an excuse** - If a test, smoke test, or benchmark fails, fix it — even if the failure predates your changes. Never skip, bypass, or rationalize a failing check by calling it "pre-existing." A red build is a red build.
+
 ## Plans
 
 All implementation plans live in `docs/plans/` (checked into the repo):

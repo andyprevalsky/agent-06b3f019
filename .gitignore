@@ -73,7 +73,7 @@ venv.bak/
 .pytest_cache/
 # VS Code Python settings
 .vscode/settings.json
-agents/navi-worker-log.txt
+agents/navi-worker-log*.txt
 agents/benchmarks/runs/*.json
 back-end/jobs/
 moltbot/

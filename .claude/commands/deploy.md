@@ -127,11 +127,36 @@ BENCHMARK_BASE_URL=$SMOKE_BASE_URL \
 
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
-**After benchmarks complete (pass or fail), run the teardown helper from Step 5.**
-
-If benchmarks fail, diagnose using local logs (see below), fix the issue, and re-run from the top of the Test Loop.
-
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
+
+### Cleanup: Delete smoke test agents
+
+**This must happen BEFORE teardown** — the local backend must still be running to process DELETE requests.
+
+If benchmarks **pass**: delete all agents created during the run, then teardown.
+
+```bash
+RESULTS_FILE=$(ls -t agents/benchmarks/runs/*.json 2>/dev/null | head -1)
+if [ -n "$RESULTS_FILE" ]; then
+  python3 -c "
+import json
+with open('$RESULTS_FILE') as f:
+    data = json.load(f)
+for r in data.get('task_results', []):
+    aid = r.get('agent_id', '')
+    if aid:
+        print(aid)
+" | while read aid; do
+    curl -s -X DELETE "$SMOKE_BASE_URL/api/agents/$aid" \
+      -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" > /dev/null
+  done
+fi
+```
+
+If benchmarks **fail**: do NOT delete agents yet — keep them alive for diagnosis. Diagnose and fix the issue first (see below), then delete agents, then teardown, then re-run from the top of the Test Loop.
+
+**After cleanup (or after diagnosis on failure), run the teardown helper from Step 5.**
 
 ### Diagnosing failures
 
