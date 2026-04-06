@@ -82,6 +82,10 @@ If on main already (linear commits), just push:
 git push origin main
 ```
 
-## Step 3: Done
+## Step 3: Create new branch
 
-Report what was pushed (files changed, commit summary).
+After pushing, run `/new_branch_with_context` to create a fresh branch from updated main, keeping the same Conductor workspace name.
+
+## Step 4: Done
+
+Report what was pushed (files changed, commit summary) and the new branch name.
