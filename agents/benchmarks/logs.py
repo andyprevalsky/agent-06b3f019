@@ -19,9 +19,12 @@ Fly.io note:
   by agent_id after each task completes.
 
 Supabase note:
-  The completions edge function doesn't log agent_id. The Management API logs.all
-  endpoint returns gateway-level HTTP logs (method/status/URL). We filter for
-  requests to /functions/v1/completions within the agent's time window.
+  The Supabase Management API only exposes gateway-level HTTP logs (method/status/URL)
+  via the logs.all endpoint. Edge function console output (console.log/slog() calls
+  from completions/index.ts) is NOT available via REST API — only visible in the
+  Supabase Logs Explorer UI. In local mode, console output goes to research-logs.log.
+  In prod, the worker logs are the best proxy: they log the HTTP status and error body
+  received back from the completions endpoint.
 """
 
 import asyncio
@@ -588,6 +591,8 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
                 )
 
     # 2. Detect tools stuck IN_PROGRESS without FINISHED
+    # Spawn tools are inherently long-running (sub-agents have their own anomaly detection)
+    _SPAWN_TOOLS = {"spawn_agent", "spawn_sub_agent_for_each", "spawn_claude_code_agent", "spawn_browser_agent"}
     in_progress = {}  # tool_call_id → metadata
     for m in msgs:
         meta = m.get("metadata", {})
@@ -595,7 +600,8 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
             continue
         tcid = meta.get("toolCallId") or meta.get("tool_call_id", "")
         status = meta.get("toolStatus", "")
-        if status == "IN_PROGRESS" and tcid:
+        tool_name = meta.get("toolName", "")
+        if status == "IN_PROGRESS" and tcid and tool_name not in _SPAWN_TOOLS:
             in_progress[tcid] = meta
         elif status in ("FINISHED", "ERROR") and tcid:
             in_progress.pop(tcid, None)
