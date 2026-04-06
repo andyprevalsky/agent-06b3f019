@@ -66,9 +66,10 @@ class FilePointer:
         if self.mime_type in TEXT_MIME_TYPES or self.mime_type.startswith("text/"):
             return True
         # Fallback: check file extension when mime_type is generic
+        # NOTE: avoid os.path — this runs inside Temporal's workflow sandbox
         if self.mime_type == "application/octet-stream" and self.original_filename:
-            import os
-            ext = os.path.splitext(self.original_filename)[1].lower()
+            dot_idx = self.original_filename.rfind(".")
+            ext = self.original_filename[dot_idx:].lower() if dot_idx >= 0 else ""
             return ext in self._TEXT_EXTENSIONS
         return False
 
