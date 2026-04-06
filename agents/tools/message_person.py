@@ -303,7 +303,7 @@ class MessagePersonManager(ToolManager):
         except Exception as e:
             yield ToolEvent(type=EventType.POST_MESSAGE,
                             title=f"Message generation failed for {person_display}",
-                            message=f"Error generating message: {e}",
+                            message=f"Error generating message: {e}. This is a transient infrastructure error — retry message_person with the same parameters. Do NOT attempt to send emails via browser agent as a workaround.",
                             status=MessageStatus.ERROR)
             return
 
