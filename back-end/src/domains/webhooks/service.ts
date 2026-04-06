@@ -1,17 +1,14 @@
-import Stripe from 'stripe';
-import crypto from 'crypto';
+import { stripe, type Stripe } from '../../providers/stripe';
+import { randomBytes } from '../../providers/crypto';
+// eslint-disable-next-line no-restricted-imports -- one-off Supabase RPC for auto-generating Rose API keys on subscription
 import { createClient } from '@supabase/supabase-js';
 import { getUserUsage } from '../../providers/credits';
 import { createLogger } from '../../providers/logger';
 import { getTemporalClient } from '../../providers/temporal';
 import * as repo from './repo';
-import { STRIPE_API_VERSION, STRIPE_WEBHOOK_SECRET } from './config';
+import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, STRIPE_WEBHOOK_SECRET } from './config';
 
 const log = createLogger('Webhooks');
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? '', {
-  apiVersion: STRIPE_API_VERSION,
-});
 
 /**
  * Verify and construct a Stripe webhook event from raw body + signature
@@ -136,8 +133,8 @@ async function unpauseUserAgents(userId: string): Promise<void> {
  */
 async function autoGenerateApiKeyIfNeeded(userId: string): Promise<void> {
   try {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const supabaseUrl = SUPABASE_URL;
+    const supabaseServiceKey = SUPABASE_SERVICE_ROLE_KEY;
 
     if (
       supabaseUrl === undefined ||
@@ -167,7 +164,7 @@ async function autoGenerateApiKeyIfNeeded(userId: string): Promise<void> {
       return;
     }
 
-    const apiKey = crypto.randomBytes(32).toString('base64url');
+    const apiKey = randomBytes(32).toString('base64url');
 
     const { error: insertError } = await supabase.from('RoseApiKey').insert({
       userId,

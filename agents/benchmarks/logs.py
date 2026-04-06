@@ -660,6 +660,17 @@ def format_tree_diagnostics(
 
     visited: set = set()
 
+    def _scan_log_errors(log_list: List, source_name: str) -> List[str]:
+        found = []
+        for log_line in log_list:
+            lower = log_line.lower() if isinstance(log_line, str) else ""
+            if any(kw in lower for kw in (
+                '"level":"error"', '"event":"error"', 'traceback',
+                'exception', 'error:', 'failed', '500 ', '502 ', '503 ',
+            )):
+                found.append(f"[{source_name}] {log_line[:200]}")
+        return found
+
     def _walk(agent_id: str, depth: int = 0):
         if agent_id in visited:
             indent = "  " * (depth + 1)
@@ -698,18 +709,6 @@ def format_tree_diagnostics(
             lines.append(f"{indent}   📊 {', '.join(state_parts)}")
 
         logs = info.get("logs", {})
-
-        # Scan ALL log sources for errors (worker, backend, research)
-        def _scan_log_errors(log_list: List, source_name: str) -> List[str]:
-            found = []
-            for l in log_list:
-                ls = l.lower() if isinstance(l, str) else ""
-                if any(kw in ls for kw in (
-                    '"level":"error"', '"event":"error"', 'traceback',
-                    'exception', 'error:', 'failed', '500 ', '502 ', '503 ',
-                )):
-                    found.append(f"[{source_name}] {l[:200]}")
-            return found
 
         worker = logs.get("worker_logs", [])
         backend = logs.get("backend_logs", [])
@@ -797,24 +796,31 @@ def format_tree_diagnostics(
     if failed:
         lines.append(f"  Failed agents: {', '.join(a[:12] for a in failed)}")
 
-    # Verdict: collect all error/anomaly signals across the tree
     verdict_reasons = []
     for aid, info in tree_logs.items():
         short = aid[:12]
         status = info.get("status", "")
         if status in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"):
             verdict_reasons.append(f"{short} status={status}")
+
         logs = info.get("logs", {})
+        log_errors = (
+            _scan_log_errors(logs.get("worker_logs", []), "worker")
+            + _scan_log_errors(logs.get("backend_logs", []), "backend")
+            + _scan_log_errors(logs.get("research_logs", []), "research")
+        )
+        for err in log_errors[:3]:
+            verdict_reasons.append(f"{short} {err}")
+
         msgs = logs.get("messages", [])
-        # Tool errors
         for m in msgs:
             meta = m.get("metadata", {})
             if isinstance(meta, dict) and meta.get("toolStatus") == "ERROR":
                 tool = meta.get("toolName", "?")
                 verdict_reasons.append(f"{short} ❌ {tool} ERROR")
-        # Anomalies
-        for a in _detect_anomalies(msgs):
-            verdict_reasons.append(f"{short} {a}")
+
+        for anomaly in _detect_anomalies(msgs):
+            verdict_reasons.append(f"{short} {anomaly}")
 
     lines.append("")
     if verdict_reasons:

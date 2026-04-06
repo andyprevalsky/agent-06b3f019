@@ -5,7 +5,10 @@
  */
 
 import { prisma } from './database';
+import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
+
+const log = createLogger('SMS');
 
 interface SurgeMessageResponse {
   id: string;
@@ -24,7 +27,7 @@ export async function sendSms(
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
   if (!apiKey || !accountId) {
-    console.error('[SMS] Surge credentials not configured');
+    log.error('Surge credentials not configured');
     return { success: false, error: 'Surge not configured' };
   }
 
@@ -43,19 +46,19 @@ export async function sendSms(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[SMS] Surge API error:', response.status, logTruncate(errorText));
+      log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       return { success: false, error: `Surge API error: ${response.status}` };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;
-    console.log('[SMS] Sent via Surge', {
+    log.info('Sent via Surge', {
       messageId: result.id,
       phone: phoneNumber.substring(0, 7) + '****',
     });
 
     return { success: true, messageSid: result.id };
   } catch (error) {
-    console.error('[SMS] Error sending:', error);
+    log.error('Error sending', { error: error instanceof Error ? error.message : String(error) });
     return { success: false, error: String(error) };
   }
 }
@@ -72,7 +75,7 @@ export async function sendMms(
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
   if (!apiKey || !accountId) {
-    console.error('[MMS] Surge credentials not configured');
+    log.error('Surge credentials not configured');
     return { success: false, error: 'Surge not configured' };
   }
 
@@ -92,19 +95,19 @@ export async function sendMms(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('[MMS] Surge API error:', response.status, logTruncate(errorText));
+      log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       return { success: false, error: `Surge API error: ${response.status}` };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;
-    console.log('[MMS] Sent via Surge', {
+    log.info('Sent via Surge', {
       messageId: result.id,
       phone: phoneNumber.substring(0, 7) + '****',
     });
 
     return { success: true, messageSid: result.id };
   } catch (error) {
-    console.error('[MMS] Error sending:', error);
+    log.error('Error sending', { error: error instanceof Error ? error.message : String(error) });
     return { success: false, error: String(error) };
   }
 }

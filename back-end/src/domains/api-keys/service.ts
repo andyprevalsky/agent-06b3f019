@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+import { randomUUID } from '../../providers/crypto';
 import * as repo from './repo';
 import { createLogger } from '../../providers/logger';
 
@@ -41,7 +41,7 @@ export async function generateKey(userId: string, name?: string) {
   }
 
   // Generate 32-character API key (UUID without dashes)
-  const apiKey = crypto.randomUUID().replace(/-/g, '');
+  const apiKey = randomUUID().replace(/-/g, '');
 
   const newKey = await repo.createApiKey(
     userId,

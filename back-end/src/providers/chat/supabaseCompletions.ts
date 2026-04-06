@@ -10,7 +10,10 @@
  */
 
 // Use local Supabase functions in development, production URL otherwise
+import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
+
+const log = createLogger('SupabaseCompletions');
 
 const SUPABASE_FUNCTIONS_URL =
   process.env.NODE_ENV === 'production'
@@ -47,7 +50,7 @@ export interface CompletionOptions {
     json_schema: {
       name: string;
       strict: boolean;
-      schema: Record<string, any>;
+      schema: Record<string, unknown>;
     };
   };
   claude_token?: string;
@@ -103,9 +106,10 @@ export async function createStreamingCompletion(
     stream_options: { include_usage: true },
   };
 
-  console.log('[SupabaseCompletions] Request to Rose:', logJson(requestBody));
+  log.info('Request to Rose', { body: logJson(requestBody) });
 
   let lastError: Error | null = null;
+  // eslint-disable-next-line no-restricted-syntax -- retry is interleaved with SSE stream setup and per-attempt HTTP/network error branching
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch(url, {
@@ -122,14 +126,14 @@ export async function createStreamingCompletion(
         const errorText = await response.text();
         if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
           const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-          console.warn(
-            `[SupabaseCompletions] Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
+          log.warn(
+            `Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
           );
           await new Promise((r) => setTimeout(r, backoff));
           lastError = new Error(`Supabase completions failed: ${response.status} ${errorText}`);
           continue;
         }
-        console.error('[SupabaseCompletions] Request failed', {
+        log.error('Request failed', {
           status: response.status,
           statusText: response.statusText,
           error: errorText.substring(0, 500),
@@ -142,7 +146,7 @@ export async function createStreamingCompletion(
       }
 
       if (attempt > 1) {
-        console.log(`[SupabaseCompletions] Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
+        log.info(`Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
       }
 
       // Return an async iterable that parses SSE events
@@ -152,10 +156,9 @@ export async function createStreamingCompletion(
       // Retry on network errors (fetch throws on connection refused, timeout, etc.)
       if (attempt < MAX_RETRIES && !lastError.message.startsWith('Supabase completions failed:')) {
         const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-        console.warn(
-          `[SupabaseCompletions] Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms:`,
-          lastError.message
-        );
+        log.warn(`Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`, {
+          error: lastError.message,
+        });
         await new Promise((r) => setTimeout(r, backoff));
         continue;
       }
@@ -194,9 +197,9 @@ async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncIterable<
           try {
             const chunk = JSON.parse(data) as CompletionChunk;
             yield chunk;
-          } catch (e) {
+          } catch {
             // Skip invalid JSON (could be partial or debug data)
-            console.warn('[SupabaseCompletions] Failed to parse chunk:', data.substring(0, 100));
+            log.warn('Failed to parse chunk', { data: data.substring(0, 100) });
           }
         }
       }

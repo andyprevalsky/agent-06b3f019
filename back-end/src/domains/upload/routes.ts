@@ -1,4 +1,5 @@
 import { type Response, Router } from 'express';
+// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { type AuthRequest, authenticate } from '../../providers/auth';

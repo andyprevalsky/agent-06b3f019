@@ -1,4 +1,5 @@
-import crypto from 'crypto';
+import { createHash } from '../../providers/crypto';
+// eslint-disable-next-line no-restricted-imports -- domain-specific LRU cache, single consumer
 import { LRUCache } from 'lru-cache';
 import type { MemoryEntry, CachedMemory, AppendEntryInput } from './types';
 import { MAX_TOKEN_COUNT, CHARS_PER_TOKEN, CACHE_MAX_ENTRIES, CACHE_TTL_MS } from './config';
@@ -16,7 +17,7 @@ const memoryCache = new LRUCache<string, CachedMemory>({
 // Compute hash of content
 function computeHash(content: MemoryEntry[]): string {
   const str = JSON.stringify(content);
-  return crypto.createHash('sha256').update(str).digest('hex').substring(0, 16);
+  return createHash('sha256').update(str).digest('hex').substring(0, 16);
 }
 
 // Estimate token count from string length

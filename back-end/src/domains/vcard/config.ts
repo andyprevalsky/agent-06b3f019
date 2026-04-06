@@ -1,3 +1,4 @@
+// eslint-disable-next-line no-restricted-imports -- reads static asset at startup in config
 import { readFileSync } from 'fs';
 import { join } from 'path';
 

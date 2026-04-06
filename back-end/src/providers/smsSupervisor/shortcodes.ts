@@ -9,6 +9,10 @@
 
 import crypto from 'crypto';
 import { prisma } from '../database';
+import { createLogger } from '../logger';
+import { retryOnCollision } from '../retry';
+
+const log = createLogger('SMS Shortcode');
 
 const SHORTCODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // 32 chars
 const SHORTCODE_LENGTH = 5;
@@ -40,12 +44,12 @@ export async function createShortcode(params: {
   const { userId, attentionRequestId, agentId, workflowId } = params;
   const expiresAt = new Date(Date.now() + SHORTCODE_TTL_HOURS * 60 * 60 * 1000);
 
-  for (let attempt = 0; attempt < MAX_COLLISION_RETRIES; attempt++) {
-    const code = generateShortcode();
-    try {
-      const shortcode = await prisma.smsShortcode.create({
+  const code = await retryOnCollision(
+    async () => {
+      const generatedCode = generateShortcode();
+      await prisma.smsShortcode.create({
         data: {
-          code,
+          code: generatedCode,
           userId,
           attentionRequestId,
           agentId,
@@ -54,37 +58,20 @@ export async function createShortcode(params: {
         },
       });
 
-      console.log('[SMS Shortcode] Created', {
-        code,
+      log.info('Created', {
+        code: generatedCode,
         userId,
         attentionRequestId,
         agentId,
         expiresAt: expiresAt.toISOString(),
-        attempt,
       });
 
-      return shortcode.code;
-    } catch (error: any) {
-      // Unique constraint violation on code — retry with new code
-      if (error?.code === 'P2002') {
-        console.warn('[SMS Shortcode] Collision on code, retrying', {
-          code,
-          attempt,
-        });
-        continue;
-      }
-      console.error('[SMS Shortcode] Failed to create', {
-        error: error?.message,
-        userId,
-        attentionRequestId,
-      });
-      throw error;
-    }
-  }
-
-  throw new Error(
-    `[SMS Shortcode] Failed to generate unique code after ${MAX_COLLISION_RETRIES} attempts`
+      return generatedCode;
+    },
+    { maxAttempts: MAX_COLLISION_RETRIES, component: 'SMS Shortcode' }
   );
+
+  return code;
 }
 
 /**
@@ -101,7 +88,7 @@ export async function lookupAndConsumeShortcode(
 } | null> {
   const normalizedCode = code.toUpperCase().trim();
 
-  console.log('[SMS Shortcode] Looking up', {
+  log.info('Looking up', {
     code: normalizedCode,
     userId,
   });
@@ -115,7 +102,7 @@ export async function lookupAndConsumeShortcode(
   });
 
   if (!shortcode) {
-    console.log('[SMS Shortcode] Not found or expired', {
+    log.info('Not found or expired', {
       code: normalizedCode,
       userId,
     });
@@ -127,7 +114,7 @@ export async function lookupAndConsumeShortcode(
     where: { id: shortcode.id },
   });
 
-  console.log('[SMS Shortcode] Consumed', {
+  log.info('Consumed', {
     code: normalizedCode,
     userId,
     attentionRequestId: shortcode.attentionRequestId,
@@ -150,7 +137,7 @@ export async function cleanupExpiredShortcodes(): Promise<number> {
   });
 
   if (result.count > 0) {
-    console.log('[SMS Shortcode] Cleaned up expired', {
+    log.info('Cleaned up expired', {
       count: result.count,
     });
   }

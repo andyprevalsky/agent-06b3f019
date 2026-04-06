@@ -2,10 +2,16 @@
  * Blueprints domain service -- business logic for blueprint search, CRUD, and feedback.
  */
 
+// eslint-disable-next-line no-restricted-imports -- domain-specific OpenAI embeddings client, single consumer
 import OpenAI from 'openai';
 import type { Prisma, BlueprintMetadata } from './types';
 import { createLogger } from '../../providers/logger';
-import { SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT, EMBEDDING_MODEL } from './config';
+import {
+  SIMILARITY_THRESHOLD,
+  DEFAULT_SEARCH_LIMIT,
+  EMBEDDING_MODEL,
+  OPENAI_API_KEY,
+} from './config';
 import * as repo from './repo';
 
 const log = createLogger('Blueprints');
@@ -27,7 +33,7 @@ export class EmbeddingError extends Error {
 // ---------------------------------------------------------------------------
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: OPENAI_API_KEY,
 });
 
 // ---------------------------------------------------------------------------

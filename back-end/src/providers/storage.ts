@@ -1,5 +1,8 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import { createLogger } from './logger';
+
+const log = createLogger('Storage');
 
 // Lazy initialization of Supabase client
 let supabaseClient: SupabaseClient | null = null;
@@ -53,11 +56,11 @@ export async function uploadToStorage(
   });
 
   if (error) {
-    console.error('[Storage] Upload failed:', error);
+    log.error('Upload failed', { error: error.message });
     throw new Error(`Failed to upload file: ${error.message}`);
   }
 
-  console.log(`[Storage] Uploaded file to ${storagePath} (${fileBuffer.length} bytes)`);
+  log.info(`Uploaded file to ${storagePath} (${fileBuffer.length} bytes)`);
 
   return { storage_path: storagePath };
 }
@@ -71,7 +74,7 @@ export async function downloadFromStorage(storagePath: string): Promise<Buffer> 
   const { data, error } = await client.storage.from(ATTACHMENT_BUCKET).download(storagePath);
 
   if (error) {
-    console.error('[Storage] Download failed:', error);
+    log.error('Download failed', { error: error.message });
     throw new Error(`Failed to download file: ${error.message}`);
   }
 
@@ -89,7 +92,7 @@ export async function getSignedUrl(storagePath: string, expiresIn: number = 3600
     .createSignedUrl(storagePath, expiresIn);
 
   if (error) {
-    console.error('[Storage] Signed URL generation failed:', error);
+    log.error('Signed URL generation failed', { error: error.message });
     throw new Error(`Failed to generate signed URL: ${error.message}`);
   }
 
@@ -105,7 +108,7 @@ export async function deleteFromStorage(storagePath: string): Promise<void> {
   const { error } = await client.storage.from(ATTACHMENT_BUCKET).remove([storagePath]);
 
   if (error) {
-    console.error('[Storage] Delete failed:', error);
+    log.error('Delete failed', { error: error.message });
     throw new Error(`Failed to delete file: ${error.message}`);
   }
 }
@@ -129,7 +132,7 @@ export async function processUploadedFile(
   }
 
   // Upload to Supabase Storage
-  console.log(`[Storage] Uploading file to storage: ${filename} (${fileBuffer.length} bytes)`);
+  log.info(`Uploading file to storage: ${filename} (${fileBuffer.length} bytes)`);
   const { storage_path } = await uploadToStorage(userId, fileBuffer, filename, mimeType);
 
   return {

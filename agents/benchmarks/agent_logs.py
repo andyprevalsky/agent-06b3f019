@@ -206,8 +206,8 @@ def main():
     )
     parser.add_argument("--diagnostics", action="store_true", help="Show formatted tree diagnostics")
     parser.add_argument(
-        "--url", default=f"http://localhost:{os.environ.get('CONDUCTOR_PORT', '3001')}",
-        help="Base API URL (default: localhost:$CONDUCTOR_PORT)",
+        "--url", default="https://navi-j9a9.onrender.com",
+        help="Base API URL (default: prod)",
     )
     parser.add_argument(
         "--hours", type=int, default=24,

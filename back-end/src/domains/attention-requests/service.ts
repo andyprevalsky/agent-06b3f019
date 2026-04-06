@@ -115,14 +115,8 @@ export async function respond(id: string, userId: string, data: RespondInput) {
   if (request === null) throw new NotFoundError('Attention request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
 
-  // Map rejection-like responses to the __REJECTED__ sentinel so the
-  // workflow correctly detects denial regardless of which endpoint is used.
-  const REJECTION_WORDS = ['denied', 'deny', 'reject', 'rejected', 'no'];
-  const normalised = data.response.trim().toLowerCase();
-  const resolvedResponse = REJECTION_WORDS.includes(normalised) ? REJECTED_RESPONSE : data.response;
-
-  await repo.updateResponse(id, resolvedResponse);
-  await signalWorkflow(request.workflowId, request.agentId, id, resolvedResponse);
+  await repo.updateResponse(id, data.response);
+  await signalWorkflow(request.workflowId, request.agentId, id, data.response);
 
   return { success: true, request_id: id };
 }

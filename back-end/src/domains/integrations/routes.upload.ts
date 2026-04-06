@@ -4,7 +4,9 @@
  */
 
 import { type RequestHandler, type Response, Router } from 'express';
+// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
+// eslint-disable-next-line no-restricted-imports -- temp file cleanup for multer uploads
 import fs from 'fs';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';

@@ -1,3 +1,6 @@
+export const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+export const BACKEND_URL = process.env.BACKEND_URL ?? 'https://navi-j9a9.onrender.com';
+
 /** Cache TTL in seconds (1 hour). */
 export const MODEL_CACHE_TTL = 3600;
 

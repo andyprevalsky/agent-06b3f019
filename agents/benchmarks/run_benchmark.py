@@ -3,7 +3,7 @@
 """
 Agent Benchmark Harness
 
-Spawns real agents against localhost (or prod via --url), polls for completion,
+Spawns real agents against prod (or localhost), polls for completion,
 evaluates pass/fail, handles approvals, retries transient failures,
 and stores results for comparison.
 
@@ -30,8 +30,6 @@ import asyncio
 import csv
 import json
 import os
-import signal
-import subprocess
 import tempfile
 
 import sys
@@ -62,86 +60,10 @@ from benchmarks.logs import (
     load_env_var, start_fly_log_collector, stop_fly_log_collector,
 )
 
-# Defaults — benchmarks run against localhost by default (local services must be running)
-_conductor_port = os.environ.get("CONDUCTOR_PORT", "3001")
+# Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get(
-    "BENCHMARK_BASE_URL", f"http://localhost:{_conductor_port}"
+    "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
 )
-
-# ---------------------------------------------------------------------------
-# Local service lifecycle (run.sh --benchmark)
-# ---------------------------------------------------------------------------
-_run_sh_process: Optional[subprocess.Popen] = None
-
-
-def _kill_run_sh():
-    """Kill the run.sh process tree."""
-    global _run_sh_process
-    if _run_sh_process and _run_sh_process.poll() is None:
-        print("  🛑 Stopping local services...")
-        # Send SIGTERM to the process group so run.sh's trap fires
-        try:
-            os.killpg(os.getpgid(_run_sh_process.pid), signal.SIGTERM)
-        except OSError:
-            _run_sh_process.terminate()
-        try:
-            _run_sh_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(_run_sh_process.pid), signal.SIGKILL)
-        _run_sh_process = None
-
-
-def start_local_services() -> bool:
-    """Start run.sh --benchmark and wait for backend to be ready.
-
-    Returns True if services started successfully.
-    """
-    global _run_sh_process
-
-    conductor_port = os.environ.get("CONDUCTOR_PORT")
-    workspace_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
-    if not conductor_port or not workspace_name:
-        print("  ⚠ CONDUCTOR_PORT/CONDUCTOR_WORKSPACE_NAME not set — cannot start local services")
-        return False
-
-    # Kill any existing run.sh for this workspace
-    _kill_run_sh()
-
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    run_sh = os.path.join(repo_root, "scripts", "run.sh")
-
-    env = {**os.environ, "CONDUCTOR_PORT": conductor_port, "CONDUCTOR_WORKSPACE_NAME": workspace_name}
-    _run_sh_process = subprocess.Popen(
-        ["bash", run_sh, "--benchmark"],
-        cwd=repo_root,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,  # own process group for clean kill
-    )
-
-    # Register cleanup
-    import atexit
-    atexit.register(_kill_run_sh)
-
-    # Wait for backend to be ready (up to 60s)
-    health_url = f"http://localhost:{conductor_port}/health"
-    for i in range(60):
-        if _run_sh_process.poll() is not None:
-            print(f"  ❌ run.sh exited early (code={_run_sh_process.returncode})")
-            return False
-        try:
-            resp = httpx.get(health_url, timeout=2)
-            if resp.status_code == 200:
-                print(f"  ✅ Local services ready (port {conductor_port})")
-                return True
-        except (httpx.ConnectError, httpx.ReadTimeout):
-            pass
-        time.sleep(1)
-
-    print("  ❌ Timeout waiting for local backend")
-    _kill_run_sh()
-    return False
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
 # Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
@@ -215,7 +137,7 @@ async def create_agent(
     body: dict = {
         "goal": task.prompt,
         "model": "rose-labs/rose-1-lite",
-        "source": "MAC_APP",
+        "source": "WEB",
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
@@ -273,41 +195,21 @@ async def get_attention_requests(base_url: str) -> list:
             f"{base_url}/api/attention-requests", headers=headers
         )
         if resp.status_code == 200:
-            data = resp.json()
-            # Handle both bare list and {requests: [...]} envelope
-            if isinstance(data, dict):
-                return data.get("requests", [])
-            return data
+            return resp.json()
         return []
 
 
 async def respond_to_attention_request(
     base_url: str, request_id: str, response: str
 ) -> None:
-    """Approve or reject an attention request.
-
-    Uses /respond for approvals and /reject for denials, because the
-    workflow checks for the __REJECTED__ sentinel (only sent by /reject).
-    """
+    """POST /api/attention-requests/:id/respond"""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        if response == "denied":
-            resp = await client.post(
-                f"{base_url}/api/attention-requests/{request_id}/reject",
-                headers=headers,
-                json={},
-            )
-        else:
-            resp = await client.post(
-                f"{base_url}/api/attention-requests/{request_id}/respond",
-                headers=headers,
-                json={"response": response},
-            )
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(
-                f"Failed to respond to attention request {request_id}: "
-                f"status={resp.status_code} body={resp.text[:200]}"
-            )
+        await client.post(
+            f"{base_url}/api/attention-requests/{request_id}/respond",
+            headers=headers,
+            json={"response": response},
+        )
 
 
 async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
@@ -595,7 +497,7 @@ async def poll_agent(
                 pending = await get_attention_requests(base_url)
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
-                    if req_agent_id in tree_agent_ids and not req.get("answered"):
+                    if req_agent_id in tree_agent_ids and not req.get("response"):
                         approvals_triggered += 1
                         req_id = req.get("id")
                         if task.approval_handling == "auto_approve":
@@ -610,7 +512,10 @@ async def poll_agent(
                                 question = req.get("question", req.get("message", "(no details)"))
                                 print(f"\n    🔔 APPROVAL REQUIRED: {question[:200]}")
                                 if not sys.stdin.isatty():
-                                    print(f"    ⏸ Non-interactive environment — skipping {req_id[:8]} (leave for user to review)")
+                                    print(f"    ⚠ Non-interactive environment — auto-denying {req_id[:8]}")
+                                    await respond_to_attention_request(
+                                        base_url, req_id, "denied"
+                                    )
                                     continue
                                 loop = asyncio.get_event_loop()
                                 answer = (await loop.run_in_executor(None, input, "    Approve? [y/n]: ")).strip().lower()
@@ -661,6 +566,7 @@ def evaluate_task(
     agent = data.get("agent", {})
     status = agent.get("status", "UNKNOWN")
     messages = data.get("messages", [])
+    progress = agent.get("progress", 0)
 
     # Chat mode: just needs ASSISTANT response
     if task.is_chat_mode:
@@ -693,15 +599,9 @@ def evaluate_task(
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
         return False, "Expected approval requests but none were triggered"
 
-    # Check for tool errors
-    tool_errors = [
-        m for m in messages
-        if isinstance(m.get("metadata"), dict)
-        and m["metadata"].get("toolStatus") == "ERROR"
-    ]
-    if tool_errors:
-        tool_names = [m["metadata"].get("toolName", "unknown") for m in tool_errors]
-        return False, f"Tool errors detected: {', '.join(tool_names)}"
+    # Progress score check (verifier gave a score)
+    if progress < 0.5:
+        return False, f"Low progress score: {progress:.2f}"
 
     return True, None
 
@@ -955,14 +855,6 @@ async def main_async(args):
 
     base_url = args.url.rstrip("/")
 
-    # Start local services when running against localhost (not --url to prod)
-    is_local = "localhost" in base_url or "127.0.0.1" in base_url
-    if is_local:
-        print("\n  Starting local services (back-end + agents + research)...")
-        if not start_local_services():
-            print("  ❌ Failed to start local services. Aborting.")
-            sys.exit(1)
-
     tasks = resolve_tasks(args)
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
@@ -1032,10 +924,6 @@ async def main_async(args):
     finally:
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
-
-        # Stop local services if we started them
-        if is_local:
-            _kill_run_sh()
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:

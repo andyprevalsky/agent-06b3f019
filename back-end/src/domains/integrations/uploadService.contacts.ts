@@ -3,6 +3,7 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
+// eslint-disable-next-line no-restricted-imports -- temp file read/cleanup for multer uploads
 import fs from 'fs';
 import { IntegrationType, IntegrationStatus } from './types';
 import { createLogger } from '../../providers/logger';

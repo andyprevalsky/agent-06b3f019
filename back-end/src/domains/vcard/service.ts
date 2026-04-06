@@ -1,4 +1,5 @@
 // @ts-expect-error - vcards-js doesn't have type declarations
+// eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
 import vCardsJS from 'vcards-js';
 import * as repo from './repo';
 import { createLogger } from '../../providers/logger';

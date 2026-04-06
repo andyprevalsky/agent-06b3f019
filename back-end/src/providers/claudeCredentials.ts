@@ -1,5 +1,8 @@
 import crypto from 'crypto';
 import { prisma } from './database';
+import { createLogger } from './logger';
+
+const log = createLogger('ClaudeCredentials');
 
 /**
  * Decrypt an RSA+AES-GCM encrypted envelope.
@@ -18,14 +21,12 @@ export function decryptCredentialEnvelope(
     const envelope = JSON.parse(envelopeJson);
 
     if (envelope.version !== 1) {
-      console.error('[ClaudeCredentials] Unknown envelope version:', envelope.version);
+      log.error('Unknown envelope version', { version: envelope.version });
       return null;
     }
 
     if (!envelope.encrypted_aes_key || !envelope.iv || !envelope.ciphertext) {
-      console.error(
-        '[ClaudeCredentials] Malformed envelope: missing encrypted_aes_key, iv, or ciphertext'
-      );
+      log.error('Malformed envelope: missing encrypted_aes_key, iv, or ciphertext');
       return null;
     }
 
@@ -55,7 +56,9 @@ export function decryptCredentialEnvelope(
 
     return plaintext.toString('utf8');
   } catch (error) {
-    console.error('[ClaudeCredentials] Failed to decrypt credential envelope:', error);
+    log.error('Failed to decrypt credential envelope', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -67,9 +70,7 @@ export function decryptCredentialEnvelope(
 export async function fetchClaudeCodeCredentials(userId: string): Promise<string | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) {
-    console.log(
-      '[ClaudeCredentials] CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping credential lookup'
-    );
+    log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping credential lookup');
     return null;
   }
 
@@ -83,36 +84,29 @@ export async function fetchClaudeCodeCredentials(userId: string): Promise<string
     });
 
     if (!integration) {
-      console.log(`[ClaudeCredentials] No claude_code integration found for user ${userId}`);
+      log.info(`No claude_code integration found for user ${userId}`);
       return null;
     }
 
     const config = integration.config as Record<string, unknown> | null;
     const encryptedCredentials = config?.encryptedCredentials as string | undefined;
     if (!encryptedCredentials) {
-      console.log(
-        `[ClaudeCredentials] claude_code integration has no encryptedCredentials for user ${userId}`
-      );
+      log.info(`claude_code integration has no encryptedCredentials for user ${userId}`);
       return null;
     }
 
     const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
     if (!decrypted) {
-      console.error(
-        `[ClaudeCredentials] Failed to decrypt Claude Code credentials for user ${userId}`
-      );
+      log.error(`Failed to decrypt Claude Code credentials for user ${userId}`);
       return null;
     }
 
-    console.log(
-      `[ClaudeCredentials] Successfully decrypted Claude Code credentials for user ${userId}`
-    );
+    log.info(`Successfully decrypted Claude Code credentials for user ${userId}`);
     return decrypted;
   } catch (error) {
-    console.error(
-      `[ClaudeCredentials] Error fetching Claude Code credentials for user ${userId}:`,
-      error
-    );
+    log.error(`Error fetching Claude Code credentials for user ${userId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -145,9 +139,7 @@ export async function fetchPoolToken(
 ): Promise<{ accessToken: string; poolTokenId: string } | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) {
-    console.log(
-      '[ClaudeCredentials] CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping pool lookup'
-    );
+    log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping pool lookup');
     return null;
   }
 
@@ -165,31 +157,27 @@ export async function fetchPoolToken(
     });
 
     if (!poolIntegration) {
-      console.log('[ClaudeCredentials] No available pool tokens');
+      log.info('No available pool tokens');
       return null;
     }
 
     const config = poolIntegration.config as Record<string, unknown> | null;
     const encryptedCredentials = config?.encryptedCredentials as string | undefined;
     if (!encryptedCredentials) {
-      console.error(
-        `[ClaudeCredentials] Pool integration ${poolIntegration.id} missing encryptedCredentials`
-      );
+      log.error(`Pool integration ${poolIntegration.id} missing encryptedCredentials`);
       return null;
     }
 
     const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
     if (!decrypted) {
-      console.error(`[ClaudeCredentials] Failed to decrypt pool integration ${poolIntegration.id}`);
+      log.error(`Failed to decrypt pool integration ${poolIntegration.id}`);
       return null;
     }
 
     const parsed = JSON.parse(decrypted);
     const oauth = parsed?.claudeAiOauth;
     if (!oauth?.accessToken) {
-      console.error(
-        `[ClaudeCredentials] Pool integration ${poolIntegration.id} missing accessToken`
-      );
+      log.error(`Pool integration ${poolIntegration.id} missing accessToken`);
       return null;
     }
 
@@ -199,12 +187,14 @@ export async function fetchPoolToken(
       data: { lastUsedAt: now },
     });
 
-    console.log(
-      `[ClaudeCredentials] Serving pool token from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
+    log.info(
+      `Serving pool token from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
     );
     return { accessToken: oauth.accessToken, poolTokenId: poolIntegration.id };
   } catch (error) {
-    console.error('[ClaudeCredentials] Error fetching pool token:', error);
+    log.error('Error fetching pool token', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -224,9 +214,7 @@ export async function markPoolTokenRateLimited(
     where: { id: poolTokenId },
     data: { rateLimitedUntil: until },
   });
-  console.log(
-    `[ClaudeCredentials] Pool token ${poolTokenId} rate-limited until ${until.toISOString()}`
-  );
+  log.info(`Pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
 }
 
 /**
@@ -248,9 +236,7 @@ export async function markUserTokenRateLimited(
     },
     data: { rateLimitedUntil: until },
   });
-  console.log(
-    `[ClaudeCredentials] User token for ${userId} rate-limited until ${until.toISOString()}`
-  );
+  log.info(`User token for ${userId} rate-limited until ${until.toISOString()}`);
 }
 
 // =============================================================================
@@ -264,7 +250,7 @@ export async function markUserTokenRateLimited(
 export async function fetchClaudeCodeAccessToken(userId: string): Promise<string | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) {
-    console.log('[ClaudeCredentials] CLAUDE_CREDENTIAL_DECRYPTION_KEY not set');
+    log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set');
     return null;
   }
 
@@ -280,7 +266,7 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     });
 
     if (!integration) {
-      console.log(`[ClaudeCredentials] No claude_code integration found for user ${userId}`);
+      log.info(`No claude_code integration found for user ${userId}`);
       return null;
     }
 
@@ -294,13 +280,15 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     const parsed = JSON.parse(decrypted);
     const oauth = parsed?.claudeAiOauth;
     if (!oauth?.accessToken) {
-      console.error(`[ClaudeCredentials] Credentials missing accessToken for user ${userId}`);
+      log.error(`Credentials missing accessToken for user ${userId}`);
       return null;
     }
 
     return oauth.accessToken;
   } catch (error) {
-    console.error(`[ClaudeCredentials] Failed to fetch access token for user ${userId}:`, error);
+    log.error(`Failed to fetch access token for user ${userId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }

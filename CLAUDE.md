@@ -39,7 +39,7 @@ cd agents && python tests/run_all_tests.py  # Agent tool tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 ```
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks run against **localhost** (`http://localhost:$CONDUCTOR_PORT`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
+**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference and **prod log review instructions** (how to read Render/Fly.io/Supabase logs from benchmark runs). Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks run against **prod** by default — no local services needed. Before running `--auto` mode, read the docstring at the top of `agents/benchmarks/run_benchmark.py` to understand the full auto-debug-fix-deploy loop.
 
 ## Log Files
 
@@ -97,6 +97,8 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
    ```
 
 14. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
+
+15. **Cross-cutting concerns must flow through `providers/`** - Domain code must never directly use infrastructure (raw `fetch`, `process.env`, retry loops, npm clients like `stripe`/`ioredis`). Use the canonical provider. Run `/enforce-canonical-utility` to audit and enforce via ESLint.
 
 ## Plans
 

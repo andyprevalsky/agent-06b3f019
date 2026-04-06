@@ -2,7 +2,13 @@
  * Rose domain service — model selection, chat completions proxy, cost calculation.
  */
 
-import { CEREBRAS_API_URL, DEFAULT_CONTEXT_LENGTH } from './config';
+import {
+  CEREBRAS_API_URL,
+  CEREBRAS_API_KEY,
+  OPENROUTER_API_KEY,
+  BACKEND_URL,
+  DEFAULT_CONTEXT_LENGTH,
+} from './config';
 import type {
   ModelSelection,
   ChatCompletionParams,
@@ -101,7 +107,7 @@ async function callCerebras(
   const cerebrasResponse = await fetch(CEREBRAS_API_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.CEREBRAS_API_KEY}`,
+      Authorization: `Bearer ${CEREBRAS_API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(cerebrasBody),
@@ -145,9 +151,9 @@ async function callOpenRouter(
   const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.BACKEND_URL ?? 'https://navi-j9a9.onrender.com',
+      'HTTP-Referer': BACKEND_URL,
       'X-Title': 'Rose AI Agent',
     },
     body: JSON.stringify(openrouterBody),
@@ -216,8 +222,8 @@ export async function calculateCost(modelName: string): Promise<CostResult> {
 
   const response = await fetch('https://openrouter.ai/api/v1/models', {
     headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'HTTP-Referer': process.env.BACKEND_URL ?? 'https://navi-j9a9.onrender.com',
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': BACKEND_URL,
       'X-Title': 'Rose AI Agent',
     },
   });

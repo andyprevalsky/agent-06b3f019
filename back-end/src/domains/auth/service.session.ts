@@ -1,5 +1,6 @@
+// eslint-disable-next-line no-restricted-imports -- domain-specific auth concern, single consumer
 import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from '../../providers/crypto';
 import {
   SUPABASE_URL,
   SUPABASE_JWT_SECRET,
@@ -29,7 +30,7 @@ export function generateSupabaseSession(userId: string, phone: string): SessionT
   const expiresAt = now + SESSION_EXPIRES_IN;
   const refreshExpiresAt = now + REFRESH_TOKEN_EXPIRES_IN;
 
-  const sessionId = uuidv4();
+  const sessionId = randomUUID();
   const accessPayload = {
     aud: 'authenticated',
     exp: expiresAt,
@@ -87,8 +88,8 @@ export function generateAnonymousSession(): AnonymousSessionResult {
   }
 
   const secret = SUPABASE_JWT_SECRET;
-  const userId = uuidv4();
-  const sessionId = uuidv4();
+  const userId = randomUUID();
+  const sessionId = randomUUID();
 
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + SESSION_EXPIRES_IN;

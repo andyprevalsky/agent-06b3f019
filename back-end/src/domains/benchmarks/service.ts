@@ -1,3 +1,4 @@
+// eslint-disable-next-line no-restricted-imports -- reads static benchmark JSON at startup
 import fs from 'fs';
 import { TASKS_PATH } from './config';
 import { createLogger } from '../../providers/logger';

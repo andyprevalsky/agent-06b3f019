@@ -1,7 +1,10 @@
+// eslint-disable-next-line no-restricted-imports -- domain-specific model cache, single consumer
 import NodeCache from 'node-cache';
 import { ROSE_MODEL_POOLS } from '../../providers/roseModels';
 import type { OpenRouterModel, SortedModel } from './types';
 import {
+  OPENROUTER_API_KEY,
+  BACKEND_URL,
   MODEL_CACHE_TTL,
   DEFAULT_CONTEXT_LENGTH,
   FALLBACK_PRICING,
@@ -207,8 +210,8 @@ export async function listModels(): Promise<{
   const response = await fetch('https://openrouter.ai/api/v1/models', {
     signal: AbortSignal.timeout(15_000),
     headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'HTTP-Referer': process.env.BACKEND_URL ?? 'https://navi-j9a9.onrender.com',
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': BACKEND_URL,
       'X-Title': 'Rose AI Agent',
     },
   });

@@ -1,6 +1,7 @@
 import { logTruncate } from '../../utils/log';
 import { sendSms, getUserPhone } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
+import { SURGE_API_KEY, SURGE_ACCOUNT_ID } from './config';
 import {
   notifyAgentStarted,
   notifyPlannerMessage,
@@ -44,8 +45,8 @@ export class SurgeApiError extends Error {
  * Send an SMS via the Surge API.
  */
 export async function sendViaSurge(phoneNumber: string, message: string): Promise<SurgeSendResult> {
-  const apiKey = process.env.SURGE_API_KEY;
-  const accountId = process.env.SURGE_ACCOUNT_ID;
+  const apiKey = SURGE_API_KEY;
+  const accountId = SURGE_ACCOUNT_ID;
 
   if (apiKey === undefined || apiKey === '' || accountId === undefined || accountId === '') {
     log.error('Surge credentials not configured');

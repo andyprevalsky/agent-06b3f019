@@ -43,6 +43,23 @@ export default tseslint.config(
       eqeqeq: ['error', 'always'],
       'no-duplicate-imports': 'error',
       'prefer-const': 'error',
+
+      // ── Canonical utility enforcement ──
+      // Ban hand-rolled alternatives to shared utilities (OpenAI harness eng pattern).
+      // See /enforce-canonical-utility skill and providers/retry.ts.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ForStatement:has(CallExpression[callee.name="setTimeout"])',
+          message:
+            'Hand-rolled retry loop detected. Use retryWithBackoff() or retryOnCollision() from providers/retry.ts instead.',
+        },
+        {
+          selector: 'WhileStatement:has(CallExpression[callee.name="setTimeout"])',
+          message:
+            'Hand-rolled retry loop detected. Use retryWithBackoff() or retryOnCollision() from providers/retry.ts instead.',
+        },
+      ],
     },
   },
 
@@ -74,6 +91,112 @@ export default tseslint.config(
         },
       ]
     : []),
+
+  // ── Domain non-config files: enforce config.ts pattern for env vars ──
+  // process.env must only be read in config.ts; services/routes/repos import from config.ts.
+  // NOTE: no-restricted-syntax must repeat base rules because flat-config replaces, not merges.
+  {
+    files: ['src/domains/**/*.ts'],
+    ignores: ['src/domains/**/config.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ForStatement:has(CallExpression[callee.name="setTimeout"])',
+          message:
+            'Hand-rolled retry loop detected. Use retryWithBackoff() or retryOnCollision() from providers/retry.ts instead.',
+        },
+        {
+          selector: 'WhileStatement:has(CallExpression[callee.name="setTimeout"])',
+          message:
+            'Hand-rolled retry loop detected. Use retryWithBackoff() or retryOnCollision() from providers/retry.ts instead.',
+        },
+        {
+          selector:
+            'MemberExpression[object.object.name="process"][object.property.name="env"]',
+          message:
+            'Read process.env in your domain config.ts, not here. Import the value from config.ts instead.',
+        },
+      ],
+    },
+  },
+
+  // ── Domain files: ban direct npm/Node imports that bypass canonical providers ──
+  // CLAUDE.md rule: "Domain code must never directly use infrastructure … npm clients".
+  // Providers are the ONE place that imports these packages; domains import from providers.
+  {
+    files: ['src/domains/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'crypto',
+              message:
+                'Import from providers/crypto.ts instead of Node crypto directly.',
+            },
+            {
+              name: 'stripe',
+              message:
+                'Import from providers/stripe.ts instead of using Stripe directly.',
+              allowTypeImports: true,
+            },
+            {
+              name: 'node-fetch',
+              message:
+                'Use global fetch() instead of node-fetch. It is available in Node 18+.',
+            },
+            {
+              name: 'uuid',
+              message:
+                'Use randomUUID() from providers/crypto.ts instead of the uuid package.',
+            },
+            {
+              name: 'fs',
+              message:
+                'File system access should go through a provider or be restricted to config.ts.',
+            },
+            {
+              name: 'openai',
+              message:
+                'Import from a provider instead of using the OpenAI SDK directly.',
+            },
+            {
+              name: 'jsonwebtoken',
+              message:
+                'Import from a provider instead of using jsonwebtoken directly.',
+            },
+            {
+              name: '@supabase/supabase-js',
+              message:
+                'Import from a provider instead of using the Supabase client directly.',
+            },
+            {
+              name: 'node-cache',
+              message:
+                'Import from a provider instead of using node-cache directly.',
+            },
+            {
+              name: 'lru-cache',
+              message:
+                'Import from a provider instead of using lru-cache directly.',
+            },
+            {
+              name: 'multer',
+              message:
+                'Import from a provider or configure multer in your domain config.ts.',
+            },
+            {
+              name: 'vcards-js',
+              message:
+                'Import from a provider instead of using vcards-js directly.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 
   // ── Ban .js files in src/ ──
   {
