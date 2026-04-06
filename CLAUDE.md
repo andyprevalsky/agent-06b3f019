@@ -100,6 +100,13 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 15. **Cross-cutting concerns must flow through `providers/`** - Domain code must never directly use infrastructure (raw `fetch`, `process.env`, retry loops, npm clients like `stripe`/`ioredis`). Use the canonical provider. Run `/enforce-canonical-utility` to audit and enforce via ESLint.
 
+16. **NEVER use broad process kills** - `pkill -f worker.py`, `pkill -f "npx tsx"`, `pkill -f "run.sh"`, or any pattern-based kill will murder processes in OTHER Conductor workspaces. Only kill by port:
+    ```bash
+    for port in $BACKEND_PORT $HEALTH_PORT $RESEARCH_PORT; do
+        lsof -ti :$port 2>/dev/null | xargs kill -9 2>/dev/null || true
+    done
+    ```
+
 ## Plans
 
 All implementation plans live in `docs/plans/` (checked into the repo):
