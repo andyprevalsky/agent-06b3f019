@@ -15,7 +15,7 @@ from temporalio.common import RetryPolicy
 
 from tools.base import ToolManager, ToolEvent, EventType, MessageStatus
 from helpers.tool_schemas import TOOL_MODELS, PLANNER_ASSIGNABLE_TOOLS
-from helpers.attachments import FilePointer, get_cached_file
+from helpers.attachments import FilePointer
 
 # Manual descriptions for planner-facing tool names (mapped to spawn_agent via DAG aliases)
 PLANNING_TOOL_DESCRIPTIONS = {
@@ -226,18 +226,17 @@ class SetPlanManager(ToolManager):
             role = msg.get("role", "").upper()
             text = msg.get("text", "")
 
-            # Resolve file attachments from cache (pre-populated by resolve_attachments_activity)
+            # Include file metadata only (not full content) — the planner generates a task
+            # plan and doesn't need raw file bytes. Including full file content (especially
+            # binary PDFs decoded as UTF-8 garbage) can exceed Temporal's payload limit.
             file_pointer_data = msg.get("file_pointer") or msg.get("filePointer")
             if file_pointer_data and isinstance(file_pointer_data, dict):
                 try:
                     fp = FilePointer.from_dict(file_pointer_data)
-                    cached = get_cached_file(fp.id)
-                    if cached:
-                        file_bytes, _ = cached
-                        file_text = file_bytes.decode("utf-8", errors="replace")
-                        text = f"{text}\n\n[File: {fp.original_filename}]\n```\n{file_text}\n```" if text else f"[File: {fp.original_filename}]\n```\n{file_text}\n```"
-                    elif not text:
-                        text = f"[File attached: {fp.original_filename} ({fp.mime_type})]"
+                    filename = fp.original_filename or "unknown"
+                    mime = fp.mime_type or "unknown type"
+                    file_label = f"[File attached: {filename} ({mime})]"
+                    text = f"{text}\n\n{file_label}" if text else file_label
                 except Exception:
                     pass  # Fall through to normal text handling
 
