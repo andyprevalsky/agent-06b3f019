@@ -1,11 +1,29 @@
 ---
-description: "Run a benchmark task in auto-debug mode. Spawns agent against prod, monitors, diagnoses failures, fixes code, deploys, and reruns until COMPLETED."
-argument-hint: "<task-name> | list"
+description: "Run a benchmark task in auto-debug mode. Spawns agent, monitors, diagnoses failures, fixes code, deploys, and reruns until COMPLETED."
+argument-hint: "<task-name> [--prod] | list"
 ---
 
 # Benchmark Auto-Debug Loop
 
-Run a benchmark task against prod, monitor it, and iteratively fix any issues until it passes.
+Run a benchmark task, monitor it, and iteratively fix any issues until it passes.
+
+## Parse arguments
+
+Extract flags from `$ARGUMENTS`:
+- If `$ARGUMENTS` contains `--prod`: set **MODE=prod**, remove `--prod` from the argument string to get the task name.
+- Otherwise: set **MODE=local** (default).
+- The remaining text after removing flags is the task name (e.g., `outreach-batch`).
+
+Set variables based on mode:
+- **Local mode** (`MODE=local`):
+  - `BASE_URL=http://localhost:$CONDUCTOR_PORT`
+  - Local services MUST be running
+  - Local log files available: `agents/navi-worker-log.txt`, `back-end/backend-logs.log`, `research/research-logs.log`
+- **Prod mode** (`MODE=prod`):
+  - `BASE_URL=https://navi-j9a9.onrender.com`
+  - Do NOT start or manage local services
+  - Do NOT manage run.sh
+  - Local log files are NOT available; use `agent_logs.py --prod` for all diagnostics
 
 ## If `$ARGUMENTS` is `list`
 
@@ -20,17 +38,38 @@ cd agents && python benchmarks/run_benchmark.py --list
 
 ## Setup
 
-- Benchmarks run against **prod** (`https://navi-j9a9.onrender.com`) — no local services needed.
 - Working directory: `cd agents` (all commands below assume this)
-- Task argument: `$ARGUMENTS` (the benchmark task name, e.g. `build-boxing-payment`)
-- If you need a local smoke reproduction before or after the prod run, start services with `bash scripts/run.sh --benchmark`. That mode skips `front-end` and `mac-app`; benchmark/smoke runs should never boot either UI service.
+- Task argument: the task name extracted from `$ARGUMENTS` (e.g. `build-boxing-payment`)
+- API key: `AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=`
+- User ID: `1f85ff25-6e29-4c1b-8739-f917bd101a30`
+- Base URL: `$BASE_URL` (set during argument parsing above)
+
+### If local mode (default)
+
+1. **Pull latest main:** `git pull origin main`
+2. **Ensure `run.sh` only starts back-end + agents + research** (no front-end, no mac-app). If front-end or mac-app service blocks are present in `scripts/run.sh`, remove them. Never remove back-end, agents, or research.
+3. **Check if services are already running:**
+   ```bash
+   curl -s http://localhost:$CONDUCTOR_PORT/health | head -c 100
+   ```
+4. **If not running**, Conductor starts services via `bash scripts/run.sh` (see `conductor.json`). The `CONDUCTOR_PORT` and `CONDUCTOR_WORKSPACE_NAME` env vars are set by Conductor automatically.
+   Wait for "Worker started, waiting for tasks..." in `agents/navi-worker-log.txt`.
+
+### If prod mode
+
+1. **Pull latest main:** `git pull origin main`
+2. **Verify prod is reachable:**
+   ```bash
+   curl -s https://navi-j9a9.onrender.com/health | head -c 100
+   ```
+3. Do NOT start run.sh or local services. Do NOT modify run.sh.
 
 ## Step 1: Clean up old agents
 
 Before starting, delete any existing agents for this task:
 
 ```bash
-curl -s "https://navi-j9a9.onrender.com/api/agents" \
+curl -s "$BASE_URL/api/agents" \
   -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
   -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
   | python3 -c "import json,sys; [print(a['agent_id']) for a in json.load(sys.stdin)['agents']]"
@@ -41,21 +80,33 @@ Delete any that match the task goal. Only 1 agent per task should be alive at a 
 ## Step 2: Run the benchmark
 
 ```bash
-cd agents && python benchmarks/run_benchmark.py --task $ARGUMENTS
+curl -s -X POST "$BASE_URL/api/agents" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "<prompt from task>", "model": "rose-labs/rose-1-lite", "source": "MAC_APP", "price_limit_cents": <from task>, "start_phase": "<from task>"}'
 ```
 
-Run this in the background. Save the task ID for monitoring.
+Save the returned `agent_id`.
+
+If the task has attachments, upload each one:
+```bash
+curl -s -X POST "$BASE_URL/api/agents/<agent_id>/attachments" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
+  -F "file=@front-end/public/test-assets/<attachment_path>"
+```
+
+Then post the file pointers as a message so the agent can see them.
 
 ## Step 3: Monitor every 60 seconds
 
 **You MUST poll every 60 seconds. Never fire-and-forget.**
 
-First, find the agent ID from the benchmark output or by listing agents (Step 1 command).
-
-Then use the diagnostics tool:
+Use the diagnostics tool:
 
 ```bash
-python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url $BASE_URL
 ```
 
 This shows: agent tree status, message counts, tool distribution, errors, anomalies (infinite loops, stalls, stuck tools, time gaps).
@@ -84,7 +135,7 @@ The verdict aggregates these signals across the entire agent tree:
 
 **Cost tracking:**
 ```bash
-curl -s "https://navi-j9a9.onrender.com/api/agents/tree?busId=<agent_id>" \
+curl -s "$BASE_URL/api/agents/tree?busId=<agent_id>" \
   -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
   -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
   | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'{a[\"agent_id\"][:12]} cost={a.get(\"tree_cost_cents\",0)}c msgs={a.get(\"message_count\",0)} [{a[\"status\"]}]') for a in d['agents']]"
@@ -92,31 +143,56 @@ curl -s "https://navi-j9a9.onrender.com/api/agents/tree?busId=<agent_id>" \
 
 Report cost & elapsed time to the user regularly.
 
+**Approval handling:**
+Check for pending approval requests and surface them to the user:
+```bash
+curl -s "$BASE_URL/api/attention-requests" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
+  | python3 -c "import json,sys; reqs=json.load(sys.stdin).get('requests',[]); [print(f'id={r[\"id\"]} agent={r[\"agent_id\"][:12]} q={r[\"question\"][:150]}') for r in reqs if not r.get('answered')]"
+```
+
+If the task's `approval_handling` is `auto_approve`, respond automatically:
+```bash
+curl -s -X POST "$BASE_URL/api/attention-requests/<request_id>/respond" \
+  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
+  -H "Content-Type: application/json" \
+  -d '{"response": "Approved"}'
+```
+
+If `prompt_user`, show the approval request to the user and wait for their response. **Never auto-approve when `prompt_user` is set.**
+
 ## Step 4: On error — Pause and diagnose
 
 When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across polls, or the agent reaches a terminal status:
 
 1. **Pause the root agent:**
    ```bash
-   curl -s -X POST "https://navi-j9a9.onrender.com/api/agents/<agent_id>/pause" \
+   curl -s -X POST "$BASE_URL/api/agents/<agent_id>/pause" \
      -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
    ```
 
 2. **Get full diagnostics:**
    ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+   python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url $BASE_URL
    ```
 
 3. **Get detailed logs per source if needed:**
    ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source worker    # Fly.io worker logs
-   python benchmarks/agent_logs.py <agent_id> --tree --source backend   # Render HTTP logs
-   python benchmarks/agent_logs.py <agent_id> --tree --source messages  # Full message transcripts
-   python benchmarks/agent_logs.py <agent_id> --tree --source research  # Supabase edge function logs
+   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL
+   python benchmarks/agent_logs.py <agent_id> --tree --source backend --url $BASE_URL
+   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL
+   python benchmarks/agent_logs.py <agent_id> --tree --source research --url $BASE_URL
    ```
 
-4. **Identify root cause** — read the relevant agent code, don't guess.
+4. **Check log files:**
+   - **If local mode:** Check local log files:
+     - `agents/navi-worker-log.txt` — worker tracebacks
+     - `back-end/backend-logs.log` — backend HTTP errors
+     - `research/research-logs.log` — research edge function errors
+   - **If prod mode:** Local log files are NOT available. Use the `--source` commands above for all log inspection.
 
 5. **If the error involves LLM calls, 429s, or auth failures**, trace through the research layer:
    - Read `research/supabase/functions/completions/index.ts` — this is the Rose completions endpoint that handles Claude token auth, rate limiting (429 → `CLAUDE_RATE_LIMITED`), and racing fallback
@@ -138,12 +214,15 @@ After user approves:
 
 1. **Delete the root agent** (cascades to all descendants):
    ```bash
-   curl -s -X DELETE "https://navi-j9a9.onrender.com/api/agents/<agent_id>" \
+   curl -s -X DELETE "$BASE_URL/api/agents/<agent_id>" \
      -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
    ```
 
 2. **Apply the approved code fix.**
+
+3. **If local mode:** Restart local services if the fix touches backend/agents code (workers don't hot-reload). Conductor handles restart — just kill the run script and it restarts via `conductor.json`.
+   **If prod mode:** Skip — the fix will be deployed in Step 7.
 
 ## Step 7: Deploy
 
@@ -187,3 +266,6 @@ On `COMPLETED`:
    pkill -f "scripts/run.sh"
    pkill -f "run_local_worker"
    ```
+10. **Respect the mode** — use `$BASE_URL` for all API calls. In local mode, ensure local services are running. In prod mode, do NOT start or manage local services.
+11. **Claude drives the loop** — do NOT delegate to `run_benchmark.py` for monitoring/approval/polling. You (Claude) execute each step directly using curl, `agent_logs.py`, and the task definition from `tasks.json`. Use `run_benchmark.py` only for `--list`.
+12. **No front-end or mac-app** — benchmarks only need back-end + agents + research. In prod mode, no local services at all.

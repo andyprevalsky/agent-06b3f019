@@ -45,6 +45,7 @@ _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 
 VALID_SOURCES = {"worker", "backend", "research", "messages"}
 
@@ -213,7 +214,27 @@ def main():
         "--hours", type=int, default=24,
         help="Look back N hours for time-windowed logs (default: 24)",
     )
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
+        "--prod",
+        action="store_true",
+        help=f"Use production URL ({PROD_BASE_URL})",
+    )
+    target_group.add_argument(
+        "--local",
+        action="store_true",
+        help="Use localhost (default behavior)",
+    )
     args = parser.parse_args()
+
+    # Resolve URL: --url > --prod/--local > default
+    _default_url = f"http://localhost:{os.environ.get('CONDUCTOR_PORT', '3001')}"
+    if args.url != _default_url:
+        pass  # User explicitly passed --url, keep it
+    elif args.prod:
+        args.url = PROD_BASE_URL
+    elif args.local:
+        args.url = _default_url
 
     if args.diagnostics and not args.tree:
         print("--diagnostics requires --tree")

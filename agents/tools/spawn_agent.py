@@ -25,6 +25,7 @@ from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager, spawn_sub_agent_activity
 from helpers.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
+from helpers.attachments import extract_attachments_from_context, resolve_attachments_for_llm, FilePointer
 from config import load_config
 
 logger = structlog.get_logger()
@@ -217,6 +218,22 @@ async def save_explore_message(
 
 
 @activity.defn
+async def _resolve_explore_attachments_activity(
+    attachment_dicts: List[Dict[str, Any]],
+) -> tuple:
+    """Download file content for explore agent attachments.
+
+    Returns (content_blocks, metadata_texts) from resolve_attachments_for_llm.
+    Runs as a Temporal activity because file downloads require I/O.
+    """
+    pointers = [FilePointer.from_dict(d) for d in attachment_dicts]
+    content_blocks, metadata_texts = await resolve_attachments_for_llm(pointers)
+    # Explore agents are text-only (no multimodal), so we only return metadata_texts.
+    # Images get a metadata placeholder; text/CSV files get inlined content.
+    return content_blocks, metadata_texts
+
+
+@activity.defn
 async def spawn_explore_agent_activity(
     agent_id: str,
     user_id: str,
@@ -227,6 +244,7 @@ async def spawn_explore_agent_activity(
     task_id: str = "",
     init_tool_call_id: str = "",
     claude_token: Optional[str] = None,
+    attachment_texts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Run the explore agent loop inside a Temporal activity.
@@ -390,6 +408,11 @@ async def spawn_explore_agent_activity(
             task_id=task_id,
         )
 
+    # Build initial context with goal + any resolved attachment content
+    initial_user_text = goal
+    if attachment_texts:
+        initial_user_text = goal + "\n\n" + "\n\n".join(attachment_texts)
+
     # Run the agent loop
     result = await run_agent(
         agent_id=agent_id,
@@ -398,7 +421,7 @@ async def spawn_explore_agent_activity(
         verifier_prompt_generator=explore_verifier_prompt,
         model=model,
         tools=["web_search", "web_fetch", "grep", "read_memories", "attempt_completion"],
-        initial_context=[{"role": "USER", "text": goal}],
+        initial_context=[{"role": "USER", "text": initial_user_text}],
         task_id=task_id,
         is_inside_temporal_activity=True,
         execute_tool=explore_execute_tool,
@@ -607,6 +630,43 @@ class SpawnAgentManager(ToolManager):
                 else:
                     local_data_summary = ""
 
+            # Resolve requested attachments from workflow context (same pattern as browser/code agents)
+            attachment_texts: List[str] = []
+            requested_attachments = tool_call.get("attachments")
+            if isinstance(requested_attachments, str):
+                requested_attachments = [requested_attachments]
+            if requested_attachments and hasattr(workflow_instance, 'context'):
+                context_attachments = extract_attachments_from_context(workflow_instance.context)
+                filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
+
+                matched_pointers = []
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        matched_pointers.append(filename_to_pointer[filename])
+                    else:
+                        logger.warning(
+                            "[ExploreAgent] Attachment not found in context",
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys()),
+                        )
+
+                if matched_pointers:
+                    # resolve_attachments_for_llm downloads content and returns text/image blocks
+                    _, metadata_texts = await workflow.execute_activity(
+                        _resolve_explore_attachments_activity,
+                        args=[[{
+                            "id": fp.id,
+                            "storage_path": fp.storage_path,
+                            "original_filename": fp.original_filename,
+                            "mime_type": fp.mime_type,
+                            "size_bytes": fp.size_bytes,
+                            "created_at": fp.created_at,
+                        } for fp in matched_pointers]],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    attachment_texts = metadata_texts
+
             # Run explore agent activity with pause polling (like browser agent)
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
             claude_token = None  # Explore uses cheap lite waterfall, no claudeAuth
@@ -622,6 +682,7 @@ class SpawnAgentManager(ToolManager):
                     task_id,
                     tool_call_id,  # init_tool_call_id — progress updates reuse this to replace the init bubble
                     claude_token,
+                    attachment_texts,
                 ],
                 start_to_close_timeout=timedelta(seconds=600),  # 10 min max
                 heartbeat_timeout=timedelta(seconds=120),

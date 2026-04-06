@@ -81,7 +81,7 @@ from helpers.llm import call_planner_llm_activity, set_response_schema_activity,
 from helpers.attachments import resolve_attachments_activity
 from helpers.messages import update_agent_tree_state
 from helpers.save_tool_usage import save_tool_usage
-from tools.spawn_agent import spawn_explore_agent_activity, fetch_full_network_metadata
+from tools.spawn_agent import spawn_explore_agent_activity, _resolve_explore_attachments_activity, fetch_full_network_metadata
 from tools.wait_for import evaluate_condition_activity
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from tools.grep import grep_activity, fetch_local_data_summary
@@ -591,6 +591,7 @@ async def main():
             compress_context,
             generate_completion_summary,
             spawn_explore_agent_activity,
+            _resolve_explore_attachments_activity,
             fetch_full_network_metadata,
             evaluate_condition_activity,
             grep_activity,

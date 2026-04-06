@@ -64,6 +64,8 @@ from benchmarks.logs import (
 DEFAULT_BASE_URL = os.environ.get(
     "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
 )
+PROD_BASE_URL = "https://navi-j9a9.onrender.com"
+_conductor_port = os.environ.get("CONDUCTOR_PORT", "3001")
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
 # Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
@@ -853,7 +855,19 @@ async def main_async(args):
         compare_runs(args.compare[0], args.compare[1])
         return
 
-    base_url = args.url.rstrip("/")
+    # Resolve base URL: --url > --prod/--local > default
+    _local_url = f"http://localhost:{_conductor_port}"
+    if args.url != DEFAULT_BASE_URL:
+        # User explicitly passed --url — it takes priority
+        base_url = args.url.rstrip("/")
+        if args.prod:
+            print("  ⚠ --prod and --url both set. Using --url value.")
+    elif args.prod:
+        base_url = PROD_BASE_URL
+    elif args.local:
+        base_url = _local_url
+    else:
+        base_url = args.url.rstrip("/")
 
     tasks = resolve_tasks(args)
     if not tasks:
@@ -991,6 +1005,17 @@ def main():
         type=int,
         default=None,
         help="Override task row_end — slice CSV attachments ending at this 1-indexed data row (inclusive)",
+    )
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
+        "--prod",
+        action="store_true",
+        help=f"Run against production ({PROD_BASE_URL})",
+    )
+    target_group.add_argument(
+        "--local",
+        action="store_true",
+        help="Run against localhost (default behavior)",
     )
     args = parser.parse_args()
 
