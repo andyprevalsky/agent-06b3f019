@@ -217,5 +217,21 @@
     "attachments": ["test-exec-assistant-resume.pdf", "test-childcare-resume.pdf"],
     "approval_handling": "prompt_user",
     "start_phase": "plan"
+  },
+  {
+    "name": "calendly-schedule-meeting",
+    "title": "Create Calendly Link & Send Meeting Invite",
+    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
+    "eval_prompt": "Agent used a browser agent to navigate Calendly and create or retrieve a 30-minute scheduling link. Agent then sent an email to andyprevalsky@yahoo.com containing a Calendly link. The email is short, friendly, and includes a working Calendly URL. Both spawn_browser_agent and message_person tools were used successfully.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent", "message_person"],
+    "tags": ["browser", "approval", "outreach"],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "plan"
   }
 ]
