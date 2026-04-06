@@ -1097,7 +1097,7 @@ async def call_rose_browser_use(
     }
     logger.info(f"📤 [{request_id}] Rose browser-use request", request_id=request_id, request=json.dumps(log_body, indent=2, default=str))
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             config.rose.api_url,
             headers={

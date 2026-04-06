@@ -173,3 +173,17 @@ On `COMPLETED`:
 6. **Fix log pipeline first** — if logs are broken, fix that before debugging agent issues.
 7. **All diagnostics in final message** — only the last message is visible to the user.
 8. **`progress` is dead** — use message count, token count, and status instead.
+9. **NEVER use broad process kills** — `pkill -f worker.py`, `pkill -f "npx tsx watch"`, `pkill -f "scripts/run.sh"`, or any other pattern-based kill will murder processes belonging to OTHER Conductor workspaces. Only kill by port (workspace-specific):
+   ```bash
+   # CORRECT — only kills THIS workspace's processes
+   for port in $BACKEND_PORT $HEALTH_PORT $RESEARCH_PORT; do
+       lsof -ti :$port 2>/dev/null | xargs kill -9 2>/dev/null || true
+   done
+   ```
+   ```bash
+   # FORBIDDEN — kills ALL workspaces
+   pkill -f worker.py
+   pkill -f "npx tsx watch"
+   pkill -f "scripts/run.sh"
+   pkill -f "run_local_worker"
+   ```
