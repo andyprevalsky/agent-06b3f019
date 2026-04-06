@@ -233,7 +233,9 @@ class SetPlanManager(ToolManager):
             if file_pointer_data and isinstance(file_pointer_data, dict):
                 try:
                     fp = FilePointer.from_dict(file_pointer_data)
-                    file_label = f"[File attached: {fp.original_filename} ({fp.mime_type})]"
+                    filename = fp.original_filename or "unknown"
+                    mime = fp.mime_type or "unknown type"
+                    file_label = f"[File attached: {filename} ({mime})]"
                     text = f"{text}\n\n{file_label}" if text else file_label
                 except Exception:
                     pass  # Fall through to normal text handling
