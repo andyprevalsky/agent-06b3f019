@@ -592,7 +592,11 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
 
     # 2. Detect tools stuck IN_PROGRESS without FINISHED
     # Spawn tools are inherently long-running (sub-agents have their own anomaly detection)
-    _SPAWN_TOOLS = {"spawn_agent", "spawn_sub_agent_for_each", "spawn_claude_code_agent", "spawn_browser_agent"}
+    _LONG_RUNNING_TOOLS = {
+        "spawn_agent", "spawn_sub_agent", "spawn_sub_agent_for_each",
+        "spawn_claude_code_agent", "spawn_browser_agent",
+        "set_plan", "message_person", "request_user_approval", "check_progress",
+    }
     in_progress = {}  # tool_call_id → metadata
     for m in msgs:
         meta = m.get("metadata", {})
@@ -601,7 +605,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         tcid = meta.get("toolCallId") or meta.get("tool_call_id", "")
         status = meta.get("toolStatus", "")
         tool_name = meta.get("toolName", "")
-        if status == "IN_PROGRESS" and tcid and tool_name not in _SPAWN_TOOLS:
+        if status == "IN_PROGRESS" and tcid and tool_name not in _LONG_RUNNING_TOOLS:
             in_progress[tcid] = meta
         elif status in ("FINISHED", "ERROR") and tcid:
             in_progress.pop(tcid, None)
