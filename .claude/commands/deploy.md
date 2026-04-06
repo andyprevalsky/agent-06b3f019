@@ -207,15 +207,13 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 9: Wait for code review
 
-Wait for **all** PR checks to finish — not just CodeRabbit. Poll every 30 seconds:
+Wait for all PR checks to complete:
 
 ```bash
-gh pr checks <PR_NUMBER> --json name,state
+gh pr checks <PR_NUMBER> --watch
 ```
 
-Keep waiting until every check has a terminal state (`SUCCESS`, `FAILURE`, `CANCELLED`, `SKIPPED`, `ERROR` — anything other than `PENDING` or `IN_PROGRESS`). **No timeout — keep waiting.**
-
-Once all checks have completed, read reviews from ALL three comment locations:
+This blocks until all checks finish (including CodeRabbit). Once it returns, read reviews from ALL three comment locations:
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
@@ -298,13 +296,20 @@ Determine which deploy workflows are relevant based on what files changed in the
 - Changes in `front-end/` → Vercel auto-deploys (no workflow to poll, just wait ~60s)
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
 
-For GitHub Action workflows, poll every 30 seconds:
+For GitHub Action workflows, wait for the new run to appear then watch it:
 
 ```bash
-gh run list --workflow <workflow-name>.yml --branch main --limit 1 --json status,conclusion,createdAt
+# Wait up to 60s for a workflow run that started after merge
+MERGE_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+for i in $(seq 1 12); do
+  RUN_ID=$(gh run list --workflow <workflow-name>.yml --branch main --limit 1 --json databaseId,createdAt --jq ".[0] | select(.createdAt >= \"$MERGE_TIME\") | .databaseId")
+  [ -n "$RUN_ID" ] && break
+  sleep 5
+done
+gh run watch "$RUN_ID"
 ```
 
-Wait for all relevant deploys to show `completed` with `success` conclusion.
+This avoids watching a stale run that started before the merge. Repeat for each relevant workflow.
 
 If a deploy fails:
 1. Show the failure to the user

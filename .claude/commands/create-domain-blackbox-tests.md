@@ -11,6 +11,101 @@ If `$ARGUMENTS` is empty, ask the user for the domain and stop.
 
 **This is a loop. Do NOT stop after analysis, planning, or partial implementation. Continue until the validation gates pass or you are blocked by a true ambiguity that cannot be resolved from the codebase.**
 
+## Step 0: Verify and bootstrap required infrastructure
+
+This skill requires three pieces of infrastructure. Check if each exists; if not, build it.
+
+```bash
+find . -maxdepth 3 -name 'map-domains.*' -o -name 'map_domains.*' | grep -v node_modules | grep -v __pycache__
+find . -maxdepth 4 -name 'fetchCapture.*' -o -name 'fetch_capture.*' -o -name 'httpx_capture.*' | grep -v node_modules | grep -v __pycache__
+find . -maxdepth 3 -name 'run-blackbox-tests.*' -o -name 'run_blackbox_tests.*' | grep -v node_modules | grep -v __pycache__
+```
+
+### 0a. Domain mapping script
+
+**If missing:** Run `/map-domains` first. It will analyze this codebase, define the domains, and write the mapping script. Do NOT proceed without it.
+
+### 0b. Outbound HTTP capture harness
+
+**If it exists:** skip to 0c.
+
+**If missing:** build it. Read the reference implementation at `back-end/src/providers/fetchCapture.ts` and the article at `.context/attachments/pasted_text_2026-04-05_20-13-11.txt` to understand the design, then write a capture harness for this codebase's language and HTTP client.
+
+The capture harness must:
+
+1. **Intercept outbound HTTP calls** — Wrap the runtime's HTTP client (e.g., `globalThis.fetch` for JS, `httpx` for Python, `net/http` for Go) to record every outbound call. Filter out localhost/loopback calls to avoid infinite recursion if the harness itself makes HTTP calls.
+
+2. **Activate via environment variable** — Only intercept when `BLACKBOX_TEST_CAPTURE_OUTBOUND=1` is set. In normal operation, the harness must be completely transparent (zero overhead).
+
+3. **Record per-call data** — For each intercepted call, store:
+   - `id` (incrementing integer)
+   - `timestamp` (ISO 8601)
+   - `url` (full URL)
+   - `method` (GET, POST, etc.)
+   - `requestHeaders` (redact Authorization/API key values for security)
+   - `requestBody` (string or null)
+   - `responseStatus` (integer or null if error)
+   - `responseBody` (truncated to ~2000 chars)
+   - `durationMs` (wall-clock time)
+   - `error` (string or null)
+   - `cached` (boolean — true if served from replay cache)
+
+4. **Expose a test API** — Provide a way for tests to read and clear captures:
+   - For HTTP servers: mount endpoints (e.g., `GET /api/test/captures`, `DELETE /api/test/captures`)
+   - For non-HTTP codebases (agents, CLIs, libraries): expose a Python/JS module with `get_captures()`, `clear_captures()` functions that tests import directly
+
+5. **Support response caching (optional but recommended)** — On first run, make real API calls and cache responses. On subsequent runs, replay from cache. This makes tests fast and deterministic without mocking. The reference uses `@with-logic/fast-forward`; Python equivalents include `vcrpy`, `responses`, or `respx`.
+
+6. **Isolate between tests** — Clear captures must reset the in-memory log so each test starts with a clean capture buffer. Cache clearing should be separate (delete filesystem cache to force re-record).
+
+**Where to put it:** In the codebase's shared infrastructure directory (e.g., `providers/`, `helpers/`, `lib/`, `test_utils/`). Name it `fetch_capture.*` or `httpx_capture.*` matching the HTTP client being wrapped.
+
+**Verification:** After writing the harness, write a minimal smoke test that:
+1. Activates capture mode
+2. Makes an outbound HTTP call
+3. Reads captures and asserts the call was recorded with correct URL, method, and body
+4. Clears captures and asserts the buffer is empty
+
+### 0c. Blackbox test runner
+
+**If it exists:** skip to Step 1.
+
+**If missing:** build it. Read the reference implementation at `back-end/scripts/run-blackbox-tests.sh` to understand the design, then write a runner for this codebase.
+
+The test runner must:
+
+1. **Generate a unique run ID** — Timestamp + PID or UUID. All artifacts for this run live under a single directory.
+
+2. **Create an artifact directory** — At `.context/test-runs/<run-id>/`. Store logs, manifests, and any test-generated files here.
+
+3. **Write a manifest file** — `manifest.json` in the artifact directory with:
+   - `run_id`
+   - `mode` (isolated or existing service)
+   - `base_url` (if applicable)
+   - `port` (if applicable)
+   - `artifact_dir` path
+   - any other runtime config (env vars, feature flags)
+
+4. **Start the service in test mode (if applicable)** — For HTTP servers: reserve a port, start the server with `BLACKBOX_TEST_CAPTURE_OUTBOUND=1`, wait for health check. For non-HTTP codebases (agents, CLIs, libraries): set up the test environment (env vars, temp dirs, capture mode activation).
+
+5. **Support an existing-service mode** — If `BLACKBOX_TEST_USE_EXISTING_SERVICE=1` is set, skip service launch and use `TEST_BASE_URL` directly. This allows running against a service already started by Conductor or manually.
+
+6. **Run the test suite** — Invoke the codebase's test runner (pytest, jest, go test, etc.) with:
+   - Domain filtering (run only tests for the specified domain)
+   - Output to both stdout and `<artifact-dir>/runner.log`
+   - Exit code propagation (test failures = non-zero exit)
+
+7. **Clean up on exit** — Kill spawned processes, release port locks, clean temp files. Use signal traps to clean up even on SIGINT/SIGTERM.
+
+8. **Support `--list` mode** — List available test domains without running anything.
+
+**Where to put it:** `scripts/run_blackbox_tests.sh` (or `.py` if the codebase prefers Python scripts).
+
+**Verification:** After writing the runner:
+1. Run with `--list` and verify it lists domains
+2. Run against a trivial passing test and verify the artifact directory is created with manifest.json
+3. Verify cleanup works (no orphaned processes or port locks after exit)
+
 ## Inputs
 
 - Required: `$ARGUMENTS` must contain the domain name, module, folder, bounded context, or feature name.

@@ -13,15 +13,8 @@ import { resolve, dirname, relative } from 'path';
 
 const BACK_END = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const SRC = resolve(BACK_END, 'src');
-const ROUTES_DIR = resolve(SRC, 'routes');
+const DOMAINS_DIR = resolve(SRC, 'domains');
 const BLACKBOX_DIR = resolve(SRC, 'tests/blackbox');
-
-function routeFileToDomain(filename: string): string {
-  return filename
-    .replace('.ts', '')
-    .replace(/([a-z])([A-Z])/g, '$1-$2')
-    .toLowerCase();
-}
 
 function parseLocalImports(filePath: string): string[] {
   if (!existsSync(filePath)) return [];
@@ -57,29 +50,43 @@ function traceImports(entry: string): string[] {
 
 interface DomainInfo {
   domain: string;
-  routeFile: string;
+  entryFile: string;
   files: string[];
   testFile: string | null;
   fileCount: number;
 }
 
-const routeFiles = readdirSync(ROUTES_DIR).filter(f => f.endsWith('.ts')).sort();
+const domainDirs = readdirSync(DOMAINS_DIR, { withFileTypes: true })
+  .filter(d => d.isDirectory())
+  .map(d => d.name)
+  .sort();
 const domains: DomainInfo[] = [];
 
-for (const rf of routeFiles) {
-  const domain = routeFileToDomain(rf);
-  const routeFile = resolve(ROUTES_DIR, rf);
-  const allFiles = traceImports(routeFile).map(f => relative(BACK_END, f));
+for (const domainName of domainDirs) {
+  const domainDir = resolve(DOMAINS_DIR, domainName);
+  // Find all routes*.ts files in this domain directory
+  const routeFiles = readdirSync(domainDir)
+    .filter(f => f.startsWith('routes') && f.endsWith('.ts'))
+    .sort();
+  if (routeFiles.length === 0) continue;
 
-  const testFilename = `${domain}.blackbox.ts`;
+  // Use the primary routes.ts as entry, but trace all route files
+  const entryFiles = routeFiles.map(f => resolve(domainDir, f));
+  const allFiles = new Set<string>();
+  for (const entry of entryFiles) {
+    for (const f of traceImports(entry)) allFiles.add(f);
+  }
+  const sortedFiles = [...allFiles].sort().map(f => relative(BACK_END, f));
+
+  const testFilename = `${domainName}.blackbox.ts`;
   const testPath = resolve(BLACKBOX_DIR, testFilename);
 
   domains.push({
-    domain,
-    routeFile: relative(BACK_END, routeFile),
-    files: allFiles,
+    domain: domainName,
+    entryFile: relative(BACK_END, entryFiles.find(f => f.endsWith('/routes.ts')) ?? entryFiles[0]),
+    files: sortedFiles,
     testFile: existsSync(testPath) ? relative(BACK_END, testPath) : null,
-    fileCount: allFiles.length,
+    fileCount: sortedFiles.length,
   });
 }
 
@@ -98,7 +105,7 @@ if (arg && arg !== '--json') {
     process.exit(1);
   }
   console.log(`Domain: ${d.domain}`);
-  console.log(`Route:  ${d.routeFile}`);
+  console.log(`Entry:  ${d.entryFile}`);
   console.log(`Test:   ${d.testFile || '(none)'}`);
   console.log(`Files (${d.fileCount}):`);
   d.files.forEach(f => console.log(`  ${f}`));
