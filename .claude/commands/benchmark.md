@@ -151,25 +151,49 @@ When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across po
    python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url $BASE_URL
    ```
 
-3. **Get detailed logs per source if needed:**
+3. **Drill into raw logs with grep** — raw log sources are noisy. ALWAYS pipe through grep to extract signal:
+
+   **Worker logs** (Fly.io) — raw structlog JSON. Grep for errors:
    ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL
-   python benchmarks/agent_logs.py <agent_id> --tree --source backend --url $BASE_URL
-   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL
-   python benchmarks/agent_logs.py <agent_id> --tree --source research --url $BASE_URL
+   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'
+   ```
+   If you need full context around a specific error, grep for a keyword from the error:
+   ```bash
+   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL 2>&1 | grep -i '<keyword>'
    ```
 
-4. **Check log files:**
-   - **If local mode:** Check local log files:
-     - `agents/navi-worker-log.txt` — worker tracebacks
-     - `back-end/backend-logs.log` — backend HTTP errors
-     - `research/research-logs.log` — research edge function errors
-   - **If prod mode:** Local log files are NOT available. Use the `--source` commands above for all log inspection.
+   **Backend logs** (Render) — raw JSON HTTP logs, mostly 200s from poll requests. Filter out the noise:
+   ```bash
+   python benchmarks/agent_logs.py <agent_id> --tree --source backend --url $BASE_URL 2>&1 | grep -v '"status":200' | grep -v '"status":204' | grep -v '"status":201'
+   ```
+
+   **Messages** — already well-formatted. Grep for errors or a specific tool:
+   ```bash
+   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL 2>&1 | grep -i 'ERROR\|FAILED'
+   ```
+   Or to see only a specific tool's lifecycle:
+   ```bash
+   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL 2>&1 | grep '<tool_name>'
+   ```
+
+   **Research logs** (Supabase) — gateway HTTP logs only (the Supabase Management API does NOT expose edge function console output via REST). Only useful for spotting 4xx/5xx responses:
+   ```bash
+   python benchmarks/agent_logs.py <agent_id> --tree --source research --url $BASE_URL 2>&1 | grep -v '| 200 \|| 201 \|| 202 '
+   ```
+
+   **IMPORTANT:** Do NOT dump an entire `--source` without grep. The raw output burns tokens for very little signal. Always grep first, then broaden the filter if the initial grep returns nothing.
+
+4. **Check local log files (local mode only):**
+   - `agents/navi-worker-log.txt` — worker tracebacks (grep for `ERROR\|Traceback\|Exception`)
+   - `back-end/backend-logs.log` — backend HTTP errors (grep for `"level":"error"\|status":5`)
+   - `research/research-logs.log` — research edge function console output including slog() calls (grep for `error\|failed\|429`)
+   - **If prod mode:** Local log files are NOT available. Use the grep commands above for all log inspection. Note: edge function console.log output (the `slog()` calls in `completions/index.ts`) is NOT available via the Supabase Management API in prod. If you need to debug LLM racing, token auth, or model selection issues in prod, the evidence will be in worker logs (which log the response from the completions endpoint) rather than research logs.
 
 5. **If the error involves LLM calls, 429s, or auth failures**, trace through the research layer:
-   - Read `research/supabase/functions/completions/index.ts` — this is the Rose completions endpoint that handles Claude token auth, rate limiting (429 → `CLAUDE_RATE_LIMITED`), and racing fallback
-   - Check `--source research` logs for Supabase edge function errors
-   - Common issues: Claude OAuth token expired/rate-limited (429 from Anthropic → research returns `CLAUDE_RATE_LIMITED` with `fallback: 'racing'`), Supabase auth disabled (`phone_provider_disabled`), missing API keys in `.env` files
+   - Read `research/supabase/functions/completions/index.ts` — the Rose completions endpoint handling Claude token auth, rate limiting (429), and racing fallback
+   - In local mode: grep `research/research-logs.log` for the `request_id` or `agent_id`
+   - In prod mode: research console logs are NOT available via API. Instead, grep worker logs for the error response from the completions endpoint (the worker logs the HTTP status and error body it receives back)
+   - Common issues: Claude OAuth token expired/rate-limited (429 from Anthropic), Supabase auth disabled (`phone_provider_disabled`), missing API keys in `.env` files
    - The benchmark harness loads `BACKEND_API_KEY` from `agents/.env` then `back-end/.env` — if both are missing, auth fails entirely
 
 ## Step 5: Propose fix to user

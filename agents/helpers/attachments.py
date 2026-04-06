@@ -59,8 +59,18 @@ class FilePointer:
     def is_pdf(self) -> bool:
         return self.mime_type in PDF_MIME_TYPES
 
+    # Extensions treated as text when mime_type is ambiguous (e.g. application/octet-stream)
+    _TEXT_EXTENSIONS = {".csv", ".txt", ".md", ".json", ".xml", ".html", ".js", ".ts", ".py", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log", ".sql"}
+
     def is_text(self) -> bool:
-        return self.mime_type in TEXT_MIME_TYPES or self.mime_type.startswith("text/")
+        if self.mime_type in TEXT_MIME_TYPES or self.mime_type.startswith("text/"):
+            return True
+        # Fallback: check file extension when mime_type is generic
+        if self.mime_type == "application/octet-stream" and self.original_filename:
+            import os
+            ext = os.path.splitext(self.original_filename)[1].lower()
+            return ext in self._TEXT_EXTENSIONS
+        return False
 
     def is_small_enough_for_llm(self) -> bool:
         """Check if file is small enough to send full content to LLM."""
