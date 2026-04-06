@@ -12,9 +12,13 @@ Fast-track merge to main. Runs local validation tests, pushes directly to main, 
 
 ---
 
+## Step 0: Stage untracked files
+
+Check `git status` for untracked files. If any exist that should be included, stage and commit them before proceeding.
+
 ## Step 1: Run local tests
 
-All commands run from repo root. Compute changed files once:
+All commands run from repo root. Compute changed files once (include both committed and staged changes):
 
 ```bash
 CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
