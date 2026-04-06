@@ -12,13 +12,9 @@ Fast-track merge to main. Runs local validation tests, pushes directly to main, 
 
 ---
 
-## Step 0: Stage untracked files
-
-Check `git status` for untracked files. If any exist that should be included, stage and commit them before proceeding.
-
 ## Step 1: Run local tests
 
-All commands run from repo root. Compute changed files once (include both committed and staged changes):
+All commands run from repo root. Compute changed files once:
 
 ```bash
 CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
@@ -68,7 +64,11 @@ If any step fails, fix the issue and re-run from the top.
 
 Stage and commit any auto-fix changes (prettier, eslint) before proceeding.
 
-## Step 2: Merge to main
+## Step 2: Sync
+
+Run `/sync` before merging.
+
+## Step 3: Merge to main
 
 ```bash
 git checkout main
@@ -82,10 +82,10 @@ If on main already (linear commits), just push:
 git push origin main
 ```
 
-## Step 3: Create new branch
+## Step 4: New branch
 
-After pushing, run `/new_branch_with_context` to create a fresh branch from updated main, keeping the same Conductor workspace name.
+Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
 
-## Step 4: Done
+## Step 5: Done
 
 Report what was pushed (files changed, commit summary) and the new branch name.
