@@ -1133,7 +1133,7 @@ class AgentWorkflow:
             return {
                 "error": True,
                 "message": "During PLAN phase, spawn_agent only supports type='explore'. "
-                           "Use set_plan to create tasks for browser/code/sub_agent agents.",
+                           "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents.",
             }
 
         # Track tool as in-use with human-readable display string

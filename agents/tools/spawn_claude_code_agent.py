@@ -809,7 +809,7 @@ async def spawn_claude_code_activity(
                         agent_id=agent_id,
                         title=f"Claude Code working ({elapsed_int}s)",
                         task_id=task_id,
-                        message=f"Interactions: {interaction_count}",
+                        message=f"Elapsed: {elapsed_int}s, Interactions: {interaction_count}",
                         status=MessageStatus.FINISHED,
                         action_type="agent_observation",
                     )
@@ -1245,15 +1245,53 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
         # Resolve requested attachments from workflow context
         attachments = []
-        if requested_attachments and hasattr(workflow_instance, 'context'):
+        if hasattr(workflow_instance, 'context'):
             # Extract all file_pointers from context and build filename lookup
             context_attachments = extract_attachments_from_context(workflow_instance.context)
             filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
-            # Resolve requested filenames to FilePointer dicts
-            for filename in requested_attachments:
-                if filename in filename_to_pointer:
-                    fp = filename_to_pointer[filename]
+            if requested_attachments:
+                # Resolve explicitly requested filenames to FilePointer dicts
+                # Also build an ID lookup for cases where LLM passes UUIDs instead of filenames
+                id_to_pointer = {fp.id: fp for fp in context_attachments}
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        fp = filename_to_pointer[filename]
+                        attachments.append({
+                            "id": fp.id,
+                            "storage_path": fp.storage_path,
+                            "original_filename": fp.original_filename,
+                            "mime_type": fp.mime_type,
+                            "size_bytes": fp.size_bytes,
+                            "created_at": fp.created_at,
+                        })
+                    elif filename in id_to_pointer:
+                        fp = id_to_pointer[filename]
+                        attachments.append({
+                            "id": fp.id,
+                            "storage_path": fp.storage_path,
+                            "original_filename": fp.original_filename,
+                            "mime_type": fp.mime_type,
+                            "size_bytes": fp.size_bytes,
+                            "created_at": fp.created_at,
+                        })
+                    else:
+                        logger.warning(
+                            "[ClaudeCode] Attachment not found in context",
+                            agent_id=agent_id,
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys())
+                        )
+            # If explicit resolution found nothing (LLM hallucinated names/IDs), auto-forward all
+            if requested_attachments and not attachments and context_attachments:
+                logger.info(
+                    "[ClaudeCode] Explicit attachment resolution failed, auto-forwarding all parent attachments",
+                    agent_id=agent_id,
+                    requested=requested_attachments,
+                    num_files=len(context_attachments),
+                    filenames=list(filename_to_pointer.keys())
+                )
+                for fp in context_attachments:
                     attachments.append({
                         "id": fp.id,
                         "storage_path": fp.storage_path,
@@ -1262,13 +1300,25 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "size_bytes": fp.size_bytes,
                         "created_at": fp.created_at,
                     })
-                else:
-                    logger.warning(
-                        "[ClaudeCode] Attachment not found in context",
-                        agent_id=agent_id,
-                        filename=filename,
-                        available_files=list(filename_to_pointer.keys())
-                    )
+            elif not requested_attachments and context_attachments:
+                # Auto-forward all parent attachments when none explicitly requested
+                # Code agents are ephemeral single-task sessions — if the parent has files,
+                # the code agent almost certainly needs them
+                logger.info(
+                    "[ClaudeCode] Auto-forwarding parent attachments (none explicitly requested)",
+                    agent_id=agent_id,
+                    num_files=len(context_attachments),
+                    filenames=list(filename_to_pointer.keys())
+                )
+                for fp in context_attachments:
+                    attachments.append({
+                        "id": fp.id,
+                        "storage_path": fp.storage_path,
+                        "original_filename": fp.original_filename,
+                        "mime_type": fp.mime_type,
+                        "size_bytes": fp.size_bytes,
+                        "created_at": fp.created_at,
+                    })
 
         logger.info(
             "[ClaudeCode] Tool starting",

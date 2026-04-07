@@ -439,41 +439,44 @@ async def spawn_sub_agent_activity(
         if not api_key:
             raise ValueError("BACKEND_API_KEY not configured - required for spawning sub-agents")
 
-        # Check if any sub-agent needs attachments - if so, fetch parent's messages
-        needs_attachments = any(agent.get("attachments") for agent in sub_agents)
+        # Always fetch parent's attachments so they can auto-forward to sub-agents
+        # that don't explicitly specify attachments (prevents file propagation gaps)
         filename_to_pointer: Dict[str, Dict[str, Any]] = {}
+        all_pointers_by_id: Dict[str, Dict[str, Any]] = {}
+        activity.heartbeat("Fetching parent agent's attachments...")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{backend_url}/api/agents/{parent_agent_id}",
+                    headers={
+                        "X-API-Key": api_key,
+                        "Content-Type": "application/json"
+                    },
+                )
+                response.raise_for_status()
+                parent_data = response.json()
+                parent_messages = parent_data.get("messages", [])
 
-        if needs_attachments:
-            activity.heartbeat("Fetching parent agent's attachments...")
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        f"{backend_url}/api/agents/{parent_agent_id}",
-                        headers={
-                            "X-API-Key": api_key,
-                            "Content-Type": "application/json"
-                        },
-                    )
-                    response.raise_for_status()
-                    parent_data = response.json()
-                    parent_messages = parent_data.get("messages", [])
+                # Extract FilePointers from parent's context
+                file_pointers = extract_attachments_from_context(parent_messages)
 
-                    # Extract FilePointers from parent's context
-                    file_pointers = extract_attachments_from_context(parent_messages)
+                # Build filename -> FilePointer dict lookup (last wins on dupes)
+                # Also keep a full list keyed by ID for forwarding all attachments
+                for fp in file_pointers:
+                    fp_dict = asdict(fp)
+                    filename_to_pointer[fp.original_filename] = fp_dict
+                    if fp.id:
+                        all_pointers_by_id[fp.id] = fp_dict
 
-                    # Build filename -> FilePointer dict lookup
-                    for fp in file_pointers:
-                        filename_to_pointer[fp.original_filename] = asdict(fp)
-
-                    logger.info(
-                        "Extracted parent attachments",
-                        parent_agent_id=parent_agent_id,
-                        attachment_count=len(file_pointers),
-                        filenames=list(filename_to_pointer.keys())
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to fetch parent attachments: {e}")
-                # Continue without attachments - don't fail the spawn
+                logger.info(
+                    "Extracted parent attachments",
+                    parent_agent_id=parent_agent_id,
+                    attachment_count=len(file_pointers),
+                    filenames=list(filename_to_pointer.keys())
+                )
+        except Exception as e:
+            logger.warning(f"Failed to fetch parent attachments: {e}")
+            # Continue without attachments - don't fail the spawn
 
         # Spawn strategy:
         # - Pool pattern with max 10 parallel spawn requests
@@ -494,15 +497,40 @@ async def spawn_sub_agent_activity(
 
                     # Resolve attachments for this sub-agent
                     resolved_attachments = []
+                    # Build ID lookup for cases where LLM passes UUIDs instead of filenames
+                    id_to_pointer = {v.get("id", ""): v for v in filename_to_pointer.values() if v.get("id")}
                     if agent_cfg.get("attachments"):
                         for filename in agent_cfg["attachments"]:
                             if filename in filename_to_pointer:
                                 resolved_attachments.append(filename_to_pointer[filename])
+                            elif filename in id_to_pointer:
+                                resolved_attachments.append(id_to_pointer[filename])
                             else:
                                 logger.warning(
                                     f"Attachment not found in parent context: {filename}",
                                     available_files=list(filename_to_pointer.keys())
                                 )
+                    # Use all_pointers_by_id for forwarding to preserve duplicate filenames
+                    all_attachments = list(all_pointers_by_id.values()) if all_pointers_by_id else list(filename_to_pointer.values())
+                    # If explicit resolution found nothing, auto-forward all
+                    if agent_cfg.get("attachments") and not resolved_attachments and filename_to_pointer:
+                        logger.info(
+                            "Explicit attachment resolution failed, auto-forwarding all parent attachments",
+                            index=index,
+                            requested=agent_cfg["attachments"],
+                            num_files=len(all_attachments),
+                            filenames=list(filename_to_pointer.keys())
+                        )
+                        resolved_attachments = all_attachments
+                    elif not agent_cfg.get("attachments") and filename_to_pointer:
+                        # Auto-forward all parent attachments when none explicitly requested
+                        logger.info(
+                            "Auto-forwarding parent attachments to sub-agent",
+                            index=index,
+                            num_files=len(all_attachments),
+                            filenames=list(filename_to_pointer.keys())
+                        )
+                        resolved_attachments = all_attachments
 
                     # start_phase must be strict: plan | execute
                     start_phase = str(agent_cfg.get("start_phase", "plan")).strip().lower()
