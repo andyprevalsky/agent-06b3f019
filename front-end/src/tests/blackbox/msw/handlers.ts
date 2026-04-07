@@ -1,0 +1,293 @@
+/**
+ * Default MSW handlers for blackbox tests.
+ * These return realistic happy-path responses for every API endpoint the frontend calls.
+ * Individual tests override specific handlers for edge case testing.
+ */
+import { http, HttpResponse } from 'msw';
+
+const API_BASE = 'http://localhost:3001/api';
+
+export const handlers = [
+  // Auth endpoints
+  http.post(`${API_BASE}/auth/anonymous`, () => {
+    return HttpResponse.json({
+      user: { id: 'anon-user-001' },
+      session: {
+        access_token: 'test-anon-token',
+        refresh_token: 'test-refresh-token',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+      },
+    });
+  }),
+
+  http.post(`${API_BASE}/auth/send-otp`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/auth/verify-otp`, () => {
+    return HttpResponse.json({
+      user: { id: 'verified-user-001', phone: '+19729777432' },
+      session: {
+        access_token: 'test-verified-token',
+        refresh_token: 'test-verified-refresh',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+      },
+    });
+  }),
+
+  // Models endpoint
+  http.get(`${API_BASE}/models`, () => {
+    return HttpResponse.json({
+      models: [
+        { id: 'rose-1-lite', name: 'Rose 1 Lite', provider: 'rose', description: 'Fast model' },
+        { id: 'rose-1-ultra', name: 'Rose 1 Ultra', provider: 'rose', description: 'Powerful model' },
+      ],
+    });
+  }),
+
+  // Tools endpoint
+  http.get(`${API_BASE}/tools`, () => {
+    return HttpResponse.json({
+      tools: [
+        { id: 'web-search', name: 'Web Search', description: 'Search the web' },
+        { id: 'web-fetch', name: 'Web Fetch', description: 'Fetch a webpage' },
+      ],
+    });
+  }),
+
+  // Agents endpoints
+  http.get(`${API_BASE}/agents`, () => {
+    return HttpResponse.json({
+      agents: [
+        {
+          agent_id: 'agent-001',
+          goal: 'Test agent',
+          model: 'rose-1-lite',
+          source: 'WEB',
+          reasoning_effort: 'medium',
+          progress: 50,
+          status: 'ACTIVE',
+          status_message: null,
+          temporal_workflow_id: 'wf-001',
+          token_count: 1000,
+          tokens_in: 800,
+          tokens_out: 200,
+          tool_tokens_in: 0,
+          tool_tokens_out: 0,
+          tool_cost_cents: 0,
+          context_size: 4096,
+          message_count: 5,
+          price_limit_cents: 100,
+          tree_cost_cents: 10,
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:01:00Z',
+          write_lock_enabled: false,
+        },
+      ],
+    });
+  }),
+
+  http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
+    return HttpResponse.json({
+      agent: {
+        agent_id: params.agentId,
+        goal: 'Test agent',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        reasoning_effort: 'medium',
+        progress: 50,
+        status: 'ACTIVE',
+        status_message: null,
+        temporal_workflow_id: 'wf-001',
+        token_count: 1000,
+        tokens_in: 800,
+        tokens_out: 200,
+        tool_tokens_in: 0,
+        tool_tokens_out: 0,
+        tool_cost_cents: 0,
+        context_size: 4096,
+        message_count: 2,
+        price_limit_cents: 100,
+        tree_cost_cents: 10,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:01:00Z',
+        write_lock_enabled: false,
+        parent_agent_id: null,
+        parent_goal: null,
+        verifier: null,
+        tools: [],
+      },
+      messages: [
+        {
+          message_id: 'msg-001',
+          timestamp: '2026-01-01T00:00:00Z',
+          text: 'Starting agent...',
+          role: 'SYSTEM',
+        },
+        {
+          message_id: 'msg-002',
+          timestamp: '2026-01-01T00:00:01Z',
+          text: 'Working on your task.',
+          role: 'ASSISTANT',
+        },
+      ],
+      pagination: {
+        has_more: false,
+        oldest_timestamp: null,
+      },
+    });
+  }),
+
+  http.post(`${API_BASE}/agents`, () => {
+    return HttpResponse.json({
+      agent_id: 'new-agent-001',
+      goal: 'New test agent',
+      model: 'rose-1-lite',
+      source: 'WEB',
+      reasoning_effort: 'medium',
+      progress: 0,
+      status: 'STARTING_UP',
+      status_message: null,
+      temporal_workflow_id: 'wf-new-001',
+      token_count: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      tool_tokens_in: 0,
+      tool_tokens_out: 0,
+      tool_cost_cents: 0,
+      context_size: 0,
+      message_count: 0,
+      price_limit_cents: 100,
+      tree_cost_cents: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      write_lock_enabled: false,
+    });
+  }),
+
+  http.post(`${API_BASE}/agents/:agentId/messages`, () => {
+    return HttpResponse.json({
+      message_id: 'msg-new-001',
+      timestamp: new Date().toISOString(),
+      text: 'Message received',
+      role: 'USER',
+    });
+  }),
+
+  http.delete(`${API_BASE}/agents/:agentId`, () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.post(`${API_BASE}/agents/:agentId/pause`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/agents/:agentId/resume`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.patch(`${API_BASE}/agents/:agentId`, () => {
+    return HttpResponse.json({ agent: {} });
+  }),
+
+  http.post(`${API_BASE}/agents/:agentId/start-agent`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  // Attention requests
+  http.get(`${API_BASE}/attention-requests`, () => {
+    return HttpResponse.json({ requests: [] });
+  }),
+
+  http.post(`${API_BASE}/attention-requests/:requestId/respond`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/attention-requests/:requestId/skip`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/attention-requests/:requestId/reject`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  // Invite codes
+  http.get(`${API_BASE}/invite-codes/my-code`, () => {
+    return HttpResponse.json({
+      inviteCode: 123456,
+      uses: 3,
+      usesRemaining: 7,
+    });
+  }),
+
+  http.post(`${API_BASE}/invite-codes/use`, () => {
+    return HttpResponse.json({ success: true, message: 'Invite code applied' });
+  }),
+
+  http.get(`${API_BASE}/invite-codes/check`, () => {
+    return HttpResponse.json({ needsInviteCode: false });
+  }),
+
+  // People / Network
+  http.get(`${API_BASE}/people`, () => {
+    return HttpResponse.json({
+      people: [],
+      pagination: { page: 1, limit: 50, total: 0, totalPages: 0 },
+    });
+  }),
+
+  // Tree state
+  http.get(`${API_BASE}/agents/tree`, () => {
+    return HttpResponse.json({ agents: [] });
+  }),
+
+  http.get(`${API_BASE}/agents/:agentId/ancestors`, () => {
+    return HttpResponse.json({ ancestors: [] });
+  }),
+
+  // Blueprints
+  http.get(`${API_BASE}/blueprints/by-goal`, () => {
+    return new HttpResponse(null, { status: 404 });
+  }),
+
+  // Upload
+  http.post(`${API_BASE}/upload`, () => {
+    return HttpResponse.json({
+      file_pointer: {
+        id: 'file-001',
+        storage_path: 'uploads/test/file.txt',
+        original_filename: 'file.txt',
+        mime_type: 'text/plain',
+        size_bytes: 100,
+        created_at: new Date().toISOString(),
+      },
+    });
+  }),
+
+  // Credits/usage
+  http.get(`${API_BASE}/credits/usage`, () => {
+    return HttpResponse.json({
+      used: 0,
+      limit: 1000,
+      remaining: 1000,
+    });
+  }),
+
+  // Generate LLM judge prompt
+  http.post(`${API_BASE}/generate-llm-judge-prompt`, () => {
+    return HttpResponse.json({ prompt: 'Test LLM judge prompt' });
+  }),
+
+  // Signal endpoints
+  http.post(`${API_BASE}/agents/:agentId/signal/signup_completed`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/agents/:agentId/signal/signup_dismissed`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+];
