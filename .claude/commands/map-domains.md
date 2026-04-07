@@ -36,6 +36,27 @@ The domain map must identify ALL domain types, not just the obvious entry points
 └── <app-wiring>  # Composition root — the ONLY file that imports across all domains
 ```
 
+**Frontend equivalent (React/Next.js/Vite):**
+```
+<source-root>/
+├── shared/       # L0+L1 — reusable code (utils, lib, components, hooks, types)
+│   ├── utils/    # Pure functions (cn, formatDate) — zero project imports
+│   ├── lib/      # Configured libraries with side effects (API client, Supabase, analytics)
+│   ├── components/ # Shared UI kit (Button, Modal, Form)
+│   ├── hooks/    # Shared React hooks (useDisclosure, useMediaQuery)
+│   └── types/    # Shared TypeScript interfaces
+├── features/     # L2 — business logic, each with fixed layer structure
+│   ├── <feature>/types.ts        # Zod schemas, TS interfaces
+│   ├── <feature>/api.ts          # Data fetching (React Query hooks, HTTP calls)
+│   ├── <feature>/hooks.ts        # Business logic orchestration
+│   ├── <feature>/components/     # UI rendering
+│   └── <feature>/index.ts        # Public API barrel (mandatory)
+├── pages/ or app/ # Entry points — compose features
+└── App.tsx        # Composition root (provider tree + router)
+```
+
+The same import rules apply: features never import from other features, shared code never imports from features.
+
 **Import rules:**
 - Domains NEVER import from other domains
 - Cross-domain communication goes through providers (a registry, dispatcher, or event bus)
@@ -76,6 +97,7 @@ A domain is the natural unit of independent work. What counts as a domain depend
 | Library | A public module | Module entry (`__init__.py`, `index.ts`, `mod.rs`) |
 | Monolith with MVC | A controller + its model/service | Controller file |
 | Event-driven system | An event handler domain | Handler/consumer file |
+| Frontend SPA (React/Vue/Svelte) | A feature slice (business capability) | Feature barrel (`index.ts`), page component (`pages/*.tsx`) |
 
 ### 1b. Domain types — discover, don't hardcode
 
@@ -88,6 +110,16 @@ Every codebase has multiple categories of domain. The mapping script must discov
 | **Coordination domains** | The layer that dispatches work across entry/support domains | Workflow engine, request router, event bus, orchestrator, job scheduler |
 
 **How to identify types:** Look at the directory structure. Each top-level source directory that contains business logic files (not just utils/config) likely represents a domain category. For example, `routes/`, `tools/`, `commands/` → entry domains. `workers/`, `activities/`, `jobs/` → support domains. `workflows/`, `orchestration/`, `pipeline/` → coordination domains.
+
+**Frontend-specific domain types:**
+
+| Category | What to look for | Examples |
+|---|---|---|
+| **Entry domains (pages)** | Top-level route components that compose features | `pages/Dashboard.tsx`, `app/routes/settings.tsx` |
+| **Support domains (features)** | Self-contained feature slices with their own API/hooks/components | `features/auth/`, `features/billing/`, `features/notifications/` |
+| **Coordination domains (router/layout)** | The routing tree or layout shell that wires pages together | `app/router.tsx`, `app/App.tsx`, `pages/_app.tsx` |
+
+Frontend projects often use `features/` instead of `domains/` and `shared/` instead of `providers/`. The mapping script should detect these directory names and treat them as equivalents.
 
 The script should assign a `type` string to each domain based on its category. Derive the type names from the codebase's own terminology (e.g., if the codebase calls them "tools", the type is `"tool"`).
 
@@ -121,6 +153,19 @@ Shared infrastructure is code imported by multiple domains but not a domain itse
 - The ONLY file allowed to import across all domains
 
 The mapping script must identify shared files and classify them so `/audit-providers-and-utils` can sort them into `providers/` vs `utils/`.
+
+**Frontend shared infrastructure mapping:**
+
+| Directory | Backend equivalent | Contents |
+|---|---|---|
+| `shared/lib/` | `providers/` | Configured library instances with side effects (API client, Supabase, analytics SDK) |
+| `shared/utils/` | `utils/` | Pure functions (`cn`, `formatDate`, `debounce`) |
+| `shared/components/` | *(no equivalent)* | Reusable UI kit (Button, Modal, Dialog) |
+| `shared/hooks/` | *(no equivalent)* | Shared React hooks (`useDisclosure`, `useMediaQuery`) |
+| `shared/types/` | types in providers/ | Shared TypeScript types/interfaces |
+| `shared/config/` | config files | Environment variables, constants, feature flags |
+
+The provider/util test still applies: if it has side effects (network, storage, analytics), it belongs in `shared/lib/`. If it is a pure function, it belongs in `shared/utils/`.
 
 ### 1e. Build the domain list
 
@@ -198,11 +243,11 @@ The script must support four invocation modes:
 
 ### Reference implementation
 
-See `back-end/scripts/map-domains.ts` for a working TypeScript implementation that:
-- Scans `src/domains/*/` for entry points
-- Parses `import`/`from` via regex
+If a reference implementation exists (e.g., `back-end/scripts/map-domains.ts`), read it for patterns. A typical implementation:
+- Scans the domain directory (`src/domains/*/`, `src/features/*/`, or whatever the codebase uses) for entry points
+- Parses `import`/`from` via regex (include `.tsx` files for frontend codebases)
 - BFS-traces the transitive graph
-- Checks `src/tests/blackbox/<domain>.blackbox.ts`
+- Checks for existing test files per domain
 - Supports all required modes
 
 ### Verification
