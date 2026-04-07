@@ -43,6 +43,19 @@ service/logic  → own repo, own types, own config, providers/*
 runtime/handler → own service, own types, providers/*, utils/
 ```
 
+**Frontend variant (if codebase uses features/):**
+```
+shared/utils/           → nothing from project source tree
+shared/lib/             → shared/utils/ only
+features/*/types        → external packages + shared/types/
+features/*/config       → own types
+features/*/api          → own types, own config, shared/lib/
+features/*/hooks        → own api, own types, own config, shared/*
+features/*/components   → own hooks, own types, shared/components/, shared/hooks/
+```
+
+The structural test must detect which directory structure exists (`domains/` vs `features/`) and apply the corresponding rules.
+
 **Remediation message format:**
 ```
 LAYER VIOLATION in domains/<domain>/repo:
@@ -85,7 +98,12 @@ UTILS BOUNDARY VIOLATION in utils/<file>:
 
 ### 5. Domain completeness
 
-Every domain directory must contain all required layer files (types, config, repo, service, runtime/handler). Large domains may have additional files (e.g., split service files), which is allowed.
+Every domain directory must contain all required layer files. Large domains may have additional files (e.g., split service files), which is allowed.
+
+**Backend required files:** types, config, repo, service, runtime/handler.
+**Frontend required files:** types, api, hooks, components/ (directory with at least one component), index.ts. Optional: config.
+
+The test must detect whether the codebase uses `domains/` or `features/` and check the appropriate layer file set.
 
 **Remediation:**
 ```
@@ -106,6 +124,7 @@ Any other file importing the data client is a violation.
 - TypeScript: `from '...prisma'`, `from '...database'`, `@prisma/client`
 - Python: `from ... import prisma`, `import sqlalchemy`, `from ... import db`
 - Go: `import "database/sql"`, ORM package imports
+- Frontend (React): `fetch(`, `axios.`, `useQuery(`/`useMutation(` from `@tanstack/react-query` — only allowed in `features/*/api.*` files and `shared/lib/`
 
 **Remediation:**
 ```
@@ -122,6 +141,14 @@ HTTP/framework types (Request, Response, Router, etc.) must only appear in:
 - Utils that wrap framework concepts (asyncHandler, error middleware)
 
 If service, repo, types, or config files import framework types, it's a violation.
+
+**Frontend framework types to detect:**
+- React Router: `useNavigate`, `useParams`, `useSearchParams`, `Link`, `Navigate` — only allowed in `components/` and page files
+- Next.js Router: `useRouter`, `usePathname`, `redirect` — same restriction
+- DOM APIs: `document.getElementById`, `window.location` — only in components or shared hooks
+- `React.lazy`, `Suspense` — only in page/layout files (composition, not feature logic)
+
+If `api.ts`, `hooks.ts`, or `types.ts` import router/navigation types, it is a FRAMEWORK LEAK.
 
 **Remediation:**
 ```
@@ -153,6 +180,21 @@ WIRING VIOLATION in <entry-point>:
   Imports <domain> from old location but domain exists at domains/<domain>/
   → Fix: Update the import path to point to the domains/ location.
 ```
+
+### 10. Public API enforcement (frontend only)
+
+Every feature directory must have an `index.ts` barrel file. External consumers (pages, other features via shared state) must import from the barrel, not from internal layer files.
+
+**Detection:** For every import statement in `pages/`, `app/`, or other features that references a path under `features/<name>/`, verify the import resolves to `features/<name>/index.ts` (or `features/<name>/`), not to `features/<name>/api.ts`, `features/<name>/hooks.ts`, etc.
+
+**Remediation:**
+```
+PUBLIC API VIOLATION in pages/Dashboard.tsx:
+  Imports from 'features/billing/hooks' but must import via 'features/billing'
+  → Fix: Re-export the needed symbol from features/billing/index.ts and import from there.
+```
+
+Skip this invariant for backend codebases (no `features/` directory).
 
 ## Execution
 
@@ -201,6 +243,7 @@ For each invariant category, make a temporary deliberate violation and verify th
 7. **Framework leak**: Add a framework type import in service → verify FRAMEWORK LEAK
 8. **Circular imports**: Create a bidirectional import → verify CIRCULAR IMPORT
 9. **Wiring correctness**: Point the entry file import to the old location → verify WIRING VIOLATION
+10. **(Frontend only) Public API violation**: Import a feature's `hooks.ts` directly from a page file → verify PUBLIC API VIOLATION
 
 Revert each violation immediately after confirming the test catches it.
 

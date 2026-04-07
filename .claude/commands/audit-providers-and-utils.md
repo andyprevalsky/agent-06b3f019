@@ -39,6 +39,17 @@ providers/    → imports from utils/ and external packages ONLY (never from dom
 domains/*/    → imports from providers/, utils/ (runtime layer only), own domain layers
 ```
 
+**Frontend equivalent directory names:**
+```
+shared/utils/      → same as utils/ (pure functions, zero side effects)
+shared/lib/        → same as providers/ (configured libraries with side effects)
+shared/components/ → reusable UI kit (no backend equivalent)
+shared/hooks/      → shared React hooks (no direct backend equivalent)
+features/*/        → same as domains/*/ (business logic, layered)
+```
+
+The boundary rules are identical. The audit must detect which naming convention the codebase uses and apply rules accordingly.
+
 ### What belongs where
 
 **providers/** — Any module with side effects:
@@ -55,6 +66,30 @@ domains/*/    → imports from providers/, utils/ (runtime layer only), own doma
 - Error class definitions
 - Functions you could copy-paste into any project and they'd work
 
+**Frontend-specific classification:**
+
+**shared/lib/** (same rules as providers/):
+- API client instance (`axios.create`, configured `fetch` wrapper)
+- Supabase/Firebase client
+- Analytics SDK wrapper
+- Auth token management (reads/writes storage)
+- WebSocket client
+
+**shared/utils/** (same rules as utils/):
+- `cn()` (classname merge), `formatDate()`, `formatCurrency()`
+- Zod schema helpers
+- URL builders, query string parsers
+- Pure data transformations
+
+**shared/components/** (frontend-only):
+- Design system primitives (Button, Input, Modal, Toast)
+- Layout components (PageContainer, Sidebar)
+- Must not contain business logic — only presentation
+
+**shared/hooks/** (frontend-only):
+- `useDisclosure()`, `useMediaQuery()`, `useDebounce()`
+- Must not import from features/ — if it needs feature data, it belongs in that feature's `hooks.ts`
+
 **The test:** If you can run the function in a unit test with no mocks, no env vars, no network — it's a util. Everything else is a provider.
 
 ## Step 1: Inventory
@@ -62,7 +97,7 @@ domains/*/    → imports from providers/, utils/ (runtime layer only), own doma
 Scan the full source tree and build an inventory of all files in providers/, utils/, and any legacy shared directories (lib/, middleware/, helpers/, common/):
 
 ```bash
-find <source-root>/providers <source-root>/utils <source-root>/lib <source-root>/middleware <source-root>/helpers <source-root>/common -type f -name '*.<ext>' 2>/dev/null | sort
+find <source-root>/providers <source-root>/utils <source-root>/shared <source-root>/lib <source-root>/middleware <source-root>/helpers <source-root>/common -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.py' -o -name '*.go' \) 2>/dev/null | sort
 ```
 
 For each file, read it and classify:
@@ -94,6 +129,14 @@ Search all provider and util files for imports from domains/. Any match is a bou
 ### 2d. Utils importing from project source
 
 Search all util files for imports going up to the project source. Utils must be self-contained.
+
+### 2f. shared/components/ importing from features/ (frontend only)
+
+Shared components must never import from features/. If a shared component needs feature-specific data, it should accept it via props.
+
+### 2g. shared/hooks/ importing from features/ (frontend only)
+
+Same rule. Shared hooks must be feature-agnostic. If a hook needs feature-specific data, it belongs in that feature's `hooks.ts`, not in shared/.
 
 ### 2e. Standalone types directory
 

@@ -5,7 +5,7 @@ argument-hint: "<utility-name> (e.g., retry, config) — or leave blank to run f
 
 # Enforce Canonical Utility
 
-Add ESLint `no-restricted-syntax` rules that ban hand-rolled implementations of cross-cutting concerns, pointing developers to canonical utilities in `providers/` instead.
+Add ESLint `no-restricted-syntax` rules that ban hand-rolled implementations of cross-cutting concerns, pointing developers to canonical utilities in `providers/` (backend) or `shared/lib/` (frontend) instead.
 
 **This is a loop. Do NOT stop after partial work. Continue until ESLint passes on the entire codebase.**
 
@@ -14,6 +14,24 @@ Add ESLint `no-restricted-syntax` rules that ban hand-rolled implementations of 
 From the OpenAI harness engineering playbook: when the same capability is implemented N times, only one version gets proper observability. The fix is to designate one canonical implementation and ban alternatives via lint rules.
 
 The structural tests in `layer-deps.test.ts` enforce **architecture** (import direction, boundaries). This skill enforces **"use the shared thing, don't roll your own"** via ESLint AST selectors.
+
+---
+
+## Source root detection
+
+Before any audit, determine `<source-root>` — the directory containing the domain/feature source code:
+
+```bash
+# Detect source root: look for domains/, features/, or src/ with domain-like structure
+for candidate in ./back-end ./front-end ./src . ; do
+  if [ -d "$candidate/src/domains" ] || [ -d "$candidate/src/features" ] || [ -d "$candidate/domains" ] || [ -d "$candidate/features" ]; then
+    echo "SOURCE_ROOT=$candidate"
+    break
+  fi
+done
+```
+
+All commands below use `<source-root>` as a placeholder. Replace it with the detected path. For frontend codebases, also substitute: `domains/` → `features/`, `providers/` → `shared/lib/`, `utils/` → `shared/utils/`.
 
 ---
 
@@ -29,7 +47,7 @@ This is the most robust way to find cross-cutting concerns. Instead of grepping 
 
 **Extract and categorize all imports from `domains/`:**
 
-For every `.ts` file under `back-end/src/domains/`, extract its import statements and categorize each one:
+For every source file under `<source-root>/src/domains/` (or `<source-root>/src/features/` for frontend), extract its import statements and categorize each one:
 
 | Category | Pattern | What it means |
 |----------|---------|---------------|
@@ -41,7 +59,7 @@ For every `.ts` file under `back-end/src/domains/`, extract its import statement
 | **Relative local** | `from './types'`, `from './service'` | OK — intra-domain import |
 
 ```bash
-cd back-end && grep -rhn "^import\|^} from\|from '" src/domains/ --include="*.ts" | \
+cd <source-root> && grep -rhn "^import\|^} from\|from '" src/domains/ src/features/ --include="*.ts" --include="*.tsx" 2>/dev/null | \
   grep -v "from '\.\/" | \
   sed "s/.*from '//; s/'.*//" | \
   sort | uniq -c | sort -rn | head -40
@@ -57,8 +75,8 @@ This gives you a ranked list of external dependencies by fan-in. **High fan-in =
 **Cross-reference with existing providers:**
 
 ```bash
-ls back-end/src/providers/    # What providers exist?
-ls back-end/src/utils/        # What utils exist?
+ls <source-root>/src/providers/ <source-root>/src/shared/lib/ 2>/dev/null    # What providers exist?
+ls <source-root>/src/utils/ <source-root>/src/shared/utils/ 2>/dev/null      # What utils exist?
 ```
 
 For each high-fan-in dependency:
@@ -71,16 +89,37 @@ For each high-fan-in dependency:
 Import analysis misses cases where developers reimplement a concern inline without importing anything (e.g., hand-rolling a retry loop with `setTimeout`, or reading `process.env` directly). Scan for these:
 
 ```bash
-cd back-end && echo "=== Inline pattern scan ===" && \
+cd <source-root> && echo "=== Inline pattern scan ===" && \
+DOMAIN_DIR=$([ -d src/domains ] && echo "src/domains/" || echo "src/features/") && \
 for pattern in 'process\.env\.' 'console\.(log|error|warn)' 'setTimeout' 'crypto\.' 'fs\.' 'new Headers' 'Authorization.*Bearer'; do
-  count=$(grep -rn "$pattern" src/domains/ --include="*.ts" 2>/dev/null | wc -l)
+  count=$(grep -rn "$pattern" "$DOMAIN_DIR" --include="*.ts" --include="*.tsx" 2>/dev/null | wc -l)
   if [ "$count" -gt 0 ]; then
     echo "--- $pattern ($count hits) ---"
-    grep -rn "$pattern" src/domains/ --include="*.ts" | head -10
+    grep -rn "$pattern" "$DOMAIN_DIR" --include="*.ts" --include="*.tsx" | head -10
     echo ""
   fi
 done
 ```
+
+**Frontend-specific inline patterns** (add to the scan if the codebase is a React/frontend SPA):
+
+```bash
+cd <source-root> && echo "=== Frontend inline pattern scan ===" && \
+for pattern in 'fetch(' 'axios\.' 'useNavigate\|useRouter' 'localStorage\.' 'sessionStorage\.' 'window\.location' 'document\.(get|query)' 'console\.(log|error|warn)'; do
+  count=$(grep -rn "$pattern" src/features/ --include="*.ts" --include="*.tsx" 2>/dev/null | grep -v '/api\.' | grep -v 'shared/lib' | wc -l)
+  if [ "$count" -gt 0 ]; then
+    echo "--- $pattern ($count hits outside api/shared/lib) ---"
+    grep -rn "$pattern" src/features/ --include="*.ts" --include="*.tsx" | grep -v '/api\.' | grep -v 'shared/lib' | head -10
+    echo ""
+  fi
+done
+```
+
+Key frontend concerns:
+- **Direct fetch/axios outside `api.ts`** → must go through the feature's `api.ts` layer or `shared/lib/apiClient`
+- **Direct router/navigation outside components** → `useNavigate`/`useRouter` only in component files or page files
+- **Direct localStorage/sessionStorage** → should go through `shared/lib/storage.ts`
+- **Direct DOM access** → should go through shared hooks
 
 ### 0c. Semantic review (catches what mechanical scans miss)
 
@@ -191,11 +230,19 @@ Already enforced globally by `no-console: error`. No additional rule needed.
 |---------|-------------|---------|
 | Bare `fetch()` calls in domains | `CallExpression[callee.name='fetch']` | Use the canonical HTTP client from `providers/http.ts` instead of calling `fetch()` directly. |
 
+**Frontend-specific patterns:**
+
+| Pattern | AST Selector | Message |
+|---------|-------------|---------|
+| Direct `fetch()` in features | `CallExpression[callee.name='fetch']` | Use the API client from `shared/lib/apiClient` via the feature's `api.ts` instead of calling `fetch()` directly. |
+| Direct localStorage | `MemberExpression[object.name='localStorage']` | Use `shared/lib/storage.ts` instead of accessing localStorage directly. |
+| Direct sessionStorage | `MemberExpression[object.name='sessionStorage']` | Use `shared/lib/storage.ts` instead of accessing sessionStorage directly. |
+
 **Other patterns**: Read the utility, identify what inline code it replaces, and craft an AST selector. Use https://astexplorer.net with the `@typescript-eslint/parser` to test selectors.
 
 ## Step 2: Add the rules to eslint.config.mjs
 
-Read `back-end/eslint.config.mjs`. Add the `no-restricted-syntax` rules to the **base config** (applies to all `.ts` files).
+Read the ESLint config (`eslint.config.mjs` or equivalent) in `<source-root>`. Add the `no-restricted-syntax` rules to the **base config** (applies to all `.ts`/`.tsx` files).
 
 Rules go in the existing base config's `rules` object:
 
@@ -214,7 +261,7 @@ Rules go in the existing base config's `rules` object:
 ## Step 3: Run ESLint to find all existing violations
 
 ```bash
-cd back-end && npx eslint src/ --no-fix 2>&1 | grep "no-restricted-syntax\|no-restricted-imports" | head -50
+cd <source-root> && npx eslint src/ --no-fix 2>&1 | grep "no-restricted-syntax\|no-restricted-imports" | head -50
 ```
 
 This shows every file that still uses the banned pattern. These are the files that need migration.
@@ -246,24 +293,24 @@ For files being suppressed:
 
 ### 6a. ESLint passes
 ```bash
-cd back-end && npx eslint src/ 2>&1 | tail -5
+cd <source-root> && npx eslint src/ 2>&1 | tail -5
 ```
 Must report 0 errors (or only pre-existing errors unrelated to this change).
 
 ### 6b. TypeScript compiles
 ```bash
-cd back-end && npx tsc --noEmit 2>&1 | grep -v fetchCapture
+cd <source-root> && npx tsc --noEmit 2>&1 | grep -v fetchCapture
 ```
 Must report 0 errors.
 
 ### 6c. Structural tests pass
 ```bash
-cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
+cd <source-root> && npx tsx <structural-test-path>
 ```
 
 ### 6d. Blackbox tests pass (if running)
 ```bash
-cd back-end && npm run test:blackbox:existing 2>&1 | tail -10
+cd <source-root> && <blackbox-test-command> 2>&1 | tail -10
 ```
 
 ## Step 7: Report

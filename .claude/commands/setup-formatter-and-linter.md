@@ -54,12 +54,13 @@ If a config exists, check whether it supports **per-domain strict enforcement** 
 
 #### Language-specific guidance
 
-**TypeScript (ESLint flat config + Prettier):**
+**TypeScript / React (ESLint flat config + Prettier):**
 - Create `eslint.config.mjs` using `typescript-eslint` flat config API
 - Define `STRICT_DOMAIN_FILES` as a const array at the top of the file
 - Base: `@eslint/js` recommended + `typescript-eslint` recommended
 - Strict overlay: type-aware rules (`projectService: true`) — `no-floating-promises`, `no-misused-promises`, `strict-boolean-expressions`, `consistent-type-imports`
 - Add `eslint-config-prettier` last to disable format-conflicting rules
+- **React projects additionally:** Add `eslint-plugin-react-hooks` with `react-hooks/exhaustive-deps: 'error'` and `react-hooks/rules-of-hooks: 'error'` to base rules. In the strict overlay, add: `react/no-unstable-nested-components: 'error'`, `@typescript-eslint/naming-convention` for component PascalCase enforcement, `no-restricted-imports` banning deep imports into feature internals (e.g., `features/*/*` — must import via barrel). If using Next.js, add `@next/eslint-plugin-next`.
 - Formatter: `.prettierrc` with project conventions (inspect existing code for quote style, trailing commas)
 
 **Python (Ruff):**

@@ -59,6 +59,21 @@ domains/<domain>/
 └── handler.go    # HTTP handler / gRPC server
 ```
 
+**React/TypeScript (Frontend):**
+```
+features/<feature>/
+├── types.ts        # Zod schemas, TS interfaces, prop types
+├── config.ts       # Constants, feature flags, defaults (optional — create if needed)
+├── api.ts          # Data fetching: React Query hooks, HTTP calls (sole API consumer)
+├── hooks.ts        # Business logic orchestration (custom hooks)
+├── components/     # UI components (thin: call hooks, render JSX)
+│   ├── FeatureList.tsx
+│   └── FeatureDetail.tsx
+└── index.ts        # Public API barrel — re-exports ONLY what external consumers need
+```
+
+Note: Frontend uses `features/` not `domains/`, and `shared/` not `providers/`. The directory names differ but the layering principle is identical. The `index.ts` barrel is mandatory for frontend — it encapsulates the feature so consumers import from `features/auth`, never from `features/auth/hooks`.
+
 ### Import direction rules (forward-only, never reverse)
 
 ```
@@ -71,7 +86,20 @@ domains/*/service   → imports from own repo, own types, own config, providers/
 domains/*/runtime   → imports from own service, own types, providers/*, utils/
 ```
 
-**Domains NEVER import from other domains.** Shared logic lives in providers.
+**Frontend import direction (same principle, different names):**
+```
+shared/utils/              → imports nothing from the project source tree
+shared/lib/                → imports from shared/utils/ only (+ external packages)
+shared/components/         → imports from shared/utils/, shared/hooks/, shared/lib/
+features/*/types           → external packages + shared/types/ only
+features/*/config          → own types
+features/*/api             → own types, own config, shared/lib/ (API client)
+features/*/hooks           → own api, own types, own config, shared/*
+features/*/components      → own hooks, own types, shared/components/, shared/hooks/
+features/*/index.ts        → re-exports from own layers only
+```
+
+**Domains/features NEVER import from other domains/features.** Shared logic lives in providers (backend) or shared/ (frontend).
 
 ## Step 0: Verify required infrastructure
 
@@ -154,6 +182,8 @@ Create the domain directory and ALL layer files. Every domain gets every layer, 
 
 If the domain has no config, create the file with a comment and an empty export.
 
+**Frontend only:** Also create `index.ts` as the public API barrel. This file re-exports only what external consumers (pages, other features via shared state) need. Internal layer files should NOT be imported directly from outside the feature. This is the frontend equivalent of encapsulation — without it, feature boundaries leak.
+
 ## Step 3: Extract types
 
 Move from the entry file:
@@ -182,6 +212,8 @@ Rules:
 - **Import the data client from providers/** (database, ORM, file system provider).
 - **No business logic.** Just data access: find, create, update, delete, count.
 
+**Frontend equivalent (api.ts):** Move all `fetch`, `axios`, React Query `useQuery`/`useMutation` definitions here. Each API call becomes a named, exported hook or function. Rules: no UI rendering, no business logic beyond cache configuration. Import the shared API client from `shared/lib/` — never call `fetch()` directly.
+
 ## Step 6: Extract service / business logic
 
 Move business logic from the entry file. Each operation becomes a named, exported function.
@@ -191,6 +223,8 @@ Rules:
 - **Call repo functions for data access.** NEVER import the data client directly.
 - **May import providers/** for cross-cutting operations.
 - **Throw typed errors** for conditions that map to status codes or error responses.
+
+**Frontend equivalent (hooks.ts):** Move business logic hooks here. These orchestrate API hooks from `api.ts`, manage derived state, and expose clean interfaces to components. Rules: no JSX rendering, no direct API calls (use `api.ts`), no direct store mutations (use shared state hooks).
 
 **For large domains** where the service layer would exceed 300 lines: split into multiple service files by sub-concern. Each follows the same import rules.
 
@@ -208,6 +242,8 @@ Rules:
 - No inline business logic
 - No inline validation schemas (import from types)
 - Target: under 150 lines. Must stay under 300.
+
+**Frontend equivalent (components/):** Each component does ONLY: receive props or call hooks, render JSX, handle user events by calling hook functions. No direct API calls. No inline business logic. No data transformation beyond simple display formatting.
 
 ## Step 8: Update the wiring file
 
@@ -261,7 +297,7 @@ Output:
 - Any large-domain splits (multiple service files)
 
 Only say **`Domain refactor complete`** if ALL of:
-- [ ] Domain folder has all layer files
+- [ ] Domain folder has all layer files (backend: types/config/repo/service/runtime; frontend: types/api/hooks/components/index.ts)
 - [ ] All imports follow forward-only direction rules
 - [ ] Old entry file is deleted
 - [ ] Wiring file import updated
