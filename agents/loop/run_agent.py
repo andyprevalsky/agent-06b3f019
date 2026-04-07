@@ -875,9 +875,11 @@ async def run_agent(
                     }
 
                 # Not complete - add feedback to context
+                feedback_text = f"Verifier: {score * 100:.0f}% - {v_reasoning}"
+                feedback_text += "\n\nIMPORTANT: Your ASSISTANT text responses are NOT visible to the verifier. Only TOOL results (tool call outputs, files, structured responses) are evaluated. If you have completed work but scored low, you must produce visible output through tool calls — e.g., use spawn_claude_code_agent to write results to files, or use other tools that produce visible TOOL messages."
                 context.append({
                     "role": "TOOL",
-                    "text": f"Verifier: {score * 100:.0f}% - {v_reasoning}",
+                    "text": feedback_text,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "metadata": {"verifierMessage": True}
                 })
