@@ -442,6 +442,7 @@ async def spawn_sub_agent_activity(
         # Always fetch parent's attachments so they can auto-forward to sub-agents
         # that don't explicitly specify attachments (prevents file propagation gaps)
         filename_to_pointer: Dict[str, Dict[str, Any]] = {}
+        all_pointers_by_id: Dict[str, Dict[str, Any]] = {}
         activity.heartbeat("Fetching parent agent's attachments...")
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -459,9 +460,13 @@ async def spawn_sub_agent_activity(
                 # Extract FilePointers from parent's context
                 file_pointers = extract_attachments_from_context(parent_messages)
 
-                # Build filename -> FilePointer dict lookup
+                # Build filename -> FilePointer dict lookup (last wins on dupes)
+                # Also keep a full list keyed by ID for forwarding all attachments
                 for fp in file_pointers:
-                    filename_to_pointer[fp.original_filename] = asdict(fp)
+                    fp_dict = asdict(fp)
+                    filename_to_pointer[fp.original_filename] = fp_dict
+                    if fp.id:
+                        all_pointers_by_id[fp.id] = fp_dict
 
                 logger.info(
                     "Extracted parent attachments",
@@ -505,25 +510,27 @@ async def spawn_sub_agent_activity(
                                     f"Attachment not found in parent context: {filename}",
                                     available_files=list(filename_to_pointer.keys())
                                 )
+                    # Use all_pointers_by_id for forwarding to preserve duplicate filenames
+                    all_attachments = list(all_pointers_by_id.values()) if all_pointers_by_id else list(filename_to_pointer.values())
                     # If explicit resolution found nothing, auto-forward all
                     if agent_cfg.get("attachments") and not resolved_attachments and filename_to_pointer:
                         logger.info(
                             "Explicit attachment resolution failed, auto-forwarding all parent attachments",
                             index=index,
                             requested=agent_cfg["attachments"],
-                            num_files=len(filename_to_pointer),
+                            num_files=len(all_attachments),
                             filenames=list(filename_to_pointer.keys())
                         )
-                        resolved_attachments = list(filename_to_pointer.values())
+                        resolved_attachments = all_attachments
                     elif not agent_cfg.get("attachments") and filename_to_pointer:
                         # Auto-forward all parent attachments when none explicitly requested
                         logger.info(
                             "Auto-forwarding parent attachments to sub-agent",
                             index=index,
-                            num_files=len(filename_to_pointer),
+                            num_files=len(all_attachments),
                             filenames=list(filename_to_pointer.keys())
                         )
-                        resolved_attachments = list(filename_to_pointer.values())
+                        resolved_attachments = all_attachments
 
                     # start_phase must be strict: plan | execute
                     start_phase = str(agent_cfg.get("start_phase", "plan")).strip().lower()

@@ -79,6 +79,11 @@ wss.on('connection', (ws) => {
       if (msg.type === 'stdin') {
         log('info', 'Received stdin', { bytes: msg.data?.length || 0 });
 
+        if (!msg.data) {
+          ws.send(JSON.stringify({ type: 'stdin_error', error: 'Missing data field' }));
+          return;
+        }
+
         // Write directly to PTY — no middleman process
         if (claude && !processExited) {
           // Ensure carriage return at end for prompt submission
@@ -314,7 +319,11 @@ claude.onData((data) => {
     trustDialogDismissed = true;
     log('info', 'Auto-dismissing trust folder dialog');
     broadcast('trust_dismissed', true);
-    setTimeout(() => claude.write('\r'), 500);
+    setTimeout(() => {
+      if (!processExited) {
+        try { claude.write('\r'); } catch (e) { log('error', 'Trust dismiss write failed', { error: e.message }); }
+      }
+    }, 500);
   }
 });
 
