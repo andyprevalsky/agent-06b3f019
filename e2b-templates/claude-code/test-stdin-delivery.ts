@@ -131,6 +131,7 @@ function createTestState(): TestState {
       state.outputChunks = [];
       state.acks = [];
       state.errors = [];
+      state.exitCode = null;
     },
     getOutput() {
       return stripAnsi(state.outputChunks.join(''));

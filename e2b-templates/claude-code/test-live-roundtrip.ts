@@ -195,28 +195,13 @@ async function main(): Promise<void> {
 
     log('  Connected');
 
-    // ─── Step 4a: Dismiss trust dialog if it appears ─────
-    log('[4/7] Checking for trust folder dialog...');
+    // ─── Step 4a: Wait for server-side trust dialog auto-dismiss ─────
+    log('[4/7] Waiting for server-side trust dialog handling...');
 
-    // Wait briefly for initial output
-    await sleep(3000);
-
-    const initialOutput = stripAnsi(outputChunks.join(''));
-    if (initialOutput.includes('trust') || initialOutput.includes('Enter to confirm')) {
-      log('  Trust dialog detected — sending Enter to dismiss');
-      ws.send(JSON.stringify({ type: 'stdin', data: '\r' }));
-
-      // Wait for ack
-      await sleep(500);
-      stdinAckReceived = false; // Reset for the real stdin test later
-
-      // Wait for dialog to dismiss and Claude to start processing
-      log('  Waiting for Claude Code to start processing goal...');
-      lastOutputTime = Date.now();
-      await sleep(3000);
-    } else {
-      log('  No trust dialog — Claude Code started directly');
-    }
+    // The server (ws-server.mjs) auto-detects and dismisses the trust dialog
+    // by writing \r to the PTY. We just wait for output to stabilize.
+    await sleep(5000);
+    lastOutputTime = Date.now();
 
     // ─── Step 4b: Wait for Claude to ask a question ─────
     log('[5/7] Waiting for Claude Code to respond (silence detection)...');

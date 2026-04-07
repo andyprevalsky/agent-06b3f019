@@ -28,9 +28,10 @@ RUN chmod +x /home/user/ws-server.mjs && chown 1000:1000 /home/user/ws-server.mj
 COPY CLAUDE.md /home/user/CLAUDE.md
 RUN chown 1000:1000 /home/user/CLAUDE.md
 
-# Install ws + node-pty locally in /home/user
+# Install ws + node-pty from local package.json for reproducible builds
+COPY package.json /home/user/package.json
 WORKDIR /home/user
-RUN npm init -y && npm install ws node-pty && chown -R 1000:1000 /home/user
+RUN npm install && chown -R 1000:1000 /home/user
 
 # Set working directory
 WORKDIR /home/user

@@ -442,37 +442,36 @@ async def spawn_sub_agent_activity(
         # Always fetch parent's attachments so they can auto-forward to sub-agents
         # that don't explicitly specify attachments (prevents file propagation gaps)
         filename_to_pointer: Dict[str, Dict[str, Any]] = {}
-        if True:
-            activity.heartbeat("Fetching parent agent's attachments...")
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        f"{backend_url}/api/agents/{parent_agent_id}",
-                        headers={
-                            "X-API-Key": api_key,
-                            "Content-Type": "application/json"
-                        },
-                    )
-                    response.raise_for_status()
-                    parent_data = response.json()
-                    parent_messages = parent_data.get("messages", [])
+        activity.heartbeat("Fetching parent agent's attachments...")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{backend_url}/api/agents/{parent_agent_id}",
+                    headers={
+                        "X-API-Key": api_key,
+                        "Content-Type": "application/json"
+                    },
+                )
+                response.raise_for_status()
+                parent_data = response.json()
+                parent_messages = parent_data.get("messages", [])
 
-                    # Extract FilePointers from parent's context
-                    file_pointers = extract_attachments_from_context(parent_messages)
+                # Extract FilePointers from parent's context
+                file_pointers = extract_attachments_from_context(parent_messages)
 
-                    # Build filename -> FilePointer dict lookup
-                    for fp in file_pointers:
-                        filename_to_pointer[fp.original_filename] = asdict(fp)
+                # Build filename -> FilePointer dict lookup
+                for fp in file_pointers:
+                    filename_to_pointer[fp.original_filename] = asdict(fp)
 
-                    logger.info(
-                        "Extracted parent attachments",
-                        parent_agent_id=parent_agent_id,
-                        attachment_count=len(file_pointers),
-                        filenames=list(filename_to_pointer.keys())
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to fetch parent attachments: {e}")
-                # Continue without attachments - don't fail the spawn
+                logger.info(
+                    "Extracted parent attachments",
+                    parent_agent_id=parent_agent_id,
+                    attachment_count=len(file_pointers),
+                    filenames=list(filename_to_pointer.keys())
+                )
+        except Exception as e:
+            logger.warning(f"Failed to fetch parent attachments: {e}")
+            # Continue without attachments - don't fail the spawn
 
         # Spawn strategy:
         # - Pool pattern with max 10 parallel spawn requests

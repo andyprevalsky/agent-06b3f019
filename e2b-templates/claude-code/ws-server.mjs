@@ -313,6 +313,7 @@ claude.onData((data) => {
   if (!trustDialogDismissed && outputBuffer.includes('trust') && outputBuffer.includes('Esc to cancel')) {
     trustDialogDismissed = true;
     log('info', 'Auto-dismissing trust folder dialog');
+    broadcast('trust_dismissed', true);
     setTimeout(() => claude.write('\r'), 500);
   }
 });
