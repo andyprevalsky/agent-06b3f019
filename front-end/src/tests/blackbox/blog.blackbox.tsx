@@ -452,9 +452,7 @@ describe('Blog data layer', () => {
     it('returns empty array for a category with no posts', () => {
       // "product" and "company" currently have no posts in the real data
       const result = getBlogPostsByCategory('product');
-      result.forEach((post) => {
-        expect(post.category).toBe('product');
-      });
+      expect(result).toHaveLength(0);
     });
   });
 

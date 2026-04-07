@@ -71,7 +71,7 @@ function installSettingsHandlers(overrides?: {
     // POST for generating API key
     http.post(`${API_BASE}/api-keys`, () => {
       return HttpResponse.json({
-        apiKey: 'rk_test_newkey123456',
+        apiKey: 'TEST_API_KEY_PLACEHOLDER',
         key: { id: 'key-new', name: 'My Key', maskedApiKey: 'rk_t...6', createdAt: new Date().toISOString() },
       });
     }),
@@ -375,7 +375,7 @@ describe('Settings page', () => {
       await user.click(screen.getByRole('button', { name: /^generate$/i }));
 
       await waitFor(() => {
-        expect(screen.getByText('rk_test_newkey123456')).toBeInTheDocument();
+        expect(screen.getByText('TEST_API_KEY_PLACEHOLDER')).toBeInTheDocument();
       });
       expect(screen.getByText(/copy & dismiss/i)).toBeInTheDocument();
     });

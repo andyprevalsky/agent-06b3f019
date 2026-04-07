@@ -94,6 +94,8 @@ HTMLCanvasElement.prototype.getContext = ((origGetContext) => {
       return new Proxy(glStubs, {
         get(target, prop) {
           if (prop in target) return target[prop as string];
+          // GL enum constants (VERTEX_SHADER, COMPILE_STATUS, etc.) are uppercase
+          if (typeof prop === 'string' && /^[A-Z0-9_]+$/.test(prop)) return 0;
           return () => {};
         },
       });

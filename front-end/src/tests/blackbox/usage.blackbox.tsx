@@ -253,25 +253,23 @@ describe('Usage page', () => {
   // ---------------------------------------------------------------------------
 
   describe('auth behavior', () => {
-    it('stays in loading state when no session exists (no API calls)', async () => {
+    it('makes no credit API calls when no session exists', async () => {
       localStorage.clear(); // remove session
       clearCaptures();
       renderWithProviders(<Usage />);
 
-      // The component calls fetchUsageData which checks session, finds none,
-      // returns early without calling setLoading(false) properly — it stays loading
-      // since finally block still runs, it will exit loading but usage remains null
-      // Actually, looking at the code: the finally block sets loading=false even on no-session.
-      // But without session, usage stays null, so it renders default '$0.00' values.
+      // Wait for the component to finish its loading cycle (finally block sets loading=false)
+      // then verify no credits API calls were made
       await waitFor(() => {
-        // loading will become false because of the finally block,
-        // but the early return skips the API calls so no data is fetched
-        const apiCalls = capturedRequests.filter(
-          (r) => r.url.includes('/credits/'),
-        );
-        // No API calls should have been made
-        expect(apiCalls).toHaveLength(0);
+        // Component should settle out of loading state
+        expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
       });
+
+      // After component has settled, check no credit API calls were made
+      const apiCalls = capturedRequests.filter(
+        (r) => r.url.includes('/credits/'),
+      );
+      expect(apiCalls).toHaveLength(0);
     });
   });
 

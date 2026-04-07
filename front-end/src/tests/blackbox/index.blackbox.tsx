@@ -12,7 +12,7 @@ describe('Index (landing) page', () => {
     clearCaptures();
     // Clear stored session so auth hook creates a fresh anonymous session
     window.localStorage.removeItem('rose-session');
-    window.localStorage.removeItem('rose-cached-user');
+    window.localStorage.removeItem('app-user');
     // Stub scrollIntoView (not implemented in jsdom)
     Element.prototype.scrollIntoView = () => {};
   });

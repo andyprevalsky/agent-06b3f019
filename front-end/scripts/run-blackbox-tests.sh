@@ -11,7 +11,7 @@ cd "$FRONTEND_DIR"
 # --list mode: list available test domains
 if [[ "${1:-}" == "--list" ]]; then
   echo "Available blackbox test domains:"
-  for f in src/tests/blackbox/*.blackbox.{ts,tsx} 2>/dev/null; do
+  for f in src/tests/blackbox/*.blackbox.ts src/tests/blackbox/*.blackbox.tsx; do
     [ -f "$f" ] || continue
     basename "$f" | sed 's/\.blackbox\.\(ts\|tsx\)$//'
   done
