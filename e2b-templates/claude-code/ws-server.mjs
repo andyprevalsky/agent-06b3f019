@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 /**
- * WebSocket server that runs Claude Code and streams stdout to connected clients.
+ * WebSocket server that runs Claude Code in a proper PTY and streams output.
  *
+ * Uses node-pty for direct PTY management (replaces `script` command):
+ * - Characters written via pty.write() go directly to the PTY master
+ * - No middleman process between us and Claude Code
+ * - Proper raw mode support for stdin injection
+ *
+ * Architecture:
  * - Accumulates all stdout in a buffer (never flushed)
  * - On client connect: sends full buffer, then streams live
- * - Manages multiple client connections
- * - Agent worker is responsible for persisting output to DB
+ * - Agent worker sends stdin via WebSocket for follow-up prompts
  * - Logs to /tmp/ws-server.log for debugging
- * - If GITHUB_REPO_URL is set, clones the repo before starting Claude Code
  */
 
 import { WebSocketServer } from 'ws';
-import { spawn, execSync } from 'child_process';
-import { appendFileSync } from 'fs';
+import pty from 'node-pty';
+import { execSync } from 'child_process';
+import { appendFileSync, writeFileSync, mkdirSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
 // Log to both console and file for debugging
 const LOG_FILE = '/tmp/ws-server.log';
@@ -72,25 +79,25 @@ wss.on('connection', (ws) => {
       if (msg.type === 'stdin') {
         log('info', 'Received stdin', { bytes: msg.data?.length || 0 });
 
-        // Write to Claude Code's stdin
-        if (claude && claude.stdin && !claude.stdin.destroyed) {
+        // Write directly to PTY — no middleman process
+        if (claude && !processExited) {
           // Ensure carriage return at end for prompt submission
-          // Claude Code runs in raw PTY mode and expects \r (Enter key), not \n (line feed)
+          // In raw PTY mode, \r is the Enter key
           const input = msg.data.endsWith('\r') ? msg.data : msg.data + '\r';
-          claude.stdin.write(input, (err) => {
-            if (err) {
-              log('error', 'stdin write error', { error: err.message });
-              ws.send(JSON.stringify({ type: 'stdin_error', error: err.message }));
-            } else {
-              log('info', 'stdin write successful');
-              ws.send(JSON.stringify({ type: 'stdin_ack', bytes: input.length }));
-              // Broadcast stdin to all clients so FE can display what was typed
-              broadcast('stdin_echo', input);
-            }
-          });
+
+          try {
+            claude.write(input);
+            log('info', 'stdin write successful', { bytes: input.length });
+            ws.send(JSON.stringify({ type: 'stdin_ack', bytes: input.length }));
+            // Broadcast stdin to all clients so FE can display what was typed
+            broadcast('stdin_echo', input);
+          } catch (err) {
+            log('error', 'stdin write error', { error: err.message });
+            ws.send(JSON.stringify({ type: 'stdin_error', error: err.message }));
+          }
         } else {
-          log('error', 'Cannot write to stdin - process not ready');
-          ws.send(JSON.stringify({ type: 'stdin_error', error: 'Process not ready or stdin destroyed' }));
+          log('error', 'Cannot write to stdin - process not ready or exited');
+          ws.send(JSON.stringify({ type: 'stdin_error', error: 'Process not ready or exited' }));
         }
       }
     } catch (e) {
@@ -121,6 +128,8 @@ function broadcast(type, data) {
 
 
 // Handle shutdown gracefully
+let processExited = false;
+
 async function shutdown(exitCode = 0) {
   log('info', 'Starting graceful shutdown', { exitCode });
 
@@ -156,10 +165,6 @@ process.on('SIGTERM', () => shutdown(0));
 
 // Pre-configure Claude Code to skip all prompts
 log('info', 'Configuring Claude Code');
-
-import { writeFileSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
 
 const home = homedir();
 mkdirSync(join(home, '.claude'), { recursive: true });
@@ -270,18 +275,21 @@ IMPORTANT: Always push your changes before the session ends. The sandbox is ephe
   }
 }
 
-// Start Claude Code with PTY via script command
+// Start Claude Code with node-pty for proper PTY management
 log('info', 'Starting Claude Code', { goal: GOAL.slice(0, 100) });
 
-// Pass goal via environment variable. "$CLAUDE_GOAL" in double quotes is safe —
-// shell parameter expansion is literal (no re-scanning for $, `, \ in the value).
-// Strip NUL bytes which would truncate at the C level.
+// Strip NUL bytes which would truncate at the C level
 const sanitizedGoal = GOAL.replace(/\0/g, '');
 
-const claude = spawn('script', [
-  '-q', '/dev/null',
-  '-c', 'claude --dangerously-skip-permissions "$CLAUDE_GOAL"'
+// Spawn Claude Code directly in a PTY — no `script` middleman.
+// node-pty creates a real PTY pair and gives us direct write access
+// to the master side, ensuring stdin delivery is reliable.
+const claude = pty.spawn('bash', [
+  '-l', '-c', 'claude --dangerously-skip-permissions "$CLAUDE_GOAL"'
 ], {
+  name: 'xterm-256color',
+  cols: 200,
+  rows: 50,
   cwd: workDir,
   env: {
     ...process.env,
@@ -290,25 +298,27 @@ const claude = spawn('script', [
   },
 });
 
-claude.stdout.on('data', (data) => {
-  const chunk = data.toString();
-  outputBuffer += chunk;
-  broadcast('stdout', chunk);
+log('info', 'Claude Code spawned via node-pty', { pid: claude.pid });
+
+// Auto-dismiss the "trust this folder" dialog if it appears.
+// Newer Claude Code versions ignore the projects.json hasTrustDialogAccepted
+// config, so we detect the dialog in PTY output and press Enter.
+let trustDialogDismissed = false;
+
+claude.onData((data) => {
+  outputBuffer += data;
+  broadcast('stdout', data);
+
+  // Detect trust dialog and auto-dismiss by pressing Enter
+  if (!trustDialogDismissed && outputBuffer.includes('trust') && outputBuffer.includes('Esc to cancel')) {
+    trustDialogDismissed = true;
+    log('info', 'Auto-dismissing trust folder dialog');
+    setTimeout(() => claude.write('\r'), 500);
+  }
 });
 
-claude.stderr.on('data', (data) => {
-  const chunk = data.toString();
-  outputBuffer += chunk;
-  broadcast('stderr', chunk);
-});
-
-claude.on('close', (code) => {
-  log('info', 'Claude Code exited', { exitCode: code });
-  shutdown(code || 0);
-});
-
-claude.on('error', (err) => {
-  log('error', 'Failed to start Claude Code', { error: err.message });
-  broadcast('error', err.message);
-  shutdown(1);
+claude.onExit(({ exitCode, signal }) => {
+  processExited = true;
+  log('info', 'Claude Code exited', { exitCode, signal });
+  shutdown(exitCode || 0);
 });

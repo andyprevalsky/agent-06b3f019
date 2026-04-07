@@ -439,11 +439,10 @@ async def spawn_sub_agent_activity(
         if not api_key:
             raise ValueError("BACKEND_API_KEY not configured - required for spawning sub-agents")
 
-        # Check if any sub-agent needs attachments - if so, fetch parent's messages
-        needs_attachments = any(agent.get("attachments") for agent in sub_agents)
+        # Always fetch parent's attachments so they can auto-forward to sub-agents
+        # that don't explicitly specify attachments (prevents file propagation gaps)
         filename_to_pointer: Dict[str, Dict[str, Any]] = {}
-
-        if needs_attachments:
+        if True:
             activity.heartbeat("Fetching parent agent's attachments...")
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -494,15 +493,38 @@ async def spawn_sub_agent_activity(
 
                     # Resolve attachments for this sub-agent
                     resolved_attachments = []
+                    # Build ID lookup for cases where LLM passes UUIDs instead of filenames
+                    id_to_pointer = {v.get("id", ""): v for v in filename_to_pointer.values() if v.get("id")}
                     if agent_cfg.get("attachments"):
                         for filename in agent_cfg["attachments"]:
                             if filename in filename_to_pointer:
                                 resolved_attachments.append(filename_to_pointer[filename])
+                            elif filename in id_to_pointer:
+                                resolved_attachments.append(id_to_pointer[filename])
                             else:
                                 logger.warning(
                                     f"Attachment not found in parent context: {filename}",
                                     available_files=list(filename_to_pointer.keys())
                                 )
+                    # If explicit resolution found nothing, auto-forward all
+                    if agent_cfg.get("attachments") and not resolved_attachments and filename_to_pointer:
+                        logger.info(
+                            "Explicit attachment resolution failed, auto-forwarding all parent attachments",
+                            index=index,
+                            requested=agent_cfg["attachments"],
+                            num_files=len(filename_to_pointer),
+                            filenames=list(filename_to_pointer.keys())
+                        )
+                        resolved_attachments = list(filename_to_pointer.values())
+                    elif not agent_cfg.get("attachments") and filename_to_pointer:
+                        # Auto-forward all parent attachments when none explicitly requested
+                        logger.info(
+                            "Auto-forwarding parent attachments to sub-agent",
+                            index=index,
+                            num_files=len(filename_to_pointer),
+                            filenames=list(filename_to_pointer.keys())
+                        )
+                        resolved_attachments = list(filename_to_pointer.values())
 
                     # start_phase must be strict: plan | execute
                     start_phase = str(agent_cfg.get("start_phase", "plan")).strip().lower()
