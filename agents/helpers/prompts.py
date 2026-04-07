@@ -89,7 +89,7 @@ Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seco
 
     "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
 
-    "message_person": """Send a message to a person via iMessage or email. Provide a person identifier (name, phone, or email) and describe the intent — the tool generates the message, reads history, and requests user approval before sending. Do NOT write the message yourself. If message_person fails with a transient error, retry it — do NOT use browser agents to send emails as a workaround.""",
+    "message_person": """Send a message to a person via iMessage or email. Provide a person identifier (name, phone, or email) and describe the intent — the tool generates the message, reads history, and requests user approval before sending. Do NOT write the message yourself.""",
 
     "call_phone_number": """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt, and output schema. Only call ONCE per number — do NOT make parallel calls to the same number.""",
 

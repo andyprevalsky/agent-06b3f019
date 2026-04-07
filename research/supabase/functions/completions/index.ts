@@ -2393,12 +2393,7 @@ async function raceModels(
       const modelMessages = getMessagesForModel(messages, model);
       
       let response: globalThis.Response;
-
-      // Build fetch params (shared across initial request and 429 retry)
-      let fetchUrl: string;
-      let fetchHeaders: Record<string, string>;
-      let fetchBody: string;
-
+      
       // Call Anthropic directly for Claude models (structured outputs require beta header)
       if (isAnthropicModel(model)) {
         const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
@@ -2406,17 +2401,17 @@ async function raceModels(
           slog('error', `${model} requires ANTHROPIC_API_KEY`);
           return null;
         }
-
+        
         const anthropicModel = getAnthropicModelName(model);
         const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
-
+        
         const anthropicBody: any = {
           model: anthropicModel,
           messages: anthropicMessages,
           max_tokens: maxTokens || 4096,
           stream: true
         };
-
+        
         if (system) {
           // Array format with cache_control for prompt caching (stable across racing retries)
           anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
@@ -2436,14 +2431,17 @@ async function raceModels(
 
         slog('info', `Calling Anthropic directly for ${anthropicModel}`);
         slog('info', `[Anthropic Race] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
-        fetchUrl = ANTHROPIC_API_URL;
-        fetchHeaders = {
-          'x-api-key': anthropicKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': ANTHROPIC_BETA_HEADER,
-          'content-type': 'application/json'
-        };
-        fetchBody = JSON.stringify(anthropicBody);
+        response = await fetch(ANTHROPIC_API_URL, {
+          method: 'POST',
+          headers: {
+            'x-api-key': anthropicKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': ANTHROPIC_BETA_HEADER,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify(anthropicBody),
+          signal: controllers[index].signal
+        });
       } else {
         // Call OpenRouter for other models
         const body: any = {
@@ -2466,64 +2464,27 @@ async function raceModels(
 
         slog('info', `[OpenRouter Race] Request to ${model}:`, { data: JSON.stringify(truncateForLogging(body), null, 2) });
 
-        fetchUrl = 'https://openrouter.ai/api/v1/chat/completions';
-        fetchHeaders = {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose AI - Trio Racing'
-        };
-        fetchBody = JSON.stringify(body);
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${openRouterKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': supabaseUrl,
+            'X-Title': 'Rose AI - Trio Racing'
+          },
+          body: JSON.stringify(body),
+          signal: controllers[index].signal  // Enable abort
+        });
       }
-
-      // Fire the request
-      response = await fetch(fetchUrl, {
-        method: 'POST',
-        headers: fetchHeaders,
-        body: fetchBody,
-        signal: controllers[index].signal
-      });
-
+      
       const headersTime = Date.now() - startTime;
       timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
       slog('info', `${model} headers in ${headersTime}ms at t=${timings[`${modelKey}_headers`]}ms (status: ${response.status})`);
-
+      
       if (!response.ok) {
-        // Retry once on 429 rate limit (common under high concurrency)
-        if (response.status === 429 && !controllers[index].signal.aborted) {
-          const retryAfterHeader = response.headers.get('retry-after');
-          const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : 2;
-          const delayMs = Math.min(Math.max(retryAfterSec * 1000, 1000), 5000);
-          const errorText = await response.text();
-          slog('warn', `${model} hit 429 rate limit, retrying in ${delayMs}ms (retry-after: ${retryAfterHeader ?? 'none'}). Error: ${errorText}`);
-
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-
-          // Check abort again after waiting
-          if (controllers[index].signal.aborted) {
-            slog('info', `${model} aborted during 429 retry wait`);
-            return null;
-          }
-
-          response = await fetch(fetchUrl, {
-            method: 'POST',
-            headers: fetchHeaders,
-            body: fetchBody,
-            signal: controllers[index].signal
-          });
-
-          slog('info', `${model} 429 retry result: status ${response.status}`);
-
-          if (!response.ok) {
-            const retryErrorText = await response.text();
-            slog('error', `${model} failed after 429 retry: ${response.status} - ${retryErrorText}`);
-            return null;
-          }
-        } else {
-          const errorText = await response.text();
-          slog('error', `${model} failed: ${response.status} - ${errorText}`);
-          return null;
-        }
+        const errorText = await response.text();
+        slog('error', `${model} failed: ${response.status} - ${errorText}`);
+        return null;
       }
       
       // CRITICAL: Wait for FIRST ACTUAL DATA, not just headers!

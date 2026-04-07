@@ -147,7 +147,6 @@ async def run_agent(
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
-    plan_stall_iterations = 0  # Track iterations in PLAN after set_plan succeeded without attempt_completion
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -882,28 +881,6 @@ async def run_agent(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "metadata": {"verifierMessage": True}
                 })
-
-        # Detect PLAN phase stall: set_plan succeeded but LLM won't call attempt_completion
-        if is_plan_loop and set_plan_succeeded:
-            plan_stall_iterations += 1
-            if plan_stall_iterations >= 5:
-                logger.warning(f"PLAN phase stall: {plan_stall_iterations} iterations after set_plan succeeded without attempt_completion — injecting forced nudge")
-                context.append({
-                    "role": "SYSTEM",
-                    "text": "CRITICAL: set_plan has already succeeded. You MUST call attempt_completion NOW to transition to the EXECUTE phase. Do not call set_plan again. Do not generate text without tools. Call attempt_completion immediately.",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            if plan_stall_iterations >= 8:
-                logger.error(f"PLAN phase stall unrecoverable after {plan_stall_iterations} iterations — forcing exit")
-                return {
-                    "status": "completed",
-                    "context": context,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "token_count": token_count,
-                    "context_size": context_size,
-                    "message": "Forced PLAN phase exit after repeated stall",
-                }
 
         # Handle no-tool-calls: if LLM returned text but no tools, nudge it
         if not tool_calls and not attempt_completion_tool:
