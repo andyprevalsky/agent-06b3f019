@@ -468,6 +468,13 @@ IMPORTANT: The data does NOT need to be in a specific format. If the conversatio
 
 Look through ALL tool results and messages for the required data. Web search results, API responses, and agent reasoning all count as valid sources.
 
+CONTEXT VISIBILITY
+------------------
+IMPORTANT: You can ONLY see USER messages and TOOL results. The agent's ASSISTANT messages (its reasoning and text responses) are FILTERED OUT of your context to prevent reward hacking. This means:
+- If the agent produced output only in its text response (not via a tool), you will NOT see it.
+- Only data visible in USER messages, tool call results, file attachments, and structured responses counts as evidence.
+- Do NOT assume the agent has done work you cannot see evidence of.
+
 OUTPUT CONTRACT
 ---------------
 Additional context: {verifier_prompt}
@@ -476,9 +483,15 @@ STRUCTURED OUTPUT EXTRACTION:
 Extract the following fields from the conversation:
 {fields_desc}
 
+FEEDBACK INSTRUCTIONS (when score < 1.0):
+In your reasoning, you MUST:
+1. List EACH unpopulated field by name and explain what evidence is missing.
+2. Recommend specific tools the agent should use to produce visible output for the missing fields. For example: use spawn_claude_code_agent to write text content to output files, or use spawn_browser_agent to capture screenshots.
+3. Remind the agent: "Your text responses are not visible to verification. To get credit for your work, you must produce output through tool calls (e.g., write files, create artifacts) so the results appear in tool messages."
+
 Return JSON:
 {{
-  "reasoning": "<explain which fields you could/couldn't populate and why>",
+  "reasoning": "<list each field, whether it could be populated, what's missing, and what tools to use>",
   "score": <number between 0.0 and 1.0 based on field population>,
   "output": {{
     "<field_name>": <extracted value>,
