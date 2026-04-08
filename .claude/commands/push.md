@@ -12,6 +12,18 @@ Fast-track merge to main. Runs local validation tests, pushes directly to main, 
 
 ---
 
+# Step 0: Capture original Conductor workspace title
+
+Before tests/merge, capture the current Conductor workspace title so it can be restored at the end:
+
+```bash
+WORKSPACE_DIR="$(basename "$PWD")"
+ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
+  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` is empty, continue push but skip the final rename step.
+
 ## Step 1: Run local tests
 
 All commands run from repo root. Compute changed files once:
@@ -86,6 +98,16 @@ git push origin main
 
 Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
 
-## Step 5: Done
+## Step 5: Restore workspace name via rename
 
-Report what was pushed (files changed, commit summary) and the new branch name.
+End the push flow by restoring the Conductor workspace title captured in Step 0:
+
+```bash
+/rename $ORIGINAL_WORKSPACE_TITLE
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` is empty, skip this step.
+
+## Step 6: Done
+
+Report what was pushed (files changed, commit summary), the new branch name, and the restored workspace title.
