@@ -10,6 +10,18 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 ---
 
+# Step 0: Capture original Conductor workspace title
+
+Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge:
+
+```bash
+WORKSPACE_DIR="$(basename "$PWD")"
+ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
+  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final rename step.
+
 # Phase 1: Test Loop
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -315,14 +327,20 @@ If a deploy fails:
 1. Show the failure to the user
 2. If fixable, create a new fix branch/commit, push, create a new PR (Step 8), then continue from Step 9.
 
-## Step 14: New branch
+## Step 14: Restore workspace name via rename
 
-Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
+End the deploy flow by restoring the Conductor workspace title that was captured in Step 0:
+
+```bash
+/rename $ORIGINAL_WORKSPACE_TITLE
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` was empty, skip this step.
 
 ## Step 15: Done
 
-After the new branch is created, report to the user:
+After `/rename` completes (or is skipped because title was empty), report to the user:
 - PR URL
 - Which services were deployed
 - Any review issues that were fixed along the way
-- The new branch name
+- The restored workspace title
