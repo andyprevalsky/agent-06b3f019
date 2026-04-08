@@ -75,7 +75,7 @@
  */
 
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect } from 'react';
-import { RealtimeChannel } from '@supabase/supabase-js';
+import { type RealtimeChannel } from '@supabase/supabase-js';
 import {
   subscribeToAgent,
   unsubscribe,
@@ -87,7 +87,7 @@ import {
   type InsertMessagePayload,
   type UpdateAgentPayload,
 } from '@/lib/realtime';
-import { getAgent, postMessage as postMessageAPI, AgentDetail, Message } from '@/lib/api';
+import { getAgent, postMessage as postMessageAPI, type AgentDetail, type Message } from '@/lib/api';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types

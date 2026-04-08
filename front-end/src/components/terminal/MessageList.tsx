@@ -55,13 +55,13 @@ import { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } fr
 import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useAgentContext, StreamingBubble } from '@/contexts/AgentContext';
-import { Message, startAgent } from '@/lib/api';
+import { type Message, startAgent } from '@/lib/api';
 import MessageBubble from './MessageBubble';
 import { type ExploreStep } from './ExploreAgentBubble';
 import { type WaitForCheck } from './WaitForChip';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { Button } from '@/components/ui/button';
-import { FeedbackData } from './FeedbackBanner';
+import { type FeedbackData } from './FeedbackBanner';
 import { Copy, ArrowDown } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';

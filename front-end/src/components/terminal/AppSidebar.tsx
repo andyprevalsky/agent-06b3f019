@@ -61,7 +61,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import AgentListItem from './AgentListItem';
-import { Agent } from '@/lib/api';
+import { type Agent } from '@/lib/api';
 import { getStoredSession } from '@/lib/supabase';
 import SubscriptionModal from '@/components/SubscriptionModal';
 

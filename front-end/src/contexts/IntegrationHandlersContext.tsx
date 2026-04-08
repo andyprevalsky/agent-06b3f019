@@ -18,7 +18,7 @@
  * - openKeychainAccess(searchQuery?): opens Keychain Access app
  */
 
-import { createContext, useContext, ReactNode } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
 
 // Browser types for multi-browser cookie sync
 export type BrowserType =

@@ -31,7 +31,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useSmallTileAnimations } from '@/hooks/useSmallTileAnimations';
-import { drawDotMarker, AnimatingTile, TileGridPosition } from '@/lib/smallTileAnimations';
+import { drawDotMarker, type AnimatingTile, TileGridPosition } from '@/lib/smallTileAnimations';
 import { renderProceduralAnimationSync } from '@/lib/proceduralTileAnimation';
 
 interface SmallTileAnimationCanvasProps {

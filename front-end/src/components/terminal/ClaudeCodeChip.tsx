@@ -48,7 +48,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { cn } from '@/lib/utils';
 import { useAgentContext } from '@/contexts/AgentContext';
-import { ResponseSchemaField, FilePointer } from '@/lib/api';
+import { type ResponseSchemaField, type FilePointer } from '@/lib/api';
 import ClaudeIcon from '@/assets/claude-color.svg';
 import { supabase, getSession } from '@/lib/supabase';
 

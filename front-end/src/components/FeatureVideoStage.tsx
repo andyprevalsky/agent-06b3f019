@@ -203,7 +203,7 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
     logsRef.current.push(entry);
     if (logsRef.current.length > 400) logsRef.current.splice(0, logsRef.current.length - 400);
     try {
-        console.log('[features-video]', kind, extra || '');
+      console.log('[features-video]', kind, extra || '');
     } catch {}
   };
 
@@ -261,10 +261,9 @@ export default function FeatureVideoStage({ activeIndex }: FeatureVideoStageProp
   const log = (label: string, data?: Record<string, any>) => {
     try {
       const payload = data ? ` ${JSON.stringify(data)}` : '';
-       
+
       // console.log(`[features-video] ${label}${payload}`);
     } catch {
-       
       // console.log(`[features-video] ${label}`);
     }
   };

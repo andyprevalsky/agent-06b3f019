@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Message } from '@/lib/api';
+import { type Message } from '@/lib/api';
 
 // Steel browser dimensions
 // Debug view shows full browser window (1288x891), content viewport is 1280x800

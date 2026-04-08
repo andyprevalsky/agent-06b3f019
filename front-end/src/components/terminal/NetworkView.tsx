@@ -51,7 +51,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { getPeople, PeoplePaginatedResponse } from '@/lib/api';
+import { getPeople, type PeoplePaginatedResponse } from '@/lib/api';
 import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 

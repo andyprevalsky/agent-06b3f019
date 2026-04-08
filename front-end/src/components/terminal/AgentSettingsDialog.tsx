@@ -39,10 +39,10 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Settings, Loader2, Trash2, FileJson, DollarSign } from 'lucide-react';
-import { AgentDetail, deleteAgent, updateAgent, ResponseSchemaField } from '@/lib/api';
+import { type AgentDetail, deleteAgent, updateAgent, type ResponseSchemaField } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { Progress } from '@/components/ui/progress';
-import { useAppData, Model } from '@/hooks/useAppData';
+import { useAppData, type Model } from '@/hooks/useAppData';
 
 interface AgentSettingsDialogProps {
   agent: AgentDetail | null;
