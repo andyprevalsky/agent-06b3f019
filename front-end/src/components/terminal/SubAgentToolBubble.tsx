@@ -27,40 +27,40 @@ interface SubAgentToolBubbleProps {
 
 // Extract emoji from start of text and return {emoji, text}
 function extractEmoji(text: string): { emoji: string; text: string } {
-  const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
+  const emojiRegex =
+    /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
   const match = text.match(emojiRegex);
-  
+
   if (match) {
     const emoji = match[0];
     const remainingText = text.slice(emoji.length).trim();
     return { emoji, text: remainingText };
   }
-  
+
   return { emoji: '', text };
 }
 
-const SubAgentToolBubble = memo(function SubAgentToolBubble({ 
-  toolCallId, 
-  title, 
-  message, 
+const SubAgentToolBubble = memo(function SubAgentToolBubble({
+  toolCallId,
+  title,
+  message,
   status,
   progress,
   agentId,
-  onNavigate 
+  onNavigate,
 }: SubAgentToolBubbleProps) {
-
   const isComplete = status === 'FINISHED';
-  
+
   // Extract emoji from title (memoized)
   const { emoji, text: titleText } = useMemo(() => extractEmoji(title), [title]);
-  
+
   // Memoize progress calculations to prevent recalculation on every render
   const progressData = useMemo(() => {
     const radius = 10;
     const circumference = 2 * Math.PI * radius;
-    const progressOffset = circumference - (progress * circumference);
+    const progressOffset = circumference - progress * circumference;
     const progressPercent = Math.round(progress * 100);
-    
+
     return { radius, circumference, progressOffset, progressPercent };
   }, [progress]);
 
@@ -81,12 +81,7 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
     >
       {/* Progress Ring (small) - no percentage text */}
       <div className="flex-shrink-0" style={{ width: 20, height: 20 }}>
-        <svg 
-          className="transform -rotate-90" 
-          viewBox="0 0 24 24" 
-          width="20" 
-          height="20"
-        >
+        <svg className="transform -rotate-90" viewBox="0 0 24 24" width="20" height="20">
           {/* Background circle */}
           <circle
             className="fill-none stroke-gray-300 dark:stroke-gray-600"
@@ -105,9 +100,9 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
             strokeLinecap="round"
             strokeDasharray={progressData.circumference}
             strokeDashoffset={progressData.progressOffset}
-            style={{ 
+            style={{
               transition: 'stroke-dashoffset 500ms ease',
-              stroke: isComplete ? '#10b981' : 'url(#progress-gradient-small)'
+              stroke: isComplete ? '#10b981' : 'url(#progress-gradient-small)',
             }}
           />
           <defs>
@@ -124,19 +119,16 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
       </div>
 
       {/* Content */}
-      <span 
+      <span
         className={cn(
-          "text-sm font-medium inline-flex items-center gap-1",
-          status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-          status === 'FINISHED' && "text-gray-700 dark:text-gray-300"
+          'text-sm font-medium inline-flex items-center gap-1',
+          status === 'IN_PROGRESS' &&
+            'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
+          status === 'FINISHED' && 'text-gray-700 dark:text-gray-300',
         )}
       >
         {/* Emoji with grayscale filter (but shimmer still applies via parent) */}
-        {emoji && (
-          <span style={{ filter: 'grayscale(1) brightness(0)' }}>
-            {emoji}
-          </span>
-        )}
+        {emoji && <span style={{ filter: 'grayscale(1) brightness(0)' }}>{emoji}</span>}
         {/* Text without filter (shimmer applies via parent) */}
         <span>{titleText}</span>
       </span>
@@ -148,4 +140,3 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
 });
 
 export default SubAgentToolBubble;
-

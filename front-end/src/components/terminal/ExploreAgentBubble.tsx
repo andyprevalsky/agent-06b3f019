@@ -58,7 +58,9 @@ function truncate(s: string, maxLen: number): string {
 
 /** Check if a step is a thinking step (from explore_post_message) */
 function isThinkingStep(step: ExploreStep): boolean {
-  return step.toolName === 'spawn_agent' && (step.title === 'Explore agent thinking' || !step.title);
+  return (
+    step.toolName === 'spawn_agent' && (step.title === 'Explore agent thinking' || !step.title)
+  );
 }
 
 /** Get the right icon for an explore step */
@@ -89,12 +91,12 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
   }, []);
 
   const toggleExpanded = useCallback(() => {
-    setIsExpanded(prev => !prev);
+    setIsExpanded((prev) => !prev);
   }, []);
 
   const toggleStep = useCallback((index: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    setExpandedSteps(prev => {
+    setExpandedSteps((prev) => {
       const next = new Set(prev);
       next.has(index) ? next.delete(index) : next.add(index);
       return next;
@@ -110,15 +112,13 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
 
   // Subtitle: title of the most recent IN_PROGRESS step (current action)
   const subtitle = isInProgress
-    ? [...steps].reverse().find(s => s.status === 'IN_PROGRESS')?.title
+    ? [...steps].reverse().find((s) => s.status === 'IN_PROGRESS')?.title
     : undefined;
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1">
-        <div
-          className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2"
-        >
+        <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2">
           {/* Header - clickable to expand/collapse */}
           <div
             className="flex items-center gap-2 min-h-[24px] cursor-pointer select-none"
@@ -134,11 +134,13 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
                 />
               </div>
             ) : (
-              <Sparkles className={cn(
-                'h-4 w-4 flex-shrink-0',
-                isComplete && 'text-emerald-400',
-                isError && 'text-red-400',
-              )} />
+              <Sparkles
+                className={cn(
+                  'h-4 w-4 flex-shrink-0',
+                  isComplete && 'text-emerald-400',
+                  isError && 'text-red-400',
+                )}
+              />
             )}
 
             <div className="flex-1 min-w-0">
@@ -158,10 +160,12 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
               </span>
             )}
 
-            <ChevronRight className={cn(
-              'h-3 w-3 flex-shrink-0 transition-transform text-muted-foreground/40',
-              isExpanded && 'rotate-90',
-            )} />
+            <ChevronRight
+              className={cn(
+                'h-3 w-3 flex-shrink-0 transition-transform text-muted-foreground/40',
+                isExpanded && 'rotate-90',
+              )}
+            />
           </div>
 
           {/* Result: always visible when FINISHED/ERROR */}
@@ -198,9 +202,7 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
                     <div key={`${step.timestamp}-${i}`}>
                       <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground/60 py-0.5 px-1 -mx-1">
                         <Lightbulb className="h-3 w-3 flex-shrink-0 text-amber-400/70 mt-0.5" />
-                        <span className="italic">
-                          {thinkingText || 'Thinking...'}
-                        </span>
+                        <span className="italic">{thinkingText || 'Thinking...'}</span>
                       </div>
                     </div>
                   );
@@ -217,10 +219,12 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
                     >
                       <StepIcon className="h-3 w-3 flex-shrink-0 text-muted-foreground/50" />
                       {hasContent && (
-                        <ChevronRight className={cn(
-                          'h-2.5 w-2.5 flex-shrink-0 transition-transform text-muted-foreground/40',
-                          isStepExpanded && 'rotate-90',
-                        )} />
+                        <ChevronRight
+                          className={cn(
+                            'h-2.5 w-2.5 flex-shrink-0 transition-transform text-muted-foreground/40',
+                            isStepExpanded && 'rotate-90',
+                          )}
+                        />
                       )}
                       <span className="truncate">{step.title}</span>
                     </div>

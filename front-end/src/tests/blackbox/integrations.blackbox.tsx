@@ -143,7 +143,13 @@ describe('Integrations page', () => {
     it('renders connected state (checkmark) when integrations are connected', async () => {
       server.use(
         integrationsHandler([
-          { id: 'int-1', name: 'gmail', status: 'CONNECTED', isActive: true, config: { connectedEmail: 'test@gmail.com' } },
+          {
+            id: 'int-1',
+            name: 'gmail',
+            status: 'CONNECTED',
+            isActive: true,
+            config: { connectedEmail: 'test@gmail.com' },
+          },
           { id: 'int-2', name: 'imessage', status: 'CONNECTED', isActive: true },
         ]),
       );
@@ -477,7 +483,8 @@ describe('Integrations page', () => {
       });
 
       const integrationCalls = capturedRequests.filter(
-        (r) => r.url.includes('/api/integrations') && r.method === 'GET' && !r.url.includes('/email/'),
+        (r) =>
+          r.url.includes('/api/integrations') && r.method === 'GET' && !r.url.includes('/email/'),
       );
       expect(integrationCalls.length).toBeGreaterThanOrEqual(1);
     });
@@ -490,9 +497,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
       });
 
-      const inviteCalls = capturedRequests.filter(
-        (r) => r.url.includes('/invite-codes/check'),
-      );
+      const inviteCalls = capturedRequests.filter((r) => r.url.includes('/invite-codes/check'));
       expect(inviteCalls.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -505,7 +510,8 @@ describe('Integrations page', () => {
       });
 
       const integrationCalls = capturedRequests.filter(
-        (r) => r.url.includes('/api/integrations') && r.method === 'GET' && !r.url.includes('/email/'),
+        (r) =>
+          r.url.includes('/api/integrations') && r.method === 'GET' && !r.url.includes('/email/'),
       );
       expect(integrationCalls.length).toBeGreaterThanOrEqual(1);
       expect(integrationCalls[0].headers['authorization']).toBe('Bearer test-token');
@@ -537,10 +543,7 @@ describe('Integrations page', () => {
 
       server.use(
         http.post(`${API_BASE}/integrations/email/gmail/start`, () => {
-          return HttpResponse.json(
-            { error: 'Failed to start email connection' },
-            { status: 500 },
-          );
+          return HttpResponse.json({ error: 'Failed to start email connection' }, { status: 500 });
         }),
       );
 

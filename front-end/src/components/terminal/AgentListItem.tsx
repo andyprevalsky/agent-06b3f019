@@ -24,11 +24,18 @@ interface AgentListItemProps {
   isCompact?: boolean;
 }
 
-export default function AgentListItem({ agent, isSelected, onClick, onResume, isResuming = false, isCompact = false }: AgentListItemProps) {
+export default function AgentListItem({
+  agent,
+  isSelected,
+  onClick,
+  onResume,
+  isResuming = false,
+  isCompact = false,
+}: AgentListItemProps) {
   // Calculate the progress arc for the circular progress wheel
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
-  const progressOffset = circumference - (agent.progress * circumference);
+  const progressOffset = circumference - agent.progress * circumference;
 
   const handlePlayClick = (e: React.MouseEvent) => {
     e.stopPropagation(); // Don't trigger the parent onClick
@@ -44,15 +51,15 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
         onClick={onClick}
         className={cn(
           'w-full flex items-center justify-center p-2 rounded-lg transition-all cursor-pointer',
-          isSelected
-            ? 'bg-gray-200 dark:bg-zinc-700'
-            : 'hover:bg-gray-100 dark:hover:bg-zinc-800'
+          isSelected ? 'bg-gray-200 dark:bg-zinc-700' : 'hover:bg-gray-100 dark:hover:bg-zinc-800',
         )}
       >
-        <Bot className={cn(
-          "h-5 w-5",
-          isSelected ? "text-gray-800 dark:text-gray-200" : "text-gray-500 dark:text-gray-400"
-        )} />
+        <Bot
+          className={cn(
+            'h-5 w-5',
+            isSelected ? 'text-gray-800 dark:text-gray-200' : 'text-gray-500 dark:text-gray-400',
+          )}
+        />
       </div>
     );
   }
@@ -65,13 +72,13 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
           'w-full text-left p-3 rounded-lg transition-all border cursor-pointer',
           isSelected
             ? 'bg-navi-white-dark dark:bg-navi-light-light-black border-border'
-            : 'bg-navi-white dark:bg-navi-light-black hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black border-border'
+            : 'bg-navi-white dark:bg-navi-light-black hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black border-border',
         )}
       >
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
-            
+
             {/* Show play button if paused, credit icon if out of credits, dollar icon if cost limit, otherwise show progress */}
             {agent.status === 'OUT_OF_CREDITS' ? (
               <div
@@ -92,12 +99,12 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
                 onClick={handlePlayClick}
                 disabled={isResuming}
                 className={cn(
-                  "flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600",
-                  isResuming 
-                    ? "cursor-not-allowed opacity-70" 
-                    : "hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer"
+                  'flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600',
+                  isResuming
+                    ? 'cursor-not-allowed opacity-70'
+                    : 'hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer',
                 )}
-                title={isResuming ? "Resuming agent..." : "Resume agent"}
+                title={isResuming ? 'Resuming agent...' : 'Resume agent'}
               >
                 {isResuming ? (
                   <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />
@@ -107,9 +114,7 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
               </button>
             ) : (
               <div className="flex items-center gap-2 flex-shrink-0">
-                <span className="text-xs text-gray-500">
-                  {Math.round(agent.progress * 100)}%
-                </span>
+                <span className="text-xs text-gray-500">{Math.round(agent.progress * 100)}%</span>
                 <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
                   <circle
                     className="fill-none stroke-gray-300 opacity-70"
@@ -127,9 +132,9 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
                     strokeLinecap="round"
                     strokeDasharray={circumference}
                     strokeDashoffset={progressOffset}
-                    style={{ 
+                    style={{
                       transition: 'stroke-dashoffset 500ms ease',
-                      stroke: 'url(#progress-gradient)'
+                      stroke: 'url(#progress-gradient)',
                     }}
                   />
                   <defs>
@@ -148,8 +153,6 @@ export default function AgentListItem({ agent, isSelected, onClick, onResume, is
           </div>
         </div>
       </div>
-
     </div>
   );
 }
-

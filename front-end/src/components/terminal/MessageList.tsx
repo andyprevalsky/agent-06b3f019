@@ -77,18 +77,18 @@ const CLAUDE_GRADIENT = ['#F5C4A1', '#E8976A', '#D97757', '#CC5B33', '#B84A22', 
 function StreamingMarkdown({ text }: { text: string }) {
   const prevTextRef = useRef('');
   const [chunks, setChunks] = useState<string[]>([]);
-  
+
   useEffect(() => {
     if (text.length > prevTextRef.current.length) {
       const delta = text.slice(prevTextRef.current.length);
-      setChunks(prev => [...prev, delta]);
+      setChunks((prev) => [...prev, delta]);
       prevTextRef.current = text;
     } else if (text !== prevTextRef.current) {
       setChunks([text]);
       prevTextRef.current = text;
     }
   }, [text]);
-  
+
   return (
     <span className="text-sm text-muted-foreground">
       {chunks.map((chunk, i) => (
@@ -109,19 +109,22 @@ function StreamingMarkdown({ text }: { text: string }) {
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, ExploreStep[]>, Map<string, WaitForCheck[]>] {
-  const sortedMessages = [...messages].sort((a, b) => 
-    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+function deduplicateToolMessages(
+  messages: Message[],
+): [Message[], Map<string, ExploreStep[]>, Map<string, WaitForCheck[]>] {
+  const sortedMessages = [...messages].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
 
   // Find timestamp of last ASSISTANT message with text - used to clean up orphaned IN_PROGRESS tools
   // Exclude empty ASSISTANT messages (e.g., file_pointer relays from sub-agents)
   // Exclude DAG reasoning ASSISTANT messages - they run in parallel with other tools
   // and should not trigger orphaned cleanup of legitimately running IN_PROGRESS tools
-  const lastAssistantTimestamp = sortedMessages
-    .filter(m => m.role === 'ASSISTANT' && m.text?.trim() && m.metadata?.dagTaskIndex == null)
-    .map(m => new Date(m.timestamp).getTime())
-    .pop() ?? 0;
+  const lastAssistantTimestamp =
+    sortedMessages
+      .filter((m) => m.role === 'ASSISTANT' && m.text?.trim() && m.metadata?.dagTaskIndex == null)
+      .map((m) => new Date(m.timestamp).getTime())
+      .pop() ?? 0;
 
   // Collect raw wait_for messages BEFORE dedup collapse (for step history)
   const rawWaitForByToolCallId = new Map<string, Message[]>();
@@ -142,28 +145,29 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
   sortedMessages.forEach((message) => {
     if (message.role === 'TOOL') {
       const toolCallId = message.metadata?.toolCallId;
-      
+
       if (!toolCallId) {
         console.error('Tool message missing toolCallId in metadata:', message);
         nonToolMessages.push(message);
         return;
       }
-      
+
       const existing = toolMessageMap.get(toolCallId);
-      
+
       if (existing) {
         const isAttention = !!message.metadata?.isUserAttentionMessage;
         const isWaitFor = message.metadata?.toolName === 'wait_for';
         toolMessageMap.set(toolCallId, {
-          message: (isAttention || isWaitFor)
-            ? { ...message, message_id: existing.message.message_id }
-            : message,
-          firstTimestamp: existing.firstTimestamp
+          message:
+            isAttention || isWaitFor
+              ? { ...message, message_id: existing.message.message_id }
+              : message,
+          firstTimestamp: existing.firstTimestamp,
         });
       } else {
         toolMessageMap.set(toolCallId, {
           message: message,
-          firstTimestamp: message.timestamp
+          firstTimestamp: message.timestamp,
         });
       }
     } else {
@@ -171,14 +175,16 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     }
   });
 
-  const deduplicatedToolMessages = Array.from(toolMessageMap.values()).map(({ message, firstTimestamp }) => ({
-    ...message,
-    timestamp: firstTimestamp
-  }));
+  const deduplicatedToolMessages = Array.from(toolMessageMap.values()).map(
+    ({ message, firstTimestamp }) => ({
+      ...message,
+      timestamp: firstTimestamp,
+    }),
+  );
 
   // Clean up orphaned IN_PROGRESS tools from failed LLM calls
   // If an ASSISTANT message came AFTER an IN_PROGRESS tool, that tool is orphaned
-  const cleanedToolMessages = deduplicatedToolMessages.filter(m => {
+  const cleanedToolMessages = deduplicatedToolMessages.filter((m) => {
     // Keep all FINISHED/ERROR tools
     if (m.metadata?.toolStatus !== 'IN_PROGRESS') return true;
 
@@ -198,11 +204,11 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
 
   // Compress set_plan messages - only keep the latest one
   const latestSetPlan = cleanedToolMessages
-    .filter(m => m.metadata?.toolName === 'set_plan')
+    .filter((m) => m.metadata?.toolName === 'set_plan')
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
-  
-  const withCompressedPlans = cleanedToolMessages.filter(m => 
-    m.metadata?.toolName !== 'set_plan' || m.message_id === latestSetPlan?.message_id
+
+  const withCompressedPlans = cleanedToolMessages.filter(
+    (m) => m.metadata?.toolName !== 'set_plan' || m.message_id === latestSetPlan?.message_id,
   );
 
   // Group explore agent messages by taskId.
@@ -230,38 +236,43 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
   const exploreHidden = new Set<string>();
   const exploreStepMap = new Map<string, ExploreStep[]>();
   // taskId → pre-built explore data for reuse by wait_for checks
-  const exploreDataByTaskId = new Map<string, {
-    repMessageId: string;
-    title: string;
-    fullGoal?: string;
-    message: string;
-    status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
-    steps: ExploreStep[];
-  }>();
+  const exploreDataByTaskId = new Map<
+    string,
+    {
+      repMessageId: string;
+      title: string;
+      fullGoal?: string;
+      message: string;
+      status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+      steps: ExploreStep[];
+    }
+  >();
 
   for (const [taskId, msgs] of exploreMessagesByTask) {
     // Sort chronologically (oldest first)
     msgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     // Pick representative: the init spawn_agent message (first one, or terminal one)
-    const terminalSpawn = msgs.find(m =>
-      m.metadata?.toolName === 'spawn_agent' &&
-      (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR')
+    const terminalSpawn = msgs.find(
+      (m) =>
+        m.metadata?.toolName === 'spawn_agent' &&
+        (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR'),
     );
-    const firstSpawn = msgs.find(m => m.metadata?.toolName === 'spawn_agent');
+    const firstSpawn = msgs.find((m) => m.metadata?.toolName === 'spawn_agent');
     const representative = terminalSpawn || firstSpawn || msgs[0];
 
     // Steps = all non-representative messages, sorted chronologically (newest at bottom)
     const steps: ExploreStep[] = msgs
-      .filter(m => m.message_id !== representative.message_id)
-      .map(m => {
+      .filter((m) => m.message_id !== representative.message_id)
+      .map((m) => {
         const status = (m.metadata?.toolStatus as string) || 'IN_PROGRESS';
         const title = (m.metadata?.title as string) || '';
         // Thinking messages (spawn_agent with title "Explore agent thinking") carry content even when IN_PROGRESS
-        const isThinking = m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
+        const isThinking =
+          m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
         // IN_PROGRESS messages repeat the title as the message body — show empty instead
         // Exception: thinking messages carry the actual thinking text
-        const message = (status === 'IN_PROGRESS' && !isThinking) ? '' : (m.text || '');
+        const message = status === 'IN_PROGRESS' && !isThinking ? '' : m.text || '';
         return {
           title,
           status,
@@ -280,7 +291,10 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
       title: (representative.metadata?.title as string) || '',
       fullGoal: (representative.metadata?.data?.goal as string) || undefined,
       message: representative.text || '',
-      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as 'IN_PROGRESS' | 'FINISHED' | 'ERROR',
+      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as
+        | 'IN_PROGRESS'
+        | 'FINISHED'
+        | 'ERROR',
       steps,
     });
 
@@ -291,7 +305,7 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     }
   }
 
-  const withExploreGrouped = withCompressedPlans.filter(m => {
+  const withExploreGrouped = withCompressedPlans.filter((m) => {
     if (exploreRepresentatives.has(m.message_id)) return true;
     if (exploreHidden.has(m.message_id)) return false;
     return true;
@@ -309,7 +323,7 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     rawMsgs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     // Find the representative (dedup'd message) in the current list
-    const representative = withExploreGrouped.find(m => m.metadata?.toolCallId === toolCallId);
+    const representative = withExploreGrouped.find((m) => m.metadata?.toolCallId === toolCallId);
     if (!representative) continue;
 
     // Build checks from raw messages:
@@ -317,8 +331,7 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
     // - Deduplicate by checkNum: each check emits "checking..." then a result;
     //   keep only the latest message per checkNum (the result)
     // - Include the representative — it naturally wins its checkNum in dedup
-    const withCheckNum = rawMsgs
-      .filter(m => m.metadata?.checkNum != null);
+    const withCheckNum = rawMsgs.filter((m) => m.metadata?.checkNum != null);
 
     // Dedup by checkNum: later message wins (rawMsgs already sorted chronologically)
     const latestByCheckNum = new Map<number, Message>();
@@ -326,38 +339,37 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
       latestByCheckNum.set(m.metadata!.checkNum as number, m);
     }
 
-    const checks: WaitForCheck[] = Array.from(latestByCheckNum.values())
-      .map(m => {
-        const exploreTaskId = m.metadata?.exploreTaskId as string | undefined;
+    const checks: WaitForCheck[] = Array.from(latestByCheckNum.values()).map((m) => {
+      const exploreTaskId = m.metadata?.exploreTaskId as string | undefined;
 
-        // Look up pre-built explore data by taskId (single source of truth, no re-processing)
-        let explore: WaitForCheck['explore'] = undefined;
-        if (exploreTaskId) {
-          const data = exploreDataByTaskId.get(exploreTaskId);
-          if (data) {
-            waitForChildExploreIds.add(data.repMessageId);
-            explore = {
-              title: data.title,
-              fullGoal: data.fullGoal,
-              message: data.message,
-              status: data.status,
-              steps: data.steps,
-            };
-          }
+      // Look up pre-built explore data by taskId (single source of truth, no re-processing)
+      let explore: WaitForCheck['explore'] = undefined;
+      if (exploreTaskId) {
+        const data = exploreDataByTaskId.get(exploreTaskId);
+        if (data) {
+          waitForChildExploreIds.add(data.repMessageId);
+          explore = {
+            title: data.title,
+            fullGoal: data.fullGoal,
+            message: data.message,
+            status: data.status,
+            steps: data.steps,
+          };
         }
+      }
 
-        return {
-          title: (m.metadata?.title as string) || '',
-          status: ((m.metadata?.toolStatus as string) || 'IN_PROGRESS') as WaitForCheck['status'],
-          timestamp: m.timestamp,
-          message: m.text || '',
-          checkNum: m.metadata?.checkNum as number | undefined,
-          maxChecks: m.metadata?.maxChecks as number | undefined,
-          conditionMet: m.metadata?.conditionMet as boolean | undefined,
-          exploreTaskId,
-          explore,
-        };
-      });
+      return {
+        title: (m.metadata?.title as string) || '',
+        status: ((m.metadata?.toolStatus as string) || 'IN_PROGRESS') as WaitForCheck['status'],
+        timestamp: m.timestamp,
+        message: m.text || '',
+        checkNum: m.metadata?.checkNum as number | undefined,
+        maxChecks: m.metadata?.maxChecks as number | undefined,
+        conditionMet: m.metadata?.conditionMet as boolean | undefined,
+        exploreTaskId,
+        explore,
+      };
+    });
 
     // Representative is already included in latestByCheckNum (it wins naturally as the
     // chronologically last message for its checkNum). No separate re-addition needed.
@@ -366,13 +378,13 @@ function deduplicateToolMessages(messages: Message[]): [Message[], Map<string, E
   }
 
   // Filter out explore agents that are children of wait_for (they render inside WaitForChip)
-  const withWaitForChildrenHidden = withExploreGrouped.filter(m =>
-    !waitForChildExploreIds.has(m.message_id)
+  const withWaitForChildrenHidden = withExploreGrouped.filter(
+    (m) => !waitForChildExploreIds.has(m.message_id),
   );
 
   const deduplicatedMessages = [...nonToolMessages, ...withWaitForChildrenHidden];
-  deduplicatedMessages.sort((a, b) =>
-    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  deduplicatedMessages.sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
 
   return [deduplicatedMessages, exploreStepMap, waitForCheckMap];
@@ -409,7 +421,7 @@ interface MessageListProps {
 
 export function MessageList({
   subAgentId,
-  containerClassName = "max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20",
+  containerClassName = 'max-w-4xl mx-auto flex flex-col gap-1.5 pb-32 relative z-20',
   showStatusBanners = true,
   showThinkingIndicator = true,
   compact = false,
@@ -437,7 +449,7 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // LOCAL BUFFER STATE (independent per MessageList instance)
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const [messageBuffer, setMessageBuffer] = useState<Message[]>([]);
   const [isAnimating, setIsAnimating] = useState(false);
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
@@ -445,16 +457,15 @@ export function MessageList({
   // Track if this is initial load (skip animation for existing messages)
   const isInitialLoadRef = useRef(true);
 
-
   // ═══════════════════════════════════════════════════════════════════════════
   // FILTER MESSAGES for this subAgentId
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const filteredMessagesAndSteps = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
 
     // Filter messages for this subAgentId
-    const filtered = messages.filter(m => {
+    const filtered = messages.filter((m) => {
       const msgSubAgentId = m.metadata?.subAgentId ?? null;
       // Main chat (null) shows messages without subAgentId
       // Exception: explore agent internal messages use subAgentId for LLM filtering
@@ -468,10 +479,10 @@ export function MessageList({
     });
 
     // Filter out SYSTEM messages
-    const withoutSystem = filtered.filter(m => m.role !== 'SYSTEM');
+    const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
 
     // Filter out hidden messages (e.g., custom system prompt injection)
-    const withoutHidden = withoutSystem.filter(m => !m.metadata?.hidden);
+    const withoutHidden = withoutSystem.filter((m) => !m.metadata?.hidden);
 
     // Deduplicate tool messages
     return deduplicateToolMessages(withoutHidden);
@@ -550,31 +561,28 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // REGISTER HANDLER to receive realtime messages
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   useEffect(() => {
     // Always unregister previous handler when subAgentId changes
-    const unregister = registerMessageHandler(
-      subAgentId ?? null,
-      (message: Message) => {
-        // Messages arrive via realtime and are already added to context messages
-        // The buffer is used to control animation timing, not to hold messages
-        // Add to buffer - buffer processing will set currentAnimatingId to trigger animation
-        setMessageBuffer(prev => {
-          // Prevent duplicates (shouldn't happen, but safety check)
-          if (prev.some(m => m.message_id === message.message_id)) {
-            return prev;
-          }
-          return [...prev, message];
-        });
-      }
-    );
-    
+    const unregister = registerMessageHandler(subAgentId ?? null, (message: Message) => {
+      // Messages arrive via realtime and are already added to context messages
+      // The buffer is used to control animation timing, not to hold messages
+      // Add to buffer - buffer processing will set currentAnimatingId to trigger animation
+      setMessageBuffer((prev) => {
+        // Prevent duplicates (shouldn't happen, but safety check)
+        if (prev.some((m) => m.message_id === message.message_id)) {
+          return prev;
+        }
+        return [...prev, message];
+      });
+    });
+
     // Mark initial load complete after first render
     // Existing messages from context won't go through buffer (they're already displayed)
     requestAnimationFrame(() => {
       isInitialLoadRef.current = false;
     });
-    
+
     return () => {
       unregister();
     };
@@ -583,18 +591,18 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // BUFFER PROCESSING - pull one message at a time and animate
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   useEffect(() => {
     if (messageBuffer.length === 0 || isAnimating) return;
-    
+
     const nextMessage = messageBuffer[0];
-    
+
     // Remove from buffer (it's already in messages via context)
-    setMessageBuffer(prev => prev.slice(1));
-    
+    setMessageBuffer((prev) => prev.slice(1));
+
     // Determine if should animate
     let shouldAnimate = false;
-    
+
     // ASSISTANT messages animate unless already streamed
     if (nextMessage.role === 'ASSISTANT') {
       // Flag assistant INSERT for thinking dismissal
@@ -609,13 +617,13 @@ export function MessageList({
         shouldAnimate = true;
       }
     }
-    
+
     // TOOL messages animate if FINISHED/ERROR with content
     if (nextMessage.role === 'TOOL') {
       const isAttention = !!nextMessage.metadata?.isUserAttentionMessage;
       const status = nextMessage.metadata?.toolStatus;
       const messageText = nextMessage.text || '';
-      
+
       if (isAttention) {
         // Attention messages manage own animation
         shouldAnimate = false;
@@ -623,7 +631,7 @@ export function MessageList({
         shouldAnimate = true;
       }
     }
-    
+
     if (shouldAnimate) {
       setIsAnimating(true);
       setCurrentAnimatingId(nextMessage.message_id);
@@ -633,7 +641,7 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // ANIMATION COMPLETE HANDLER
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const handleAnimationComplete = useCallback(() => {
     setIsAnimating(false);
     setCurrentAnimatingId(null);
@@ -642,16 +650,16 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // FILTER STREAMING STATE for this subAgentId
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const filteredStreamingBubbles = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
     return new Map(
-      [...streamingBubbles].filter(([_, bubble]) => 
-        (bubble.subAgentId ?? null) === targetSubAgentId
-      )
+      [...streamingBubbles].filter(
+        ([_, bubble]) => (bubble.subAgentId ?? null) === targetSubAgentId,
+      ),
     );
   }, [streamingBubbles, subAgentId]);
-  
+
   const filteredStreamingPlan = useMemo(() => {
     if (!streamingPlan) return null;
     const targetSubAgentId = subAgentId ?? null;
@@ -660,7 +668,7 @@ export function MessageList({
     }
     return null;
   }, [streamingPlan, subAgentId]);
-  
+
   const filteredStreamingAttention = useMemo(() => {
     if (!streamingAttention) return null;
     const targetSubAgentId = subAgentId ?? null;
@@ -669,13 +677,11 @@ export function MessageList({
     }
     return null;
   }, [streamingAttention, subAgentId]);
-  
+
   const filteredStreamingTools = useMemo(() => {
     const targetSubAgentId = subAgentId ?? null;
     return new Map(
-      [...streamingTools].filter(([_, tool]) =>
-        (tool.subAgentId ?? null) === targetSubAgentId
-      )
+      [...streamingTools].filter(([_, tool]) => (tool.subAgentId ?? null) === targetSubAgentId),
     );
   }, [streamingTools, subAgentId]);
 
@@ -685,7 +691,7 @@ export function MessageList({
 
   const streamingCharCount = useMemo(() => {
     let totalChars = 0;
-    filteredStreamingBubbles.forEach(bubble => {
+    filteredStreamingBubbles.forEach((bubble) => {
       totalChars += bubble.text.length;
     });
     return totalChars;
@@ -715,7 +721,8 @@ export function MessageList({
     if (!showThinkingIndicator) return false;
 
     // Condition 1: agent status is active
-    const isAgentActive = agent &&
+    const isAgentActive =
+      agent &&
       agent.status !== 'PAUSED' &&
       agent.status !== 'COMPLETED' &&
       agent.status !== 'FAILED' &&
@@ -728,10 +735,11 @@ export function MessageList({
     if (filteredStreamingBubbles.size > 0) return true;
 
     // Condition 2: no tools with status IN_PROGRESS (excluding isUserAttentionMessage)
-    const hasInProgressTool = filteredMessages.some(m =>
-      m.role === 'TOOL' &&
-      m.metadata?.toolStatus === 'IN_PROGRESS' &&
-      !m.metadata?.isUserAttentionMessage
+    const hasInProgressTool = filteredMessages.some(
+      (m) =>
+        m.role === 'TOOL' &&
+        m.metadata?.toolStatus === 'IN_PROGRESS' &&
+        !m.metadata?.isUserAttentionMessage,
     );
 
     if (hasInProgressTool) return false;
@@ -797,37 +805,40 @@ export function MessageList({
   // ═══════════════════════════════════════════════════════════════════════════
   // SEND MESSAGE handler for attention messages
   // ═══════════════════════════════════════════════════════════════════════════
-  
-  const handleSendMessage = useCallback(async (text: string) => {
-    try {
-      await sendMessage(text);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-    }
-  }, [sendMessage]);
+
+  const handleSendMessage = useCallback(
+    async (text: string) => {
+      try {
+        await sendMessage(text);
+      } catch (error) {
+        console.error('Failed to send message:', error);
+      }
+    },
+    [sendMessage],
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTOSCROLL for streaming content (browser panel)
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollEndRef = useRef<HTMLDivElement>(null);
-  
+
   // Auto-scroll when streaming content changes (for sub-agent panels)
   useLayoutEffect(() => {
     // Only auto-scroll for sub-agent panels (browser, code, etc.)
     if (subAgentId === undefined) return;
-    
+
     // Auto-scroll when streaming bubbles have content
     if (filteredStreamingBubbles.size > 0 && scrollEndRef.current) {
       scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, [subAgentId, filteredStreamingBubbles]);
-  
+
   // Also scroll when new messages arrive
   useLayoutEffect(() => {
     if (subAgentId === undefined) return;
-    
+
     if (filteredMessages.length > 0 && scrollEndRef.current) {
       scrollEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
@@ -864,74 +875,91 @@ export function MessageList({
       ))}
 
       {/* Chat Mode Actions - show copy + Start Agent when in chat mode after generator response */}
-      {showStatusBanners && subAgentId === undefined && isChatMode && (() => {
-        const lastMessage = filteredMessages[filteredMessages.length - 1];
-        // Only show after send_message_to_user (generator's final response), not intermediate tools like web_search
-        const isChatComplete = lastMessage?.role === 'TOOL' &&
-          lastMessage.metadata?.toolStatus === 'FINISHED' &&
-          lastMessage.metadata?.toolName === 'send_message_to_user';
-        const notStreaming = filteredStreamingBubbles.size === 0 && filteredStreamingTools.size === 0;
-        const notAnimating = !isAnimating && messageBuffer.length === 0;
+      {showStatusBanners &&
+        subAgentId === undefined &&
+        isChatMode &&
+        (() => {
+          const lastMessage = filteredMessages[filteredMessages.length - 1];
+          // Only show after send_message_to_user (generator's final response), not intermediate tools like web_search
+          const isChatComplete =
+            lastMessage?.role === 'TOOL' &&
+            lastMessage.metadata?.toolStatus === 'FINISHED' &&
+            lastMessage.metadata?.toolName === 'send_message_to_user';
+          const notStreaming =
+            filteredStreamingBubbles.size === 0 && filteredStreamingTools.size === 0;
+          const notAnimating = !isAnimating && messageBuffer.length === 0;
 
-        if (isChatComplete && notStreaming && notAnimating && agent?.status === 'ACTIVE') {
-          const handleCopy = async () => {
-            // Copy the last assistant/tool response to clipboard
-            const lastAssistant = [...filteredMessages].reverse().find(m =>
-              m.role === 'ASSISTANT' || (m.role === 'TOOL' && m.metadata?.toolStatus === 'FINISHED' && m.text)
-            );
-            if (lastAssistant?.text) {
-              await navigator.clipboard.writeText(lastAssistant.text);
-              toast({ title: 'Copied to clipboard' });
-            }
-          };
+          if (isChatComplete && notStreaming && notAnimating && agent?.status === 'ACTIVE') {
+            const handleCopy = async () => {
+              // Copy the last assistant/tool response to clipboard
+              const lastAssistant = [...filteredMessages]
+                .reverse()
+                .find(
+                  (m) =>
+                    m.role === 'ASSISTANT' ||
+                    (m.role === 'TOOL' && m.metadata?.toolStatus === 'FINISHED' && m.text),
+                );
+              if (lastAssistant?.text) {
+                await navigator.clipboard.writeText(lastAssistant.text);
+                toast({ title: 'Copied to clipboard' });
+              }
+            };
 
-          const handleStartAgent = async () => {
-            if (!selectedAgentId) return;
-            try {
-              await startAgent(selectedAgentId);
-              toast({ title: 'Agent mode started' });
-            } catch (error) {
-              toast({
-                title: 'Failed to start agent',
-                description: error instanceof Error ? error.message : 'Unknown error',
-                variant: 'destructive'
-              });
-            }
-          };
+            const handleStartAgent = async () => {
+              if (!selectedAgentId) return;
+              try {
+                await startAgent(selectedAgentId);
+                toast({ title: 'Agent mode started' });
+              } catch (error) {
+                toast({
+                  title: 'Failed to start agent',
+                  description: error instanceof Error ? error.message : 'Unknown error',
+                  variant: 'destructive',
+                });
+              }
+            };
 
-          return (
-            <div className="flex gap-3 animate-in fade-in duration-300">
-              <div className="flex items-center gap-3 text-muted-foreground">
-                {/* Copy button */}
-                <button
-                  onClick={handleCopy}
-                  className="p-1.5 hover:bg-muted/50 rounded transition-colors"
-                  title="Copy response"
-                >
-                  <Copy className="w-4 h-4" />
-                </button>
+            return (
+              <div className="flex gap-3 animate-in fade-in duration-300">
+                <div className="flex items-center gap-3 text-muted-foreground">
+                  {/* Copy button */}
+                  <button
+                    onClick={handleCopy}
+                    className="p-1.5 hover:bg-muted/50 rounded transition-colors"
+                    title="Copy response"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
 
-                {/* Separator */}
-                <div className="w-px h-4 bg-border" />
+                  {/* Separator */}
+                  <div className="w-px h-4 bg-border" />
 
-                {/* Start Agent button */}
-                <button
-                  onClick={handleStartAgent}
-                  className="flex items-center gap-2 px-2 py-1 hover:bg-muted/50 rounded transition-colors text-sm"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="1" />
-                    <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
-                    <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
-                  </svg>
-                  Start agent
-                </button>
+                  {/* Start Agent button */}
+                  <button
+                    onClick={handleStartAgent}
+                    className="flex items-center gap-2 px-2 py-1 hover:bg-muted/50 rounded transition-colors text-sm"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <circle cx="12" cy="12" r="1" />
+                      <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
+                      <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
+                    </svg>
+                    Start agent
+                  </button>
+                </div>
               </div>
-            </div>
-          );
-        }
-        return null;
-      })()}
+            );
+          }
+          return null;
+        })()}
 
       {/* Status Banners (only for main chat) */}
       {showStatusBanners && subAgentId === undefined && (
@@ -939,7 +967,7 @@ export function MessageList({
           {/* Paused banner */}
           {agent?.status === 'PAUSED' && (
             <div className="flex gap-3">
-              <div 
+              <div
                 className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
                 style={{
                   backdropFilter: 'blur(12px)',
@@ -948,7 +976,11 @@ export function MessageList({
                 }}
               >
                 <div className="flex items-center justify-center w-5 h-5 rounded-full border-[1.5px] border-muted-foreground">
-                  <svg className="w-2 h-2 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
+                  <svg
+                    className="w-2 h-2 text-muted-foreground"
+                    fill="currentColor"
+                    viewBox="0 0 24 24"
+                  >
                     <rect x="6" y="5" width="4" height="14" rx="1" />
                     <rect x="14" y="5" width="4" height="14" rx="1" />
                   </svg>
@@ -959,7 +991,7 @@ export function MessageList({
               </div>
             </div>
           )}
-          
+
           {/* Out of credits */}
           {agent?.status === 'OUT_OF_CREDITS' && (
             <div className="flex gap-3 items-center">
@@ -1003,40 +1035,36 @@ export function MessageList({
           )}
 
           {/* Completed - FeedbackBanner is now rendered below CompletionSummaryCard in MessageBubble */}
-
         </>
       )}
-      
+
       {/* Thinking indicator with token counter */}
       {thinkingVisible && (
-          <div className={cn("flex", !compact && "gap-3")}>
-            <div className="flex flex-col gap-2">
-              {/* Thinking header with token counter */}
-              <div className="flex items-center gap-2">
-                <ThinkingAnimation
-                  dataUrl="./thinking_animations.txt"
-                  autoplay
-                  loop
-                  className="w-4 h-4 flex-shrink-0"
-                  style={{ width: '16px', height: '16px' }}
-                  gradient={isClaudeStreaming ? CLAUDE_GRADIENT : undefined}
-                />
-                <span
-                  className="text-sm font-medium animate-shimmer bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-transparent from-foreground via-muted-foreground to-foreground"
-                >
-                  Thinking
+        <div className={cn('flex', !compact && 'gap-3')}>
+          <div className="flex flex-col gap-2">
+            {/* Thinking header with token counter */}
+            <div className="flex items-center gap-2">
+              <ThinkingAnimation
+                dataUrl="./thinking_animations.txt"
+                autoplay
+                loop
+                className="w-4 h-4 flex-shrink-0"
+                style={{ width: '16px', height: '16px' }}
+                gradient={isClaudeStreaming ? CLAUDE_GRADIENT : undefined}
+              />
+              <span className="text-sm font-medium animate-shimmer bg-gradient-to-r bg-[length:200%_100%] bg-clip-text text-transparent from-foreground via-muted-foreground to-foreground">
+                Thinking
+              </span>
+              {/* Char counter */}
+              {streamingCharCount > 0 && (
+                <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
+                  <ArrowDown className="w-3 h-3" />
+                  <span className="tabular-nums">{animatedCharCount.toLocaleString()}</span>
                 </span>
-                {/* Char counter */}
-                {streamingCharCount > 0 && (
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
-                    <ArrowDown className="w-3 h-3" />
-                    <span className="tabular-nums">{animatedCharCount.toLocaleString()}</span>
-                  </span>
-                )}
-              </div>
-
+              )}
             </div>
           </div>
+        </div>
       )}
 
       {/* Streaming tools - early detection indicators (below thinking bubble) */}
@@ -1062,31 +1090,33 @@ export function MessageList({
       ))}
 
       {/* Streaming attention message */}
-      {filteredStreamingAttention && subAgentId === undefined && filteredStreamingBubbles.size > 0 && (
-        <div className="flex gap-3 mt-4">
-          <MessageBubble
-            key={`streaming-attention-${filteredStreamingAttention.tool_call_id}`}
-            message={{
-              message_id: `streaming-${filteredStreamingAttention.tool_call_id}`,
-              role: 'TOOL',
-              text: filteredStreamingAttention.message,
-              timestamp: new Date().toISOString(),
-              metadata: {
-                toolCallId: filteredStreamingAttention.tool_call_id,
-                toolName: 'send_message_to_user',
-                toolStatus: 'IN_PROGRESS',
-                isUserAttentionMessage: true,
-                attentionMessage: filteredStreamingAttention.message,
-              },
-            }}
-            shouldType={false}
-            onTypingComplete={() => {}}
-            onSendMessage={handleSendMessage}
-            isStreaming={true}
-          />
-        </div>
-      )}
-      
+      {filteredStreamingAttention &&
+        subAgentId === undefined &&
+        filteredStreamingBubbles.size > 0 && (
+          <div className="flex gap-3 mt-4">
+            <MessageBubble
+              key={`streaming-attention-${filteredStreamingAttention.tool_call_id}`}
+              message={{
+                message_id: `streaming-${filteredStreamingAttention.tool_call_id}`,
+                role: 'TOOL',
+                text: filteredStreamingAttention.message,
+                timestamp: new Date().toISOString(),
+                metadata: {
+                  toolCallId: filteredStreamingAttention.tool_call_id,
+                  toolName: 'send_message_to_user',
+                  toolStatus: 'IN_PROGRESS',
+                  isUserAttentionMessage: true,
+                  attentionMessage: filteredStreamingAttention.message,
+                },
+              }}
+              shouldType={false}
+              onTypingComplete={() => {}}
+              onSendMessage={handleSendMessage}
+              isStreaming={true}
+            />
+          </div>
+        )}
+
       {/* Preview Mode banner for web-spawned agents - always below all other items */}
       {showStatusBanners && subAgentId === undefined && agent?.source === 'WEB' && (
         <div className="flex gap-3">
@@ -1099,7 +1129,8 @@ export function MessageList({
             }}
           >
             <span className="text-muted-foreground text-sm">
-              Agents spawned via web are in Preview Mode and have restricted functionality. To enable all tools
+              Agents spawned via web are in Preview Mode and have restricted functionality. To
+              enable all tools
             </span>
             <a
               href="/download"
@@ -1118,4 +1149,3 @@ export function MessageList({
 }
 
 export default MessageList;
-

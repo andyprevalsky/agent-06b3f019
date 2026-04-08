@@ -124,8 +124,8 @@ export function useXmlFrameReplay({
         return 0;
       }
 
-      const currentTime = (frame.t - startTime);
-      const nextTime = (frames[idx + 1].t - startTime);
+      const currentTime = frame.t - startTime;
+      const nextTime = frames[idx + 1].t - startTime;
       const delta = Math.max(0, nextTime - currentTime);
       return delta;
     });
@@ -349,4 +349,3 @@ export function useXmlFrameReplay({
     isPlaying,
   };
 }
-

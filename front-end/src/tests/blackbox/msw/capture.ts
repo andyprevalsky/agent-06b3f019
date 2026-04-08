@@ -21,7 +21,9 @@ export function clearCaptures(): void {
  * Install capture listener on the MSW server.
  * Call this in the test setup file.
  */
-export function installCapture(server: { events: { on: (event: string, handler: (args: { request: Request }) => void) => void } }): void {
+export function installCapture(server: {
+  events: { on: (event: string, handler: (args: { request: Request }) => void) => void };
+}): void {
   server.events.on('request:start', async ({ request }: { request: Request }) => {
     // Only capture API requests, not static assets
     if (!request.url.includes('/api/')) return;

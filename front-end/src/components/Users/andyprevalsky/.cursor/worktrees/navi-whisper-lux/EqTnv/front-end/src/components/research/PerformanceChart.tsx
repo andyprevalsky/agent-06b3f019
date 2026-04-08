@@ -8,13 +8,16 @@ interface ModelData {
 }
 
 export default function PerformanceChart() {
-  const models: ModelData[] = useMemo(() => [
-    { name: 'Best Open', intelligence: 35, speed: 65, category: 'best-open' },
-    { name: 'Fast Frontier', intelligence: 48, speed: 150, category: 'fast-frontier' },
-    { name: 'Frontier 7/2025', intelligence: 52, speed: 45, category: 'frontier-7-2025' },
-    { name: 'Rose-1', intelligence: 58, speed: 220, category: 'rose' },
-    { name: 'Best Frontier†', intelligence: 62, speed: 30, category: 'best-frontier' },
-  ], []);
+  const models: ModelData[] = useMemo(
+    () => [
+      { name: 'Best Open', intelligence: 35, speed: 65, category: 'best-open' },
+      { name: 'Fast Frontier', intelligence: 48, speed: 150, category: 'fast-frontier' },
+      { name: 'Frontier 7/2025', intelligence: 52, speed: 45, category: 'frontier-7-2025' },
+      { name: 'Rose-1', intelligence: 58, speed: 220, category: 'rose' },
+      { name: 'Best Frontier†', intelligence: 62, speed: 30, category: 'best-frontier' },
+    ],
+    [],
+  );
 
   const maxIntelligence = 70;
   const maxSpeed = 250;
@@ -33,9 +36,11 @@ export default function PerformanceChart() {
   return (
     <div className="w-full max-w-6xl mx-auto py-16">
       <h2 className="text-4xl font-semibold text-center mb-4 text-gray-900">
-        Rose-1 combines strong coding intelligence<br />with best-in-class speed
+        Rose-1 combines strong coding intelligence
+        <br />
+        with best-in-class speed
       </h2>
-      
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-12 mt-16">
         {/* Intelligence Chart */}
         <div>
@@ -46,7 +51,7 @@ export default function PerformanceChart() {
                   {model.name}
                 </div>
                 <div className="flex-1 relative h-10">
-                  <div 
+                  <div
                     className={`h-full bg-gradient-to-r ${getBarColor(model.category)} rounded transition-all duration-500`}
                     style={{ width: `${(model.intelligence / maxIntelligence) * 100}%` }}
                   />
@@ -80,7 +85,7 @@ export default function PerformanceChart() {
                   {model.name}
                 </div>
                 <div className="flex-1 relative h-10">
-                  <div 
+                  <div
                     className={`h-full bg-gradient-to-r ${getBarColor(model.category)} rounded transition-all duration-500`}
                     style={{ width: `${(model.speed / maxSpeed) * 100}%` }}
                   />
@@ -111,5 +116,3 @@ export default function PerformanceChart() {
     </div>
   );
 }
-
-

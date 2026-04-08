@@ -35,7 +35,7 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
   alt,
   className = '',
   style = {},
-  fetchPriority = 'auto'
+  fetchPriority = 'auto',
 }) => {
   const [currentSrc, setCurrentSrc] = useState(lowSrc);
   const [isLoading, setIsLoading] = useState(true);
@@ -139,4 +139,4 @@ const ProgressiveImage: React.FC<ProgressiveImageProps> = ({
   );
 };
 
-export default ProgressiveImage; 
+export default ProgressiveImage;

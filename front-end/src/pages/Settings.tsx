@@ -51,8 +51,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog';
-import { Loader2, Save, Check, CreditCard, HelpCircle, Pencil, Key, Trash2, Plus, ExternalLink, Copy, Receipt, ShieldAlert, Sparkles } from 'lucide-react';
-import SystemCustomization, { type CustomizationData } from '../components/customization/SystemCustomization';
+import {
+  Loader2,
+  Save,
+  Check,
+  CreditCard,
+  HelpCircle,
+  Pencil,
+  Key,
+  Trash2,
+  Plus,
+  ExternalLink,
+  Copy,
+  Receipt,
+  ShieldAlert,
+  Sparkles,
+} from 'lucide-react';
+import SystemCustomization, {
+  type CustomizationData,
+} from '../components/customization/SystemCustomization';
 import {
   encryptPaymentData,
   parsePaymentEnvelope,
@@ -63,14 +80,12 @@ import {
   type PaymentData,
   type EncryptedPaymentEnvelope,
 } from '../lib/encryption';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip';
 
-const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 const DOCS_URL = import.meta.env.DEV ? 'http://localhost:3002' : 'https://docs.roselabs.ai';
 
 interface UserData {
@@ -101,40 +116,53 @@ interface UpgradeOption {
 const CardIcons: Record<string, React.ReactNode> = {
   visa: (
     <svg viewBox="0 0 24 24" className="w-8 h-8" fill="none">
-      <rect width="24" height="24" rx="4" fill="#1A1F71"/>
-      <path d="M9.5 15.5L10.5 8.5H12.5L11.5 15.5H9.5Z" fill="white"/>
-      <path d="M16.5 8.7C16 8.5 15.2 8.3 14.2 8.3C12.2 8.3 10.8 9.3 10.8 10.8C10.8 11.9 11.8 12.5 12.6 12.9C13.4 13.3 13.7 13.5 13.7 13.9C13.7 14.4 13.1 14.7 12.5 14.7C11.7 14.7 11.2 14.5 10.5 14.2L10.2 14.1L9.9 16C10.5 16.3 11.5 16.5 12.5 16.5C14.6 16.5 16 15.5 16 13.9C16 13 15.5 12.3 14.4 11.8C13.7 11.4 13.2 11.2 13.2 10.7C13.2 10.3 13.6 9.9 14.5 9.9C15.2 9.9 15.8 10 16.2 10.2L16.4 10.3L16.5 8.7Z" fill="white"/>
-      <path d="M19.5 8.5H18C17.5 8.5 17.1 8.7 16.9 9.2L14 15.5H16.1L16.5 14.3H19.1L19.3 15.5H21.2L19.5 8.5ZM17.1 12.7L18.1 10.1L18.7 12.7H17.1Z" fill="white"/>
-      <path d="M8 8.5L6 13.5L5.8 12.5C5.4 11.2 4.2 9.8 2.8 9L4.6 15.5H6.8L10.2 8.5H8Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#1A1F71" />
+      <path d="M9.5 15.5L10.5 8.5H12.5L11.5 15.5H9.5Z" fill="white" />
+      <path
+        d="M16.5 8.7C16 8.5 15.2 8.3 14.2 8.3C12.2 8.3 10.8 9.3 10.8 10.8C10.8 11.9 11.8 12.5 12.6 12.9C13.4 13.3 13.7 13.5 13.7 13.9C13.7 14.4 13.1 14.7 12.5 14.7C11.7 14.7 11.2 14.5 10.5 14.2L10.2 14.1L9.9 16C10.5 16.3 11.5 16.5 12.5 16.5C14.6 16.5 16 15.5 16 13.9C16 13 15.5 12.3 14.4 11.8C13.7 11.4 13.2 11.2 13.2 10.7C13.2 10.3 13.6 9.9 14.5 9.9C15.2 9.9 15.8 10 16.2 10.2L16.4 10.3L16.5 8.7Z"
+        fill="white"
+      />
+      <path
+        d="M19.5 8.5H18C17.5 8.5 17.1 8.7 16.9 9.2L14 15.5H16.1L16.5 14.3H19.1L19.3 15.5H21.2L19.5 8.5ZM17.1 12.7L18.1 10.1L18.7 12.7H17.1Z"
+        fill="white"
+      />
+      <path
+        d="M8 8.5L6 13.5L5.8 12.5C5.4 11.2 4.2 9.8 2.8 9L4.6 15.5H6.8L10.2 8.5H8Z"
+        fill="white"
+      />
     </svg>
   ),
   mastercard: (
     <svg viewBox="0 0 24 24" className="w-8 h-8" fill="none">
-      <rect width="24" height="24" rx="4" fill="#000"/>
-      <circle cx="9" cy="12" r="5" fill="#EB001B"/>
-      <circle cx="15" cy="12" r="5" fill="#F79E1B"/>
-      <path d="M12 8.5C13.1 9.4 13.8 10.6 13.8 12C13.8 13.4 13.1 14.6 12 15.5C10.9 14.6 10.2 13.4 10.2 12C10.2 10.6 10.9 9.4 12 8.5Z" fill="#FF5F00"/>
+      <rect width="24" height="24" rx="4" fill="#000" />
+      <circle cx="9" cy="12" r="5" fill="#EB001B" />
+      <circle cx="15" cy="12" r="5" fill="#F79E1B" />
+      <path
+        d="M12 8.5C13.1 9.4 13.8 10.6 13.8 12C13.8 13.4 13.1 14.6 12 15.5C10.9 14.6 10.2 13.4 10.2 12C10.2 10.6 10.9 9.4 12 8.5Z"
+        fill="#FF5F00"
+      />
     </svg>
   ),
   amex: (
     <svg viewBox="0 0 24 24" className="w-8 h-8" fill="none">
-      <rect width="24" height="24" rx="4" fill="#006FCF"/>
-      <path d="M3 12L5 8H7L9 12L7 16H5L3 12Z" fill="white"/>
-      <path d="M9 8H13V10H11V11H13V13H11V14H13V16H9V8Z" fill="white"/>
-      <path d="M14 8H16L17.5 11L19 8H21L18.5 12L21 16H19L17.5 13L16 16H14L16.5 12L14 8Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#006FCF" />
+      <path d="M3 12L5 8H7L9 12L7 16H5L3 12Z" fill="white" />
+      <path d="M9 8H13V10H11V11H13V13H11V14H13V16H9V8Z" fill="white" />
+      <path
+        d="M14 8H16L17.5 11L19 8H21L18.5 12L21 16H19L17.5 13L16 16H14L16.5 12L14 8Z"
+        fill="white"
+      />
     </svg>
   ),
   discover: (
     <svg viewBox="0 0 24 24" className="w-8 h-8" fill="none">
-      <rect width="24" height="24" rx="4" fill="#FF6000"/>
-      <circle cx="12" cy="12" r="4" fill="white"/>
-      <path d="M4 10H6V14H4V10Z" fill="white"/>
-      <path d="M18 10H20V14H18V10Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#FF6000" />
+      <circle cx="12" cy="12" r="4" fill="white" />
+      <path d="M4 10H6V14H4V10Z" fill="white" />
+      <path d="M18 10H20V14H18V10Z" fill="white" />
     </svg>
   ),
-  unknown: (
-    <CreditCard className="w-8 h-8 text-muted-foreground" />
-  ),
+  unknown: <CreditCard className="w-8 h-8 text-muted-foreground" />,
 };
 
 export default function Settings() {
@@ -187,7 +215,9 @@ export default function Settings() {
   const [savingPayment, setSavingPayment] = useState(false);
   const [savedPayment, setSavedPayment] = useState(false);
   const [autopayLimitDisplay, setAutopayLimitDisplay] = useState('100.00');
-  const [savedPaymentEnvelope, setSavedPaymentEnvelope] = useState<EncryptedPaymentEnvelope | null>(null);
+  const [savedPaymentEnvelope, setSavedPaymentEnvelope] = useState<EncryptedPaymentEnvelope | null>(
+    null,
+  );
 
   // Subscription state
   const [subscriptionTier, setSubscriptionTier] = useState<number | null>(null);
@@ -223,7 +253,10 @@ export default function Settings() {
       setSavedPaymentEnvelope(envelope);
       if (envelope) {
         setAutopayLimitDisplay((envelope.autoagentpaylimit_cents / 100).toFixed(2));
-        setPaymentData(prev => ({ ...prev, autoagentpaylimit_cents: envelope.autoagentpaylimit_cents }));
+        setPaymentData((prev) => ({
+          ...prev,
+          autoagentpaylimit_cents: envelope.autoagentpaylimit_cents,
+        }));
       }
     } else {
       setSavedPaymentEnvelope(null);
@@ -243,7 +276,7 @@ export default function Settings() {
 
       const response = await fetch(`${API_URL}/api/user-settings`, {
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -283,7 +316,7 @@ export default function Settings() {
 
       const response = await fetch(`${API_URL}/api/credits/subscription`, {
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -305,7 +338,7 @@ export default function Settings() {
 
       const response = await fetch(`${API_URL}/api/api-keys`, {
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -335,7 +368,7 @@ export default function Settings() {
       const response = await fetch(`${API_URL}/api/user-settings`, {
         method: 'PUT',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -378,7 +411,7 @@ export default function Settings() {
       const response = await fetch(`${API_URL}/api/user-settings`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -444,7 +477,10 @@ export default function Settings() {
       errors.billing_country = 'Country is required';
     }
 
-    if (paymentData.billing_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paymentData.billing_email)) {
+    if (
+      paymentData.billing_email &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paymentData.billing_email)
+    ) {
       errors.billing_email = 'Invalid email format';
     }
 
@@ -481,7 +517,7 @@ export default function Settings() {
       const response = await fetch(`${API_URL}/api/user-settings`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -494,7 +530,7 @@ export default function Settings() {
       }
 
       const data = await response.json();
-      setUserData(prev => ({
+      setUserData((prev) => ({
         ...prev,
         encryptedPaymentInformation: data.encryptedPaymentInformation,
       }));
@@ -541,7 +577,7 @@ export default function Settings() {
 
       const response = await fetch(`${API_URL}/api/billing/portal`, {
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -582,7 +618,7 @@ export default function Settings() {
       const response = await fetch(`${API_URL}/api/api-keys`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ name: newKeyName || null }),
@@ -615,7 +651,7 @@ export default function Settings() {
       await fetch(`${API_URL}/api/api-keys/${keyId}`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -642,23 +678,23 @@ export default function Settings() {
   const handleCardNumber = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 16);
     const formatted = digits.replace(/(.{4})/g, '$1 ').trim();
-    setPaymentData(prev => ({ ...prev, card_number: formatted }));
+    setPaymentData((prev) => ({ ...prev, card_number: formatted }));
   };
 
   const handleExpiry = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 4);
     const formatted = digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
-    setPaymentData(prev => ({ ...prev, card_expiry: formatted }));
+    setPaymentData((prev) => ({ ...prev, card_expiry: formatted }));
   };
 
   const handleCVV = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 4);
-    setPaymentData(prev => ({ ...prev, card_cvv: digits }));
+    setPaymentData((prev) => ({ ...prev, card_cvv: digits }));
   };
 
   const handleAutopayBlur = () => {
     const dollars = parseFloat(autopayLimitDisplay) || 0;
-    setPaymentData(prev => ({ ...prev, autoagentpaylimit_cents: Math.round(dollars * 100) }));
+    setPaymentData((prev) => ({ ...prev, autoagentpaylimit_cents: Math.round(dollars * 100) }));
   };
 
   const currentCardType = detectCardType(paymentData.card_number);
@@ -676,9 +712,7 @@ export default function Settings() {
       <div className="container max-w-3xl mx-auto py-12 px-4 space-y-6">
         <div className="mb-8 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50">
           <h1 className="text-4xl font-bold mb-2">Settings</h1>
-          <p className="text-muted-foreground">
-            Manage your account settings and preferences
-          </p>
+          <p className="text-muted-foreground">Manage your account settings and preferences</p>
         </div>
 
         {error && (
@@ -716,7 +750,11 @@ export default function Settings() {
                 />
 
                 <div className="flex gap-4 pt-4 border-t">
-                  <Button onClick={saveCustomization} disabled={savingCustomization} className="min-w-[160px]">
+                  <Button
+                    onClick={saveCustomization}
+                    disabled={savingCustomization}
+                    className="min-w-[160px]"
+                  >
                     {savingCustomization ? (
                       <>
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -869,14 +907,13 @@ export default function Settings() {
                   <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
                   <div className="flex-1 space-y-2">
                     <p className="text-sm text-amber-800 dark:text-amber-200">
-                      <span className="font-medium">All card credentials are end-to-end encrypted.</span>{' '}
-                      We recommend creating a separate card for your agent to manage spend (takes &lt; 2 min).
+                      <span className="font-medium">
+                        All card credentials are end-to-end encrypted.
+                      </span>{' '}
+                      We recommend creating a separate card for your agent to manage spend (takes
+                      &lt; 2 min).
                     </p>
-                    <Button
-                      size="sm"
-                      className="bg-black text-white hover:bg-black/80"
-                      asChild
-                    >
+                    <Button size="sm" className="bg-black text-white hover:bg-black/80" asChild>
                       <a href="https://privacy.com" target="_blank" rel="noopener noreferrer">
                         <ExternalLink className="w-3 h-3 mr-2" />
                         Create Card via Privacy.com
@@ -896,7 +933,8 @@ export default function Settings() {
                             **** **** **** {savedPaymentEnvelope.card_last_four}
                           </p>
                           <p className="text-sm text-muted-foreground">
-                            {savedPaymentEnvelope.billing_city}, {savedPaymentEnvelope.billing_country}
+                            {savedPaymentEnvelope.billing_city},{' '}
+                            {savedPaymentEnvelope.billing_country}
                           </p>
                         </div>
                       </div>
@@ -911,7 +949,9 @@ export default function Settings() {
                         ${(savedPaymentEnvelope.autoagentpaylimit_cents / 100).toFixed(2)}
                       </span>
                       {savedPaymentEnvelope.autoagentpaylimit_cents === 0 && (
-                        <span className="text-muted-foreground">(disabled - all payments require approval)</span>
+                        <span className="text-muted-foreground">
+                          (disabled - all payments require approval)
+                        </span>
                       )}
                     </div>
                   </div>
@@ -931,8 +971,8 @@ export default function Settings() {
                             </TooltipTrigger>
                             <TooltipContent className="max-w-xs">
                               <p>
-                                Payments under this amount will be automatically approved.
-                                Payments over this amount will require your approval.
+                                Payments under this amount will be automatically approved. Payments
+                                over this amount will require your approval.
                               </p>
                             </TooltipContent>
                           </Tooltip>
@@ -950,7 +990,9 @@ export default function Settings() {
                         className="max-w-[200px]"
                       />
                       {paymentErrors.autoagentpaylimit_cents && (
-                        <p className="text-sm text-destructive">{paymentErrors.autoagentpaylimit_cents}</p>
+                        <p className="text-sm text-destructive">
+                          {paymentErrors.autoagentpaylimit_cents}
+                        </p>
                       )}
                       <p className="text-sm text-muted-foreground">
                         Set to $0 to require approval for all payments
@@ -987,11 +1029,15 @@ export default function Settings() {
                           id="cardholderName"
                           placeholder="John Doe"
                           value={paymentData.cardholder_name}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, cardholder_name: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({ ...prev, cardholder_name: e.target.value }))
+                          }
                           className={paymentErrors.cardholder_name ? 'border-destructive' : ''}
                         />
                         {paymentErrors.cardholder_name && (
-                          <p className="text-sm text-destructive">{paymentErrors.cardholder_name}</p>
+                          <p className="text-sm text-destructive">
+                            {paymentErrors.cardholder_name}
+                          </p>
                         )}
                       </div>
 
@@ -1039,11 +1085,20 @@ export default function Settings() {
                           id="billingStreet"
                           placeholder="123 Main Street"
                           value={paymentData.billing_street_address}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_street_address: e.target.value }))}
-                          className={paymentErrors.billing_street_address ? 'border-destructive' : ''}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({
+                              ...prev,
+                              billing_street_address: e.target.value,
+                            }))
+                          }
+                          className={
+                            paymentErrors.billing_street_address ? 'border-destructive' : ''
+                          }
                         />
                         {paymentErrors.billing_street_address && (
-                          <p className="text-sm text-destructive">{paymentErrors.billing_street_address}</p>
+                          <p className="text-sm text-destructive">
+                            {paymentErrors.billing_street_address}
+                          </p>
                         )}
                       </div>
 
@@ -1053,7 +1108,12 @@ export default function Settings() {
                           id="billingLine2"
                           placeholder="Apt 4B, Suite 100, etc."
                           value={paymentData.billing_address_line2}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_address_line2: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({
+                              ...prev,
+                              billing_address_line2: e.target.value,
+                            }))
+                          }
                         />
                       </div>
 
@@ -1064,7 +1124,9 @@ export default function Settings() {
                             id="billingCity"
                             placeholder="New York"
                             value={paymentData.billing_city}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_city: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({ ...prev, billing_city: e.target.value }))
+                            }
                             className={paymentErrors.billing_city ? 'border-destructive' : ''}
                           />
                           {paymentErrors.billing_city && (
@@ -1078,11 +1140,15 @@ export default function Settings() {
                             id="billingState"
                             placeholder="NY"
                             value={paymentData.billing_state}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_state: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({ ...prev, billing_state: e.target.value }))
+                            }
                             className={paymentErrors.billing_state ? 'border-destructive' : ''}
                           />
                           {paymentErrors.billing_state && (
-                            <p className="text-sm text-destructive">{paymentErrors.billing_state}</p>
+                            <p className="text-sm text-destructive">
+                              {paymentErrors.billing_state}
+                            </p>
                           )}
                         </div>
                       </div>
@@ -1094,11 +1160,18 @@ export default function Settings() {
                             id="billingZip"
                             placeholder="10001"
                             value={paymentData.billing_zipcode}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_zipcode: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({
+                                ...prev,
+                                billing_zipcode: e.target.value,
+                              }))
+                            }
                             className={paymentErrors.billing_zipcode ? 'border-destructive' : ''}
                           />
                           {paymentErrors.billing_zipcode && (
-                            <p className="text-sm text-destructive">{paymentErrors.billing_zipcode}</p>
+                            <p className="text-sm text-destructive">
+                              {paymentErrors.billing_zipcode}
+                            </p>
                           )}
                         </div>
 
@@ -1108,11 +1181,18 @@ export default function Settings() {
                             id="billingCountry"
                             placeholder="United States"
                             value={paymentData.billing_country}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_country: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({
+                                ...prev,
+                                billing_country: e.target.value,
+                              }))
+                            }
                             className={paymentErrors.billing_country ? 'border-destructive' : ''}
                           />
                           {paymentErrors.billing_country && (
-                            <p className="text-sm text-destructive">{paymentErrors.billing_country}</p>
+                            <p className="text-sm text-destructive">
+                              {paymentErrors.billing_country}
+                            </p>
                           )}
                         </div>
                       </div>
@@ -1124,7 +1204,9 @@ export default function Settings() {
                             id="billingPhone"
                             placeholder="+1 555-123-4567"
                             value={paymentData.billing_phone}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_phone: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({ ...prev, billing_phone: e.target.value }))
+                            }
                           />
                         </div>
 
@@ -1135,11 +1217,15 @@ export default function Settings() {
                             placeholder="john@example.com"
                             type="email"
                             value={paymentData.billing_email}
-                            onChange={(e) => setPaymentData(prev => ({ ...prev, billing_email: e.target.value }))}
+                            onChange={(e) =>
+                              setPaymentData((prev) => ({ ...prev, billing_email: e.target.value }))
+                            }
                             className={paymentErrors.billing_email ? 'border-destructive' : ''}
                           />
                           {paymentErrors.billing_email && (
-                            <p className="text-sm text-destructive">{paymentErrors.billing_email}</p>
+                            <p className="text-sm text-destructive">
+                              {paymentErrors.billing_email}
+                            </p>
                           )}
                         </div>
                       </div>
@@ -1147,7 +1233,11 @@ export default function Settings() {
 
                     {/* Save Button */}
                     <div className="flex gap-4 pt-4">
-                      <Button onClick={savePaymentInfo} disabled={savingPayment} className="min-w-[160px]">
+                      <Button
+                        onClick={savePaymentInfo}
+                        disabled={savingPayment}
+                        className="min-w-[160px]"
+                      >
                         {savingPayment ? (
                           <>
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -1215,7 +1305,11 @@ export default function Settings() {
                       </Button>
                     ) : (
                       <Button asChild>
-                        <a href={getSubscribeUrl() || '#'} target="_blank" rel="noopener noreferrer">
+                        <a
+                          href={getSubscribeUrl() || '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
                           Subscribe
                         </a>
                       </Button>
@@ -1240,9 +1334,7 @@ export default function Settings() {
                   <Key className="w-5 h-5" />
                   Rose API Keys
                 </CardTitle>
-                <CardDescription>
-                  API keys for accessing the Rose completions API
-                </CardDescription>
+                <CardDescription>API keys for accessing the Rose completions API</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {loadingKeys ? (

@@ -17,11 +17,11 @@
  * [READY] <-- copied: false
  */
 
-import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { useToast } from "@/hooks/use-toast";
-import { useState, useEffect } from "react";
-import { getMyInviteCode, InviteCodeInfo } from "@/lib/api";
-import { Copy, Check } from "lucide-react";
+import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { useToast } from '@/hooks/use-toast';
+import { useState, useEffect } from 'react';
+import { getMyInviteCode, InviteCodeInfo } from '@/lib/api';
+import { Copy, Check } from 'lucide-react';
 
 interface InviteCodeModalProps {
   open: boolean;
@@ -48,9 +48,9 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
     } catch (error: any) {
       console.error('Error loading invite code:', error);
       toast({
-        title: "Error",
-        description: error.message || "Failed to load invite code",
-        variant: "destructive",
+        title: 'Error',
+        description: error.message || 'Failed to load invite code',
+        variant: 'destructive',
       });
     } finally {
       setLoading(false);
@@ -64,25 +64,25 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
       await navigator.clipboard.writeText(inviteInfo.inviteCode.toString());
       setCopied(true);
       toast({
-        title: "Copied!",
-        description: "Invite code copied to clipboard",
+        title: 'Copied!',
+        description: 'Invite code copied to clipboard',
       });
-      
+
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
       toast({
-        title: "Error",
-        description: "Failed to copy to clipboard",
-        variant: "destructive",
+        title: 'Error',
+        description: 'Failed to copy to clipboard',
+        variant: 'destructive',
       });
     }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent 
+      <DialogContent
         className="sm:max-w-md p-8 border border-border/50 shadow-lg z-[100]"
-        style={{ 
+        style={{
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
         }}
@@ -100,7 +100,7 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
           ) : inviteInfo ? (
             <>
               <div className="relative">
-                <div 
+                <div
                   className="text-center text-5xl font-mono font-bold tracking-wider py-6 px-4 bg-muted rounded-lg cursor-pointer hover:bg-muted/80 transition-colors"
                   onClick={handleCopy}
                 >
@@ -129,9 +129,7 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
               </div>
             </>
           ) : (
-            <div className="text-center text-muted-foreground">
-              Failed to load invite code
-            </div>
+            <div className="text-center text-muted-foreground">Failed to load invite code</div>
           )}
         </div>
       </DialogContent>
@@ -140,4 +138,3 @@ const InviteCodeModal = ({ open, onOpenChange }: InviteCodeModalProps) => {
 };
 
 export default InviteCodeModal;
-

@@ -44,16 +44,16 @@ describe('OnePager page', () => {
 
   it('renders intro paragraphs about Mass Agent Networks', () => {
     renderWithProviders(<OnePager />);
-    expect(
-      screen.getByText(/pioneering/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/pioneering/i)).toBeInTheDocument();
     // "Mass Agent Networks" appears in multiple places
     expect(screen.getAllByText(/mass agent networks/i).length).toBeGreaterThanOrEqual(2);
   });
 
   it('renders MANs characteristic bullet points', () => {
     renderWithProviders(<OnePager />);
-    expect(screen.getByText(/divide complex tasks into small tractable components/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/divide complex tasks into small tractable components/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/keep context small where models perform best/i)).toBeInTheDocument();
     expect(screen.getByText(/run thousands of reasoning paths in parallel/i)).toBeInTheDocument();
     expect(screen.getByText(/cross verify each other/i)).toBeInTheDocument();
@@ -84,9 +84,7 @@ describe('OnePager page', () => {
   it('renders Vision section content', () => {
     renderWithProviders(<OnePager />);
     expect(screen.getByText(/within a decade/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/first billion \/ trillion agent systems/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/first billion \/ trillion agent systems/i)).toBeInTheDocument();
     expect(
       screen.getByText(/rose labs is building the foundation for this architecture/i),
     ).toBeInTheDocument();
@@ -163,10 +161,7 @@ describe('OnePager page', () => {
     expect(andyLink).toHaveAttribute('target', '_blank');
 
     const aadityaLink = screen.getByRole('link', { name: 'Aaditya' });
-    expect(aadityaLink).toHaveAttribute(
-      'href',
-      'https://www.linkedin.com/in/aaditya-shidham/',
-    );
+    expect(aadityaLink).toHaveAttribute('href', 'https://www.linkedin.com/in/aaditya-shidham/');
     expect(aadityaLink).toHaveAttribute('target', '_blank');
   });
 
@@ -186,9 +181,7 @@ describe('OnePager page', () => {
     await waitFor(() => {
       const meta = document.querySelector('meta[name="description"]');
       expect(meta).not.toBeNull();
-      expect(meta!.getAttribute('content')).toContain(
-        'Rose Labs investor one pager',
-      );
+      expect(meta!.getAttribute('content')).toContain('Rose Labs investor one pager');
     });
   });
 
@@ -199,8 +192,6 @@ describe('OnePager page', () => {
   it('renders copyright with current year', () => {
     renderWithProviders(<OnePager />);
     const year = new Date().getFullYear();
-    expect(
-      screen.getByText(new RegExp(`© ${year} Rose Labs`)),
-    ).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`© ${year} Rose Labs`))).toBeInTheDocument();
   });
 });

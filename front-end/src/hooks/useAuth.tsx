@@ -77,7 +77,7 @@ export function useAuth() {
         setIsFullySignedIn(false);
       }
     },
-    [log]
+    [log],
   );
 
   // Apply a session (from login or refresh)
@@ -104,15 +104,18 @@ export function useAuth() {
 
       await updateInviteStatus(nextSession, nextSession?.user ?? null);
     },
-    [log, updateInviteStatus]
+    [log, updateInviteStatus],
   );
 
   // Manual refresh - call this after login
-  const refreshAuthState = useCallback(async (reason = 'manual-refresh') => {
-    log(`refreshAuthState (${reason})`);
-    const currentSession = getSession();
-    await applySession(reason, currentSession);
-  }, [applySession, log]);
+  const refreshAuthState = useCallback(
+    async (reason = 'manual-refresh') => {
+      log(`refreshAuthState (${reason})`);
+      const currentSession = getSession();
+      await applySession(reason, currentSession);
+    },
+    [applySession, log],
+  );
 
   // Sign out
   const signOut = useCallback(async () => {

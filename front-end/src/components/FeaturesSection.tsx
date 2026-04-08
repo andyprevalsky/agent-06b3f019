@@ -17,10 +17,10 @@
  * Click-driven: scrollSpyPauseUntilRef temporarily disables scroll updates
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useIsMobile } from "@/hooks/use-mobile";
-import FeatureVideoStage from "./FeatureVideoStage";
-import { isEarlyAccessEnabled } from "@/lib/utils";
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useIsMobile } from '@/hooks/use-mobile';
+import FeatureVideoStage from './FeatureVideoStage';
+import { isEarlyAccessEnabled } from '@/lib/utils';
 
 const FeaturesSection = () => {
   const [activeFeature, setActiveFeature] = useState(0);
@@ -38,17 +38,37 @@ const FeaturesSection = () => {
     const mql = window.matchMedia('(max-width: 380px)');
     const onChange = () => setIsNarrowPhone(mql.matches);
     onChange();
-    try { mql.addEventListener('change', onChange); } catch { /* Safari */ mql.addListener(onChange as any); }
-    return () => { try { mql.removeEventListener('change', onChange); } catch { mql.removeListener(onChange as any); } };
+    try {
+      mql.addEventListener('change', onChange);
+    } catch {
+      /* Safari */ mql.addListener(onChange as any);
+    }
+    return () => {
+      try {
+        mql.removeEventListener('change', onChange);
+      } catch {
+        mql.removeListener(onChange as any);
+      }
+    };
   }, []);
   useEffect(() => {
     const mqlH = window.matchMedia('(max-height: 750px)');
     const onChangeH = () => setIsShortHeight(mqlH.matches);
     onChangeH();
-    try { mqlH.addEventListener('change', onChangeH); } catch { /* Safari */ mqlH.addListener(onChangeH as any); }
-    return () => { try { mqlH.removeEventListener('change', onChangeH); } catch { mqlH.removeListener(onChangeH as any); } };
+    try {
+      mqlH.addEventListener('change', onChangeH);
+    } catch {
+      /* Safari */ mqlH.addListener(onChangeH as any);
+    }
+    return () => {
+      try {
+        mqlH.removeEventListener('change', onChangeH);
+      } catch {
+        mqlH.removeListener(onChangeH as any);
+      }
+    };
   }, []);
-  
+
   // Orchestrator manages playback; no direct video refs needed here
 
   // Rose logo gradient stops (left-to-right) for sequential card backgrounds
@@ -91,12 +111,18 @@ const FeaturesSection = () => {
 
   const getIconForIndex = (index: number) => {
     switch (index) {
-      case 0: return 'customize.svg';
-      case 1: return 'seamless.svg';
-      case 2: return 'agent.svg';
-      case 3: return 'grow.svg';
-      case 4: return 'privacy.svg';
-      default: return 'seamless.svg';
+      case 0:
+        return 'customize.svg';
+      case 1:
+        return 'seamless.svg';
+      case 2:
+        return 'agent.svg';
+      case 3:
+        return 'grow.svg';
+      case 4:
+        return 'privacy.svg';
+      default:
+        return 'seamless.svg';
     }
   };
 
@@ -129,7 +155,7 @@ const FeaturesSection = () => {
       scale = Math.max(minScale, scale - step);
       attempts += 1;
     }
-    setTextScales(prev => {
+    setTextScales((prev) => {
       const next = [...prev];
       next[idx] = scale;
       return next;
@@ -144,58 +170,59 @@ const FeaturesSection = () => {
 
   const features = [
     {
-      title: "Fully Customizable",
-      description: "",
+      title: 'Fully Customizable',
+      description: '',
       details: [
-        "Change the LLM provider, System Prompt & Voice to create your perfect AI companion.",
-        "Connect your own tools to Rose through MCPs, or use tools shared by other devs in our marketplace.",
-        "Rose comes with prebuilt presets to get you up and running with SOTA models in an instant."
-      ]
+        'Change the LLM provider, System Prompt & Voice to create your perfect AI companion.',
+        'Connect your own tools to Rose through MCPs, or use tools shared by other devs in our marketplace.',
+        'Rose comes with prebuilt presets to get you up and running with SOTA models in an instant.',
+      ],
     },
     {
-      title: "Seamless Conversations",
-      description: "",
+      title: 'Seamless Conversations',
+      description: '',
       details: [
-        "Sub-800 ms responses keep every exchange natural and fluid.",
-        "Custom models fine-tuned for smooth interruption handling and turn-taking.",
-        "Custom voice pipeline engineered by veterans of top voice-AI companies."
-      ]
+        'Sub-800 ms responses keep every exchange natural and fluid.',
+        'Custom models fine-tuned for smooth interruption handling and turn-taking.',
+        'Custom voice pipeline engineered by veterans of top voice-AI companies.',
+      ],
     },
     {
-      title: "Agent Enabled",
-      description: "",
+      title: 'Agent Enabled',
+      description: '',
       details: [
-        "Rose agents break down, measure & iterate towards any long-term goal.",
-        "Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Rose can take real-world actions on your behalf.",
-        "Each agent runs on a SOTA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions."
-      ]
+        'Rose agents break down, measure & iterate towards any long-term goal.',
+        'Integrated with phone calling, web search, email/SMS, and user-authorized payments, so Rose can take real-world actions on your behalf.',
+        'Each agent runs on a SOTA agent harness, so that agents maintain long term context, are fault tolerant & can share learnings across sessions.',
+      ],
     },
     {
-      title: "Rose Grows With You",
-      description: "",
+      title: 'Rose Grows With You',
+      description: '',
       details: [
-        "After each conversation, Rose extracts key entity information to keep track of your most important relationships, events, and ideas.",
+        'After each conversation, Rose extracts key entity information to keep track of your most important relationships, events, and ideas.',
         "Rose's personality evolves to match your communication style.",
-        "Time-based queries keep Rose working in the background, constantly refining its understanding of your world and ideating on ways to help you grow."
-      ]
+        'Time-based queries keep Rose working in the background, constantly refining its understanding of your world and ideating on ways to help you grow.',
+      ],
     },
     {
-      title: "Privacy First",
-      description: "",
+      title: 'Privacy First',
+      description: '',
       details: [
         <>
-          Your conversations stay private. Rose never stores or sells your data. View our privacy policy{" "}
-          <a 
-            href="/privacy" 
+          Your conversations stay private. Rose never stores or sells your data. View our privacy
+          policy{' '}
+          <a
+            href="/privacy"
             className="text-primary hover:text-primary/80 underline transition-colors"
           >
             here.
           </a>
         </>,
-        "Rose does not passively listen, and is designed to only trigger active listening according to the customizable wake word, \"Hi Rose\".",
-        "Audio data & transcriptions are streamed directly, securely & anonymously to AI providers."
-      ]
-    }
+        'Rose does not passively listen, and is designed to only trigger active listening according to the customizable wake word, "Hi Rose".',
+        'Audio data & transcriptions are streamed directly, securely & anonymously to AI providers.',
+      ],
+    },
   ];
 
   useEffect(() => {
@@ -206,18 +233,18 @@ const FeaturesSection = () => {
       const sectionRect = sectionElement.getBoundingClientRect();
       const viewportHeight = window.innerHeight;
       const sectionHeight = sectionElement.offsetHeight || 1;
-      
+
       // Pre-reveal margin so the grid paints early, with a stronger effect on small screens
       const isSmall = window.matchMedia('(max-width: 1024px)').matches;
       const preRevealPx = viewportHeight * (isSmall ? 0.6 : 0.25);
-      const topClip = Math.max(0, (sectionRect.top - preRevealPx)) / viewportHeight * 100;
-      const bottomClip = Math.max(0, (viewportHeight - sectionRect.bottom)) / viewportHeight * 100;
+      const topClip = (Math.max(0, sectionRect.top - preRevealPx) / viewportHeight) * 100;
+      const bottomClip = (Math.max(0, viewportHeight - sectionRect.bottom) / viewportHeight) * 100;
       setFeaturesClipPath(`inset(${topClip}% 0% ${bottomClip}% 0%)`);
 
       // Smooth horizontal scan tied to scroll
       const scrolledWithin = Math.min(Math.max(-sectionRect.top, 0), sectionHeight);
       const progress = scrolledWithin / sectionHeight; // 0..1 across the section
-      const offset = (progress * 1200) + (window.scrollY * 0.1);
+      const offset = progress * 1200 + window.scrollY * 0.1;
       setGridOffsetX(offset);
     };
 
@@ -242,7 +269,9 @@ const FeaturesSection = () => {
   useEffect(() => {
     if (!sectionRef.current || observersReadyRef.current) return;
     const sectionEl = sectionRef.current;
-    const sentinels = Array.from(sectionEl.querySelectorAll('[data-sentinel-index]')) as HTMLElement[];
+    const sentinels = Array.from(
+      sectionEl.querySelectorAll('[data-sentinel-index]'),
+    ) as HTMLElement[];
     if (sentinels.length === 0) return;
 
     const observer = new IntersectionObserver(
@@ -251,7 +280,7 @@ const FeaturesSection = () => {
         if (performance.now() < scrollSpyPauseUntilRef.current) return;
         // Pick the entry most centered/in view
         const visible = entries
-          .filter(e => e.isIntersecting)
+          .filter((e) => e.isIntersecting)
           .sort((a, b) => (b.intersectionRatio || 0) - (a.intersectionRatio || 0));
         if (visible.length > 0) {
           const idxAttr = (visible[0].target as HTMLElement).getAttribute('data-sentinel-index');
@@ -262,21 +291,22 @@ const FeaturesSection = () => {
       {
         // Broader thresholds and a centered root margin band make switching smoother
         threshold: [0, 0.25, 0.5, 0.75, 1],
-        rootMargin: '-40% 0px -40% 0px'
-      }
+        rootMargin: '-40% 0px -40% 0px',
+      },
     );
 
-    sentinels.forEach(s => observer.observe(s));
+    sentinels.forEach((s) => observer.observe(s));
     observersReadyRef.current = true;
     return () => observer.disconnect();
   }, []);
-
 
   const handleFeatureClick = (index: number) => {
     setActiveFeature(index);
     // Pause scroll-based updates to avoid highlight flicker while smooth-scrolling
     scrollSpyPauseUntilRef.current = performance.now() + 300; // ms
-    const sentinel = sectionRef.current?.querySelector(`[data-sentinel-index="${index}"]`) as HTMLElement | null;
+    const sentinel = sectionRef.current?.querySelector(
+      `[data-sentinel-index="${index}"]`,
+    ) as HTMLElement | null;
     if (sentinel) {
       sentinel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -286,12 +316,17 @@ const FeaturesSection = () => {
   const scrollToFeature = (index: number) => {
     const node = sectionRef.current;
     if (!node) return;
-    const all = Array.from(node.querySelectorAll(`[data-sentinel-index="${index}"]`)) as HTMLElement[];
+    const all = Array.from(
+      node.querySelectorAll(`[data-sentinel-index="${index}"]`),
+    ) as HTMLElement[];
     // Prefer the visible sentinel (not display:none and with layout)
-    let sentinel = all.find(el => {
-      const cs = window.getComputedStyle(el);
-      return cs.display !== 'none' && el.offsetParent !== null;
-    }) || all[0] || null;
+    const sentinel =
+      all.find((el) => {
+        const cs = window.getComputedStyle(el);
+        return cs.display !== 'none' && el.offsetParent !== null;
+      }) ||
+      all[0] ||
+      null;
     if (!sentinel) return;
     const rect = sentinel.getBoundingClientRect();
     const targetY = window.scrollY + rect.top + 1; // nudge to ensure IO band overlap
@@ -301,7 +336,6 @@ const FeaturesSection = () => {
       window.scrollTo(0, targetY);
     }
   };
-
 
   return (
     <section id="features" className="py-24 bg-background relative" ref={sectionRef}>
@@ -314,14 +348,20 @@ const FeaturesSection = () => {
             Rose is a hackable smart speaker designed for developers
           </p>
         </div>
-        
-              {/* 3D Grid Background - Fixed with Clip Path */}
-      <div 
-        className="grid-3d-background"
-        style={{ clipPath: featuresClipPath, willChange: 'clip-path, background-position' }}
-      >
-          <div className="grid-3d-wall" style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}></div>
-          <div className="grid-3d-floor" style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}></div>
+
+        {/* 3D Grid Background - Fixed with Clip Path */}
+        <div
+          className="grid-3d-background"
+          style={{ clipPath: featuresClipPath, willChange: 'clip-path, background-position' }}
+        >
+          <div
+            className="grid-3d-wall"
+            style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}
+          ></div>
+          <div
+            className="grid-3d-floor"
+            style={{ backgroundPosition: `${-gridOffsetX}px 0px` }}
+          ></div>
         </div>
         {/* Top fade to ensure grid never peeks above and bottom bleed under waitlist */}
         <div className="pointer-events-none absolute top-0 left-0 right-0 h-24 z-20 bg-gradient-to-b from-background to-transparent"></div>
@@ -353,63 +393,67 @@ const FeaturesSection = () => {
               </div>
             </div>
 
-
-
             {/* Feature Titles Menu - Right Side */}
             <div className="w-[400px] relative z-20">
               <div className="sticky top-24">
                 <div className="bg-surface/30 backdrop-blur-sm rounded-2xl border border-gray-200">
-                {features.map((feature, index) => (
-                  <div key={feature.title} className="relative">
-                    {/* Unified card structure for all items */}
-                    <div className={`relative overflow-hidden transition-all duration-500 ${
-                      activeFeature === index ? 'border-2 border-transparent rounded-lg' : 'border-2 border-transparent rounded-lg'
-                    }`}>
-                      {/* Gradient border for active item */}
-                      {activeFeature === index && (
-                        <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
-                          <div className="w-full h-full bg-background rounded-md"></div>
-                        </div>
-                      )}
-                      
-                      {/* Header button */}
-                      <button
-                        onClick={() => handleFeatureClick(index)}
-                        className={`relative w-full text-left p-4 transition-all duration-500 ${
+                  {features.map((feature, index) => (
+                    <div key={feature.title} className="relative">
+                      {/* Unified card structure for all items */}
+                      <div
+                        className={`relative overflow-hidden transition-all duration-500 ${
                           activeFeature === index
-                            ? 'text-foreground'
-                            : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                            ? 'border-2 border-transparent rounded-lg'
+                            : 'border-2 border-transparent rounded-lg'
                         }`}
                       >
-                        <h4 className="relative font-medium text-sm leading-tight">{feature.title}</h4>
-                      </button>
-                      
-                      {/* Expandable content with proper animation timing */}
-                      <div 
-                        className={`relative overflow-hidden transition-all duration-700 ease-in-out ${
-                          activeFeature === index 
-                            ? 'max-h-96 opacity-100 delay-700' 
-                            : 'max-h-0 opacity-0 delay-0'
-                        }`}
-                      >
-                        <div className="relative px-4 pb-4">
-                          
-                          
-                          {feature.details.length > 0 && (
-                            <ul className="space-y-3">
-                              {feature.details.map((detail, detailIndex) => (
-                                <li key={detailIndex} className="flex items-start space-x-3">
-                                  <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
-                                  <span className="text-sm text-foreground/80 leading-relaxed">{detail}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
+                        {/* Gradient border for active item */}
+                        {activeFeature === index && (
+                          <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg p-[2px]">
+                            <div className="w-full h-full bg-background rounded-md"></div>
+                          </div>
+                        )}
+
+                        {/* Header button */}
+                        <button
+                          onClick={() => handleFeatureClick(index)}
+                          className={`relative w-full text-left p-4 transition-all duration-500 ${
+                            activeFeature === index
+                              ? 'text-foreground'
+                              : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <h4 className="relative font-medium text-sm leading-tight">
+                            {feature.title}
+                          </h4>
+                        </button>
+
+                        {/* Expandable content with proper animation timing */}
+                        <div
+                          className={`relative overflow-hidden transition-all duration-700 ease-in-out ${
+                            activeFeature === index
+                              ? 'max-h-96 opacity-100 delay-700'
+                              : 'max-h-0 opacity-0 delay-0'
+                          }`}
+                        >
+                          <div className="relative px-4 pb-4">
+                            {feature.details.length > 0 && (
+                              <ul className="space-y-3">
+                                {feature.details.map((detail, detailIndex) => (
+                                  <li key={detailIndex} className="flex items-start space-x-3">
+                                    <div className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC]"></div>
+                                    <span className="text-sm text-foreground/80 leading-relaxed">
+                                      {detail}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
                 </div>
 
                 {/* Special Waitlist/Pre-order Button - GRADIENT (desktop) */}
@@ -419,13 +463,17 @@ const FeaturesSection = () => {
                     if (window.location.pathname === '/') {
                       document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
                     } else {
-                      window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+                      window.location.href = earlyAccess
+                        ? `/?earlyaccess#${targetId}`
+                        : `/#${targetId}`;
                     }
                   }}
                   className="relative w-full text-left p-4 rounded-lg transition-all duration-300 overflow-hidden border-2 border-transparent mt-2"
                 >
                   <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
-                  <h4 className="relative font-medium text-sm leading-tight text-white z-10">{earlyAccess ? 'Pre-order' : 'Join the Waitlist'}</h4>
+                  <h4 className="relative font-medium text-sm leading-tight text-white z-10">
+                    {earlyAccess ? 'Pre-order' : 'Join the Waitlist'}
+                  </h4>
                 </button>
               </div>
             </div>
@@ -435,82 +483,126 @@ const FeaturesSection = () => {
         {/* Mobile/Tablet Layout (applies up to lg) */}
         <div className="lg:hidden min-h-[600vh] relative">
           {/* Fixed Animation Container - Never moves */}
-          <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={{ ['--features-sticky-top' as any]: '96px' }}>
+          <div
+            className="sticky top-24 z-20 flex flex-col items-center space-y-6"
+            style={{ ['--features-sticky-top' as any]: '96px' }}
+          >
             {/* Animation stays in exact same position */}
-            <div className="flex items-center justify-center relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
+            <div
+              className="flex items-center justify-center relative"
+              style={{
+                width: 'min(420px, calc(100vw - 24px))',
+                height:
+                  'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)',
+              }}
+            >
               <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
                 <FeatureVideoStage activeIndex={activeFeature} />
               </div>
             </div>
-            
+
             {/* Content cards in same position */}
-            <div className="relative" style={{ width: 'min(420px, calc(100vw - 24px))', height: 'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)' }}>
+            <div
+              className="relative"
+              style={{
+                width: 'min(420px, calc(100vw - 24px))',
+                height:
+                  'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)',
+              }}
+            >
               {/* All content cards in same position, fade between them */}
               {features.map((feature, index) => (
-                <div 
+                <div
                   key={feature.title}
                   className={`absolute inset-0 transition-opacity duration-700 ${
                     activeFeature === index ? 'opacity-100' : 'opacity-0'
                   }`}
                 >
                   <div className="relative h-full w-full">
-                    <div 
+                    <div
                       className="h-full w-full border rounded-none shadow-lg"
-                      style={{ 
-                        backgroundColor: (activeFeature === index) ? pearlBlue : '#ffffff',
+                      style={{
+                        backgroundColor: activeFeature === index ? pearlBlue : '#ffffff',
                         transition: 'background-color 2000ms ease',
-                        borderColor: heroBlack
+                        borderColor: heroBlack,
                       }}
                     >
                       {/* Card content */}
-                      <div ref={el => (textContainerRefs.current[index] = el)} className="p-6">
-                      <div className="flex items-center gap-3" style={{ marginBottom: (!isShortHeight ? '1.25rem' : '0.75rem') }}>
+                      <div ref={(el) => (textContainerRefs.current[index] = el)} className="p-6">
                         <div
-                          className="border p-1 flex items-center justify-center"
-                          style={{
-                            width: '2.25rem',
-                            height: '2.25rem',
-                            backgroundColor: (activeFeature === index) ? heroBlack : '#d1d5db',
-                            transition: 'background-color 2000ms ease',
-                            borderColor: heroBlack
-                          }}
+                          className="flex items-center gap-3"
+                          style={{ marginBottom: !isShortHeight ? '1.25rem' : '0.75rem' }}
                         >
-                          <img 
-                            src={`/${getIconForIndex(index)}`} 
-                            alt="" 
-                            className="w-full h-full object-contain"
-                            style={{ filter: 'brightness(0) invert(1)', transition: 'none' }}
-                          />
+                          <div
+                            className="border p-1 flex items-center justify-center"
+                            style={{
+                              width: '2.25rem',
+                              height: '2.25rem',
+                              backgroundColor: activeFeature === index ? heroBlack : '#d1d5db',
+                              transition: 'background-color 2000ms ease',
+                              borderColor: heroBlack,
+                            }}
+                          >
+                            <img
+                              src={`/${getIconForIndex(index)}`}
+                              alt=""
+                              className="w-full h-full object-contain"
+                              style={{ filter: 'brightness(0) invert(1)', transition: 'none' }}
+                            />
+                          </div>
+                          <h3
+                            className="font-semibold text-foreground text-left"
+                            style={{
+                              fontSize: `calc(${isMobile ? 1.125 : 1.25}rem * ${textScales[index] || 1})`,
+                              lineHeight: `calc(${isMobile ? 1.6 : 1.75}rem * ${textScales[index] || 1})`,
+                            }}
+                          >
+                            {feature.title}
+                          </h3>
                         </div>
-                        <h3 className="font-semibold text-foreground text-left" style={{ fontSize: `calc(${isMobile ? 1.125 : 1.25}rem * ${textScales[index] || 1})`, lineHeight: `calc(${isMobile ? 1.6 : 1.75}rem * ${textScales[index] || 1})` }}>{feature.title}</h3>
-                      </div>
-                      
-                      
-                      {feature.details.length > 0 && (
-                        <ul ref={el => (textContentRefs.current[index] = el)} className="space-y-3 text-left" style={{ fontSize: `calc(${isMobile ? 0.95 : 0.875}rem * ${textScales[index] || 1})`, lineHeight: `calc(${isMobile ? 1.45 : 1.375}rem * ${textScales[index] || 1})` }}>
-                          {(isMobile ? (index === 2 ? feature.details.slice(0, 2) : (isShortHeight ? feature.details.slice(0, 2) : feature.details.slice(0, 3))) : feature.details).map((detail, detailIndex) => (
-                            <li key={detailIndex} className="flex items-start space-x-3">
-                              <div 
-                                className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors duration-1000"
-                                style={{ backgroundColor: (activeFeature === index) ? heroBlack : '#d1d5db' }}
-                              ></div>
-                              <span className="text-foreground/80 leading-relaxed">{
-                                (index === 4 && detailIndex === 1)
-                                  ? 'Rose does not passively listen, active listening is enabled only by the customizable wake word, "Hi Rose".'
-                                  : (isMobile && index === 3 && detailIndex === 2)
-                                    ? 'Time based queries keep Rose working in the background.'
-                                    : detail
-                              }</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+
+                        {feature.details.length > 0 && (
+                          <ul
+                            ref={(el) => (textContentRefs.current[index] = el)}
+                            className="space-y-3 text-left"
+                            style={{
+                              fontSize: `calc(${isMobile ? 0.95 : 0.875}rem * ${textScales[index] || 1})`,
+                              lineHeight: `calc(${isMobile ? 1.45 : 1.375}rem * ${textScales[index] || 1})`,
+                            }}
+                          >
+                            {(isMobile
+                              ? index === 2
+                                ? feature.details.slice(0, 2)
+                                : isShortHeight
+                                  ? feature.details.slice(0, 2)
+                                  : feature.details.slice(0, 3)
+                              : feature.details
+                            ).map((detail, detailIndex) => (
+                              <li key={detailIndex} className="flex items-start space-x-3">
+                                <div
+                                  className="w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 transition-colors duration-1000"
+                                  style={{
+                                    backgroundColor:
+                                      activeFeature === index ? heroBlack : '#d1d5db',
+                                  }}
+                                ></div>
+                                <span className="text-foreground/80 leading-relaxed">
+                                  {index === 4 && detailIndex === 1
+                                    ? 'Rose does not passively listen, active listening is enabled only by the customizable wake word, "Hi Rose".'
+                                    : isMobile && index === 3 && detailIndex === 2
+                                      ? 'Time based queries keep Rose working in the background.'
+                                      : detail}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
                     </div>
                   </div>
                   {/* Bottom-right bounce arrow */}
                   <div className="absolute right-2 bottom-2 z-30 pointer-events-auto">
-                    <button 
+                    <button
                       type="button"
                       className="w-8 h-4 flex items-center justify-center animate-slow-bounce-half pointer-events-auto"
                       aria-label="Scroll to next feature"
@@ -518,16 +610,29 @@ const FeaturesSection = () => {
                         if (activeFeature >= features.length - 1) {
                           const targetId = earlyAccess ? 'pre-order' : 'waitlist';
                           if (window.location.pathname === '/') {
-                            document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
+                            document
+                              .getElementById(targetId)
+                              ?.scrollIntoView({ behavior: 'smooth' });
                           } else {
-                            window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+                            window.location.href = earlyAccess
+                              ? `/?earlyaccess#${targetId}`
+                              : `/#${targetId}`;
                           }
                         } else {
                           scrollToFeature(activeFeature + 1);
                         }
                       }}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#272725" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="#272725"
+                        strokeWidth="4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="w-4 h-4"
+                      >
                         <path d="M6 9l6 6 6-6" />
                       </svg>
                     </button>
@@ -537,7 +642,10 @@ const FeaturesSection = () => {
             </div>
             {/* Removed measurement nodes; we now use 50/50 split with scrollable content */}
             {/* Dots pagination */}
-            <div className="flex items-center justify-center gap-2" style={{ width: 'min(380px, calc(100vw - 48px))' }}>
+            <div
+              className="flex items-center justify-center gap-2"
+              style={{ width: 'min(380px, calc(100vw - 48px))' }}
+            >
               {features.map((_, i) => {
                 const isActive = activeFeature === i;
                 const activeBg = heroBlack;

@@ -12,36 +12,37 @@
  * [CLOSED]
  */
 
-import { useEffect, useState } from "react";
-import NaviHeader from "@/components/NaviHeader";
-import NaviFooter from "@/components/NaviFooter";
-import ContactModal from "@/components/ContactModal";
+import { useEffect, useState } from 'react';
+import NaviHeader from '@/components/NaviHeader';
+import NaviFooter from '@/components/NaviFooter';
+import ContactModal from '@/components/ContactModal';
 
 const About = () => {
   const [contactOpen, setContactOpen] = useState(false);
 
   useEffect(() => {
-    const title = "About Rose Labs";
-    const description = "Learn about Rose Labs' mission to create Artificial Life and the story behind founder Andy Prevalsky.";
+    const title = 'About Rose Labs';
+    const description =
+      "Learn about Rose Labs' mission to create Artificial Life and the story behind founder Andy Prevalsky.";
     document.title = title;
 
     const ensureMeta = (name: string, content: string) => {
       let tag = document.querySelector(`meta[name="${name}"]`);
       if (!tag) {
-        tag = document.createElement("meta");
-        tag.setAttribute("name", name);
+        tag = document.createElement('meta');
+        tag.setAttribute('name', name);
         document.head.appendChild(tag);
       }
-      tag.setAttribute("content", content);
+      tag.setAttribute('content', content);
     };
 
-    ensureMeta("description", description);
+    ensureMeta('description', description);
 
     // Canonical
     let link = document.querySelector('link[rel="canonical"]') as HTMLLinkElement | null;
     if (!link) {
-      link = document.createElement("link");
-      link.rel = "canonical";
+      link = document.createElement('link');
+      link.rel = 'canonical';
       document.head.appendChild(link);
     }
     link.href = window.location.href;
@@ -52,11 +53,15 @@ const About = () => {
       <NaviHeader />
       <main className="pt-24 pb-20">
         <div className="container mx-auto px-6 max-w-4xl">
-
           <section className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-xl p-6 md:p-8 mb-10">
             <h1 className="text-3xl md:text-4xl font-semibold mb-4 text-foreground">Mission</h1>
             <p className="text-muted-foreground leading-relaxed">
-              Our mission is to create Artificial Life that is the truest embodiment of light. Almost everyone has the problem of only having one intelligent life form working around the clock to make sure their dreams come true, and because of that, the vast majority of human potential never sees the light of day. Rose Labs aims to give each individual a super intelligent companion to help guide them along their unique personal journey.
+              Our mission is to create Artificial Life that is the truest embodiment of light.
+              Almost everyone has the problem of only having one intelligent life form working
+              around the clock to make sure their dreams come true, and because of that, the vast
+              majority of human potential never sees the light of day. Rose Labs aims to give each
+              individual a super intelligent companion to help guide them along their unique
+              personal journey.
             </p>
           </section>
 
@@ -77,10 +82,19 @@ const About = () => {
                   Hi! I'm Andy, the solo founder and builder behind Rose Labs.
                 </p>
                 <p className="not-prose text-muted-foreground leading-relaxed mt-4">
-                  I'm a passionate software engineer, artist, and creator on a mission to 10x the level of harmony on this planet. If you're empathetic, driven, curious, and brilliant, I'd love to work alongside you.
+                  I'm a passionate software engineer, artist, and creator on a mission to 10x the
+                  level of harmony on this planet. If you're empathetic, driven, curious, and
+                  brilliant, I'd love to work alongside you.
                 </p>
                 <p className="mt-4">
-                  <a href="https://linkedin.com/in/andyprevalsky" target="_blank" rel="noopener noreferrer" className="text-primary underline font-medium hover:opacity-90 focus:underline">linkedin</a>
+                  <a
+                    href="https://linkedin.com/in/andyprevalsky"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary underline font-medium hover:opacity-90 focus:underline"
+                  >
+                    linkedin
+                  </a>
                 </p>
               </article>
             </div>
@@ -90,7 +104,9 @@ const About = () => {
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-semibold text-foreground">We’re hiring!</h2>
-                <p className="text-muted-foreground mt-2">Come help us build Artificial Life, frontier AI, agents, and delightful hardware.</p>
+                <p className="text-muted-foreground mt-2">
+                  Come help us build Artificial Life, frontier AI, agents, and delightful hardware.
+                </p>
               </div>
               <button
                 onClick={() => setContactOpen(true)}
@@ -106,7 +122,7 @@ const About = () => {
       <ContactModal
         open={contactOpen}
         onOpenChange={setContactOpen}
-        subtitle={"Come help us build the next Apple."}
+        subtitle={'Come help us build the next Apple.'}
       />
 
       <NaviFooter />

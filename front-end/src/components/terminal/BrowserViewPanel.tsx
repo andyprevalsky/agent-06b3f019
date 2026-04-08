@@ -39,7 +39,10 @@ import { respondToAttentionRequest, rejectAttentionRequest } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 
 // API Configuration - match pattern used in lib/api.ts
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 // Browser Write Lock Approval Component - renders at bottom of browser panel
@@ -49,7 +52,11 @@ interface BrowserWriteLockApprovalProps {
   onApprovalHandled?: () => void;
 }
 
-function BrowserWriteLockApproval({ attentionRequestId, question, onApprovalHandled }: BrowserWriteLockApprovalProps) {
+function BrowserWriteLockApproval({
+  attentionRequestId,
+  question,
+  onApprovalHandled,
+}: BrowserWriteLockApprovalProps) {
   const [actionState, setActionState] = useState<'accepting' | 'rejecting' | null>(null);
   const { toast } = useToast();
 
@@ -143,31 +150,31 @@ function BrowserWriteLockApproval({ attentionRequestId, question, onApprovalHand
 function getAuthHeaders() {
   const session = getStoredSession();
   const token = session?.access_token;
-  
+
   if (!token) {
     throw new Error('Not authenticated');
   }
 
   return {
-    'Authorization': `Bearer ${token}`,
+    Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
   };
 }
 
 interface BrowserViewPanelProps {
-  taskId: string;  // Stable task ID (BrowserSession.id) - used as subAgentId for MessageList
-  browserUrl: string;  // Current browser URL (may change on resume)
+  taskId: string; // Stable task ID (BrowserSession.id) - used as subAgentId for MessageList
+  browserUrl: string; // Current browser URL (may change on resume)
   isAnyBrowserFullscreen: boolean;
   onFullscreenToggle: (isFullscreen: boolean) => void;
-  onApprovalHandled?: () => void;  // Called when write lock approval is accepted/rejected
+  onApprovalHandled?: () => void; // Called when write lock approval is accepted/rejected
 }
 
 // Completion View Component - uses MessageList for action log
-function BrowserCompletionView({ 
+function BrowserCompletionView({
   taskId,
   isSuccess,
   message,
-}: { 
+}: {
   taskId: string;
   isSuccess: boolean;
   message?: string;
@@ -182,17 +189,11 @@ function BrowserCompletionView({
           <XCircle className="h-8 w-8 text-red-500 flex-shrink-0" />
         )}
         <div className="flex-1">
-          <h3 className="text-lg font-semibold">
-            {isSuccess ? 'Task Completed' : 'Task Failed'}
-          </h3>
-          {message && (
-            <p className="text-sm text-muted-foreground mt-1">
-              {message}
-            </p>
-          )}
+          <h3 className="text-lg font-semibold">{isSuccess ? 'Task Completed' : 'Task Failed'}</h3>
+          {message && <p className="text-sm text-muted-foreground mt-1">{message}</p>}
         </div>
       </div>
-      
+
       {/* Action Timeline - using MessageList */}
       <div className="space-y-1">
         <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
@@ -216,7 +217,7 @@ export default function BrowserViewPanel({
   browserUrl,
   isAnyBrowserFullscreen,
   onFullscreenToggle,
-  onApprovalHandled
+  onApprovalHandled,
 }: BrowserViewPanelProps) {
   const { messages } = useAgentContext();
   const [isThisFullscreen, setIsThisFullscreen] = useState(false);
@@ -226,10 +227,10 @@ export default function BrowserViewPanel({
   const [currentBrowserUrl, setCurrentBrowserUrl] = useState(browserUrl);
   const [isDisconnected, setIsDisconnected] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  
+
   // Detect completion status from context messages
   const { isComplete, isSuccess, completionMessage } = useMemo(() => {
-    const browserMessages = messages.filter(m => m.metadata?.task_id === taskId);
+    const browserMessages = messages.filter((m) => m.metadata?.task_id === taskId);
     const lastMessage = browserMessages[browserMessages.length - 1];
 
     const complete = lastMessage?.metadata?.action_type === 'task_complete';
@@ -247,20 +248,22 @@ export default function BrowserViewPanel({
   // Detect pending write lock approval for this browser task
   const pendingWriteLockApproval = useMemo(() => {
     // Find messages with writePermission in requestUserApproval metadata
-    const approvalMessage = messages.find(m =>
-      m.metadata?.toolStatus === 'IN_PROGRESS' &&
-      m.metadata?.requestUserApproval?.writePermission === true &&
-      m.metadata?.requestUserApproval?.attentionRequestId
+    const approvalMessage = messages.find(
+      (m) =>
+        m.metadata?.toolStatus === 'IN_PROGRESS' &&
+        m.metadata?.requestUserApproval?.writePermission === true &&
+        m.metadata?.requestUserApproval?.attentionRequestId,
     );
 
     if (!approvalMessage) return null;
 
     return {
-      attentionRequestId: approvalMessage.metadata?.requestUserApproval?.attentionRequestId as string,
+      attentionRequestId: approvalMessage.metadata?.requestUserApproval
+        ?.attentionRequestId as string,
       question: approvalMessage.text || 'Approve this write action?',
     };
   }, [messages]);
-  
+
   // Listen for Steel disconnection message (for real-time detection)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -275,33 +278,33 @@ export default function BrowserViewPanel({
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, [isComplete]);
-  
+
   // Update browser URL when prop changes
   useEffect(() => {
     setCurrentBrowserUrl(browserUrl);
   }, [browserUrl]);
-  
+
   // Resume handler
   const handleResume = async () => {
     setIsResuming(true);
     try {
       const headers = getAuthHeaders();
-      
+
       const response = await fetch(`${API_BASE_WITH_PATH}/browser-session/resume`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ task_id: taskId }),
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to resume session');
       }
-      
+
       const data = await response.json();
-      
+
       setCurrentBrowserUrl(data.debug_url);
       setIsDisconnected(false);
-      
+
       console.log('✅ Browser session resumed successfully');
     } catch (error) {
       console.error('❌ Failed to resume browser session:', error);
@@ -310,26 +313,26 @@ export default function BrowserViewPanel({
       setIsResuming(false);
     }
   };
-  
+
   // Track browser container position for portal positioning
   useEffect(() => {
     if (isAnyBrowserFullscreen) return;
-    
+
     const updatePosition = () => {
       if (browserContainerRef.current) {
         const rect = browserContainerRef.current.getBoundingClientRect();
         setActionsPosition({
           top: rect.top,
           left: rect.left - 320,
-          height: rect.height
+          height: rect.height,
         });
       }
     };
-    
+
     updatePosition();
     window.addEventListener('resize', updatePosition);
     window.addEventListener('scroll', updatePosition, true);
-    
+
     return () => {
       window.removeEventListener('resize', updatePosition);
       window.removeEventListener('scroll', updatePosition, true);
@@ -344,7 +347,7 @@ export default function BrowserViewPanel({
 
   // Fullscreen actions panel (left side) - uses MessageList
   const fullscreenActionsPanel = isThisFullscreen && (
-    <div 
+    <div
       className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
       style={{
         backdropFilter: 'blur(8px)',
@@ -377,13 +380,13 @@ export default function BrowserViewPanel({
       }}
     >
       {/* Header extension */}
-      <div 
+      <div
         className="flex items-center justify-between p-3 border-b border-border bg-muted/30 border-t border-l border-border rounded-tl-lg"
         style={{ height: '52px' }}
       />
-      
+
       {/* Actions panel with MessageList */}
-      <div 
+      <div
         className="w-full bg-muted/10 border-l border-b border-border rounded-bl-lg flex flex-col overflow-hidden"
         style={{
           height: 'calc(100% - 52px)',
@@ -410,7 +413,7 @@ export default function BrowserViewPanel({
     return (
       <div className="animate-in fade-in duration-300 w-full">
         <div className="max-w-4xl mx-auto">
-          <BrowserCompletionView 
+          <BrowserCompletionView
             taskId={taskId}
             isSuccess={isSuccess}
             message={completionMessage}
@@ -424,50 +427,49 @@ export default function BrowserViewPanel({
     <>
       {/* Portal actions panel to body when not fullscreen */}
       {portalContent && typeof window !== 'undefined' && createPortal(portalContent, document.body)}
-      
-      <div 
+
+      <div
         className={cn(
-          "animate-in fade-in duration-300 w-full",
-          isThisFullscreen && "fixed inset-0 z-50 bg-background p-4"
+          'animate-in fade-in duration-300 w-full',
+          isThisFullscreen && 'fixed inset-0 z-50 bg-background p-4',
         )}
       >
         {/* Outer container */}
-        <div 
+        <div
           ref={browserContainerRef}
           className={cn(
-            "max-w-4xl mx-auto relative",
-            isThisFullscreen && "h-full max-w-none flex flex-row"
+            'max-w-4xl mx-auto relative',
+            isThisFullscreen && 'h-full max-w-none flex flex-row',
           )}
         >
           {/* Actions panel - fullscreen mode (left side) */}
           {fullscreenActionsPanel}
-          
+
           {/* Browser container */}
-          <div className={cn(
-            "flex flex-col",
-            isThisFullscreen ? "flex-1" : "w-full"
-          )}>
+          <div className={cn('flex flex-col', isThisFullscreen ? 'flex-1' : 'w-full')}>
             {/* Header */}
-            <div 
+            <div
               className={cn(
-                "flex items-center justify-between p-3 border-b border-border bg-muted/30 border-t border-r border-border",
-                !isThisFullscreen && "rounded-tr-lg"
+                'flex items-center justify-between p-3 border-b border-border bg-muted/30 border-t border-r border-border',
+                !isThisFullscreen && 'rounded-tr-lg',
               )}
             >
               <div className="flex items-center gap-2">
-                <div className={cn(
-                  "h-2 w-2 rounded-full",
-                  isDisconnected ? "bg-yellow-500" : "bg-green-500 animate-pulse"
-                )} />
+                <div
+                  className={cn(
+                    'h-2 w-2 rounded-full',
+                    isDisconnected ? 'bg-yellow-500' : 'bg-green-500 animate-pulse',
+                  )}
+                />
                 <span className="text-xs font-medium text-muted-foreground">
-                  {isDisconnected ? "Browser Session Disconnected" : "Browser Session Active"}
+                  {isDisconnected ? 'Browser Session Disconnected' : 'Browser Session Active'}
                 </span>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={toggleFullscreen}
                   className="p-1.5 rounded hover:bg-muted transition-colors"
-                  aria-label={isThisFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                  aria-label={isThisFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                 >
                   {isThisFullscreen ? (
                     <X className="h-4 w-4 text-muted-foreground" />
@@ -479,10 +481,12 @@ export default function BrowserViewPanel({
             </div>
 
             {/* Browser iframe */}
-            <div className={cn(
-              "bg-white border-x border-b border-border w-full relative",
-              isThisFullscreen ? "flex-1" : "aspect-video"
-            )}>
+            <div
+              className={cn(
+                'bg-white border-x border-b border-border w-full relative',
+                isThisFullscreen ? 'flex-1' : 'aspect-video',
+              )}
+            >
               <iframe
                 ref={iframeRef}
                 src={currentBrowserUrl}
@@ -505,13 +509,13 @@ export default function BrowserViewPanel({
                     onClick={handleResume}
                     disabled={isResuming}
                     className={cn(
-                      "flex items-center gap-1 px-2 py-1 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground text-xs shadow-sm transition-colors",
-                      isResuming 
-                        ? "opacity-50 cursor-not-allowed" 
-                        : "hover:bg-foreground/20 cursor-pointer"
+                      'flex items-center gap-1 px-2 py-1 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground text-xs shadow-sm transition-colors',
+                      isResuming
+                        ? 'opacity-50 cursor-not-allowed'
+                        : 'hover:bg-foreground/20 cursor-pointer',
                     )}
                   >
-                    {isResuming ? "Loading..." : "Take Control"}
+                    {isResuming ? 'Loading...' : 'Take Control'}
                   </button>
                 </div>
               )}
@@ -528,8 +532,8 @@ export default function BrowserViewPanel({
               /* Control hint - only show when no approval pending */
               <div
                 className={cn(
-                  "px-3 py-2 border-x border-b border-border bg-muted/20",
-                  !isThisFullscreen && "rounded-br-lg"
+                  'px-3 py-2 border-x border-b border-border bg-muted/20',
+                  !isThisFullscreen && 'rounded-br-lg',
                 )}
               >
                 <p className="text-[10px] text-muted-foreground italic">

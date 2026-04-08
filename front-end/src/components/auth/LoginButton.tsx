@@ -19,10 +19,10 @@
  * [CLOSED]
  */
 
-import { useState, useRef } from "react";
-import PhoneAuthModal from "./PhoneAuthModal";
-import { useAuth } from "@/hooks/useAuth";
-import { useNavigate } from "react-router-dom";
+import { useState, useRef } from 'react';
+import PhoneAuthModal from './PhoneAuthModal';
+import { useAuth } from '@/hooks/useAuth';
+import { useNavigate } from 'react-router-dom';
 
 const LoginButton = () => {
   const [modalOpen, setModalOpen] = useState(false);
@@ -53,15 +53,10 @@ const LoginButton = () => {
       >
         Login
       </button>
-      
-      <PhoneAuthModal 
-        open={modalOpen} 
-        onOpenChange={setModalOpen}
-        triggerRef={buttonRef}
-      />
+
+      <PhoneAuthModal open={modalOpen} onOpenChange={setModalOpen} triggerRef={buttonRef} />
     </>
   );
 };
 
 export default LoginButton;
-

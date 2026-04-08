@@ -56,10 +56,10 @@ export default function SmallTileAnimationCanvas({
 
   // Make viewport dimensions reactive
   const [viewportWidth, setViewportWidth] = useState(
-    typeof window !== 'undefined' ? window.innerWidth : 0
+    typeof window !== 'undefined' ? window.innerWidth : 0,
   );
   const [viewportHeight, setViewportHeight] = useState(
-    typeof window !== 'undefined' ? window.innerHeight : 0
+    typeof window !== 'undefined' ? window.innerHeight : 0,
   );
   const [scrollOffset, setScrollOffset] = useState({ x: 0, y: 0 });
   const tileSize = 143;
@@ -67,7 +67,7 @@ export default function SmallTileAnimationCanvas({
 
   // Track tiles that have EVER had a color > 0
   const everColoredTiles = useRef<Set<string>>(new Set());
-  
+
   // Update the set whenever tileColors changes
   useEffect(() => {
     tileColors.forEach((colorId, key) => {
@@ -99,11 +99,11 @@ export default function SmallTileAnimationCanvas({
     const updateSize = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
-      
+
       // Update viewport dimensions state
       setViewportWidth(width);
       setViewportHeight(height);
-      
+
       // Set canvas sizes (actual pixel dimensions, not CSS)
       // Using 1:1 pixel ratio for crisp rendering
       dotsCanvas.width = width;
@@ -112,12 +112,12 @@ export default function SmallTileAnimationCanvas({
       animationsCanvas.height = height;
       bordersCanvas.width = width;
       bordersCanvas.height = height;
-      
+
       // Disable image smoothing on all canvas contexts for pixel-perfect rendering
       const dotsCtx = dotsCanvas.getContext('2d');
       const animationsCtx = animationsCanvas.getContext('2d');
       const bordersCtx = bordersCanvas.getContext('2d');
-      
+
       if (dotsCtx) {
         dotsCtx.imageSmoothingEnabled = false;
       }
@@ -186,7 +186,7 @@ export default function SmallTileAnimationCanvas({
 
       // Get currently animating tile positions
       const animatingPositions = new Set(
-        animatingTiles.map((tile) => `${tile.position.row},${tile.position.col}`)
+        animatingTiles.map((tile) => `${tile.position.row},${tile.position.col}`),
       );
 
       // Calculate grid origin (accounting for scroll)
@@ -195,14 +195,14 @@ export default function SmallTileAnimationCanvas({
       const largeTileHalf = largeTileSize / 2;
       const tilesLeft = Math.floor((centerX - largeTileHalf) / tileSize);
       const tilesUp = Math.floor((centerY - largeTileHalf) / tileSize);
-      const gridOriginX = centerX - largeTileHalf - (tilesLeft * tileSize) + scrollOffset.x;
-      const gridOriginY = centerY - largeTileHalf - (tilesUp * tileSize) + scrollOffset.y;
+      const gridOriginX = centerX - largeTileHalf - tilesLeft * tileSize + scrollOffset.x;
+      const gridOriginY = centerY - largeTileHalf - tilesUp * tileSize + scrollOffset.y;
 
       // Draw dots on DOTS canvas for tiles that have EVER had colors > 0
       // Use theme-appropriate color to match tile borders
       const isDarkMode = document.documentElement.classList.contains('dark');
       const dotColor = isDarkMode ? 'rgba(31, 41, 55, 0.8)' : 'rgba(229, 231, 235, 0.8)';
-      
+
       everColoredTiles.current.forEach((key) => {
         if (!animatingPositions.has(key)) {
           const [row, col] = key.split(',').map(Number);
@@ -215,33 +215,33 @@ export default function SmallTileAnimationCanvas({
       // Render animations on ANIMATIONS canvas
       const now = performance.now();
       const completedTiles: AnimatingTile[] = [];
-      
+
       animatingTiles.forEach((tile) => {
         const elapsedMs = now - tile.startTime;
-        
+
         // Recalculate screen position from row/col using current grid origin
         // This ensures animations move smoothly with the grid when viewport resizes
         const screenX = gridOriginX + tile.position.col * tileSize;
         const screenY = gridOriginY + tile.position.row * tileSize;
-        
+
         const isStillPlaying = renderProceduralAnimationSync(
           animationsCtx,
           screenX,
           screenY,
           tileSize,
           elapsedMs,
-          tile.animationId // Pass the animation ID to render the correct animation
+          tile.animationId, // Pass the animation ID to render the correct animation
         );
-        
+
         // If animation is complete, mark for removal
         if (!isStillPlaying) {
           completedTiles.push(tile);
         }
       });
-      
+
       // Remove completed animations
       if (completedTiles.length > 0) {
-        completedTiles.forEach(tile => removeAnimatingTile(tile));
+        completedTiles.forEach((tile) => removeAnimatingTile(tile));
       }
 
       animationFrameRef.current = requestAnimationFrame(render);
@@ -279,7 +279,7 @@ export default function SmallTileAnimationCanvas({
           imageRendering: 'pixelated' as any, // CSS for crisp pixel rendering (fallbacks handled by browser)
         }}
       />
-      
+
       {/* Animations canvas - Middle layer (z-[-2]) */}
       <canvas
         ref={animationsCanvasRef}
@@ -304,4 +304,3 @@ export default function SmallTileAnimationCanvas({
     </div>
   );
 }
-

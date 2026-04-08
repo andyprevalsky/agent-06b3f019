@@ -55,7 +55,10 @@ interface AppDataContextType {
 const AppDataContext = createContext<AppDataContextType | undefined>(undefined);
 
 // Normalize URL - strip trailing slash to prevent double slashes
-const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 
 export function AppDataProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<Model[]>([]);
@@ -72,7 +75,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       setModelsError(null);
 
       const response = await fetch(`${BACKEND_API_URL}/api/models`);
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch models: ${response.statusText}`);
       }
@@ -139,4 +142,3 @@ export function useAppData() {
   }
   return context;
 }
-

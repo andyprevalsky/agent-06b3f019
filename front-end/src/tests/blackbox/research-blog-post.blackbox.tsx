@@ -13,7 +13,7 @@ function renderBlogPost(slug: string) {
     <Routes>
       <Route path="/research/:slug" element={<ResearchBlogPost />} />
     </Routes>,
-    { route: `/research/${slug}` }
+    { route: `/research/${slug}` },
   );
 }
 
@@ -34,7 +34,9 @@ describe('ResearchBlogPost page', () => {
     it('renders the intro text', () => {
       renderBlogPost(validPost.slug);
       // Check a distinctive phrase from the intro
-      expect(screen.getByText(/personal assistants that take action in the world/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/personal assistants that take action in the world/i),
+      ).toBeInTheDocument();
     });
 
     it('renders all section headings as h2 elements', () => {
@@ -49,7 +51,9 @@ describe('ResearchBlogPost page', () => {
       renderBlogPost(validPost.slug);
       // Spot-check content from specific sections
       expect(screen.getByText(/Superintelligence, as we will know it/i)).toBeInTheDocument();
-      expect(screen.getByText(/Training a model that can decompose real-world problems/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Training a model that can decompose real-world problems/i),
+      ).toBeInTheDocument();
     });
   });
 
@@ -110,7 +114,7 @@ describe('ResearchBlogPost page', () => {
 
       // The header branding link should point to home
       const homeLinks = screen.getAllByRole('link', { name: /rose labs/i });
-      const headerLink = homeLinks.find(link => link.getAttribute('href') === '/');
+      const headerLink = homeLinks.find((link) => link.getAttribute('href') === '/');
       expect(headerLink).toBeDefined();
     });
 
@@ -124,20 +128,23 @@ describe('ResearchBlogPost page', () => {
   describe('valid slug — breadcrumb navigation', () => {
     it('renders breadcrumb with Blog link to /research', () => {
       renderBlogPost(validPost.slug);
-      const breadcrumbNav = document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+      const breadcrumbNav =
+        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
       const blogLink = within(breadcrumbNav).getByText('Blog');
       expect(blogLink.closest('a')).toHaveAttribute('href', '/research');
     });
 
     it('renders breadcrumb category matching the post category', () => {
       renderBlogPost(validPost.slug);
-      const breadcrumbNav = document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+      const breadcrumbNav =
+        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
       expect(within(breadcrumbNav).getByText(validPost.category)).toBeInTheDocument();
     });
 
     it('renders breadcrumb category link pointing to /research', () => {
       renderBlogPost(validPost.slug);
-      const breadcrumbNav = document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+      const breadcrumbNav =
+        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
       const categoryLink = within(breadcrumbNav).getByText(validPost.category);
       expect(categoryLink.closest('a')).toHaveAttribute('href', '/research');
     });

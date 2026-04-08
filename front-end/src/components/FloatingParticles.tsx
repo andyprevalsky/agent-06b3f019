@@ -9,10 +9,12 @@
  *   +--> CSS animations handle particle movement
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState } from 'react';
 
 const FloatingParticles = () => {
-  const [particles, setParticles] = useState<Array<{ id: number; left: number; delay: number }>>([]);
+  const [particles, setParticles] = useState<Array<{ id: number; left: number; delay: number }>>(
+    [],
+  );
 
   useEffect(() => {
     const newParticles = Array.from({ length: 15 }, (_, i) => ({

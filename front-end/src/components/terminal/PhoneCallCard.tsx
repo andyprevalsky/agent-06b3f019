@@ -62,7 +62,7 @@ const AudioWave = memo(function AudioWave({ isActive }: { isActive: boolean }) {
           key={i}
           className={cn(
             'w-0.5 bg-green-500 rounded-full transition-all duration-150',
-            isActive ? 'animate-pulse' : 'h-1'
+            isActive ? 'animate-pulse' : 'h-1',
           )}
           style={{
             height: isActive ? `${8 + Math.random() * 8}px` : '4px',
@@ -124,17 +124,8 @@ const RecordingPlayer = memo(function RecordingPlayer({ recordingUrl }: { record
     <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
       <audio ref={audioRef} src={recordingUrl} preload="metadata" />
 
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0 shrink-0"
-        onClick={togglePlay}
-      >
-        {isPlaying ? (
-          <Pause className="h-4 w-4" />
-        ) : (
-          <Play className="h-4 w-4" />
-        )}
+      <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={togglePlay}>
+        {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
       </Button>
 
       <div className="flex-1 flex items-center gap-2">
@@ -239,7 +230,11 @@ export const PhoneCallCard = memo(function PhoneCallCard({
           }
 
           // Create stereo audio buffer at 16kHz
-          const audioBuffer = audioContextRef.current.createBuffer(2, samplesPerChannel, VAPI_SAMPLE_RATE);
+          const audioBuffer = audioContextRef.current.createBuffer(
+            2,
+            samplesPerChannel,
+            VAPI_SAMPLE_RATE,
+          );
           audioBuffer.getChannelData(0).set(leftChannel);
           audioBuffer.getChannelData(1).set(rightChannel);
 
@@ -292,14 +287,14 @@ export const PhoneCallCard = memo(function PhoneCallCard({
         'rounded-lg border overflow-hidden transition-all duration-200',
         isInProgress && 'border-green-500/50 bg-green-500/5',
         isFinished && 'border-border bg-card',
-        isError && 'border-red-500/50 bg-red-500/5'
+        isError && 'border-red-500/50 bg-red-500/5',
       )}
     >
       {/* Header */}
       <div
         className={cn(
           'flex items-center gap-3 p-3 cursor-pointer',
-          isFinished && 'hover:bg-muted/50'
+          isFinished && 'hover:bg-muted/50',
         )}
         onClick={() => isFinished && setIsExpanded(!isExpanded)}
       >
@@ -309,7 +304,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
             'w-8 h-8 rounded-full flex items-center justify-center shrink-0',
             isInProgress && 'bg-green-500/20 animate-pulse',
             isFinished && 'bg-muted',
-            isError && 'bg-red-500/20'
+            isError && 'bg-red-500/20',
           )}
         >
           <Phone
@@ -317,7 +312,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
               'h-4 w-4',
               isInProgress && 'text-green-500',
               isFinished && 'text-muted-foreground',
-              isError && 'text-red-500'
+              isError && 'text-red-500',
             )}
           />
         </div>
@@ -336,7 +331,8 @@ export const PhoneCallCard = memo(function PhoneCallCard({
               <>
                 <span className="text-muted-foreground">•</span>
                 <span className="text-sm text-muted-foreground">
-                  {Math.floor(phoneCall.duration / 60)}:{(phoneCall.duration % 60).toString().padStart(2, '0')}
+                  {Math.floor(phoneCall.duration / 60)}:
+                  {(phoneCall.duration % 60).toString().padStart(2, '0')}
                 </span>
               </>
             )}
@@ -365,11 +361,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
                   setIsMuted(!isMuted);
                 }}
               >
-                {isMuted ? (
-                  <VolumeX className="h-4 w-4" />
-                ) : (
-                  <Volume2 className="h-4 w-4" />
-                )}
+                {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
               </Button>
             </>
           )}
@@ -377,11 +369,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
           {/* Expand chevron for finished calls */}
           {isFinished && (
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-              {isExpanded ? (
-                <ChevronUp className="h-4 w-4" />
-              ) : (
-                <ChevronDown className="h-4 w-4" />
-              )}
+              {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
             </Button>
           )}
         </div>
@@ -391,9 +379,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
       {isFinished && isExpanded && (
         <div className="border-t p-3 space-y-3">
           {/* Recording player */}
-          {phoneCall.recordingUrl && (
-            <RecordingPlayer recordingUrl={phoneCall.recordingUrl} />
-          )}
+          {phoneCall.recordingUrl && <RecordingPlayer recordingUrl={phoneCall.recordingUrl} />}
 
           {/* Summary */}
           {phoneCall.summary && (

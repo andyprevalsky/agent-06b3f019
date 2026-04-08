@@ -49,16 +49,12 @@ function installSettingsHandlers(overrides?: {
       return HttpResponse.json(
         overrides?.subscription ?? {
           tier: 10,
-          upgradeOptions: [
-            { tier: 20, name: 'Pro', url: 'https://stripe.com/checkout/pro' },
-          ],
+          upgradeOptions: [{ tier: 20, name: 'Pro', url: 'https://stripe.com/checkout/pro' }],
         },
       );
     }),
     http.get(`${API_BASE}/api-keys`, () => {
-      return HttpResponse.json(
-        overrides?.apiKeys ?? { keys: [] },
-      );
+      return HttpResponse.json(overrides?.apiKeys ?? { keys: [] });
     }),
     // PUT for saving personal info
     http.put(`${API_BASE}/user-settings`, () => {
@@ -72,7 +68,12 @@ function installSettingsHandlers(overrides?: {
     http.post(`${API_BASE}/api-keys`, () => {
       return HttpResponse.json({
         apiKey: 'TEST_API_KEY_PLACEHOLDER',
-        key: { id: 'key-new', name: 'My Key', maskedApiKey: 'rk_t...6', createdAt: new Date().toISOString() },
+        key: {
+          id: 'key-new',
+          name: 'My Key',
+          maskedApiKey: 'rk_t...6',
+          createdAt: new Date().toISOString(),
+        },
       });
     }),
     // DELETE for deleting API key
@@ -242,9 +243,7 @@ describe('Settings page', () => {
       await user.click(screen.getByRole('tab', { name: /api keys/i }));
 
       await waitFor(() => {
-        expect(
-          screen.getByText(/no api keys yet/i),
-        ).toBeInTheDocument();
+        expect(screen.getByText(/no api keys yet/i)).toBeInTheDocument();
       });
     });
   });
@@ -314,9 +313,7 @@ describe('Settings page', () => {
       await user.click(screen.getByRole('tab', { name: /api keys/i }));
 
       await waitFor(() => {
-        expect(
-          screen.getByRole('button', { name: /generate new key/i }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /generate new key/i })).toBeInTheDocument();
       });
     });
 
@@ -330,9 +327,7 @@ describe('Settings page', () => {
 
       await user.click(screen.getByRole('tab', { name: /api keys/i }));
       await waitFor(() => {
-        expect(
-          screen.getByRole('button', { name: /generate new key/i }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /generate new key/i })).toBeInTheDocument();
       });
 
       // Click generate - with a subscription tier it should show the form
@@ -442,7 +437,10 @@ describe('Settings page', () => {
 
     it('billing tab shows free tier when no subscription', async () => {
       installSettingsHandlers({
-        subscription: { tier: null, upgradeOptions: [{ tier: 10, name: 'Starter', url: 'https://stripe.com/checkout' }] },
+        subscription: {
+          tier: null,
+          upgradeOptions: [{ tier: 10, name: 'Starter', url: 'https://stripe.com/checkout' }],
+        },
       });
 
       const user = userEvent.setup();
@@ -468,9 +466,7 @@ describe('Settings page', () => {
       await user.click(screen.getByRole('tab', { name: /billing/i }));
 
       await waitFor(() => {
-        expect(
-          screen.getByRole('button', { name: /manage subscription/i }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /manage subscription/i })).toBeInTheDocument();
       });
     });
   });
@@ -515,9 +511,7 @@ describe('Settings page', () => {
         expect(screen.getByText('Settings')).toBeInTheDocument();
       });
 
-      const req = capturedRequests.find(
-        (r) => r.url.includes('/api-keys') && r.method === 'GET',
-      );
+      const req = capturedRequests.find((r) => r.url.includes('/api-keys') && r.method === 'GET');
       expect(req).toBeDefined();
       expect(req!.headers['authorization']).toBe('Bearer test-token');
     });

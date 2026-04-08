@@ -14,12 +14,15 @@ const ServiceFeeSection = () => {
           <div className="p-8 opacity-70">
             <h3 className="text-lg font-medium mb-4 text-foreground/70">AI Provider Services</h3>
             <p className="text-sm text-foreground/60 mb-4">
-              All Navi devices require AI provider services for optimal functionality. You have two options:
+              All Navi devices require AI provider services for optimal functionality. You have two
+              options:
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
               <div className="text-left">
                 <h4 className="font-medium text-foreground/70 mb-2">Provide Your Own API Keys</h4>
-                <p className="text-foreground/60">Use your existing OpenAI, Anthropic, or other provider accounts</p>
+                <p className="text-foreground/60">
+                  Use your existing OpenAI, Anthropic, or other provider accounts
+                </p>
               </div>
               <div className="text-left">
                 <h4 className="font-medium text-foreground/70 mb-2">Pay-as-You-Go Service</h4>

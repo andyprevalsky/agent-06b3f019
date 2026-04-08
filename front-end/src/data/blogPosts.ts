@@ -30,8 +30,10 @@ export interface BlogPost {
 export const blogPosts: BlogPost[] = [
   {
     slug: 'task-decomposer',
-    title: 'Why task decomposition is the bottleneck to superintelligence & how we built a SOTA generalizable task decomposer',
-    description: 'How we built a flexible task decomposition layer that enables agents to complete complex, multi-step tasks across diverse domains.',
+    title:
+      'Why task decomposition is the bottleneck to superintelligence & how we built a SOTA generalizable task decomposer',
+    description:
+      'How we built a flexible task decomposition layer that enables agents to complete complex, multi-step tasks across diverse domains.',
     category: 'research',
     date: '2026-03-22',
     author: 'Andy Prevalsky',
@@ -51,7 +53,7 @@ the completion of <em>P<sub>i</sub></em> through <em>P<sub>j</sub></em> == the c
 
 then, in theory, we could recursively reduce <em>P</em> to a set of proximate problems that are independently solvable by modern-day LLMs. And in this simple formula it becomes clear that the complexity of creating Superintelligence, a system that can solve any user problem <em>P</em>, is equal to the complexity of creating a general-purpose task decomposer that can satisfy our lemma.
 
-<span style="font-size: 0.85em; font-style: italic;">You may say, wait a minute, what if a problem <em>P</em> is NOT decomposable at all? From our experience, almost ALL problems are decomposable in some way except for fringe problems in mathematics.</span>`
+<span style="font-size: 0.85em; font-style: italic;">You may say, wait a minute, what if a problem <em>P</em> is NOT decomposable at all? From our experience, almost ALL problems are decomposable in some way except for fringe problems in mathematics.</span>`,
       },
       {
         id: 'landscape',
@@ -70,7 +72,7 @@ then, in theory, we could recursively reduce <em>P</em> to a set of proximate pr
 
 <strong>Jan 17, 2026</strong> <a href="https://ensue.dev/blog/stop-throwing-a-single-agent-at-complex-problems/" target="_blank" rel="noopener noreferrer">Ensue | Stop Throwing A Single Agent At Complex Problems</a> Shows how recursive decomposition can extend LLM capabilities to new SOTA levels for math work, solving a Putnam problem previously out of reach of Opus 4.5
 
-<strong>Jan 28, 2026</strong> <a href="https://arxiv.org/abs/2512.24601v1" target="_blank" rel="noopener noreferrer">Recursive Language Models</a> While not a task decomposer per se, recursive language models show how the effective context of a model can be extended drastically by externalizing the input prompt as an environment variable that the core LLM can query and interact with.`
+<strong>Jan 28, 2026</strong> <a href="https://arxiv.org/abs/2512.24601v1" target="_blank" rel="noopener noreferrer">Recursive Language Models</a> While not a task decomposer per se, recursive language models show how the effective context of a model can be extended drastically by externalizing the input prompt as an environment variable that the core LLM can query and interact with.`,
       },
       {
         id: 'whats-missing',
@@ -81,7 +83,7 @@ Additionally, existing benchmarks for task decomposers focus on a narrow set of 
 
 Credit assignment for recursive task decomposition (knowing which decomposition in the entire decomposition tree was bad/good) is currently an open research problem. Previous algorithms like AlphaGo solve this problem because the problem space is perfectly simulatable, and thus, are able to generate massive amounts of end-to-end runs that make approximating any given state in the tree possible.
 
-Decentralized task decomposers, like Agent Teams or Cursor's Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications, these are unacceptable conditions.`
+Decentralized task decomposers, like Agent Teams or Cursor's Long Running Code Agent are highly costly, require continued maintenance to avoid stagnation, and are bottlenecked by the complexity of creating a perfect verifier, which they rely on to ensure target drift doesn't happen. For real-world applications, these are unacceptable conditions.`,
       },
       {
         id: 'how-we-built',
@@ -121,33 +123,33 @@ The resulting model, Rose-Decompose, performs dramatically better on our hold-ou
 
 <p style="font-size: 0.75em; font-style: italic; color: #6b7280; margin-top: 6px;"><strong>All-3 Pass:</strong> the percentage of decompositions where all three quality criteria (ME, CE, and CX) pass simultaneously.<br/><br/><strong>Tree Pass (depth=3):</strong> the probability that every node in a full recursive decomposition tree of depth 3 passes all three criteria.</p>
 
-We also built out an execution engine that allows for real-world testing of our decomposition model, which you can find at <a href="https://roselabs.ai" target="_blank" rel="noopener noreferrer">https://roselabs.ai</a>`
+We also built out an execution engine that allows for real-world testing of our decomposition model, which you can find at <a href="https://roselabs.ai" target="_blank" rel="noopener noreferrer">https://roselabs.ai</a>`,
       },
       {
         id: 'what-weve-learned',
         title: "What we've learned",
         content: `Training a model that can decompose real-world problems is uniquely hard because of a lack of a good verifiable signal. While there is existing research that shows this direction is promising by measuring indirect signals like SWE bench scores, or Deep Research benchmarks, there is still a lack of a clear industry benchmark for determining whether task decomposition is done optimally.
 
-Because task decomposition is a skill with an extremely high skill ceiling, curtailed training is still needed in order to reach capability sufficient for real-world use, even current SOTA models like Opus 4.6 still underperform dramatically.`
+Because task decomposition is a skill with an extremely high skill ceiling, curtailed training is still needed in order to reach capability sufficient for real-world use, even current SOTA models like Opus 4.6 still underperform dramatically.`,
       },
       {
         id: 'whats-next',
         title: "What's Next",
         content: `Inspired by the progress made in <a href="https://deepmind.google/discover/blog/genie-2-a-large-scale-foundation-world-model/" target="_blank" rel="noopener noreferrer">World Models | Google Genie</a>, the increasing viability of <a href="https://societies.io" target="_blank" rel="noopener noreferrer">Simulated Societies</a> and <a href="https://arxiv.org/pdf/2405.02957v1" target="_blank" rel="noopener noreferrer">simulated RL Environments</a>, Rose Labs anticipates creating a simulated, lazily-rendered, low-dimensionality, world for evolving a generalized task decomposer.
 
-Additionally, scaling our expertly labeled & synthetically generated dataset is likely to continue to yield gains in decomposition performance.`
-      }
-    ]
-  }
+Additionally, scaling our expertly labeled & synthetically generated dataset is likely to continue to yield gains in decomposition performance.`,
+      },
+    ],
+  },
 ];
 
 export function getBlogPost(slug: string): BlogPost | undefined {
-  return blogPosts.find(post => post.slug === slug);
+  return blogPosts.find((post) => post.slug === slug);
 }
 
 export function getBlogPostsByCategory(category: BlogCategory | 'all'): BlogPost[] {
   if (category === 'all') return blogPosts;
-  return blogPosts.filter(post => post.category === category);
+  return blogPosts.filter((post) => post.category === category);
 }
 
 export function formatDate(dateString: string): string {
@@ -155,6 +157,6 @@ export function formatDate(dateString: string): string {
   return date.toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
-    day: 'numeric'
+    day: 'numeric',
   });
 }

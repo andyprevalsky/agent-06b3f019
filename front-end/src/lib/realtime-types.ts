@@ -101,8 +101,8 @@ export interface MessageMetadata {
  * Browser agent action types.
  */
 export type BrowserActionType =
-  | 'browser'       // Init message (new browser session)
-  | 'system'        // Legacy init
+  | 'browser' // Init message (new browser session)
+  | 'system' // Legacy init
   | 'navigate'
   | 'click'
   | 'type'
@@ -117,20 +117,17 @@ export type BrowserActionType =
 /**
  * Code agent action types.
  */
-export type CodeActionType =
-  | 'code_complete'
-  | 'code_error'
-  | 'code_deployed';
+export type CodeActionType = 'code_complete' | 'code_error' | 'code_deployed';
 
 /**
  * Claude Code agent action types.
  * See agents/tools/spawn_claude_code_agent.py:save_claude_code_message
  */
 export type ClaudeCodeActionType =
-  | 'claude_code_started'  // Init message (new sandbox session)
+  | 'claude_code_started' // Init message (new sandbox session)
   | 'task_started'
-  | 'agent_observation'    // Periodic status updates
-  | 'system'               // Verifier messages
+  | 'agent_observation' // Periodic status updates
+  | 'system' // Verifier messages
   | 'task_complete'
   | 'session_cancelled'
   | 'error';
@@ -140,11 +137,11 @@ export type ClaudeCodeActionType =
  * See e2b-templates/claude-code/ws-server.mjs
  */
 export type ClaudeCodeWsMessage =
-  | { type: 'buffer'; data: string }   // Full history buffer on connect
-  | { type: 'stdout'; data: string }   // Live stdout chunk
-  | { type: 'stderr'; data: string }   // Live stderr chunk
-  | { type: 'exit'; code: number }     // Process exited
-  | { type: 'error'; data: string };   // Server error
+  | { type: 'buffer'; data: string } // Full history buffer on connect
+  | { type: 'stdout'; data: string } // Live stdout chunk
+  | { type: 'stderr'; data: string } // Live stderr chunk
+  | { type: 'exit'; code: number } // Process exited
+  | { type: 'error'; data: string }; // Server error
 
 // =============================================================================
 // Tool-Specific Metadata Types
@@ -457,13 +454,13 @@ export type ToolMessageMetadata =
  * Sent via Supabase Realtime when a message is inserted.
  */
 export interface InsertMessagePayload {
-  agentId: string;  // Used to filter messages for correct agent
+  agentId: string; // Used to filter messages for correct agent
   id: string;
-  timestamp: string;  // ISO 8601 format
+  timestamp: string; // ISO 8601 format
   text: string;
   role: MessageRole;
   metadata?: MessageMetadata | null;
-  file_pointer?: FilePointer | null;  // File attachment (OAI-style: one file per message)
+  file_pointer?: FilePointer | null; // File attachment (OAI-style: one file per message)
 }
 
 /**
@@ -485,7 +482,10 @@ export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageM
 export function isToolMessage(msg: InsertMessagePayload): msg is ToolMessagePayload {
   if (msg.role !== 'TOOL') return false;
   if (!msg.metadata || typeof msg.metadata.toolName !== 'string') {
-    console.error('❌ [Realtime] isToolMessage called on invalid TOOL message (missing metadata.toolName)', msg);
+    console.error(
+      '❌ [Realtime] isToolMessage called on invalid TOOL message (missing metadata.toolName)',
+      msg,
+    );
     return false;
   }
   return true;
@@ -495,35 +495,48 @@ export function isToolMessage(msg: InsertMessagePayload): msg is ToolMessagePayl
  * Type guard for spawn_browser_agent messages.
  */
 export function isSpawnBrowserAgentMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<SpawnBrowserAgentMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_browser_agent';
+  return (
+    msg.role === 'TOOL' &&
+    msg.metadata !== null &&
+    msg.metadata !== undefined &&
+    msg.metadata.toolName === 'spawn_browser_agent'
+  );
 }
 
 /**
  * Type guard for spawn_claude_code_agent messages.
  */
 export function isSpawnClaudeCodeAgentMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<SpawnClaudeCodeAgentMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_claude_code_agent';
+  return (
+    msg.role === 'TOOL' &&
+    msg.metadata !== null &&
+    msg.metadata !== undefined &&
+    msg.metadata.toolName === 'spawn_claude_code_agent'
+  );
 }
 
 /**
  * Type guard for spawn_agent messages (unified: explore/browser/code/sub_agent).
  */
 export function isSpawnAgentMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<SpawnAgentMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'spawn_agent';
+  return (
+    msg.role === 'TOOL' &&
+    msg.metadata !== null &&
+    msg.metadata !== undefined &&
+    msg.metadata.toolName === 'spawn_agent'
+  );
 }
 
 /**
  * Type guard for explore agent messages (spawn_agent with agentType=explore).
  */
-export function isExploreAgentMessage(
-  msg: InsertMessagePayload
-): boolean {
+export function isExploreAgentMessage(msg: InsertMessagePayload): boolean {
   return isSpawnAgentMessage(msg) && (msg.metadata as SpawnAgentMetadata).agentType === 'explore';
 }
 
@@ -531,28 +544,41 @@ export function isExploreAgentMessage(
  * Type guard for set_plan messages.
  */
 export function isSetPlanMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<SetPlanMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'set_plan';
+  return (
+    msg.role === 'TOOL' &&
+    msg.metadata !== null &&
+    msg.metadata !== undefined &&
+    msg.metadata.toolName === 'set_plan'
+  );
 }
 
 /**
  * Type guard for send_message_to_user messages.
  */
 export function isSendMessageToUserMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<SendMessageToUserMetadata> {
   if (msg.role !== 'TOOL' || msg.metadata === null || msg.metadata === undefined) return false;
-  return msg.metadata.toolName === 'send_message_to_user' || msg.metadata.toolName === 'send_message_to_user_execute_phase';
+  return (
+    msg.metadata.toolName === 'send_message_to_user' ||
+    msg.metadata.toolName === 'send_message_to_user_execute_phase'
+  );
 }
 
 /**
  * Type guard for request_user_signup messages.
  */
 export function isRequestUserSignupMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is ToolMessagePayload<RequestUserSignupMetadata> {
-  return msg.role === 'TOOL' && msg.metadata !== null && msg.metadata !== undefined && msg.metadata.toolName === 'request_user_signup';
+  return (
+    msg.role === 'TOOL' &&
+    msg.metadata !== null &&
+    msg.metadata !== undefined &&
+    msg.metadata.toolName === 'request_user_signup'
+  );
 }
 
 /**
@@ -560,7 +586,7 @@ export function isRequestUserSignupMessage(
  * These are output files from tools like Claude Code.
  */
 export function isAssistantFileMessage(
-  msg: InsertMessagePayload
+  msg: InsertMessagePayload,
 ): msg is InsertMessagePayload & { file_pointer: FilePointer } {
   return msg.role === 'ASSISTANT' && msg.file_pointer != null;
 }
@@ -585,7 +611,7 @@ export interface UpdateAgentPayload {
   tokensOut?: number;
   contextSize?: number;
   messageCount?: number;
-  treeCostCents?: number;  // Real-time tree cost updates (for price limit feature)
+  treeCostCents?: number; // Real-time tree cost updates (for price limit feature)
   updatedAt?: string;
   temporalWorkflowId?: string | null;
 }
@@ -919,9 +945,11 @@ function validateInsertMessagePayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.id !== 'string') return `Missing or invalid 'id' (got ${typeof p.id})`;
-  if (typeof p.timestamp !== 'string') return `Missing or invalid 'timestamp' (got ${typeof p.timestamp})`;
+  if (typeof p.timestamp !== 'string')
+    return `Missing or invalid 'timestamp' (got ${typeof p.timestamp})`;
   if (typeof p.text !== 'string') return `Missing or invalid 'text' (got ${typeof p.text})`;
   if (typeof p.role !== 'string') return `Missing or invalid 'role' (got ${typeof p.role})`;
   if (!['SYSTEM', 'ASSISTANT', 'USER', 'TOOL'].includes(p.role as string)) {
@@ -933,9 +961,12 @@ function validateInsertMessagePayload(payload: unknown): string | null {
       return 'TOOL message missing metadata';
     }
     const meta = p.metadata as Record<string, unknown>;
-    if (typeof meta.toolCallId !== 'string') return `TOOL metadata missing 'toolCallId' (got ${typeof meta.toolCallId})`;
-    if (typeof meta.toolName !== 'string') return `TOOL metadata missing 'toolName' (got ${typeof meta.toolName})`;
-    if (typeof meta.toolStatus !== 'string') return `TOOL metadata missing 'toolStatus' (got ${typeof meta.toolStatus})`;
+    if (typeof meta.toolCallId !== 'string')
+      return `TOOL metadata missing 'toolCallId' (got ${typeof meta.toolCallId})`;
+    if (typeof meta.toolName !== 'string')
+      return `TOOL metadata missing 'toolName' (got ${typeof meta.toolName})`;
+    if (typeof meta.toolStatus !== 'string')
+      return `TOOL metadata missing 'toolStatus' (got ${typeof meta.toolStatus})`;
     if (!['IN_PROGRESS', 'FINISHED', 'ERROR'].includes(meta.toolStatus as string)) {
       return `Invalid toolStatus '${meta.toolStatus}'. Must be IN_PROGRESS, FINISHED, or ERROR`;
     }
@@ -974,11 +1005,14 @@ function validateAssistantStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
-  if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.stream_id !== 'string')
+    return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.delta !== 'string') return `Missing or invalid 'delta' (got ${typeof p.delta})`;
   if (typeof p.done !== 'boolean') return `Missing or invalid 'done' (got ${typeof p.done})`;
-  if (typeof p.sequence !== 'number') return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
+  if (typeof p.sequence !== 'number')
+    return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
   return null;
 }
 
@@ -991,9 +1025,12 @@ function validatePlanStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
-  if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
-  if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.stream_id !== 'string')
+    return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
+  if (typeof p.tool_call_id !== 'string')
+    return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
   return null;
 }
@@ -1007,10 +1044,14 @@ function validateToolStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
-  if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
-  if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
-  if (typeof p.tool_name !== 'string') return `Missing or invalid 'tool_name' (got ${typeof p.tool_name})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.stream_id !== 'string')
+    return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
+  if (typeof p.tool_call_id !== 'string')
+    return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
+  if (typeof p.tool_name !== 'string')
+    return `Missing or invalid 'tool_name' (got ${typeof p.tool_name})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
   return null;
 }
@@ -1024,13 +1065,19 @@ function validateAttentionStreamPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
-  if (typeof p.stream_id !== 'string') return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
-  if (typeof p.tool_call_id !== 'string') return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
-  if (typeof p.message !== 'string') return `Missing or invalid 'message' (got ${typeof p.message})`;
-  if (typeof p.is_question !== 'boolean') return `Missing or invalid 'is_question' (got ${typeof p.is_question})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.stream_id !== 'string')
+    return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
+  if (typeof p.tool_call_id !== 'string')
+    return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
+  if (typeof p.message !== 'string')
+    return `Missing or invalid 'message' (got ${typeof p.message})`;
+  if (typeof p.is_question !== 'boolean')
+    return `Missing or invalid 'is_question' (got ${typeof p.is_question})`;
   if (typeof p.done !== 'boolean') return `Missing or invalid 'done' (got ${typeof p.done})`;
-  if (typeof p.sequence !== 'number') return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
+  if (typeof p.sequence !== 'number')
+    return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
   return null;
 }
 
@@ -1043,12 +1090,16 @@ function validateAgentStateChangedPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   if (typeof p.goal !== 'string') return `Missing or invalid 'goal' (got ${typeof p.goal})`;
   if (typeof p.status !== 'string') return `Missing or invalid 'status' (got ${typeof p.status})`;
-  if (typeof p.progress !== 'number') return `Missing or invalid 'progress' (got ${typeof p.progress})`;
-  if (!Array.isArray(p.toolsInUse)) return `Missing or invalid 'toolsInUse' (got ${typeof p.toolsInUse})`;
-  if (typeof p.messageCount !== 'number') return `Missing or invalid 'messageCount' (got ${typeof p.messageCount})`;
+  if (typeof p.progress !== 'number')
+    return `Missing or invalid 'progress' (got ${typeof p.progress})`;
+  if (!Array.isArray(p.toolsInUse))
+    return `Missing or invalid 'toolsInUse' (got ${typeof p.toolsInUse})`;
+  if (typeof p.messageCount !== 'number')
+    return `Missing or invalid 'messageCount' (got ${typeof p.messageCount})`;
   return null;
 }
 
@@ -1061,7 +1112,8 @@ function validateAgentModeStartedPayload(payload: unknown): string | null {
     return 'Payload is not an object';
   }
   const p = payload as Record<string, unknown>;
-  if (typeof p.agentId !== 'string') return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
+  if (typeof p.agentId !== 'string')
+    return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   return null;
 }
 
@@ -1076,7 +1128,7 @@ function validateAgentModeStartedPayload(payload: unknown): string | null {
 function extractAndValidate<T>(
   wrapper: unknown,
   eventType: string,
-  validator: (payload: unknown) => string | null
+  validator: (payload: unknown) => string | null,
 ): T | null {
   // First extract from wrapper
   const w = wrapper as RealtimeBroadcastWrapper<T>;
@@ -1087,7 +1139,10 @@ function extractAndValidate<T>(
     w.payload === null ||
     !('record' in w.payload)
   ) {
-    console.error(`❌ [Realtime] Unknown Message Type for ${eventType}: Invalid wrapper structure`, wrapper);
+    console.error(
+      `❌ [Realtime] Unknown Message Type for ${eventType}: Invalid wrapper structure`,
+      wrapper,
+    );
     return null;
   }
 
@@ -1106,7 +1161,11 @@ function extractAndValidate<T>(
  * Transforms DB column names to API format (filePointer -> file_pointer).
  */
 export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | null {
-  const record = extractAndValidate<InsertMessagePayload>(wrapper, 'INSERT', validateInsertMessagePayload);
+  const record = extractAndValidate<InsertMessagePayload>(
+    wrapper,
+    'INSERT',
+    validateInsertMessagePayload,
+  );
   if (!record) return null;
 
   // Transform DB column name (camelCase) to API format (snake_case)
@@ -1140,7 +1199,11 @@ export function extractDeletePayload(wrapper: unknown): DeleteMessagePayload | n
  * Extract and validate ASSISTANT_STREAM payload.
  */
 export function extractAssistantStreamPayload(wrapper: unknown): AssistantStreamPayload | null {
-  return extractAndValidate<AssistantStreamPayload>(wrapper, 'ASSISTANT_STREAM', validateAssistantStreamPayload);
+  return extractAndValidate<AssistantStreamPayload>(
+    wrapper,
+    'ASSISTANT_STREAM',
+    validateAssistantStreamPayload,
+  );
 }
 
 /**
@@ -1161,21 +1224,33 @@ export function extractToolStreamPayload(wrapper: unknown): ToolStreamPayload | 
  * Extract and validate ATTENTION_STREAM payload.
  */
 export function extractAttentionStreamPayload(wrapper: unknown): AttentionStreamPayload | null {
-  return extractAndValidate<AttentionStreamPayload>(wrapper, 'ATTENTION_STREAM', validateAttentionStreamPayload);
+  return extractAndValidate<AttentionStreamPayload>(
+    wrapper,
+    'ATTENTION_STREAM',
+    validateAttentionStreamPayload,
+  );
 }
 
 /**
  * Extract and validate AGENT_STATE_CHANGED payload.
  */
 export function extractAgentStateChangedPayload(wrapper: unknown): AgentStateChangedPayload | null {
-  return extractAndValidate<AgentStateChangedPayload>(wrapper, 'AGENT_STATE_CHANGED', validateAgentStateChangedPayload);
+  return extractAndValidate<AgentStateChangedPayload>(
+    wrapper,
+    'AGENT_STATE_CHANGED',
+    validateAgentStateChangedPayload,
+  );
 }
 
 /**
  * Extract and validate AGENT_MODE_STARTED payload.
  */
 export function extractAgentModeStartedPayload(wrapper: unknown): AgentModeStartedPayload | null {
-  return extractAndValidate<AgentModeStartedPayload>(wrapper, 'AGENT_MODE_STARTED', validateAgentModeStartedPayload);
+  return extractAndValidate<AgentModeStartedPayload>(
+    wrapper,
+    'AGENT_MODE_STARTED',
+    validateAgentModeStartedPayload,
+  );
 }
 
 // =============================================================================

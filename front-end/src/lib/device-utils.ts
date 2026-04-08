@@ -10,7 +10,7 @@ export const isIOS = (): boolean => {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false;
   }
-  
+
   return /iPad|iPhone|iPod/.test(navigator.userAgent);
 };
 
@@ -22,9 +22,11 @@ export const isSafari = (): boolean => {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false;
   }
-  
+
   const userAgent = navigator.userAgent.toLowerCase();
-  return userAgent.includes('safari') && !userAgent.includes('chrome') && !userAgent.includes('firefox');
+  return (
+    userAgent.includes('safari') && !userAgent.includes('chrome') && !userAgent.includes('firefox')
+  );
 };
 
 /**

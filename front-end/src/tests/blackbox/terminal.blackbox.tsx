@@ -183,7 +183,8 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const createReq = capturedRequests.find(
-          (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages')
+          (r) =>
+            r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
         );
         expect(createReq).toBeDefined();
         expect((createReq!.body as any).goal).toBe('Build me a website');
@@ -202,7 +203,7 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const agentsReq = capturedRequests.find(
-          (r) => r.url === `${API_BASE}/agents` && r.method === 'GET'
+          (r) => r.url === `${API_BASE}/agents` && r.method === 'GET',
         );
         expect(agentsReq).toBeDefined();
       });
@@ -214,7 +215,7 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const modelsReq = capturedRequests.find(
-          (r) => r.url.includes('/api/models') && r.method === 'GET'
+          (r) => r.url.includes('/api/models') && r.method === 'GET',
         );
         expect(modelsReq).toBeDefined();
       });
@@ -226,7 +227,7 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const toolsReq = capturedRequests.find(
-          (r) => r.url.includes('/api/tools') && r.method === 'GET'
+          (r) => r.url.includes('/api/tools') && r.method === 'GET',
         );
         expect(toolsReq).toBeDefined();
       });
@@ -238,7 +239,7 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const agentsReq = capturedRequests.find(
-          (r) => r.url === `${API_BASE}/agents` && r.method === 'GET'
+          (r) => r.url === `${API_BASE}/agents` && r.method === 'GET',
         );
         expect(agentsReq).toBeDefined();
         expect(agentsReq!.headers['authorization']).toBe('Bearer test-token');
@@ -251,7 +252,7 @@ describe('Terminal page', () => {
 
       await waitFor(() => {
         const inviteReq = capturedRequests.find(
-          (r) => r.url.includes('/invite-codes/check') && r.method === 'GET'
+          (r) => r.url.includes('/invite-codes/check') && r.method === 'GET',
         );
         expect(inviteReq).toBeDefined();
       });

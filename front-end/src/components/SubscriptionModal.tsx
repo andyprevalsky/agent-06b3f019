@@ -10,11 +10,17 @@
  *     +--> user clicks upgrade --> navigates to Stripe URL
  */
 
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Check } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { getSession } from "@/lib/supabase";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Check } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { getSession } from '@/lib/supabase';
 
 interface SubscriptionModalProps {
   open: boolean;
@@ -64,9 +70,7 @@ export default function SubscriptionModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto bg-card dark:bg-navi-black border-border">
         <DialogHeader>
-          <DialogTitle>
-            Plans & credits
-          </DialogTitle>
+          <DialogTitle>Plans & credits</DialogTitle>
         </DialogHeader>
 
         {isMaxTier ? (
@@ -80,7 +84,7 @@ export default function SubscriptionModal({
             <div className="pt-4">
               <Button
                 size="lg"
-                onClick={() => window.location.href = 'mailto:andy@hinavi.ai'}
+                onClick={() => (window.location.href = 'mailto:andy@hinavi.ai')}
                 className="bg-navi-black text-white hover:bg-navi-black/90"
               >
                 Contact andy@hinavi.ai
@@ -93,9 +97,9 @@ export default function SubscriptionModal({
               <div
                 key={option.tier}
                 className={cn(
-                  "border border-border rounded-lg p-6 transition-all hover:border-foreground/50",
-                  "bg-background dark:bg-navi-light-black",
-                  "flex flex-col"
+                  'border border-border rounded-lg p-6 transition-all hover:border-foreground/50',
+                  'bg-background dark:bg-navi-light-black',
+                  'flex flex-col',
                 )}
               >
                 <div className="flex-1 space-y-4">
@@ -106,7 +110,7 @@ export default function SubscriptionModal({
                       <span className="text-sm text-muted-foreground">/month</span>
                     </div>
                   </div>
-                  
+
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-sm">
                       <Check className="h-4 w-4 text-foreground/70" />
@@ -126,7 +130,7 @@ export default function SubscriptionModal({
                     </div>
                   </div>
                 </div>
-                
+
                 <Button
                   onClick={() => handleUpgrade(option.url)}
                   className="mt-6 w-full bg-navi-black text-white hover:bg-navi-black/90"
@@ -147,4 +151,3 @@ export default function SubscriptionModal({
     </Dialog>
   );
 }
-

@@ -32,11 +32,11 @@
  * - modalPosition: { top, left } (positioned relative to trigger)
  */
 
-import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { useToast } from "@/hooks/use-toast";
-import { useState, useEffect, RefObject } from "react";
-import { sendOTP, verifyOTP } from "@/lib/supabase";
-import { X } from "lucide-react";
+import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { useToast } from '@/hooks/use-toast';
+import { useState, useEffect, RefObject } from 'react';
+import { sendOTP, verifyOTP } from '@/lib/supabase';
+import { X } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';
 
 interface PhoneAuthModalProps {
@@ -47,7 +47,13 @@ interface PhoneAuthModalProps {
   anonymousUserId?: string; // Pass this to merge anonymous user's agents on login
 }
 
-const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonymousUserId }: PhoneAuthModalProps) => {
+const PhoneAuthModal = ({
+  open,
+  onOpenChange,
+  triggerRef,
+  onAuthComplete,
+  anonymousUserId,
+}: PhoneAuthModalProps) => {
   const { toast } = useToast();
   const [step, setStep] = useState<'phone' | 'otp'>('phone');
   const [phone, setPhone] = useState('');
@@ -71,14 +77,14 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
   const formatPhoneNumber = (value: string) => {
     // Strip to just digits
     const digits = value.replace(/\D/g, '');
-    
+
     // Build formatted string
     let formatted = '';
-    
+
     if (digits.length === 0) {
       return '';
     }
-    
+
     // Handle country code (assume US +1 if starts with 1 or has 10+ digits)
     if (digits.length >= 1) {
       if (digits[0] === '1') {
@@ -113,7 +119,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
         formatted = '+' + digits;
       }
     }
-    
+
     return formatted;
   };
 
@@ -140,15 +146,15 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
 
       setStep('otp');
       toast({
-        title: "Code sent!",
-        description: "Check your phone for the 6-digit code.",
+        title: 'Code sent!',
+        description: 'Check your phone for the 6-digit code.',
       });
     } catch (error: any) {
       console.error('Send OTP error:', error);
       toast({
-        title: "Error",
-        description: error.message || "Failed to send code. Please try again.",
-        variant: "destructive",
+        title: 'Error',
+        description: error.message || 'Failed to send code. Please try again.',
+        variant: 'destructive',
       });
     } finally {
       setLoading(false);
@@ -171,16 +177,16 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
       amplitude.setUserId(strippedPhone);
 
       // Small delay to let Supabase finish internal state updates
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Complete the flow (no invite code needed anymore)
       completeAuth();
     } catch (error: any) {
       console.error('Verify OTP error:', error);
       toast({
-        title: "Invalid code",
-        description: error.message || "Please check the code and try again.",
-        variant: "destructive",
+        title: 'Invalid code',
+        description: error.message || 'Please check the code and try again.',
+        variant: 'destructive',
       });
       setLoading(false);
     }
@@ -189,7 +195,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
   // Called when auth flow is fully complete
   const completeAuth = () => {
     toast({
-      title: "Success!",
+      title: 'Success!',
       description: "You're now logged in.",
     });
     setLoading(false);
@@ -223,9 +229,9 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
 
   return (
     <Dialog open={open} onOpenChange={handleClose} modal={false}>
-      <DialogContent 
+      <DialogContent
         className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[380px] max-w-[90vw] relative rounded-xl"
-        style={{ 
+        style={{
           position: 'fixed',
           top: `${modalPosition.top}px`,
           left: `${modalPosition.left}px`,
@@ -236,7 +242,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
         }}
       >
         {/* Downward-pointing arrow/nub */}
-        <div 
+        <div
           className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
           style={{
             bottom: '-12px',
@@ -245,7 +251,7 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
             borderTop: '12px solid rgba(238, 239, 242, 0.95)',
           }}
         />
-        <div 
+        <div
           className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
           style={{
             bottom: '-13px',
@@ -269,8 +275,11 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                     <stop offset="100%" stopColor="#7A6BEC" />
                   </linearGradient>
                 </defs>
-                <g transform="translate(0,303) scale(0.1,-0.1)" fill="url(#phoneauth-logo-gradient)">
-                  <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z"/>
+                <g
+                  transform="translate(0,303) scale(0.1,-0.1)"
+                  fill="url(#phoneauth-logo-gradient)"
+                >
+                  <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z" />
                 </g>
               </svg>
               <button
@@ -284,12 +293,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
 
             {/* Titles */}
             <div className="mb-6">
-              <h2 className="text-2xl font-semibold text-navi-black">
-                Start Building.
-              </h2>
-              <p className="text-xl text-gray-400 mt-1">
-                Create free account
-              </p>
+              <h2 className="text-2xl font-semibold text-navi-black">Start Building.</h2>
+              <p className="text-xl text-gray-400 mt-1">Create free account</p>
             </div>
 
             {/* Phone Input */}
@@ -309,7 +314,9 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                   disabled={loading}
                 />
                 <p className="text-xs text-gray-500 mt-2">
-                  By submitting, you authorize Rose Labs to send an automated text message containing a one-time password (OTP) to the number you provided. Message/data rates may apply. See{' '}
+                  By submitting, you authorize Rose Labs to send an automated text message
+                  containing a one-time password (OTP) to the number you provided. Message/data
+                  rates may apply. See{' '}
                   <a
                     href="https://roselabs.ai/terms"
                     target="_blank"
@@ -317,8 +324,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                     className="underline hover:text-navi-black"
                   >
                     terms
-                  </a>
-                  {' '}and{' '}
+                  </a>{' '}
+                  and{' '}
                   <a
                     href="https://roselabs.ai/privacy"
                     target="_blank"
@@ -355,8 +362,11 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                     <stop offset="100%" stopColor="#7A6BEC" />
                   </linearGradient>
                 </defs>
-                <g transform="translate(0,303) scale(0.1,-0.1)" fill="url(#phoneauth-logo-gradient)">
-                  <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z"/>
+                <g
+                  transform="translate(0,303) scale(0.1,-0.1)"
+                  fill="url(#phoneauth-logo-gradient)"
+                >
+                  <path d="M1276 2378 c-145 -192 -231 -442 -211 -616 8 -68 41 -202 61 -251 8 -19 13 -35 11 -37 -2 -2 -30 7 -62 21 -249 100 -537 54 -784 -124 -36 -25 -69 -49 -75 -53 -17 -11 22 -46 119 -105 163 -101 300 -144 460 -144 92 -1 226 24 301 56 20 8 38 15 39 15 2 0 -10 -39 -25 -87 -69 -213 -58 -395 36 -600 31 -69 136 -237 154 -248 10 -6 114 144 152 220 37 73 75 199 88 293 14 101 1 206 -40 330 -15 48 -27 88 -26 89 1 2 26 -7 55 -18 195 -74 423 -66 611 22 98 46 217 118 245 149 18 20 18 21 -1 35 -177 139 -396 225 -570 225 -79 0 -195 -23 -282 -56 -44 -16 -63 -20 -59 -11 27 72 60 196 68 260 17 132 -17 300 -89 442 -36 72 -124 209 -141 219 -5 4 -21 -8 -35 -26z m40 -935 c7 -46 50 -92 109 -119 27 -13 41 -23 31 -23 -11 -1 -38 -12 -62 -26 -49 -29 -83 -90 -85 -151 -1 -37 -2 -36 -9 13 -4 29 -17 67 -28 85 -22 35 -86 77 -118 79 -11 0 1 9 26 20 79 35 118 90 121 168 1 25 3 28 6 11 2 -14 6 -39 9 -57z" />
                 </g>
               </svg>
               <button
@@ -370,12 +380,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
 
             {/* Titles */}
             <div className="mb-6">
-              <h2 className="text-2xl font-semibold text-navi-black">
-                Verify Code
-              </h2>
-              <p className="text-xl text-gray-400 mt-1">
-                Code sent to {phone}
-              </p>
+              <h2 className="text-2xl font-semibold text-navi-black">Verify Code</h2>
+              <p className="text-xl text-gray-400 mt-1">Code sent to {phone}</p>
             </div>
 
             <div className="space-y-4">
@@ -412,7 +418,10 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                     I authorize SMS communication
                   </span>
                   <p className="text-xs text-gray-500 mt-1">
-                    I authorize Rose Labs to send automated SMS messages to the phone number provided, including task updates, reminders, and status notifications. Message frequency varies. Message and data rates may apply. Text HELP for help or STOP to opt out. Consent is not a condition of purchase. See our{' '}
+                    I authorize Rose Labs to send automated SMS messages to the phone number
+                    provided, including task updates, reminders, and status notifications. Message
+                    frequency varies. Message and data rates may apply. Text HELP for help or STOP
+                    to opt out. Consent is not a condition of purchase. See our{' '}
                     <a
                       href="https://roselabs.ai/privacy"
                       target="_blank"
@@ -420,8 +429,8 @@ const PhoneAuthModal = ({ open, onOpenChange, triggerRef, onAuthComplete, anonym
                       className="underline hover:text-navi-black"
                     >
                       Privacy Policy
-                    </a>
-                    {' '}and{' '}
+                    </a>{' '}
+                    and{' '}
                     <a
                       href="https://roselabs.ai/terms"
                       target="_blank"

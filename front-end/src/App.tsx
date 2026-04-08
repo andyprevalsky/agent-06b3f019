@@ -16,22 +16,22 @@
  *   +--> "*" --> <NotFound />
  */
 
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { SpeedInsights } from "@vercel/speed-insights/react";
-import { Analytics } from "@vercel/analytics/react";
-import { AppDataProvider } from "@/hooks/useAppData";
-import ErrorBoundary from "@/components/ErrorBoundary";
-import Index from "./pages/Index";
-import Privacy from "./pages/Privacy";
-import Terms from "./pages/Terms";
-import NotFound from "./pages/NotFound";
-import About from "./pages/About";
-import Terminal from "./pages/Terminal";
-import ResearchBlog from "./pages/ResearchBlog";
-import ResearchBlogPost from "./pages/ResearchBlogPost";
-import Download from "./pages/Download";
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { SpeedInsights } from '@vercel/speed-insights/react';
+import { Analytics } from '@vercel/analytics/react';
+import { AppDataProvider } from '@/hooks/useAppData';
+import ErrorBoundary from '@/components/ErrorBoundary';
+import Index from './pages/Index';
+import Privacy from './pages/Privacy';
+import Terms from './pages/Terms';
+import NotFound from './pages/NotFound';
+import About from './pages/About';
+import Terminal from './pages/Terminal';
+import ResearchBlog from './pages/ResearchBlog';
+import ResearchBlogPost from './pages/ResearchBlogPost';
+import Download from './pages/Download';
 
 const queryClient = new QueryClient();
 

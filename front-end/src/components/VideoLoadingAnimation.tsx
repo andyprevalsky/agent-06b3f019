@@ -19,21 +19,11 @@ const VideoLoadingAnimation: React.FC<VideoLoadingAnimationProps> = ({ isVisible
   return (
     <>
       <div className="absolute inset-0 flex flex-col items-center justify-center z-20">
-        <div className="text-sm text-foreground/70 mb-6 font-medium tracking-wide">
-          loading
-        </div>
+        <div className="text-sm text-foreground/70 mb-6 font-medium tracking-wide">loading</div>
         <div className="flex items-center space-x-2">
           {[0, 1, 2, 3, 4].map((index) => (
-            <div
-              key={index}
-              className="w-4 h-4 box"
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 16 16"
-                className="w-full h-full"
-              >
+            <div key={index} className="w-4 h-4 box">
+              <svg width="16" height="16" viewBox="0 0 16 16" className="w-full h-full">
                 <g className="box-group">
                   <path
                     d="M2 2 Q 8 3 14 2 Q 13 8 14 14 Q 8 13 2 14 Q 3 8 2 2 Z"
@@ -57,9 +47,10 @@ const VideoLoadingAnimation: React.FC<VideoLoadingAnimationProps> = ({ isVisible
           ))}
         </div>
       </div>
-      
-      <style dangerouslySetInnerHTML={{
-        __html: `
+
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
           /* Cumulative left-to-right fill: 6 steps total */
           /* Duration can be tuned, but all five boxes share the same cycle */
           .box-group { transform-origin: 50% 50%; }
@@ -114,8 +105,9 @@ const VideoLoadingAnimation: React.FC<VideoLoadingAnimationProps> = ({ isVisible
             93.333% { opacity: 0; }
             100% { opacity: 0; }
           }
-        `
-      }} />
+        `,
+        }}
+      />
     </>
   );
 };

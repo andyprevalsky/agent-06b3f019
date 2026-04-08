@@ -35,9 +35,7 @@ export default function BlogTableOfContents({ sections }: BlogTableOfContentsPro
       >
         <span className="text-sm font-medium text-slate-700">Table of Contents</span>
         <ChevronUp
-          className={`w-4 h-4 text-slate-500 transition-transform ${
-            isOpen ? '' : 'rotate-180'
-          }`}
+          className={`w-4 h-4 text-slate-500 transition-transform ${isOpen ? '' : 'rotate-180'}`}
         />
       </button>
       {isOpen && (

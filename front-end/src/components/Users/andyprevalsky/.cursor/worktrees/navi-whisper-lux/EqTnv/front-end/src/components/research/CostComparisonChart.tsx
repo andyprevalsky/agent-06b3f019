@@ -7,32 +7,35 @@ interface CostData {
 }
 
 export default function CostComparisonChart() {
-  const costData: CostData[] = useMemo(() => [
-    { model: 'GPT-5', costPer1M: 15, category: 'other' },
-    { model: 'Claude Sonnet 4.5', costPer1M: 12, category: 'other' },
-    { model: 'Gemini Flash 2.5', costPer1M: 8, category: 'other' },
-    { model: 'Rose-1', costPer1M: 3, category: 'rose' },
-  ], []);
+  const costData: CostData[] = useMemo(
+    () => [
+      { model: 'GPT-5', costPer1M: 15, category: 'other' },
+      { model: 'Claude Sonnet 4.5', costPer1M: 12, category: 'other' },
+      { model: 'Gemini Flash 2.5', costPer1M: 8, category: 'other' },
+      { model: 'Rose-1', costPer1M: 3, category: 'rose' },
+    ],
+    [],
+  );
 
   const maxCost = 20;
 
   return (
     <div className="w-full max-w-4xl mx-auto py-16">
       <h2 className="text-3xl font-semibold text-center mb-12 text-gray-900">
-        Rose-1 delivers frontier performance<br />at a fraction of the cost
+        Rose-1 delivers frontier performance
+        <br />
+        at a fraction of the cost
       </h2>
 
       <div className="space-y-6">
         {costData.map((item, idx) => (
           <div key={idx} className="flex items-center gap-6">
-            <div className="w-48 text-right text-sm text-gray-700 font-medium">
-              {item.model}
-            </div>
+            <div className="w-48 text-right text-sm text-gray-700 font-medium">{item.model}</div>
             <div className="flex-1 relative h-12">
-              <div 
+              <div
                 className={`h-full rounded-lg transition-all duration-500 ${
-                  item.category === 'rose' 
-                    ? 'bg-gradient-to-r from-[#FE7503] via-[#FC585C] to-[#7A6BEC]' 
+                  item.category === 'rose'
+                    ? 'bg-gradient-to-r from-[#FE7503] via-[#FC585C] to-[#7A6BEC]'
                     : 'bg-gradient-to-r from-gray-200 to-gray-300'
                 }`}
                 style={{ width: `${(item.costPer1M / maxCost) * 100}%` }}
@@ -41,7 +44,9 @@ export default function CostComparisonChart() {
                   <span className={item.category === 'rose' ? 'text-white' : 'text-gray-700'}>
                     ${item.costPer1M}
                   </span>
-                  <span className={`text-xs ${item.category === 'rose' ? 'text-white/80' : 'text-gray-600'}`}>
+                  <span
+                    className={`text-xs ${item.category === 'rose' ? 'text-white/80' : 'text-gray-600'}`}
+                  >
                     / 1M tokens
                   </span>
                 </div>
@@ -53,12 +58,10 @@ export default function CostComparisonChart() {
 
       <div className="mt-12 text-center">
         <p className="text-sm text-gray-500 max-w-2xl mx-auto">
-          Rose-1 achieves competitive performance with leading frontier models while maintaining 
+          Rose-1 achieves competitive performance with leading frontier models while maintaining
           significantly lower inference costs, making advanced AI capabilities more accessible.
         </p>
       </div>
     </div>
   );
 }
-
-

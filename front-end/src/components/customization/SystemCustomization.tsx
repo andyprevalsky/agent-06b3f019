@@ -76,21 +76,17 @@ export default function SystemCustomization({
       const filePath = `profile-pictures/${userId}/avatar.${fileExt}`;
 
       // Upload to Supabase Storage
-      const { error: uploadError } = await supabase.storage
-        .from('public')
-        .upload(filePath, file, {
-          upsert: true,
-          contentType: file.type,
-        });
+      const { error: uploadError } = await supabase.storage.from('public').upload(filePath, file, {
+        upsert: true,
+        contentType: file.type,
+      });
 
       if (uploadError) {
         throw uploadError;
       }
 
       // Get public URL
-      const { data: urlData } = supabase.storage
-        .from('public')
-        .getPublicUrl(filePath);
+      const { data: urlData } = supabase.storage.from('public').getPublicUrl(filePath);
 
       // Add cache buster to force refresh
       const publicUrl = `${urlData.publicUrl}?t=${Date.now()}`;
@@ -177,9 +173,7 @@ export default function SystemCustomization({
                 </>
               )}
             </Button>
-            {uploadError && (
-              <span className="text-xs text-destructive">{uploadError}</span>
-            )}
+            {uploadError && <span className="text-xs text-destructive">{uploadError}</span>}
           </div>
         </div>
         <p className="text-xs text-muted-foreground">

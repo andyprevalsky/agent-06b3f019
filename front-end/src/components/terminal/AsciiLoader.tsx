@@ -26,7 +26,13 @@ interface AsciiLoaderProps {
   variant?: 'default' | 'engine';
 }
 
-export default function AsciiLoader({ status, showWarmingUp = true, size = 'small', fitContainer = false, variant = 'default' }: AsciiLoaderProps) {
+export default function AsciiLoader({
+  status,
+  showWarmingUp = true,
+  size = 'small',
+  fitContainer = false,
+  variant = 'default',
+}: AsciiLoaderProps) {
   const [frameIndex, setFrameIndex] = useState(0);
   const [dotCount, setDotCount] = useState(1);
 
@@ -49,14 +55,21 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
     return () => clearInterval(dotInterval);
   }, []);
 
-  const fontSize = size === 'icon' ? '0.25rem' : size === 'small' ? '0.375rem' : size === 'large' ? '0.75rem' : '0.5rem'; // 4px, 6px, 8px, or 12px
+  const fontSize =
+    size === 'icon'
+      ? '0.25rem'
+      : size === 'small'
+        ? '0.375rem'
+        : size === 'large'
+          ? '0.75rem'
+          : '0.5rem'; // 4px, 6px, 8px, or 12px
   const dots = '.'.repeat(dotCount);
 
   // If fitContainer is true, show 3 animations in a row
   if (fitContainer) {
     return (
       <div className="flex items-center gap-1">
-        <pre 
+        <pre
           className="leading-none font-mono select-none"
           style={{
             fontSize: '0.06rem',
@@ -70,7 +83,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
         >
           {frames[frameIndex]}
         </pre>
-        <pre 
+        <pre
           className="leading-none font-mono select-none"
           style={{
             fontSize: '0.06rem',
@@ -84,7 +97,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
         >
           {frames[frameIndex]}
         </pre>
-        <pre 
+        <pre
           className="leading-none font-mono select-none"
           style={{
             fontSize: '0.06rem',
@@ -105,7 +118,7 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
   return (
     <div className="flex flex-col items-center justify-center h-full space-y-4">
       {/* ASCII Art Animation */}
-      <pre 
+      <pre
         className="leading-none font-mono select-none"
         style={{
           fontSize,
@@ -121,20 +134,12 @@ export default function AsciiLoader({ status, showWarmingUp = true, size = 'smal
       </pre>
 
       {/* Warming up text */}
-      {showWarmingUp && (
-        <p className="text-sm text-muted-foreground">
-          Warming up{dots}
-        </p>
-      )}
+      {showWarmingUp && <p className="text-sm text-muted-foreground">Warming up{dots}</p>}
 
       {/* Status Message */}
       {status && (
-        <p className="text-xs text-muted-foreground/70 max-w-md px-4 text-center">
-          {status}
-        </p>
+        <p className="text-xs text-muted-foreground/70 max-w-md px-4 text-center">{status}</p>
       )}
     </div>
   );
 }
-
-

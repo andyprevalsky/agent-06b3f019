@@ -7,22 +7,25 @@ interface DataPoint {
 }
 
 export default function AccuracyOverTimeChart() {
-  const dataPoints: DataPoint[] = useMemo(() => [
-    { compute: 1, score: 38 },
-    { compute: 2, score: 40 },
-    { compute: 3, score: 42 },
-    { compute: 4, score: 43 },
-    { compute: 5, score: 44 },
-    { compute: 6, score: 45 },
-    { compute: 7, score: 46 },
-    { compute: 8, score: 47 },
-    { compute: 9, score: 48 },
-    { compute: 10, score: 49 },
-    { compute: 11, score: 50 },
-    { compute: 12, score: 51 },
-    { compute: 13, score: 52 },
-    { compute: 14, score: 53 },
-  ], []);
+  const dataPoints: DataPoint[] = useMemo(
+    () => [
+      { compute: 1, score: 38 },
+      { compute: 2, score: 40 },
+      { compute: 3, score: 42 },
+      { compute: 4, score: 43 },
+      { compute: 5, score: 44 },
+      { compute: 6, score: 45 },
+      { compute: 7, score: 46 },
+      { compute: 8, score: 47 },
+      { compute: 9, score: 48 },
+      { compute: 10, score: 49 },
+      { compute: 11, score: 50 },
+      { compute: 12, score: 51 },
+      { compute: 13, score: 52 },
+      { compute: 14, score: 53 },
+    ],
+    [],
+  );
 
   const minCompute = 0;
   const maxCompute = 15;
@@ -42,12 +45,14 @@ export default function AccuracyOverTimeChart() {
   return (
     <div className="w-full max-w-6xl mx-auto py-16">
       <h2 className="text-4xl font-semibold text-center mb-16 text-gray-900">
-        Rose-1's software engineering ability<br />improves with RL training
+        Rose-1's software engineering ability
+        <br />
+        improves with RL training
       </h2>
 
       <div className="relative w-full h-96 bg-gradient-to-br from-gray-50 to-white rounded-2xl p-12 border border-gray-200">
         {/* Best frontier model line */}
-        <div 
+        <div
           className="absolute left-12 right-12 border-t-2 border-dashed border-gray-300"
           style={{ top: `${12 + getY(bestFrontierScore) * 0.72}px` }}
         >
@@ -57,7 +62,7 @@ export default function AccuracyOverTimeChart() {
         </div>
 
         {/* Best open model line */}
-        <div 
+        <div
           className="absolute left-12 right-12 border-t-2 border-dashed border-gray-300"
           style={{ top: `${12 + getY(bestOpenScore) * 0.72}px` }}
         >
@@ -81,7 +86,8 @@ export default function AccuracyOverTimeChart() {
         {/* Trend annotation */}
         <div className="absolute right-16 top-1/2 -translate-y-1/2">
           <div className="bg-gradient-to-r from-[#FE7503] via-[#FC585C] to-[#7A6BEC] text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg">
-            Rose <span className="font-bold italic">increases consistently</span> on our<br />
+            Rose <span className="font-bold italic">increases consistently</span> on our
+            <br />
             benchmark with more training compute
           </div>
         </div>
@@ -91,7 +97,9 @@ export default function AccuracyOverTimeChart() {
           Training compute (log)
         </div>
         <div className="absolute left-2 top-1/2 -translate-y-1/2 -rotate-90 text-sm text-gray-600 whitespace-nowrap">
-          Cursor Bench<br />60
+          Cursor Bench
+          <br />
+          60
         </div>
 
         {/* X-axis ticks */}
@@ -105,5 +113,3 @@ export default function AccuracyOverTimeChart() {
     </div>
   );
 }
-
-

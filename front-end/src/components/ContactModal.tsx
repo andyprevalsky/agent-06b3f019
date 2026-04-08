@@ -14,10 +14,10 @@
  * [OPEN] <-- copied: false
  */
 
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { useToast } from "@/hooks/use-toast";
-import { useState } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { useToast } from '@/hooks/use-toast';
+import { useState } from 'react';
 
 interface ContactModalProps {
   open: boolean;
@@ -28,23 +28,23 @@ interface ContactModalProps {
 const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
-  const email = "andy@hinavi.ai";
+  const email = 'andy@hinavi.ai';
 
   const copyToClipboard = async () => {
     try {
       await navigator.clipboard.writeText(email);
       setCopied(true);
       toast({
-        title: "Email copied!",
-        description: "The email address has been copied to your clipboard.",
+        title: 'Email copied!',
+        description: 'The email address has been copied to your clipboard.',
       });
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy email:', err);
       toast({
-        title: "Copy failed",
-        description: "Please manually copy the email address.",
-        variant: "destructive",
+        title: 'Copy failed',
+        description: 'Please manually copy the email address.',
+        variant: 'destructive',
       });
     }
   };
@@ -55,13 +55,13 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
         <DialogHeader className="text-left">
           <DialogTitle>Contact Us</DialogTitle>
         </DialogHeader>
-        
+
         <div className="space-y-6">
           <div>
             <p className="text-muted-foreground mb-4">
               {subtitle ?? "Have questions? We'd love to hear from you."}
             </p>
-            
+
             <div className="relative">
               <button
                 onClick={copyToClipboard}

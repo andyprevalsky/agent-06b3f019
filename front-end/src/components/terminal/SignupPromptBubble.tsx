@@ -98,7 +98,6 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-
       <div className="flex-1 space-y-3">
         {/* Render reason message as markdown text */}
         <div className="text-sm">
@@ -136,9 +135,7 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
                 className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
                 style={{ animation: 'spin 3s linear infinite' }}
               />
-              <span className="text-xs font-medium">
-                Your agent is waiting for your choice
-              </span>
+              <span className="text-xs font-medium">Your agent is waiting for your choice</span>
             </div>
           </>
         )}

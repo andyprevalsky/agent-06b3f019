@@ -131,113 +131,113 @@ export function FeedbackBanner({ onSubmit }: FeedbackBannerProps) {
   return (
     <motion.div
       className="w-full rounded-lg border border-border overflow-hidden"
-        style={{
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
-          backgroundColor: 'rgba(255, 255, 255, 0.1)',
-        }}
-        layout
-      >
-        {/* Rating Bar */}
-        <div className="flex items-center justify-between py-2 px-4">
-          <span className="text-sm text-muted-foreground">How was this result?</span>
-          <div className="flex gap-0.5">
-              {[1, 2, 3, 4, 5].map((star) => (
-                <button
-                  key={star}
-                  className="focus:outline-none transition-transform hover:scale-110 p-0.5"
-                  onMouseEnter={() => setHoveredStar(star)}
-                  onMouseLeave={() => setHoveredStar(0)}
-                  onClick={() => handleStarClick(star)}
-                >
-                  <Star
-                    className={cn(
-                      'w-5 h-5 transition-colors',
-                      hoveredStar >= star || selectedRating >= star
-                        ? 'fill-yellow-400 text-yellow-400'
-                        : 'text-muted-foreground'
-                    )}
-                  />
-                </button>
-              ))}
-          </div>
-        </div>
-
-        {/* Expanded Panel */}
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="border-t border-border"
+      style={{
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+        backgroundColor: 'rgba(255, 255, 255, 0.1)',
+      }}
+      layout
+    >
+      {/* Rating Bar */}
+      <div className="flex items-center justify-between py-2 px-4">
+        <span className="text-sm text-muted-foreground">How was this result?</span>
+        <div className="flex gap-0.5">
+          {[1, 2, 3, 4, 5].map((star) => (
+            <button
+              key={star}
+              className="focus:outline-none transition-transform hover:scale-110 p-0.5"
+              onMouseEnter={() => setHoveredStar(star)}
+              onMouseLeave={() => setHoveredStar(0)}
+              onClick={() => handleStarClick(star)}
             >
-              <div className="p-4 space-y-4">
-                {/* Issue Type Dropdown */}
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground">Issue type (optional)</label>
-                  <Select value={issueType} onValueChange={setIssueType}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="Please select" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ISSUE_TYPES.map((type) => (
-                        <SelectItem key={type} value={type}>
-                          {type}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <Star
+                className={cn(
+                  'w-5 h-5 transition-colors',
+                  hoveredStar >= star || selectedRating >= star
+                    ? 'fill-yellow-400 text-yellow-400'
+                    : 'text-muted-foreground',
+                )}
+              />
+            </button>
+          ))}
+        </div>
+      </div>
 
-                {/* Comment Textarea */}
-                <div className="space-y-2">
-                  <label className="text-sm text-muted-foreground">Comment (optional)</label>
-                  <Textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    placeholder="Additional feedback"
-                    className="resize-none"
-                    rows={3}
+      {/* Expanded Panel */}
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="border-t border-border"
+          >
+            <div className="p-4 space-y-4">
+              {/* Issue Type Dropdown */}
+              <div className="space-y-2">
+                <label className="text-sm text-muted-foreground">Issue type (optional)</label>
+                <Select value={issueType} onValueChange={setIssueType}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Please select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ISSUE_TYPES.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Comment Textarea */}
+              <div className="space-y-2">
+                <label className="text-sm text-muted-foreground">Comment (optional)</label>
+                <Textarea
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder="Additional feedback"
+                  className="resize-none"
+                  rows={3}
+                />
+              </div>
+
+              {/* Footer with checkbox and buttons */}
+              <div className="flex items-center justify-between">
+                {/* Help Improve Checkbox */}
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="helpImprove"
+                    checked={helpImprove}
+                    onCheckedChange={(checked) => setHelpImprove(checked === true)}
                   />
+                  <label
+                    htmlFor="helpImprove"
+                    className="text-sm text-muted-foreground cursor-pointer"
+                  >
+                    Help Rose improve with my feedback
+                  </label>
                 </div>
 
-                {/* Footer with checkbox and buttons */}
-                <div className="flex items-center justify-between">
-                  {/* Help Improve Checkbox */}
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="helpImprove"
-                      checked={helpImprove}
-                      onCheckedChange={(checked) => setHelpImprove(checked === true)}
-                    />
-                    <label
-                      htmlFor="helpImprove"
-                      className="text-sm text-muted-foreground cursor-pointer"
-                    >
-                      Help Rose improve with my feedback
-                    </label>
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="flex gap-2">
-                    <Button variant="ghost" size="sm" onClick={handleCancel} disabled={isSubmitting}>
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleSubmit}
-                      disabled={isSubmitting || selectedRating === 0}
-                    >
-                      {isSubmitting ? 'Submitting...' : 'Submit'}
-                    </Button>
-                  </div>
+                {/* Action Buttons */}
+                <div className="flex gap-2">
+                  <Button variant="ghost" size="sm" onClick={handleCancel} disabled={isSubmitting}>
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleSubmit}
+                    disabled={isSubmitting || selectedRating === 0}
+                  >
+                    {isSubmitting ? 'Submitting...' : 'Submit'}
+                  </Button>
                 </div>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }

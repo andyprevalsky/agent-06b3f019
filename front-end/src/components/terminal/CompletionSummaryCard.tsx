@@ -108,7 +108,7 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
     }
     // Array of FilePointers
     if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
-      return value.map(fp => (fp as FilePointer).original_filename).join(', ');
+      return value.map((fp) => (fp as FilePointer).original_filename).join(', ');
     }
     // Regular array
     if (Array.isArray(value)) {
@@ -129,7 +129,10 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
   };
 
   const getToolDisplayName = (toolName: string): string => {
-    return TOOL_DISPLAY_NAMES[toolName] || toolName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return (
+      TOOL_DISPLAY_NAMES[toolName] ||
+      toolName.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+    );
   };
 
   const totalTools = totalToolCalls || toolUsage?.reduce((sum, t) => sum + t.count, 0) || 0;
@@ -142,7 +145,7 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
         transition={{ duration: 0.3, ease: 'easeOut' }}
         className={cn(
           'rounded-lg border overflow-hidden transition-colors',
-          'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60'
+          'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60',
         )}
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
@@ -163,7 +166,9 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
                   d="M6 18L18 6M6 6l12 12"
                 />
               </svg>
-              <span className="text-sm font-medium text-red-600 dark:text-red-400">Task Failed</span>
+              <span className="text-sm font-medium text-red-600 dark:text-red-400">
+                Task Failed
+              </span>
             </>
           ) : (
             <>
@@ -204,14 +209,14 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <div className="text-[10px] text-muted-foreground mb-0.5">
-                        {output.label}
-                      </div>
+                      <div className="text-[10px] text-muted-foreground mb-0.5">{output.label}</div>
                       <div className="text-sm text-foreground font-medium break-words">
                         {/* Render FilePointers with download chip */}
                         {isFilePointer(output.value) ? (
                           <FilePointerDisplay file={output.value} />
-                        ) : Array.isArray(output.value) && output.value.length > 0 && isFilePointer(output.value[0]) ? (
+                        ) : Array.isArray(output.value) &&
+                          output.value.length > 0 &&
+                          isFilePointer(output.value[0]) ? (
                           <div className="flex flex-wrap gap-1.5">
                             {output.value.map((fp, idx) => (
                               <FilePointerDisplay key={idx} file={fp as FilePointer} />
@@ -231,10 +236,10 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
                       >
                         {copiedField === output.key ? (
                           <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -259,7 +264,7 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
               <ChevronDown
                 className={cn(
                   'w-4 h-4 text-muted-foreground transition-transform duration-200',
-                  toolsExpanded && 'rotate-180'
+                  toolsExpanded && 'rotate-180',
                 )}
               />
             </button>
@@ -277,16 +282,11 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
                     {toolUsage
                       .sort((a, b) => b.count - a.count)
                       .map((tool) => (
-                        <div
-                          key={tool.name}
-                          className="flex items-center justify-between text-sm"
-                        >
+                        <div key={tool.name} className="flex items-center justify-between text-sm">
                           <span className="text-muted-foreground">
                             {getToolDisplayName(tool.name)}
                           </span>
-                          <span className="text-muted-foreground tabular-nums">
-                            {tool.count}
-                          </span>
+                          <span className="text-muted-foreground tabular-nums">{tool.count}</span>
                         </div>
                       ))}
                   </div>

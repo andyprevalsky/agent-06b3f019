@@ -19,11 +19,7 @@
 
 import { Lock, Unlock } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { updateAgent } from '@/lib/api';
 
@@ -89,23 +85,20 @@ export default function WriteLockToggle({
             isLocked
               ? 'border-border bg-muted/50 text-muted-foreground hover:bg-muted'
               : 'border-red-500/50 bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 animate-pulse',
-            isUpdating && 'opacity-50 cursor-not-allowed'
+            isUpdating && 'opacity-50 cursor-not-allowed',
           )}
         >
-          {isLocked ? (
-            <Lock className="h-3.5 w-3.5" />
-          ) : (
-            <Unlock className="h-3.5 w-3.5" />
-          )}
-          <span className="font-medium">
-            {isLocked ? 'Safe Writes' : 'Skip Write Permissions'}
-          </span>
+          {isLocked ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />}
+          <span className="font-medium">{isLocked ? 'Safe Writes' : 'Skip Write Permissions'}</span>
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[300px] z-[100]">
         {isLocked ? (
           <div className="text-xs space-y-1">
-            <p><span className="font-semibold">Write lock enabled.</span> Rose will ask permission before committing writes to the internet:</p>
+            <p>
+              <span className="font-semibold">Write lock enabled.</span> Rose will ask permission
+              before committing writes to the internet:
+            </p>
             <ul className="list-disc list-inside text-muted-foreground">
               <li>Sending emails or texts</li>
               <li>Submitting payment details</li>
@@ -114,7 +107,10 @@ export default function WriteLockToggle({
           </div>
         ) : (
           <div className="text-xs space-y-1">
-            <p><span className="font-semibold text-red-500">Write lock disabled.</span> Rose can act autonomously without asking:</p>
+            <p>
+              <span className="font-semibold text-red-500">Write lock disabled.</span> Rose can act
+              autonomously without asking:
+            </p>
             <ul className="list-disc list-inside text-muted-foreground">
               <li>Send emails or texts</li>
               <li>Submit payment details</li>

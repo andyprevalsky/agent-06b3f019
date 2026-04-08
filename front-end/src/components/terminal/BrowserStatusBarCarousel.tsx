@@ -30,36 +30,33 @@ interface BrowserStatusBarCarouselProps {
 
 function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProps) {
   const [activeIndex, setActiveIndex] = useState(0);
-  
+
   const hasMultipleBrowsers = browsers.length > 1;
-  
+
   // Keep activeIndex in bounds when browsers array changes
   useEffect(() => {
     if (activeIndex >= browsers.length) {
       setActiveIndex(Math.max(0, browsers.length - 1));
     }
   }, [browsers.length, activeIndex]);
-  
+
   // Navigation handlers
   const handlePrevBrowser = useCallback(() => {
-    setActiveIndex(prev => (prev - 1 + browsers.length) % browsers.length);
+    setActiveIndex((prev) => (prev - 1 + browsers.length) % browsers.length);
   }, [browsers.length]);
-  
+
   const handleNextBrowser = useCallback(() => {
-    setActiveIndex(prev => (prev + 1) % browsers.length);
+    setActiveIndex((prev) => (prev + 1) % browsers.length);
   }, [browsers.length]);
 
   if (browsers.length === 0) return null;
-  
+
   // Single browser - no carousel needed
   if (!hasMultipleBrowsers) {
     const browser = browsers[0];
     return (
       <div className="w-full max-w-4xl mx-auto mb-3 relative z-30">
-        <BrowserStatusBar
-          taskId={browser.taskId}
-          browserUrl={browser.browserUrl}
-        />
+        <BrowserStatusBar taskId={browser.taskId} browserUrl={browser.browserUrl} />
       </div>
     );
   }
@@ -87,7 +84,7 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         </button>
       </div>
-      
+
       {/* All browsers rendered identically, just positioned differently */}
       <div className="relative">
         {browsers.map((browser, idx) => {
@@ -96,9 +93,9 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
           if (relativePos < 0) {
             relativePos = browsers.length + relativePos;
           }
-          
+
           const isActive = relativePos === 0;
-          
+
           return (
             <div
               key={browser.taskId}

@@ -44,7 +44,18 @@
 
 import { Message, respondToAttentionRequest, FilePointer, getAttachmentUrl } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Info, ChevronRight, X, Download, FileIcon, FileText, ImageIcon } from 'lucide-react';
+import {
+  Bot,
+  User,
+  Wrench,
+  Info,
+  ChevronRight,
+  X,
+  Download,
+  FileIcon,
+  FileText,
+  ImageIcon,
+} from 'lucide-react';
 import { useState, useEffect, useMemo, memo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
@@ -60,7 +71,13 @@ import { PlanChip } from './PlanChip';
 import { PhoneCallCard, PhoneCallMetadata } from './PhoneCallCard';
 import { CompletionSummaryCard, CompletionSummaryData } from './CompletionSummaryCard';
 import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
-import { getToolIcon, isX402Tool, x402IconSrc, isClaudeCodeTool, claudeCodeIconSrc } from '@/lib/toolIcons';
+import {
+  getToolIcon,
+  isX402Tool,
+  x402IconSrc,
+  isClaudeCodeTool,
+  claudeCodeIconSrc,
+} from '@/lib/toolIcons';
 import { useToast } from '@/hooks/use-toast';
 import ThinkingAnimation from '../ThinkingAnimation';
 
@@ -111,15 +128,16 @@ interface ToolMessageData {
 // Extract emoji from start of text and return {emoji, text}
 function extractEmoji(text: string): { emoji: string; text: string } {
   // Comprehensive emoji regex including variant selectors and ZWJ sequences
-  const emojiRegex = /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
+  const emojiRegex =
+    /^([\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]+)\s*/gu;
   const match = text.match(emojiRegex);
-  
+
   if (match) {
     const emoji = match[0];
     const remainingText = text.slice(emoji.length).trim();
     return { emoji, text: remainingText };
   }
-  
+
   return { emoji: '', text };
 }
 
@@ -157,7 +175,7 @@ const roleConfig = {
 const ToolMessage = memo(function ToolMessage({
   data,
   shouldType = false,
-  onComplete
+  onComplete,
 }: {
   data: ToolMessageData;
   shouldType?: boolean;
@@ -168,7 +186,7 @@ const ToolMessage = memo(function ToolMessage({
   const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const { toast } = useToast();
   const actionMetadata = data.actionMetadata;
-  
+
   // Countdown timer effect for auto-simulation
   useEffect(() => {
     // Only show countdown for IN_PROGRESS attention requests with timeout
@@ -176,7 +194,7 @@ const ToolMessage = memo(function ToolMessage({
       setCountdownSeconds(null);
       return;
     }
-    
+
     const calculateRemaining = () => {
       const startTime = new Date(data.startTime!).getTime();
       const now = Date.now();
@@ -184,32 +202,32 @@ const ToolMessage = memo(function ToolMessage({
       const remaining = Math.max(0, data.timeout! - elapsed);
       return Math.ceil(remaining);
     };
-    
+
     // Initial calculation
     setCountdownSeconds(calculateRemaining());
-    
+
     // Update every second
     const interval = setInterval(() => {
       const remaining = calculateRemaining();
       setCountdownSeconds(remaining);
-      
+
       // Stop interval when timer reaches 0
       if (remaining <= 0) {
         clearInterval(interval);
       }
     }, 1000);
-    
+
     return () => clearInterval(interval);
   }, [data.status, data.timeout, data.startTime]);
-  
+
   // Get tool icon - prefer actionType for browser actions, fall back to toolName
-  const ToolIcon = data.actionType 
-    ? getToolIcon(data.actionType) 
-    : (data.toolName ? getToolIcon(data.toolName) : Wrench);
+  const ToolIcon = data.actionType
+    ? getToolIcon(data.actionType)
+    : data.toolName
+      ? getToolIcon(data.toolName)
+      : Wrench;
   const isThought = data.toolName === 'thought';
-  const [forceExpanded, setForceExpanded] = useState(
-    isThought && data.status === 'IN_PROGRESS'
-  );
+  const [forceExpanded, setForceExpanded] = useState(isThought && data.status === 'IN_PROGRESS');
   useEffect(() => {
     if (!isThought) return;
     if (data.status === 'IN_PROGRESS') {
@@ -220,25 +238,22 @@ const ToolMessage = memo(function ToolMessage({
       setIsExpanded(false);
     }
   }, [isThought, data.status]);
-  
+
   // Extract emoji from title (memoized) - keeping for backward compatibility
   const { emoji, text: titleText } = useMemo(() => extractEmoji(data.title), [data.title]);
-  
+
   // Memoize computed values
   const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
   // FINISHED and ERROR statuses should both be expandable (not IN_PROGRESS)
   const isExpandable = useMemo(
     () => data.status === 'FINISHED' || data.status === 'ERROR',
-    [data.status]
+    [data.status],
   );
   const showChevron = useMemo(
     () => hasMessage && isExpandable && !forceExpanded,
-    [hasMessage, isExpandable, forceExpanded]
+    [hasMessage, isExpandable, forceExpanded],
   );
-  const shouldBeExpanded = useMemo(
-    () => forceExpanded || isExpanded,
-    [forceExpanded, isExpanded]
-  );
+  const shouldBeExpanded = useMemo(() => forceExpanded || isExpanded, [forceExpanded, isExpanded]);
 
   // Call onComplete immediately when shouldType - tools start collapsed, no animation
   useEffect(() => {
@@ -271,7 +286,7 @@ const ToolMessage = memo(function ToolMessage({
       return;
     }
 
-    const bridge = (typeof window !== 'undefined' ? (window as any).api : undefined);
+    const bridge = typeof window !== 'undefined' ? (window as any).api : undefined;
     if (!bridge?.sendIMessage) {
       toast({
         title: 'Mac app required',
@@ -299,7 +314,10 @@ const ToolMessage = memo(function ToolMessage({
       if (result && result.success === false) {
         throw new Error(result.message || 'iMessage send failed');
       }
-      await respondToAttentionRequest(actionMetadata.attentionRequestId, 'Message sent via Mac app ✅');
+      await respondToAttentionRequest(
+        actionMetadata.attentionRequestId,
+        'Message sent via Mac app ✅',
+      );
       toast({
         title: 'iMessage sent',
         description: 'Approval recorded. Check the attention inbox for updates.',
@@ -319,10 +337,10 @@ const ToolMessage = memo(function ToolMessage({
   return (
     <div className="flex flex-col gap-1">
       {/* Title row */}
-      <div 
+      <div
         className={cn(
-          "flex items-center gap-2",
-          hasMessage && isExpandable && "cursor-pointer hover:opacity-80 transition-opacity"
+          'flex items-center gap-2',
+          hasMessage && isExpandable && 'cursor-pointer hover:opacity-80 transition-opacity',
         )}
         onClick={hasMessage && isExpandable ? () => setIsExpanded(!isExpanded) : undefined}
       >
@@ -346,40 +364,43 @@ const ToolMessage = memo(function ToolMessage({
             className="h-4 w-4 flex-shrink-0 opacity-60 dark:invert dark:opacity-70"
           />
         ) : data.toolName && isClaudeCodeTool(data.toolName) ? (
-          <img
-            src={claudeCodeIconSrc}
-            alt="Claude Code"
-            className="h-4 w-4 flex-shrink-0"
-          />
+          <img src={claudeCodeIconSrc} alt="Claude Code" className="h-4 w-4 flex-shrink-0" />
         ) : (
-          <ToolIcon className={cn(
-            "h-4 w-4 flex-shrink-0",
-            data.error && "text-red-600 dark:text-red-400",
-            !data.error && data.status === 'IN_PROGRESS' && "text-muted-foreground",
-            !data.error && data.status === 'FINISHED' && "text-muted-foreground"
-          )} />
+          <ToolIcon
+            className={cn(
+              'h-4 w-4 flex-shrink-0',
+              data.error && 'text-red-600 dark:text-red-400',
+              !data.error && data.status === 'IN_PROGRESS' && 'text-muted-foreground',
+              !data.error && data.status === 'FINISHED' && 'text-muted-foreground',
+            )}
+          />
         )}
-        
+
         {/* Text / status */}
-        <span 
+        <span
           className={cn(
-            "text-sm font-medium",
-            isThought && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-            isThought && data.status !== 'IN_PROGRESS' && "text-foreground",
-            !isThought && data.error && "text-red-600 dark:text-red-400",
-            !isThought && !data.error && data.status === 'IN_PROGRESS' && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-            !isThought && !data.error && data.status === 'FINISHED' && "text-foreground"
+            'text-sm font-medium',
+            isThought &&
+              data.status === 'IN_PROGRESS' &&
+              'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
+            isThought && data.status !== 'IN_PROGRESS' && 'text-foreground',
+            !isThought && data.error && 'text-red-600 dark:text-red-400',
+            !isThought &&
+              !data.error &&
+              data.status === 'IN_PROGRESS' &&
+              'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
+            !isThought && !data.error && data.status === 'FINISHED' && 'text-foreground',
           )}
         >
           {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
         </span>
 
         {showChevron && (
-          <ChevronRight 
+          <ChevronRight
             className={cn(
-              "h-4 w-4 text-muted-foreground transition-transform duration-75",
-              shouldBeExpanded && "rotate-90"
-            )} 
+              'h-4 w-4 text-muted-foreground transition-transform duration-75',
+              shouldBeExpanded && 'rotate-90',
+            )}
           />
         )}
       </div>
@@ -403,9 +424,7 @@ const ToolMessage = memo(function ToolMessage({
 
       {/* Simulated response indicator */}
       {data.simulated && data.status === 'FINISHED' && (
-        <span className="text-xs text-amber-600 dark:text-amber-400">
-          (Auto-answered)
-        </span>
+        <span className="text-xs text-amber-600 dark:text-amber-400">(Auto-answered)</span>
       )}
 
       {actionMetadata?.onSuccess === 'sendSmsThroughIMessage' && (
@@ -415,7 +434,9 @@ const ToolMessage = memo(function ToolMessage({
           </p>
           <div className="text-xs text-muted-foreground space-y-1">
             {actionMetadata.to && (
-              <p><span className="font-semibold">To:</span> {actionMetadata.to}</p>
+              <p>
+                <span className="font-semibold">To:</span> {actionMetadata.to}
+              </p>
             )}
             {actionMetadata.message && (
               <p className="whitespace-pre-wrap break-words">
@@ -423,12 +444,7 @@ const ToolMessage = memo(function ToolMessage({
               </p>
             )}
           </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleAction}
-            disabled={actionLoading}
-          >
+          <Button size="sm" variant="secondary" onClick={handleAction} disabled={actionLoading}>
             {actionLoading ? 'Sending...' : 'Send via Mac iMessage'}
           </Button>
         </div>
@@ -479,11 +495,7 @@ const ImageLightbox = memo(function ImageLightbox({
       onClick={onClose}
     >
       <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
-        <img
-          src={src}
-          alt={alt}
-          className="max-w-full max-h-[90vh] object-contain rounded-lg"
-        />
+        <img src={src} alt={alt} className="max-w-full max-h-[90vh] object-contain rounded-lg" />
         {/* Close button */}
         <button
           onClick={onClose}
@@ -500,7 +512,7 @@ const ImageLightbox = memo(function ImageLightbox({
         </button>
       </div>
     </div>,
-    document.body
+    document.body,
   );
 });
 
@@ -520,8 +532,8 @@ const AttachmentDisplay = memo(function AttachmentDisplay({
   useEffect(() => {
     if (!agentId) return;
 
-    const imageAttachments = attachments.filter(fp =>
-      fp.mime_type.startsWith('image/') && fp.storage_path
+    const imageAttachments = attachments.filter(
+      (fp) => fp.mime_type.startsWith('image/') && fp.storage_path,
     );
 
     if (imageAttachments.length === 0) return;
@@ -535,7 +547,7 @@ const AttachmentDisplay = memo(function AttachmentDisplay({
         } catch {
           return { id: fp.id, url: '' };
         }
-      })
+      }),
     ).then((results) => {
       const urlMap: Record<string, string> = {};
       results.forEach(({ id, url }) => {
@@ -546,63 +558,69 @@ const AttachmentDisplay = memo(function AttachmentDisplay({
   }, [attachments, agentId]);
 
   // Download file - fetch as blob to force download (not open in tab)
-  const handleDownload = useCallback(async (fp: FilePointer) => {
-    try {
-      let url: string;
-
-      if (imageUrls[fp.id]) {
-        url = imageUrls[fp.id];
-      } else if (fp.storage_path && agentId) {
-        // For storage files, get signed URL
-        url = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
-      } else {
-        throw new Error('Cannot download file');
-      }
-
-      // Fetch the file as blob to force download (cross-origin URLs ignore download attribute)
-      const response = await fetch(url);
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-
-      // Create download link with blob URL
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = fp.original_filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
-      // Clean up blob URL
-      URL.revokeObjectURL(blobUrl);
-    } catch (error) {
-      toast({
-        title: 'Download failed',
-        description: error instanceof Error ? error.message : 'Failed to download file',
-        variant: 'destructive',
-      });
-    }
-  }, [agentId, imageUrls, toast]);
-
-  // Open image in lightbox
-  const openLightbox = useCallback(async (fp: FilePointer) => {
-    let src = imageUrls[fp.id] || '';
-
-    if (!src && fp.storage_path && agentId) {
+  const handleDownload = useCallback(
+    async (fp: FilePointer) => {
       try {
-        src = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
-        // Cache it
-        setImageUrls(prev => ({ ...prev, [fp.id]: src }));
-      } catch {
+        let url: string;
+
+        if (imageUrls[fp.id]) {
+          url = imageUrls[fp.id];
+        } else if (fp.storage_path && agentId) {
+          // For storage files, get signed URL
+          url = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
+        } else {
+          throw new Error('Cannot download file');
+        }
+
+        // Fetch the file as blob to force download (cross-origin URLs ignore download attribute)
+        const response = await fetch(url);
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        // Create download link with blob URL
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fp.original_filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Clean up blob URL
+        URL.revokeObjectURL(blobUrl);
+      } catch (error) {
         toast({
-          title: 'Failed to load image',
+          title: 'Download failed',
+          description: error instanceof Error ? error.message : 'Failed to download file',
           variant: 'destructive',
         });
-        return;
       }
-    }
+    },
+    [agentId, imageUrls, toast],
+  );
 
-    setLightboxImage({ src, alt: fp.original_filename });
-  }, [agentId, imageUrls, toast]);
+  // Open image in lightbox
+  const openLightbox = useCallback(
+    async (fp: FilePointer) => {
+      let src = imageUrls[fp.id] || '';
+
+      if (!src && fp.storage_path && agentId) {
+        try {
+          src = await getAttachmentUrl(agentId, fp.id, fp.storage_path);
+          // Cache it
+          setImageUrls((prev) => ({ ...prev, [fp.id]: src }));
+        } catch {
+          toast({
+            title: 'Failed to load image',
+            variant: 'destructive',
+          });
+          return;
+        }
+      }
+
+      setLightboxImage({ src, alt: fp.original_filename });
+    },
+    [agentId, imageUrls, toast],
+  );
 
   // Get icon for file type
   const getFileIcon = (fp: FilePointer) => {
@@ -698,7 +716,7 @@ const AttachmentDisplay = memo(function AttachmentDisplay({
           alt={lightboxImage.alt}
           onClose={() => setLightboxImage(null)}
           onDownload={() => {
-            const fp = attachments.find(a => a.original_filename === lightboxImage.alt);
+            const fp = attachments.find((a) => a.original_filename === lightboxImage.alt);
             if (fp) handleDownload(fp);
           }}
         />
@@ -711,25 +729,22 @@ const AttachmentDisplay = memo(function AttachmentDisplay({
 function StreamingText({ text }: { text: string }) {
   const prevTextRef = useRef('');
   const [chunks, setChunks] = useState<string[]>([]);
-  
+
   useEffect(() => {
     if (text.length > prevTextRef.current.length) {
       const delta = text.slice(prevTextRef.current.length);
-      setChunks(prev => [...prev, delta]);
+      setChunks((prev) => [...prev, delta]);
       prevTextRef.current = text;
     } else if (text !== prevTextRef.current) {
       setChunks([text]);
       prevTextRef.current = text;
     }
   }, [text]);
-  
+
   return (
     <span className="text-sm">
       {chunks.map((chunk, i) => (
-        <span
-          key={i}
-          className="animate-in fade-in duration-300"
-        >
+        <span key={i} className="animate-in fade-in duration-300">
           {chunk}
         </span>
       ))}
@@ -754,7 +769,7 @@ const AttentionMessage = memo(function AttentionMessage({
   isStreaming?: boolean;
 }) {
   const [hasAnimated, setHasAnimated] = useState(false);
-  
+
   const handleAnimationComplete = () => {
     setHasAnimated(true);
     if (onComplete) {
@@ -763,37 +778,36 @@ const AttentionMessage = memo(function AttentionMessage({
       });
     }
   };
-  
+
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-
       <div className="flex-1 space-y-3">
         {/* Render message as raw markdown text */}
         <div className="text-sm">
           {isStreaming ? (
             <StreamingText text={attentionMessage} />
           ) : (
-            <MarkdownText 
+            <MarkdownText
               text={attentionMessage}
               shouldAnimate={isWaiting && !hasAnimated}
               onComplete={handleAnimationComplete}
             />
           )}
         </div>
-        
+
         {/* Yellow dashed circle indicator - only show while waiting */}
         {isWaiting && !isStreaming && (
           <>
             <div className="flex items-center gap-2 text-amber-500">
-              <div 
-                className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500" 
-                style={{ animation: 'spin 3s linear infinite' }} 
+              <div
+                className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
+                style={{ animation: 'spin 3s linear infinite' }}
               />
               <span className="text-xs font-medium">
                 Your Rose agent will continue working after your reply
               </span>
             </div>
-            
+
             {/* Start Autonomous Execution button */}
             {onStartExecution && (
               <TooltipProvider delayDuration={300}>
@@ -805,7 +819,15 @@ const AttentionMessage = memo(function AttentionMessage({
                       onClick={onStartExecution}
                       className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
                     >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        className="w-4 h-4"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <circle cx="12" cy="12" r="1" />
                         <path d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z" />
                         <path d="M15.7 15.7c4.52-4.54 6.54-9.87 4.5-11.9-2.03-2.04-7.36-.02-11.9 4.5-4.52 4.54-6.54 9.87-4.5 11.9 2.03 2.04 7.36.02 11.9-4.5Z" />
@@ -814,7 +836,11 @@ const AttentionMessage = memo(function AttentionMessage({
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="max-w-xs text-left text-xs">
-                    <p>Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any more questions and will relentlessly explore all possible avenues in order to accomplish your goal given the context at its disposal.</p>
+                    <p>
+                      Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask
+                      you any more questions and will relentlessly explore all possible avenues in
+                      order to accomplish your goal given the context at its disposal.
+                    </p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -826,7 +852,22 @@ const AttentionMessage = memo(function AttentionMessage({
   );
 });
 
-export default function MessageBubble({ message, shouldType = false, onTypingComplete, onNavigateToAgent, isStreaming = false, agentId, onSendMessage, compact = false, onOpenAuthModal, onSubmitFeedback, planCharCount, exploreStepHistory, waitForChecks, hideSubAgentTreeHeader }: MessageBubbleProps) {
+export default function MessageBubble({
+  message,
+  shouldType = false,
+  onTypingComplete,
+  onNavigateToAgent,
+  isStreaming = false,
+  agentId,
+  onSendMessage,
+  compact = false,
+  onOpenAuthModal,
+  onSubmitFeedback,
+  planCharCount,
+  exploreStepHistory,
+  waitForChecks,
+  hideSubAgentTreeHeader,
+}: MessageBubbleProps) {
   const config = roleConfig[message.role];
   const Icon = config.icon;
   const isUser = message.role === 'USER';
@@ -847,7 +888,10 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const isSubAgentTool = message.metadata?.toolName === 'spawn_sub_agent';
 
   // Check if this is an explore agent message (spawn_agent with agentType=explore)
-  const isExploreAgent = isTool && message.metadata?.toolName === 'spawn_agent' && message.metadata?.agentType === 'explore';
+  const isExploreAgent =
+    isTool &&
+    message.metadata?.toolName === 'spawn_agent' &&
+    message.metadata?.agentType === 'explore';
 
   // Check if this is a wait_for tool message (render as WaitForChip)
   const isWaitFor = isTool && message.metadata?.toolName === 'wait_for';
@@ -859,7 +903,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   const isPhoneCallTool = isTool && message.metadata?.toolName === 'call_phone_number';
 
   // Check if this is a spawn_claude_code_agent tool message (render as ClaudeCodeChip)
-  const isClaudeCodeToolMessage = isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
+  const isClaudeCodeToolMessage =
+    isTool && message.metadata?.toolName === 'spawn_claude_code_agent';
 
   // Check if this is a completion summary message (render as CompletionSummaryCard + FeedbackBanner)
   const isCompletionSummary = isTool && message.metadata?.isFinalSummary === true;
@@ -871,7 +916,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     if (isStreaming) {
       return null;
     }
-    
+
     // ASSISTANT messages with file_pointer are rendered separately (not as Thought cards)
     if (isAssistant && !message.file_pointer) {
       const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
@@ -885,13 +930,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     }
 
     if (!isTool || !message.metadata) return null;
-    
+
     // Extract sendMessageToUser sub-metadata if present (fallback to legacy requestUserAttention)
-    const attentionMeta = message.metadata.sendMessageToUser || message.metadata.requestUserAttention || {};
-    
-    const toolStatus = message.metadata.toolStatus === 'ERROR'
-      ? 'FINISHED'
-      : (message.metadata.toolStatus || 'FINISHED');
+    const attentionMeta =
+      message.metadata.sendMessageToUser || message.metadata.requestUserAttention || {};
+
+    const toolStatus =
+      message.metadata.toolStatus === 'ERROR'
+        ? 'FINISHED'
+        : message.metadata.toolStatus || 'FINISHED';
 
     return {
       toolCallId: message.metadata.toolCallId || '',
@@ -932,7 +979,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
           <div className="flex items-center gap-1 font-mono text-sm text-red-500">
             <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
             <span className="w-4 text-center select-none">✗</span>
-            <span className="truncate">{errorTitle}: {errorMsg}</span>
+            <span className="truncate">
+              {errorTitle}: {errorMsg}
+            </span>
           </div>
         </div>
       );
@@ -973,9 +1022,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
           <div className="flex items-center gap-1 font-mono text-sm">
             <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
             <span className="w-4 text-center select-none animate-pulse">○</span>
-            <span className="text-gray-700 dark:text-gray-300">
-              Spawning sub-agents...
-            </span>
+            <span className="text-gray-700 dark:text-gray-300">Spawning sub-agents...</span>
           </div>
         </div>
       );
@@ -1012,12 +1059,18 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     const toolStatus = (message.metadata?.toolStatus as string) || 'IN_PROGRESS';
     // Step history is passed as a prop from MessageList's explore grouping
     const stepHistory = exploreStepHistory || [
-      { title: message.metadata?.title as string || '', status: toolStatus, timestamp: message.timestamp, message: message.text || '', toolName: message.metadata?.toolName as string || '' },
+      {
+        title: (message.metadata?.title as string) || '',
+        status: toolStatus,
+        timestamp: message.timestamp,
+        message: message.text || '',
+        toolName: (message.metadata?.toolName as string) || '',
+      },
     ];
     return (
       <ExploreAgentBubble
-        title={message.metadata?.title as string || ''}
-        fullGoal={message.metadata?.fullGoal as string || ''}
+        title={(message.metadata?.title as string) || ''}
+        fullGoal={(message.metadata?.fullGoal as string) || ''}
         message={message.text || ''}
         status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
         stepHistory={stepHistory}
@@ -1032,7 +1085,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     const checkHistory = waitForChecks || [];
     return (
       <WaitForChip
-        title={message.metadata?.title as string || ''}
+        title={(message.metadata?.title as string) || ''}
         message={message.text || ''}
         status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
         checks={checkHistory}
@@ -1045,7 +1098,8 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // request_user_signup: render as SignupPromptBubble
   if (isSignupRequest && agentId) {
-    const signupReason = message.metadata?.requestUserSignup?.reason || message.text || 'Please sign up to continue.';
+    const signupReason =
+      message.metadata?.requestUserSignup?.reason || message.text || 'Please sign up to continue.';
     const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
 
     return (
@@ -1073,11 +1127,19 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // The message queue in Terminal.tsx blocks on isAnimating until callback is called.
   // IN_PROGRESS messages show shimmer effect, FINISHED shows final state.
   if (isSetPlanTool) {
-    const toolStatus = message.metadata?.toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR' | undefined;
+    const toolStatus = message.metadata?.toolStatus as
+      | 'IN_PROGRESS'
+      | 'FINISHED'
+      | 'ERROR'
+      | undefined;
     const planData = message.metadata?.data;
 
     // Call onTypingComplete for all terminal statuses to not block the queue
-    if ((toolStatus === 'FINISHED' || toolStatus === 'IN_PROGRESS' || toolStatus === 'ERROR') && shouldType && onTypingComplete) {
+    if (
+      (toolStatus === 'FINISHED' || toolStatus === 'IN_PROGRESS' || toolStatus === 'ERROR') &&
+      shouldType &&
+      onTypingComplete
+    ) {
       requestAnimationFrame(() => {
         onTypingComplete();
       });
@@ -1109,7 +1171,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-          <div className="flex-1">
+        <div className="flex-1">
           <PlanChip
             plan={{
               title: title,
@@ -1129,12 +1191,20 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   // call_phone_number tool: render as PhoneCallCard
   if (isPhoneCallTool) {
-    const toolStatus = (message.metadata?.toolStatus || 'IN_PROGRESS') as 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+    const toolStatus = (message.metadata?.toolStatus || 'IN_PROGRESS') as
+      | 'IN_PROGRESS'
+      | 'FINISHED'
+      | 'ERROR';
     const phoneCallMetadata = message.metadata?.phoneCall as PhoneCallMetadata | undefined;
 
     // Default to basic metadata if phoneCall object not present
     const phoneCall: PhoneCallMetadata = phoneCallMetadata || {
-      status: toolStatus === 'IN_PROGRESS' ? 'in-progress' : toolStatus === 'FINISHED' ? 'ended' : 'error',
+      status:
+        toolStatus === 'IN_PROGRESS'
+          ? 'in-progress'
+          : toolStatus === 'FINISHED'
+            ? 'ended'
+            : 'error',
       to: message.metadata?.title?.replace(/[📞✅❌]\s*/g, '').trim() || 'Unknown',
     };
 
@@ -1153,9 +1223,12 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // - IN_PROGRESS (toolStatus) shows spinning_up state
   // - claude_code_started shows live terminal
   // - task_complete shows completed/failed state with expandable terminal
-  const isClaudeCodeInProgress = isClaudeCodeToolMessage && message.metadata?.toolStatus === 'IN_PROGRESS';
-  const isClaudeCodeStarted = isClaudeCodeToolMessage && message.metadata?.action_type === 'claude_code_started';
-  const isClaudeCodeComplete = isClaudeCodeToolMessage && message.metadata?.action_type === 'task_complete';
+  const isClaudeCodeInProgress =
+    isClaudeCodeToolMessage && message.metadata?.toolStatus === 'IN_PROGRESS';
+  const isClaudeCodeStarted =
+    isClaudeCodeToolMessage && message.metadata?.action_type === 'claude_code_started';
+  const isClaudeCodeComplete =
+    isClaudeCodeToolMessage && message.metadata?.action_type === 'task_complete';
 
   if (isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete) {
     const taskId = (message.metadata?.task_id as string) || 'pending';
@@ -1170,7 +1243,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-          <div className="flex-1">
+        <div className="flex-1">
           <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} />
         </div>
       </div>
@@ -1189,7 +1262,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
     const completionData = message.metadata.completionSummary as CompletionSummaryData;
 
     return (
-      <div className={cn("flex", !compact && "gap-3", "animate-in fade-in duration-300")}>
+      <div className={cn('flex', !compact && 'gap-3', 'animate-in fade-in duration-300')}>
         <div className="flex-1 space-y-3">
           <CompletionSummaryCard data={completionData} />
           {onSubmitFeedback && <FeedbackBanner onSubmit={onSubmitFeedback} />}
@@ -1202,15 +1275,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   if (isUserAttentionMessage) {
     const attentionMessage = message.metadata?.attentionMessage || message.text;
     const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
-    
+
     const handleStartExecution = () => {
       if (onSendMessage) {
         onSendMessage(
-          'Please do not ask me anymore questions. I trust your judgment, intuition, and ability to make reasonable assumptions. Please proceed to the Autonomous Execution phase.'
+          'Please do not ask me anymore questions. I trust your judgment, intuition, and ability to make reasonable assumptions. Please proceed to the Autonomous Execution phase.',
         );
       }
     };
-    
+
     return (
       <AttentionMessage
         attentionMessage={attentionMessage}
@@ -1225,14 +1298,9 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
 
   if (toolData) {
     return (
-      <div className={cn("flex", !compact && "gap-3")}>
-
+      <div className={cn('flex', !compact && 'gap-3')}>
         <div className="flex-1">
-          <ToolMessage
-            data={toolData}
-            shouldType={shouldType}
-            onComplete={onTypingComplete}
-          />
+          <ToolMessage data={toolData} shouldType={shouldType} onComplete={onTypingComplete} />
         </div>
       </div>
     );
@@ -1254,7 +1322,7 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
             className={cn(
               'inline-block max-w-[80%] px-4 py-2 rounded-lg border backdrop-blur-md',
               config.bg,
-              config.border
+              config.border,
             )}
           >
             <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
@@ -1278,14 +1346,14 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
       <div className="flex flex-col items-start gap-2 animate-in fade-in duration-300">
         {/* Render text if present */}
         {message.text && (
-          <div className={cn(
-            'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
-            config.bg,
-            config.border
-          )}>
-            <p className="text-sm whitespace-pre-wrap break-words">
-              {message.text}
-            </p>
+          <div
+            className={cn(
+              'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
+              config.bg,
+              config.border,
+            )}
+          >
+            <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
           </div>
         )}
         {/* Render file attachment */}
@@ -1297,15 +1365,15 @@ export default function MessageBubble({ message, shouldType = false, onTypingCom
   // System/Assistant messages: simplified without avatar/label
   return (
     <div className="flex flex-col items-start gap-2 animate-in fade-in duration-300">
-      <div className={cn(
-        'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
-        config.bg,
-        config.border,
-        isStreaming && 'border-purple-500/50'
-      )}>
-        <p className="text-sm whitespace-pre-wrap break-words">
-          {message.text}
-        </p>
+      <div
+        className={cn(
+          'inline-block max-w-[80%] px-4 py-2 rounded-lg border',
+          config.bg,
+          config.border,
+          isStreaming && 'border-purple-500/50',
+        )}
+      >
+        <p className="text-sm whitespace-pre-wrap break-words">{message.text}</p>
       </div>
     </div>
   );

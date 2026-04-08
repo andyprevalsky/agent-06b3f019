@@ -135,7 +135,10 @@ function applyGradient(data: XmlFrameData | null, palette: string[]): XmlFrameDa
     }
   });
 
-  console.log(`[applyGradient] Found ${allColors.size} unique colors in ${data.frames.length} frames`, [...allColors].slice(0, 5));
+  console.log(
+    `[applyGradient] Found ${allColors.size} unique colors in ${data.frames.length} frames`,
+    [...allColors].slice(0, 5),
+  );
 
   if (!allColors.size) return data;
   const mapColor = buildColorMapper([...allColors], palette);
@@ -265,9 +268,10 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
       position: 'relative',
       // CSS filter to shift blue SVG to orange when gradient palette is provided
       // invert flips blue→yellow range, then sepia+hue-rotate+saturate tunes to warm orange
-      ...(hasGradient ? { filter: 'invert(0.5) sepia(1) saturate(3) hue-rotate(330deg) brightness(1.4)' } : {}),
+      ...(hasGradient
+        ? { filter: 'invert(0.5) sepia(1) saturate(3) hue-rotate(330deg) brightness(1.4)' }
+        : {}),
     };
-
 
     return (
       <div className={wrapperClass} style={wrapperStyle}>

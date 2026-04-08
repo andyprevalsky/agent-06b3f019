@@ -44,7 +44,12 @@ export const handlers = [
     return HttpResponse.json({
       models: [
         { id: 'rose-1-lite', name: 'Rose 1 Lite', provider: 'rose', description: 'Fast model' },
-        { id: 'rose-1-ultra', name: 'Rose 1 Ultra', provider: 'rose', description: 'Powerful model' },
+        {
+          id: 'rose-1-ultra',
+          name: 'Rose 1 Ultra',
+          provider: 'rose',
+          description: 'Powerful model',
+        },
       ],
     });
   }),

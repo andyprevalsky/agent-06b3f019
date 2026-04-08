@@ -24,9 +24,9 @@ async function importRSAPublicKey(pem: string): Promise<CryptoKey> {
     .replace('-----BEGIN PUBLIC KEY-----', '')
     .replace('-----END PUBLIC KEY-----', '')
     .replace(/\s/g, '');
-  
-  const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
-  
+
+  const binaryDer = Uint8Array.from(atob(pemContents), (c) => c.charCodeAt(0));
+
   return await crypto.subtle.importKey(
     'spki',
     binaryDer,
@@ -35,7 +35,7 @@ async function importRSAPublicKey(pem: string): Promise<CryptoKey> {
       hash: 'SHA-256',
     },
     false,
-    ['encrypt']
+    ['encrypt'],
   );
 }
 
@@ -49,7 +49,7 @@ async function generateAESKey(): Promise<CryptoKey> {
       length: 256,
     },
     true, // extractable (we need to export it for RSA encryption)
-    ['encrypt']
+    ['encrypt'],
   );
 }
 
@@ -58,23 +58,23 @@ async function generateAESKey(): Promise<CryptoKey> {
  */
 async function encryptWithAES(
   data: string,
-  key: CryptoKey
+  key: CryptoKey,
 ): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
   const encoder = new TextEncoder();
   const dataBytes = encoder.encode(data);
-  
+
   // Generate random IV (12 bytes is recommended for GCM)
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  
+
   const ciphertext = await crypto.subtle.encrypt(
     {
       name: 'AES-GCM',
       iv,
     },
     key,
-    dataBytes
+    dataBytes,
   );
-  
+
   return {
     ciphertext: new Uint8Array(ciphertext),
     iv,
@@ -86,20 +86,20 @@ async function encryptWithAES(
  */
 async function encryptAESKeyWithRSA(
   aesKey: CryptoKey,
-  rsaPublicKey: CryptoKey
+  rsaPublicKey: CryptoKey,
 ): Promise<Uint8Array> {
   // Export AES key as raw bytes
   const aesKeyBytes = await crypto.subtle.exportKey('raw', aesKey);
-  
+
   // Encrypt with RSA-OAEP
   const encryptedKey = await crypto.subtle.encrypt(
     {
       name: 'RSA-OAEP',
     },
     rsaPublicKey,
-    aesKeyBytes
+    aesKeyBytes,
   );
-  
+
   return new Uint8Array(encryptedKey);
 }
 
@@ -139,9 +139,9 @@ export interface PaymentData {
  */
 export interface EncryptedPaymentEnvelope {
   version: 1;
-  encrypted_aes_key: string;  // Base64-encoded RSA-encrypted AES key
-  iv: string;                  // Base64-encoded AES-GCM IV
-  ciphertext: string;          // Base64-encoded AES-encrypted payment data
+  encrypted_aes_key: string; // Base64-encoded RSA-encrypted AES key
+  iv: string; // Base64-encoded AES-GCM IV
+  ciphertext: string; // Base64-encoded AES-encrypted payment data
   // Unencrypted metadata for UI display (no sensitive data)
   card_last_four: string;
   card_type: string;
@@ -152,24 +152,24 @@ export interface EncryptedPaymentEnvelope {
 
 /**
  * Encrypt payment data using hybrid RSA+AES encryption
- * 
+ *
  * @param paymentData - The payment data to encrypt
  * @returns Base64-encoded JSON envelope containing encrypted data and metadata
  */
 export async function encryptPaymentData(paymentData: PaymentData): Promise<string> {
   // 1. Import RSA public key
   const rsaPublicKey = await importRSAPublicKey(RSA_PUBLIC_KEY_PEM);
-  
+
   // 2. Generate random AES-256 key
   const aesKey = await generateAESKey();
-  
+
   // 3. Encrypt payment data with AES
   const jsonData = JSON.stringify(paymentData);
   const { ciphertext, iv } = await encryptWithAES(jsonData, aesKey);
-  
+
   // 4. Encrypt AES key with RSA public key
   const encryptedAESKey = await encryptAESKeyWithRSA(aesKey, rsaPublicKey);
-  
+
   // 5. Build envelope with encrypted data and unencrypted metadata for UI
   const envelope: EncryptedPaymentEnvelope = {
     version: 1,
@@ -183,7 +183,7 @@ export async function encryptPaymentData(paymentData: PaymentData): Promise<stri
     billing_country: paymentData.billing_country,
     autoagentpaylimit_cents: paymentData.autoagentpaylimit_cents,
   };
-  
+
   // 6. Return as base64-encoded JSON string
   return btoa(JSON.stringify(envelope));
 }
@@ -206,19 +206,19 @@ export function parsePaymentEnvelope(encryptedData: string): EncryptedPaymentEnv
  */
 export function detectCardType(cardNumber: string): string {
   const num = cardNumber.replace(/\s/g, '');
-  
+
   // Visa: starts with 4
   if (/^4/.test(num)) return 'visa';
-  
+
   // Mastercard: starts with 51-55 or 2221-2720
   if (/^5[1-5]/.test(num) || /^2[2-7]/.test(num)) return 'mastercard';
-  
+
   // Amex: starts with 34 or 37
   if (/^3[47]/.test(num)) return 'amex';
-  
+
   // Discover: starts with 6011, 622126-622925, 644-649, 65
   if (/^6(?:011|5|4[4-9]|22)/.test(num)) return 'discover';
-  
+
   return 'unknown';
 }
 
@@ -227,24 +227,24 @@ export function detectCardType(cardNumber: string): string {
  */
 export function validateCardNumber(cardNumber: string): boolean {
   const num = cardNumber.replace(/\s/g, '');
-  
+
   if (!/^\d{13,19}$/.test(num)) return false;
-  
+
   let sum = 0;
   let isEven = false;
-  
+
   for (let i = num.length - 1; i >= 0; i--) {
     let digit = parseInt(num[i], 10);
-    
+
     if (isEven) {
       digit *= 2;
       if (digit > 9) digit -= 9;
     }
-    
+
     sum += digit;
     isEven = !isEven;
   }
-  
+
   return sum % 10 === 0;
 }
 
@@ -254,19 +254,19 @@ export function validateCardNumber(cardNumber: string): boolean {
 export function validateExpiry(expiry: string): boolean {
   const match = expiry.match(/^(\d{2})\/(\d{2})$/);
   if (!match) return false;
-  
+
   const month = parseInt(match[1], 10);
   const year = parseInt(match[2], 10) + 2000;
-  
+
   if (month < 1 || month > 12) return false;
-  
+
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
-  
+
   if (year < currentYear) return false;
   if (year === currentYear && month < currentMonth) return false;
-  
+
   return true;
 }
 
@@ -297,4 +297,3 @@ export function formatExpiry(value: string): string {
   }
   return num;
 }
-

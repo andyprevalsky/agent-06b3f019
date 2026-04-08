@@ -193,14 +193,23 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
       imageData.data.set(glowData);
       const data = imageData.data;
 
-      const { numWaves, waveWidth, waveSpeed, flickerSpeed, minOpacity, maxOpacity, dotRadius, dotColor } = CONFIG;
+      const {
+        numWaves,
+        waveWidth,
+        waveSpeed,
+        flickerSpeed,
+        minOpacity,
+        maxOpacity,
+        dotRadius,
+        dotColor,
+      } = CONFIG;
       const scaledRadius = Math.max(1, Math.floor(dotRadius * dpr));
 
       // Calculate wave positions - each wave rotates around corners
       const wavePositions: number[] = [];
       for (let i = 0; i < numWaves; i++) {
         // Waves cycle through corners (0, 1, 2, 3, 0, ...)
-        const pos = ((timestamp * waveSpeed * 4) + (i / numWaves)) % 1;
+        const pos = (timestamp * waveSpeed * 4 + i / numWaves) % 1;
         wavePositions.push(pos);
       }
 
@@ -218,14 +227,15 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
         }
 
         const waveInfluence = Math.max(0, 1 - minWaveDist / waveWidth);
-        const flicker = waveInfluence > 0.05
-          ? 0.5 + 0.5 * Math.sin(timestamp * flickerSpeed + dot.flickerPhase)
-          : 0;
+        const flicker =
+          waveInfluence > 0.05
+            ? 0.5 + 0.5 * Math.sin(timestamp * flickerSpeed + dot.flickerPhase)
+            : 0;
 
         // Fade out towards edge of region (corner or edge)
         // Corner fade is full intensity, edge fade is 50% intensity
-        const cornerFade = dot.cornerDist < 1 ? (1 - dot.cornerDist) : 0;
-        const edgeFadeRaw = dot.edgeDist < 1 ? (1 - dot.edgeDist) : 0;
+        const cornerFade = dot.cornerDist < 1 ? 1 - dot.cornerDist : 0;
+        const edgeFadeRaw = dot.edgeDist < 1 ? 1 - dot.edgeDist : 0;
         const regionFade = Math.max(cornerFade, edgeFadeRaw * 0.5);
         const baseOpacity = minOpacity * regionFade * regionFade;
         const activeOpacity = waveInfluence * flicker * (maxOpacity - minOpacity) * regionFade;
@@ -245,9 +255,14 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
                 const outAlpha = newAlpha + existingAlpha * (1 - newAlpha);
                 if (outAlpha > 0) {
                   // Blend blue dots over blue glow
-                  data[idx] = (dotColor.r * newAlpha + data[idx] * existingAlpha * (1 - newAlpha)) / outAlpha;
-                  data[idx + 1] = (dotColor.g * newAlpha + data[idx + 1] * existingAlpha * (1 - newAlpha)) / outAlpha;
-                  data[idx + 2] = (dotColor.b * newAlpha + data[idx + 2] * existingAlpha * (1 - newAlpha)) / outAlpha;
+                  data[idx] =
+                    (dotColor.r * newAlpha + data[idx] * existingAlpha * (1 - newAlpha)) / outAlpha;
+                  data[idx + 1] =
+                    (dotColor.g * newAlpha + data[idx + 1] * existingAlpha * (1 - newAlpha)) /
+                    outAlpha;
+                  data[idx + 2] =
+                    (dotColor.b * newAlpha + data[idx + 2] * existingAlpha * (1 - newAlpha)) /
+                    outAlpha;
                   data[idx + 3] = outAlpha * 255;
                 }
               }

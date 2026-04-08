@@ -42,7 +42,7 @@ describe('NotFound page', () => {
 
     expect(consoleSpy).toHaveBeenCalledWith(
       '404 Error: User attempted to access non-existent route:',
-      '/bogus-path'
+      '/bogus-path',
     );
 
     consoleSpy.mockRestore();
@@ -54,7 +54,7 @@ describe('NotFound page', () => {
 
     expect(consoleSpy).toHaveBeenCalledWith(
       '404 Error: User attempted to access non-existent route:',
-      '/'
+      '/',
     );
 
     consoleSpy.mockRestore();
@@ -77,7 +77,7 @@ describe('NotFound page', () => {
             </Routes>
           </MemoryRouter>
         </TooltipProvider>
-      </QueryClientProvider>
+      </QueryClientProvider>,
     );
 
     expect(screen.getByRole('heading', { name: '404' })).toBeInTheDocument();
@@ -99,7 +99,7 @@ describe('NotFound page', () => {
             </Routes>
           </MemoryRouter>
         </TooltipProvider>
-      </QueryClientProvider>
+      </QueryClientProvider>,
     );
 
     expect(screen.getByText('Home')).toBeInTheDocument();

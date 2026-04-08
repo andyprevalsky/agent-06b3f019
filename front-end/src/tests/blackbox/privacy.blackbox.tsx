@@ -18,9 +18,15 @@ describe('Privacy page', () => {
 
   it('renders all 7 section headings', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByRole('heading', { name: /1\. information we collect/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /2\. how our assistant operates/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /3\. third-party processing/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /1\. information we collect/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /2\. how our assistant operates/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /3\. third-party processing/i }),
+    ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /4\. security/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /5\. your control/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /6\. policy updates/i })).toBeInTheDocument();
@@ -43,41 +49,57 @@ describe('Privacy page', () => {
 
   it('renders section 1 content about not storing data', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we do not store, record, or retain any conversations or personal data/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/we do not store, record, or retain any conversations or personal data/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 1 content about real-time processing', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/all interactions are processed in real time and discarded immediately/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/all interactions are processed in real time and discarded immediately/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 1 content about no cookies or tracking', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we do not use cookies, tracking pixels, or analytics scripts/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/we do not use cookies, tracking pixels, or analytics scripts/i),
+    ).toBeInTheDocument();
   });
 
   // --- Section 2: How Our Assistant Operates ---
 
   it('renders section 2 content about pass-through to AI providers', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/our assistant serves as a pass-through to frontier ai model providers/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/our assistant serves as a pass-through to frontier ai model providers/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 2 content about no data remaining after interaction', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/after your interaction ends, no data remains with us/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/after your interaction ends, no data remains with us/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 2 content about no advertising or profiling', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we do not use your interaction data for advertising, marketing, or profiling/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /we do not use your interaction data for advertising, marketing, or profiling/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   // --- Section 3: Third-Party Processing ---
 
   it('renders section 3 content about secure anonymous streaming', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/data is securely and anonymously streamed to leading ai model providers/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/data is securely and anonymously streamed to leading ai model providers/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 3 content about not selling data', () => {
@@ -87,32 +109,46 @@ describe('Privacy page', () => {
 
   it('renders section 3 content about AI provider privacy practices', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/our ai provider partners must adhere to strict privacy and security practices/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /our ai provider partners must adhere to strict privacy and security practices/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   it('renders section 3 content about text messaging opt-in exclusion', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/text messaging originator opt-in data and consent/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/text messaging originator opt-in data and consent/i),
+    ).toBeInTheDocument();
   });
 
   // --- Section 4: Security ---
 
   it('renders section 4 content about encryption and no voice data storage', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/all data in transit is encrypted using industry-standard protocols/i)).toBeInTheDocument();
-    expect(screen.getByText(/no voice data is ever stored on our infrastructure/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/all data in transit is encrypted using industry-standard protocols/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/no voice data is ever stored on our infrastructure/i),
+    ).toBeInTheDocument();
   });
 
   // --- Section 5: Your Control ---
 
   it('renders section 5 content about user control', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/you are in full control of when and how you interact/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/you are in full control of when and how you interact/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 5 content about contact details not retained', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we use your contact details only to respond and do not retain them/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/we use your contact details only to respond and do not retain them/i),
+    ).toBeInTheDocument();
   });
 
   // --- Section 6: Policy Updates ---

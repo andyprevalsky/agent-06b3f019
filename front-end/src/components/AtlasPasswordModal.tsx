@@ -20,7 +20,13 @@ interface AtlasPasswordModalProps {
  * programmatically. Users must manually retrieve the password from
  * Keychain Access.
  */
-const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType = 'cookies' }: AtlasPasswordModalProps) => {
+const AtlasPasswordModal = ({
+  isOpen,
+  onClose,
+  onSync,
+  onOpenKeychain,
+  syncType = 'cookies',
+}: AtlasPasswordModalProps) => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,10 +71,7 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={handleClose}
-      />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={handleClose} />
 
       {/* Modal */}
       <div className="relative bg-card border border-border rounded-xl shadow-xl w-full max-w-2xl mx-4 overflow-hidden max-h-[90vh] overflow-y-auto">
@@ -96,7 +99,9 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
           <ol className="text-sm text-muted-foreground space-y-4">
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">1</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  1
+                </span>
                 <div className="flex-1">
                   <span>Click "Open Keychain Access" when prompted</span>
                   <button
@@ -120,7 +125,9 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
             </li>
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">2</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  2
+                </span>
                 <span>Double-click "ChatGPT Safe Storage"</span>
               </div>
               <div className="flex justify-center">
@@ -135,7 +142,9 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
             </li>
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">3</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  3
+                </span>
                 <span>Check "Show password" and enter your Mac password when prompted</span>
               </div>
               <div className="flex justify-center">
@@ -149,16 +158,16 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
               </div>
             </li>
             <li className="flex items-start gap-3">
-              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">4</span>
+              <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                4
+              </span>
               <span>Copy the revealed password and paste it below</span>
             </li>
           </ol>
 
           {/* Password input */}
           <div className="space-y-2">
-            <label className="text-sm font-medium text-foreground">
-              Keychain Password
-            </label>
+            <label className="text-sm font-medium text-foreground">Keychain Password</label>
             <input
               type="password"
               value={password}
@@ -178,15 +187,13 @@ const AtlasPasswordModal = ({ isOpen, onClose, onSync, onOpenKeychain, syncType 
           <div className="flex items-start gap-2 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
             <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
             <p className="text-xs text-emerald-800 dark:text-emerald-200">
-              <span className="font-medium">Your password never leaves your computer.</span>{' '}
-              It's stored locally in Rose to keep your {syncType} in sync.
+              <span className="font-medium">Your password never leaves your computer.</span> It's
+              stored locally in Rose to keep your {syncType} in sync.
             </p>
           </div>
 
           {/* Error message */}
-          {error && (
-            <p className="text-sm text-red-500">{error}</p>
-          )}
+          {error && <p className="text-sm text-red-500">{error}</p>}
         </div>
 
         {/* Footer */}

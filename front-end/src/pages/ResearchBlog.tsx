@@ -57,9 +57,7 @@ export default function ResearchBlog() {
               {posts.map((post) => (
                 <BlogPostCard key={post.slug} post={post} />
               ))}
-              {posts.length === 0 && (
-                <p className="text-slate-500">No posts yet.</p>
-              )}
+              {posts.length === 0 && <p className="text-slate-500">No posts yet.</p>}
             </div>
           </div>
         </div>

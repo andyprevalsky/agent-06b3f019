@@ -9,16 +9,16 @@
  *   +--> earlyAccess=false --> shows WaitlistSection only
  */
 
-import { Toaster } from "@/components/ui/toaster";
-import NaviHeader from "@/components/NaviHeader";
-import HeroSection from "@/components/HeroSection";
-import PoweredByTicker from "@/components/PoweredByTicker";
-import FeaturesSection from "@/components/FeaturesSection";
-import WaitlistSection from "@/components/WaitlistSection";
-import PreOrderSection from "@/components/PreOrderSection";
-import { isEarlyAccessEnabled } from "@/lib/utils";
+import { Toaster } from '@/components/ui/toaster';
+import NaviHeader from '@/components/NaviHeader';
+import HeroSection from '@/components/HeroSection';
+import PoweredByTicker from '@/components/PoweredByTicker';
+import FeaturesSection from '@/components/FeaturesSection';
+import WaitlistSection from '@/components/WaitlistSection';
+import PreOrderSection from '@/components/PreOrderSection';
+import { isEarlyAccessEnabled } from '@/lib/utils';
 
-import NaviFooter from "@/components/NaviFooter";
+import NaviFooter from '@/components/NaviFooter';
 
 const Index = () => {
   const earlyAccess = isEarlyAccessEnabled();

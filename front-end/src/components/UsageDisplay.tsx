@@ -40,10 +40,10 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
         `${(import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '')}/api/credits/usage`,
         {
           headers: {
-            'Authorization': `Bearer ${session.access_token}`,
+            Authorization: `Bearer ${session.access_token}`,
             'Content-Type': 'application/json',
           },
-        }
+        },
       );
 
       if (response.ok) {
@@ -75,7 +75,7 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
 
   if (loading || !usage) {
     return (
-      <div className={cn("flex items-center gap-2 px-3 py-2 text-sm", className)}>
+      <div className={cn('flex items-center gap-2 px-3 py-2 text-sm', className)}>
         <CreditCard className="h-4 w-4 animate-pulse" />
         <span className="text-muted-foreground">Loading...</span>
       </div>
@@ -88,16 +88,16 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
 
   return (
     <>
-      <div className={cn("space-y-2", className)}>
+      <div className={cn('space-y-2', className)}>
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
-            <CreditCard className={cn(
-              "h-4 w-4",
-              isDepleted ? "text-red-500" : isLow ? "text-yellow-500" : "text-green-500"
-            )} />
-            <span className="font-medium">
-              {Math.floor(usage.remaining)} credits
-            </span>
+            <CreditCard
+              className={cn(
+                'h-4 w-4',
+                isDepleted ? 'text-red-500' : isLow ? 'text-yellow-500' : 'text-green-500',
+              )}
+            />
+            <span className="font-medium">{Math.floor(usage.remaining)} credits</span>
           </div>
           <Button
             variant="ghost"
@@ -111,10 +111,7 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
 
         <Progress
           value={100 - percentageUsed}
-          className={cn(
-            "h-2",
-            isDepleted && "bg-red-100 dark:bg-red-900/20"
-          )}
+          className={cn('h-2', isDepleted && 'bg-red-100 dark:bg-red-900/20')}
         />
 
         {isLow && !isDepleted && (
@@ -132,9 +129,7 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
         )}
 
         {usage.tier && (
-          <div className="text-xs text-muted-foreground">
-            Current plan: ${usage.tier}/month
-          </div>
+          <div className="text-xs text-muted-foreground">Current plan: ${usage.tier}/month</div>
         )}
       </div>
 
@@ -148,4 +143,3 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
     </>
   );
 }
-

@@ -39,15 +39,24 @@ import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 // Format field type for display
 function formatFieldType(type: OutputSchemaField['type']): string {
   switch (type) {
-    case 'str': return 'string';
-    case 'int': return 'integer';
-    case 'float': return 'number';
-    case 'bool': return 'boolean';
-    case 'list[str]': return 'string[]';
-    case 'list[int]': return 'integer[]';
-    case 'file_pointer': return 'file';
-    case 'list[file_pointer]': return 'file[]';
-    default: return type;
+    case 'str':
+      return 'string';
+    case 'int':
+      return 'integer';
+    case 'float':
+      return 'number';
+    case 'bool':
+      return 'boolean';
+    case 'list[str]':
+      return 'string[]';
+    case 'list[int]':
+      return 'integer[]';
+    case 'file_pointer':
+      return 'file';
+    case 'list[file_pointer]':
+      return 'file[]';
+    default:
+      return type;
   }
 }
 
@@ -73,7 +82,7 @@ function formatValue(value: unknown, fieldType?: OutputSchemaField['type']): str
   if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
     const filePointers = value.filter(isFilePointer);
     if (filePointers.length > 0) {
-      return filePointers.map(fp => `📄 ${fp.original_filename}`).join(', ');
+      return filePointers.map((fp) => `📄 ${fp.original_filename}`).join(', ');
     }
   }
 
@@ -83,23 +92,18 @@ function formatValue(value: unknown, fieldType?: OutputSchemaField['type']): str
   }
   return String(value);
 }
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 // Tree drawing characters
 const TREE_BRANCH = '├─'; // U+251C + U+2500 - for non-last siblings
-const TREE_LAST = '└─';   // U+2514 + U+2500 - for last sibling
-const TREE_VERT = '│';     // U+2502 - vertical continuation
+const TREE_LAST = '└─'; // U+2514 + U+2500 - for last sibling
+const TREE_VERT = '│'; // U+2502 - vertical continuation
 
 interface OutputChipProps {
   schema?: OutputSchema;
   output?: Record<string, unknown>;
-  isPartial?: boolean;  // True for failed agents with partial data
-  failureReason?: string;  // Verifier reasoning for why not complete
+  isPartial?: boolean; // True for failed agents with partial data
+  failureReason?: string; // Verifier reasoning for why not complete
 }
 
 /**
@@ -118,10 +122,7 @@ function OutputChip({ schema, output, isPartial, failureReason }: OutputChipProp
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="cursor-help flex-shrink-0 inline-flex items-center self-center">
-            <FileJson className={cn(
-              "h-4 w-4",
-              isPartial ? "text-amber-500" : "text-gray-400"
-            )} />
+            <FileJson className={cn('h-4 w-4', isPartial ? 'text-amber-500' : 'text-gray-400')} />
           </span>
         </TooltipTrigger>
         <TooltipContent side="right" className="max-w-sm">
@@ -134,48 +135,54 @@ function OutputChip({ schema, output, isPartial, failureReason }: OutputChipProp
                 </div>
                 {failureReason && (
                   <div className="text-muted-foreground text-[11px] mt-0.5">
-                    {failureReason.length > 150 ? failureReason.slice(0, 147) + '...' : failureReason}
+                    {failureReason.length > 150
+                      ? failureReason.slice(0, 147) + '...'
+                      : failureReason}
                   </div>
                 )}
               </div>
             )}
-            {hasSchema ? (
-              // Show schema fields with their expected types and actual values
-              schema.fields.map((field) => {
-                const value = output?.[field.name];
-                const hasValue = value !== undefined && value !== null;
-                return (
-                  <div key={field.name} className="flex flex-col">
-                    <div className="flex items-baseline gap-1">
-                      <span className="font-medium">{field.name.replace(/_/g, ' ')}</span>
-                      <span className="text-muted-foreground text-[10px]">({formatFieldType(field.type)})</span>
+            {hasSchema
+              ? // Show schema fields with their expected types and actual values
+                schema.fields.map((field) => {
+                  const value = output?.[field.name];
+                  const hasValue = value !== undefined && value !== null;
+                  return (
+                    <div key={field.name} className="flex flex-col">
+                      <div className="flex items-baseline gap-1">
+                        <span className="font-medium">{field.name.replace(/_/g, ' ')}</span>
+                        <span className="text-muted-foreground text-[10px]">
+                          ({formatFieldType(field.type)})
+                        </span>
+                      </div>
+                      {hasValue ? (
+                        <span
+                          className={cn(
+                            'pl-2',
+                            isPartial ? 'text-amber-600 dark:text-amber-400' : 'text-foreground',
+                          )}
+                        >
+                          {formatValue(value, field.type)}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground pl-2 italic">—</span>
+                      )}
                     </div>
-                    {hasValue ? (
-                      <span className={cn(
-                        "pl-2",
-                        isPartial ? "text-amber-600 dark:text-amber-400" : "text-foreground"
-                      )}>
-                        {formatValue(value, field.type)}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground pl-2 italic">—</span>
-                    )}
+                  );
+                })
+              : // Fallback: just show output values if no schema
+                Object.entries(output || {}).map(([key, value]) => (
+                  <div key={key}>
+                    <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
+                    <span
+                      className={cn(
+                        isPartial ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+                      )}
+                    >
+                      {formatValue(value)}
+                    </span>
                   </div>
-                );
-              })
-            ) : (
-              // Fallback: just show output values if no schema
-              Object.entries(output || {}).map(([key, value]) => (
-                <div key={key}>
-                  <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
-                  <span className={cn(
-                    isPartial ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"
-                  )}>
-                    {formatValue(value)}
-                  </span>
-                </div>
-              ))
-            )}
+                ))}
           </div>
         </TooltipContent>
       </Tooltip>
@@ -194,7 +201,15 @@ interface FailureChipProps {
 function FailureChip({ failureContext }: FailureChipProps) {
   if (!failureContext) return null;
 
-  const { trajectory, progress_estimate, verifier_reasoning, partial_structured_response, last_reasoning, last_plan, steps_taken } = failureContext;
+  const {
+    trajectory,
+    progress_estimate,
+    verifier_reasoning,
+    partial_structured_response,
+    last_reasoning,
+    last_plan,
+    steps_taken,
+  } = failureContext;
 
   return (
     <TooltipProvider>
@@ -224,7 +239,9 @@ function FailureChip({ failureContext }: FailureChipProps) {
             {last_reasoning && (
               <div>
                 <div className="font-medium text-muted-foreground">Last thought:</div>
-                <div className="text-foreground pl-2 text-[11px] line-clamp-3">{last_reasoning}</div>
+                <div className="text-foreground pl-2 text-[11px] line-clamp-3">
+                  {last_reasoning}
+                </div>
               </div>
             )}
 
@@ -234,7 +251,9 @@ function FailureChip({ failureContext }: FailureChipProps) {
                 <div className="font-medium text-muted-foreground">Plan was:</div>
                 <ul className="pl-2 text-[11px]">
                   {last_plan.slice(0, 3).map((goal, i) => (
-                    <li key={i} className="truncate">• {goal}</li>
+                    <li key={i} className="truncate">
+                      • {goal}
+                    </li>
                   ))}
                   {last_plan.length > 3 && (
                     <li className="text-muted-foreground">...and {last_plan.length - 3} more</li>
@@ -246,15 +265,16 @@ function FailureChip({ failureContext }: FailureChipProps) {
             {/* Trajectory */}
             {trajectory && trajectory.length > 0 && (
               <div>
-                <div className="font-medium text-muted-foreground">
-                  Steps ({steps_taken}):
-                </div>
+                <div className="font-medium text-muted-foreground">Steps ({steps_taken}):</div>
                 <ul className="pl-2 text-[11px]">
                   {trajectory.slice(-5).map((step, i) => (
-                    <li key={i} className={cn(
-                      "flex items-center gap-1",
-                      step.success ? "text-green-600 dark:text-green-400" : "text-red-500"
-                    )}>
+                    <li
+                      key={i}
+                      className={cn(
+                        'flex items-center gap-1',
+                        step.success ? 'text-green-600 dark:text-green-400' : 'text-red-500',
+                      )}
+                    >
                       <span>{step.success ? '✓' : '✗'}</span>
                       <span className="truncate">{step.tool_name}</span>
                       {step.error_message && (
@@ -265,7 +285,9 @@ function FailureChip({ failureContext }: FailureChipProps) {
                     </li>
                   ))}
                   {trajectory.length > 5 && (
-                    <li className="text-muted-foreground">...{trajectory.length - 5} earlier steps</li>
+                    <li className="text-muted-foreground">
+                      ...{trajectory.length - 5} earlier steps
+                    </li>
                   )}
                 </ul>
               </div>
@@ -276,17 +298,26 @@ function FailureChip({ failureContext }: FailureChipProps) {
               <div>
                 <div className="font-medium text-muted-foreground">Partial data extracted:</div>
                 <ul className="pl-2 text-[11px]">
-                  {Object.entries(partial_structured_response).slice(0, 3).map(([key, value]) => (
-                    <li key={key}>
-                      <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
-                      <span className="text-muted-foreground">
-                        {typeof value === 'string' ? value.slice(0, 50) : JSON.stringify(value).slice(0, 50)}
-                        {(typeof value === 'string' && value.length > 50) || (typeof value !== 'string' && JSON.stringify(value).length > 50) ? '...' : ''}
-                      </span>
-                    </li>
-                  ))}
+                  {Object.entries(partial_structured_response)
+                    .slice(0, 3)
+                    .map(([key, value]) => (
+                      <li key={key}>
+                        <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
+                        <span className="text-muted-foreground">
+                          {typeof value === 'string'
+                            ? value.slice(0, 50)
+                            : JSON.stringify(value).slice(0, 50)}
+                          {(typeof value === 'string' && value.length > 50) ||
+                          (typeof value !== 'string' && JSON.stringify(value).length > 50)
+                            ? '...'
+                            : ''}
+                        </span>
+                      </li>
+                    ))}
                   {Object.keys(partial_structured_response).length > 3 && (
-                    <li className="text-muted-foreground">...and {Object.keys(partial_structured_response).length - 3} more</li>
+                    <li className="text-muted-foreground">
+                      ...and {Object.keys(partial_structured_response).length - 3} more
+                    </li>
                   )}
                 </ul>
               </div>
@@ -312,7 +343,7 @@ interface SubAgentTreeProps {
  */
 function getLeafNodes(
   startNode: TreeNode,
-  getChildren: (parentId: string) => TreeNode[]
+  getChildren: (parentId: string) => TreeNode[],
 ): TreeNode[] {
   const children = getChildren(startNode.agentId);
   if (children.length === 0) {
@@ -327,7 +358,7 @@ function getLeafNodes(
  */
 function getIntermediaryNodes(
   startNode: TreeNode,
-  getChildren: (parentId: string) => TreeNode[]
+  getChildren: (parentId: string) => TreeNode[],
 ): TreeNode[] {
   const children = getChildren(startNode.agentId);
   if (children.length === 0) {
@@ -348,10 +379,7 @@ function getIntermediaryNodes(
 /**
  * Calculate tree depth from a starting node.
  */
-function getTreeDepth(
-  startNode: TreeNode,
-  getChildren: (parentId: string) => TreeNode[]
-): number {
+function getTreeDepth(startNode: TreeNode, getChildren: (parentId: string) => TreeNode[]): number {
   const children = getChildren(startNode.agentId);
   if (children.length === 0) {
     return 1;
@@ -380,19 +408,22 @@ const SubAgentTree = memo(function SubAgentTree({
   // Filter to only nodes from this spawn call and their descendants
   const relevantNodes = useMemo(
     () => filterTreeBySpawn(allNodes, subAgentIds),
-    [allNodes, subAgentIds]
+    [allNodes, subAgentIds],
   );
 
   // Get children of a node (memoized to stabilize downstream useMemo deps)
-  const getChildren = useCallback((parentId: string): TreeNode[] => {
-    const children: TreeNode[] = [];
-    for (const node of relevantNodes.values()) {
-      if (node.parentAgentId === parentId) {
-        children.push(node);
+  const getChildren = useCallback(
+    (parentId: string): TreeNode[] => {
+      const children: TreeNode[] = [];
+      for (const node of relevantNodes.values()) {
+        if (node.parentAgentId === parentId) {
+          children.push(node);
+        }
       }
-    }
-    return children;
-  }, [relevantNodes]);
+      return children;
+    },
+    [relevantNodes],
+  );
 
   // Build tree structure from flat nodes
   const rootNodes = useMemo(() => {
@@ -437,18 +468,27 @@ const SubAgentTree = memo(function SubAgentTree({
   const clusterCircle = allTerminal ? (anyFailed ? '✗' : '●') : '◑';
   const totalAgents = relevantNodes.size;
   const clusterTitle = allTerminal
-    ? (anyFailed ? 'Some tasks failed' : 'All tasks completed')
+    ? anyFailed
+      ? 'Some tasks failed'
+      : 'All tasks completed'
     : 'Delegating tasks';
 
   // Header line component (constant across both views)
   const headerLine = (
-    <div className={cn("flex items-center gap-1 py-0.5", allTerminal ? (anyFailed ? "text-red-500" : "text-gray-500") : "text-foreground")}>
+    <div
+      className={cn(
+        'flex items-center gap-1 py-0.5',
+        allTerminal ? (anyFailed ? 'text-red-500' : 'text-gray-500') : 'text-foreground',
+      )}
+    >
       {/* Circle - filled when all sub-agents complete, half-filled otherwise */}
       <span className="w-4 text-center select-none">{clusterCircle}</span>
       {/* Title */}
       <span>{clusterTitle}</span>
       {/* Total agent count */}
-      <span className="text-xs text-muted-foreground">— {totalAgents} agent{totalAgents !== 1 ? 's' : ''}</span>
+      <span className="text-xs text-muted-foreground">
+        — {totalAgents} agent{totalAgents !== 1 ? 's' : ''}
+      </span>
     </div>
   );
 
@@ -482,11 +522,13 @@ const SubAgentTree = memo(function SubAgentTree({
       <div className="font-mono text-sm">
         {/* Header (hidden when grouped with preceding tree) */}
         {!hideHeader && (
-          <div className={cn("py-0.5", allTerminal ? "text-gray-500" : "text-foreground")}>
+          <div className={cn('py-0.5', allTerminal ? 'text-gray-500' : 'text-foreground')}>
             <div className="flex items-center gap-1">
               <span className="w-4 flex-shrink-0 text-center select-none">{clusterCircle}</span>
               <span>{clusterTitle}</span>
-              <span className="text-xs text-muted-foreground">— {totalAgents} agent{totalAgents !== 1 ? 's' : ''}</span>
+              <span className="text-xs text-muted-foreground">
+                — {totalAgents} agent{totalAgents !== 1 ? 's' : ''}
+              </span>
             </div>
             {goalsList.map((goal, index) => (
               <div key={index} className="flex items-center gap-1">
@@ -531,7 +573,7 @@ const SubAgentTree = memo(function SubAgentTree({
             className="flex items-center gap-1 py-0.5 cursor-pointer text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
             onClick={() => setShowCompletedNodes(false)}
           >
-            <span className="whitespace-pre select-none">      </span>
+            <span className="whitespace-pre select-none"> </span>
             <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none flex-shrink-0">
               {TREE_LAST}
             </span>
@@ -583,13 +625,7 @@ interface TreeNodeRowProps {
 /**
  * Renders a single node in the tree with its children recursively.
  */
-function TreeNodeRow({
-  node,
-  isLast,
-  prefix,
-  getChildren,
-  onNavigate,
-}: TreeNodeRowProps) {
+function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: TreeNodeRowProps) {
   const [isHovered, setIsHovered] = useState(false);
   const children = getChildren(node.agentId);
   const circle = getCircleState(node);
@@ -615,7 +651,7 @@ function TreeNodeRow({
           node.status === 'COMPLETED' && 'text-gray-500',
           node.status === 'FAILED' && 'text-red-500',
           node.status === 'COST_LIMIT_REACHED' && 'text-amber-500',
-          node.status === 'OUT_OF_CREDITS' && 'text-red-500'
+          node.status === 'OUT_OF_CREDITS' && 'text-red-500',
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
@@ -623,7 +659,8 @@ function TreeNodeRow({
       >
         {/* Tree prefix */}
         <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">
-          {prefix}{branch}
+          {prefix}
+          {branch}
         </span>
 
         {/* Circle progress state */}
@@ -647,9 +684,10 @@ function TreeNodeRow({
         {node.outputSchema?.fields?.length ? (
           <OutputChip
             schema={node.outputSchema}
-            output={node.status === 'FAILED'
-              ? node.failureContext?.partial_structured_response || undefined
-              : node.structuredOutput
+            output={
+              node.status === 'FAILED'
+                ? node.failureContext?.partial_structured_response || undefined
+                : node.structuredOutput
             }
             isPartial={node.status === 'FAILED'}
             failureReason={node.failureContext?.verifier_reasoning}
@@ -670,8 +708,9 @@ function TreeNodeRow({
           )}
           <span
             className={cn(
-              node.status !== 'COMPLETED' && node.status !== 'FAILED' &&
-                'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent'
+              node.status !== 'COMPLETED' &&
+                node.status !== 'FAILED' &&
+                'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
             )}
           >
             {goalText}
@@ -688,11 +727,7 @@ function TreeNodeRow({
           <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">
             {childPrefix}
           </span>
-          <StatusLine
-            statusText={statusText}
-            toolsInUse={node.toolsInUse}
-            isHovered={isHovered}
-          />
+          <StatusLine statusText={statusText} toolsInUse={node.toolsInUse} isHovered={isHovered} />
         </div>
       )}
 
@@ -774,7 +809,7 @@ function CompletedLine({ count, onShowAll }: CompletedLineProps) {
       onMouseLeave={() => setIsHovered(false)}
     >
       {/* Indentation to match leaf nodes */}
-      <span className="whitespace-pre select-none flex-shrink-0">      </span>
+      <span className="whitespace-pre select-none flex-shrink-0"> </span>
       <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none flex-shrink-0">
         {TREE_LAST}
       </span>
@@ -828,7 +863,7 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
           node.status === 'COMPLETED' && 'text-gray-500',
           node.status === 'FAILED' && 'text-red-500',
           node.status === 'COST_LIMIT_REACHED' && 'text-amber-500',
-          node.status === 'OUT_OF_CREDITS' && 'text-red-500'
+          node.status === 'OUT_OF_CREDITS' && 'text-red-500',
         )}
         onClick={handleClick}
         onMouseEnter={() => setIsHovered(true)}
@@ -836,11 +871,14 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
       >
         {/* Tree prefix (includes parent indentation + branch) */}
         <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none flex-shrink-0">
-          {prefix}{branch}
+          {prefix}
+          {branch}
         </span>
 
         {/* Circle progress state */}
-        <span className="w-4 flex-shrink-0 text-center select-none transition-all duration-300">{circle}</span>
+        <span className="w-4 flex-shrink-0 text-center select-none transition-all duration-300">
+          {circle}
+        </span>
 
         {/* Cost display */}
         <TooltipProvider>
@@ -860,9 +898,10 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
         {node.outputSchema?.fields?.length ? (
           <OutputChip
             schema={node.outputSchema}
-            output={node.status === 'FAILED'
-              ? node.failureContext?.partial_structured_response || undefined
-              : node.structuredOutput
+            output={
+              node.status === 'FAILED'
+                ? node.failureContext?.partial_structured_response || undefined
+                : node.structuredOutput
             }
             isPartial={node.status === 'FAILED'}
             failureReason={node.failureContext?.verifier_reasoning}
@@ -883,8 +922,9 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
           )}
           <span
             className={cn(
-              node.status !== 'COMPLETED' && node.status !== 'FAILED' &&
-                'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent'
+              node.status !== 'COMPLETED' &&
+                node.status !== 'FAILED' &&
+                'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
             )}
           >
             {goalText.length > 70 ? goalText.slice(0, 67) + '...' : goalText}
@@ -899,13 +939,10 @@ function LeafNodeRow({ node, isLast, prefix, onNavigate }: LeafNodeRowProps) {
       {statusText && (
         <div className="flex items-center gap-1 py-0.5">
           <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none flex-shrink-0">
-            {prefix}{isLast ? '   ' : `${TREE_VERT}  `}
+            {prefix}
+            {isLast ? '   ' : `${TREE_VERT}  `}
           </span>
-          <StatusLine
-            statusText={statusText}
-            toolsInUse={node.toolsInUse}
-            isHovered={isHovered}
-          />
+          <StatusLine statusText={statusText} toolsInUse={node.toolsInUse} isHovered={isHovered} />
         </div>
       )}
     </div>
@@ -945,11 +982,7 @@ function StatusLine({ statusText, toolsInUse, isHovered }: StatusLineProps) {
   }
 
   // Default text (spinning up, thinking, Using N tools)
-  return (
-    <span className="text-xs text-gray-500 dark:text-gray-400">
-      {statusText}
-    </span>
-  );
+  return <span className="text-xs text-gray-500 dark:text-gray-400">{statusText}</span>;
 }
 
 interface ToolIconProps {
@@ -961,13 +994,7 @@ interface ToolIconProps {
  */
 function ToolIcon({ toolName }: ToolIconProps) {
   if (isX402Tool(toolName)) {
-    return (
-      <img
-        src={x402IconSrc}
-        alt={toolName}
-        className="h-3 w-3 inline-block"
-      />
-    );
+    return <img src={x402IconSrc} alt={toolName} className="h-3 w-3 inline-block" />;
   }
 
   const Icon = getToolIcon(toolName);

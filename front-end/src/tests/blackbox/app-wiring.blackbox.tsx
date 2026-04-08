@@ -181,9 +181,15 @@ describe('App wiring', () => {
   describe('route content verification', () => {
     it('/privacy shows all 7 policy sections', () => {
       renderWithProviders(<AppRoutes />, { route: '/privacy' });
-      expect(screen.getByRole('heading', { name: /1\. information we collect/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /2\. how our assistant operates/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /3\. third-party processing/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /1\. information we collect/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /2\. how our assistant operates/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /3\. third-party processing/i }),
+      ).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /4\. security/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /5\. your control/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /6\. policy updates/i })).toBeInTheDocument();
@@ -194,11 +200,19 @@ describe('App wiring', () => {
       renderWithProviders(<AppRoutes />, { route: '/terms' });
       expect(screen.getByRole('heading', { name: /1\. use of our website/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /2\. waitlist sign-up/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /3\. intellectual property/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /3\. intellectual property/i }),
+      ).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /4\. no warranties/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /5\. limitation of liability/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /6\. links to other sites/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /7\. changes to these terms/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /5\. limitation of liability/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /6\. links to other sites/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /7\. changes to these terms/i }),
+      ).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /8\. sms\/text messaging/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /9\. contact/i })).toBeInTheDocument();
     });
@@ -215,7 +229,7 @@ describe('App wiring', () => {
       const fallbackLink = screen.getByRole('link', { name: /click here/i });
       expect(fallbackLink).toHaveAttribute(
         'href',
-        'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg'
+        'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg',
       );
     });
   });

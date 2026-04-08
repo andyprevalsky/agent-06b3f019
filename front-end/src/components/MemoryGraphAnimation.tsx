@@ -14,8 +14,8 @@
  * - restart: boolean (force restart video playback)
  */
 
-import { useEffect, useRef, useState } from "react";
-import VideoPlayer from "./VideoPlayer";
+import { useEffect, useRef, useState } from 'react';
+import VideoPlayer from './VideoPlayer';
 
 interface MemoryGraphAnimationProps {
   restart?: boolean;
@@ -30,7 +30,7 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
   useEffect(() => {
     if (restart && videoRef.current) {
       videoRef.current.currentTime = 0;
-      videoRef.current.play().catch(err => {
+      videoRef.current.play().catch((err) => {
         console.log('Video play failed on restart:', err);
       });
     }
@@ -46,7 +46,7 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
           setTimeout(() => {
             if (videoRef.current) {
               videoRef.current.currentTime = 0;
-              videoRef.current.play().catch(err => {
+              videoRef.current.play().catch((err) => {
                 console.log('Video play failed:', err);
               });
             }
@@ -58,7 +58,7 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
           }
         }
       },
-      { threshold: 0.1 }
+      { threshold: 0.1 },
     );
 
     if (containerRef.current) {
@@ -69,7 +69,7 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
   }, [hasTriggered]);
 
   return (
-    <div 
+    <div
       ref={containerRef}
       className="w-full h-full relative overflow-hidden flex items-center justify-center"
     >
@@ -85,7 +85,7 @@ export const MemoryGraphAnimation = ({ restart = false }: MemoryGraphAnimationPr
         onLoad={() => {
           if (videoRef.current && hasTriggered) {
             videoRef.current.currentTime = 0;
-            videoRef.current.play().catch(err => {
+            videoRef.current.play().catch((err) => {
               console.log('Video play failed on load:', err);
             });
           }

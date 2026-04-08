@@ -40,7 +40,10 @@ import { MarkdownText } from './MarkdownText';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 // API Configuration - match pattern used in lib/api.ts
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 interface AttentionRequest {
@@ -61,7 +64,10 @@ interface AttentionInboxProps {
   realtimeReady?: boolean;
 }
 
-export default function AttentionInbox({ onSelectAgent, realtimeReady = false }: AttentionInboxProps) {
+export default function AttentionInbox({
+  onSelectAgent,
+  realtimeReady = false,
+}: AttentionInboxProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,19 +87,22 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
       const session = getSession();
       if (!session?.access_token) return;
 
-      const response = await fetch(
-        `${API_BASE_WITH_PATH}/attention-requests`,
-        {
-          headers: {
-            'Authorization': `Bearer ${session.access_token}`,
-          },
-        }
-      );
+      const response = await fetch(`${API_BASE_WITH_PATH}/attention-requests`, {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
 
       if (!response.ok) throw new Error('Failed to fetch requests');
 
       const data = await response.json();
-      console.log('📥 Fetched attention requests:', data.requests.length, 'total,', data.requests.filter((r: any) => !r.answered).length, 'unanswered');
+      console.log(
+        '📥 Fetched attention requests:',
+        data.requests.length,
+        'total,',
+        data.requests.filter((r: any) => !r.answered).length,
+        'unanswered',
+      );
       setRequests(data.requests || []);
     } catch (error) {
       console.error('Failed to fetch attention requests:', error);
@@ -104,13 +113,13 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
   // Also poll every 10 seconds as fallback since backend doesn't send broadcasts
   useEffect(() => {
     fetchRequests();
-    
+
     // Poll every 10 seconds to catch new attention requests
     // This is a fallback since the backend doesn't broadcast to Supabase
     const pollInterval = setInterval(() => {
       fetchRequests();
     }, 10000);
-    
+
     return () => clearInterval(pollInterval);
   }, []);
 
@@ -143,7 +152,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
             // Data is in payload.record
             const data = payload.payload?.record;
             if (!data) return;
-            
+
             const request: AttentionRequest = {
               id: data.id,
               agent_id: data.agentId,
@@ -162,7 +171,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
             // Data is in payload.record or payload.payload.record
             const data = payload.record || payload.payload?.record;
             if (!data) return;
-            
+
             setRequests((prev) =>
               prev.map((req) =>
                 req.id === data.id
@@ -173,8 +182,8 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
                       metadata: data.metadata ?? req.metadata,
                       answered: !!data.userResponse,
                     }
-                  : req
-              )
+                  : req,
+              ),
             );
           },
           onDelete: (payload) => {
@@ -191,7 +200,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
         });
 
         channelRef.current = channel;
-        
+
         // Reset reconnection state
         reconnectAttemptRef.current = 0;
 
@@ -253,7 +262,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
   }, [isOpen]);
 
   // Get unanswered count
-  const unansweredCount = requests.filter(r => !r.answered).length;
+  const unansweredCount = requests.filter((r) => !r.answered).length;
 
   // Handle respond (accept)
   const handleRespond = async (requestId: string, overrideResponse?: string) => {
@@ -263,12 +272,14 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
     try {
       setLoading(true);
       // Count remaining requests before responding
-      const remainingBeforeResponse = requests.filter(r => !r.answered && r.id !== requestId).length;
+      const remainingBeforeResponse = requests.filter(
+        (r) => !r.answered && r.id !== requestId,
+      ).length;
 
       await respondToAttentionRequest(requestId, response);
 
       // Clear the response
-      setResponses(prev => {
+      setResponses((prev) => {
         const newResponses = { ...prev };
         if (!overrideResponse) {
           delete newResponses[requestId];
@@ -283,7 +294,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
 
       // Keep modal open
       setIsOpen(true);
-      
+
       // Show appropriate toast message
       if (remainingBeforeResponse > 0) {
         toast({
@@ -313,12 +324,12 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
     try {
       setLoading(true);
       // Count remaining requests before skipping
-      const remainingBeforeSkip = requests.filter(r => !r.answered && r.id !== requestId).length;
+      const remainingBeforeSkip = requests.filter((r) => !r.answered && r.id !== requestId).length;
 
       await skipAttentionRequest(requestId);
 
       // Clear the response if any
-      setResponses(prev => {
+      setResponses((prev) => {
         const newResponses = { ...prev };
         delete newResponses[requestId];
         return newResponses;
@@ -331,7 +342,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
 
       // Keep modal open
       setIsOpen(true);
-      
+
       // Show appropriate toast message
       if (remainingBeforeSkip > 0) {
         toast({
@@ -360,12 +371,14 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
   const handleReject = async (requestId: string) => {
     try {
       setLoading(true);
-      const remainingBeforeReject = requests.filter(r => !r.answered && r.id !== requestId).length;
+      const remainingBeforeReject = requests.filter(
+        (r) => !r.answered && r.id !== requestId,
+      ).length;
 
       await rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined);
 
       // Clear the response if any
-      setResponses(prev => {
+      setResponses((prev) => {
         const newResponses = { ...prev };
         delete newResponses[requestId];
         return newResponses;
@@ -418,7 +431,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
       return;
     }
 
-    const bridge = (typeof window !== 'undefined' ? (window as any).api : undefined);
+    const bridge = typeof window !== 'undefined' ? (window as any).api : undefined;
     if (!bridge?.sendIMessage) {
       toast({
         title: 'Mac app required',
@@ -459,7 +472,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
 
     const handleKeyDown = (e: KeyboardEvent) => {
       // Get the first unanswered request
-      const firstUnanswered = requests.find(r => !r.answered);
+      const firstUnanswered = requests.find((r) => !r.answered);
       if (!firstUnanswered) return;
 
       // Cmd/Ctrl + Enter: Submit response
@@ -492,9 +505,9 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
         {unansweredCount > 0 && (
           <span
             className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-lg text-xs font-semibold text-white"
-            style={{ 
+            style={{
               background: '#FC585C',
-              boxShadow: '0 2px 8px rgba(252, 88, 92, 0.4)'
+              boxShadow: '0 2px 8px rgba(252, 88, 92, 0.4)',
             }}
           >
             {unansweredCount}
@@ -506,19 +519,14 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
       {isOpen && (
         <>
           {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-40"
-            onClick={() => setIsOpen(false)}
-          />
+          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
 
           {/* Modal content */}
           <div className="absolute top-12 right-0 z-50 w-[500px] bg-card dark:bg-navi-black border border-border dark:border-navi-light-black rounded-lg shadow-lg">
             <div className="p-4 space-y-4">
-              {requests.filter(r => !r.answered).length === 0 ? (
+              {requests.filter((r) => !r.answered).length === 0 ? (
                 <div className="text-center py-8 space-y-2">
-                  <p className="text-sm font-medium text-foreground">
-                    🎉 Congrats!
-                  </p>
+                  <p className="text-sm font-medium text-foreground">🎉 Congrats!</p>
                   <p className="text-sm text-muted-foreground">
                     All your agents are unblocked and busy working on your goals.
                   </p>
@@ -526,28 +534,34 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
               ) : (
                 // Show only the first (oldest) unanswered request
                 (() => {
-                  const unansweredRequests = requests.filter(r => !r.answered);
+                  const unansweredRequests = requests.filter((r) => !r.answered);
                   const currentRequest = unansweredRequests[0];
                   const remainingCount = unansweredRequests.length - 1;
-                  
-                  console.log('🎯 Rendering current request:', currentRequest?.id, 'Remaining:', remainingCount);
-                  
+
+                  console.log(
+                    '🎯 Rendering current request:',
+                    currentRequest?.id,
+                    'Remaining:',
+                    remainingCount,
+                  );
+
                   if (!currentRequest) return null;
-                  
+
                   return (
                     <div key={currentRequest.id} className="space-y-3">
                       {/* Remaining requests indicator */}
                       {remainingCount > 0 && (
                         <div className="text-xs text-muted-foreground text-center py-1 px-2 bg-muted/50 rounded">
-                          {remainingCount} more {remainingCount === 1 ? 'request' : 'requests'} waiting
+                          {remainingCount} more {remainingCount === 1 ? 'request' : 'requests'}{' '}
+                          waiting
                         </div>
                       )}
-                      
+
                       {/* Image thumbnail if present */}
                       {currentRequest.image_url && (
                         <div className="flex justify-center">
-                          <img 
-                            src={currentRequest.image_url} 
+                          <img
+                            src={currentRequest.image_url}
                             alt="Product thumbnail"
                             className="max-w-[200px] max-h-[200px] rounded-md object-contain"
                           />
@@ -566,14 +580,16 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
                             <p className="text-sm font-semibold text-primary">
                               Send via iMessage on your Mac
                             </p>
-                            <span className="text-xs text-muted-foreground">
-                              Requires Mac app
-                            </span>
+                            <span className="text-xs text-muted-foreground">Requires Mac app</span>
                           </div>
                           <div className="text-xs text-muted-foreground space-y-1">
-                            <p><span className="font-semibold">To:</span> {currentRequest.metadata?.to}</p>
+                            <p>
+                              <span className="font-semibold">To:</span>{' '}
+                              {currentRequest.metadata?.to}
+                            </p>
                             <p className="whitespace-pre-wrap">
-                              <span className="font-semibold">Message:</span> {currentRequest.metadata?.message}
+                              <span className="font-semibold">Message:</span>{' '}
+                              {currentRequest.metadata?.message}
                             </p>
                           </div>
                           <Button
@@ -587,7 +603,8 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
                             onClick={() => handleSendViaIMessage(currentRequest)}
                           >
                             {(() => {
-                              const hasBridge = typeof window !== 'undefined' && (window as any)?.api?.sendIMessage;
+                              const hasBridge =
+                                typeof window !== 'undefined' && (window as any)?.api?.sendIMessage;
                               if (!hasBridge) return 'Open Mac app to send';
                               if (actionRequestId === currentRequest.id) return 'Sending...';
                               return 'Send via iMessage';
@@ -655,8 +672,7 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
 
                       {/* Timestamp */}
                       <p className="text-xs text-muted-foreground">
-                        Asked{' '}
-                        {new Date(currentRequest.created_at).toLocaleString()}
+                        Asked {new Date(currentRequest.created_at).toLocaleString()}
                       </p>
                     </div>
                   );
@@ -669,5 +685,3 @@ export default function AttentionInbox({ onSelectAgent, realtimeReady = false }:
     </div>
   );
 }
-
-

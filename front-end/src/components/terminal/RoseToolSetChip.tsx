@@ -16,11 +16,7 @@
  */
 
 import { Badge } from '@/components/ui/badge';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TOOL_ICONS, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
@@ -38,18 +34,21 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
     name: 'spawn_agent',
     displayName: 'Spawn Agent',
-    description: 'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or sub-agent (complex delegation). Unified tool for all agent types.',
+    description:
+      'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or sub-agent (complex delegation). Unified tool for all agent types.',
   },
   {
     name: 'x402',
     displayName: 'x402',
-    description: 'Rose agents can search for and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
+    description:
+      'Rose agents can search for and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
     link: 'https://www.x402.org/ecosystem?category=services-endpoints',
   },
   {
     name: 'claude_code',
     displayName: 'Claude Code',
-    description: 'Run Claude CLI on your local machine to write, edit, and analyze code with direct access to your file system.',
+    description:
+      'Run Claude CLI on your local machine to write, edit, and analyze code with direct access to your file system.',
     desktopOnly: true,
   },
   {
@@ -60,7 +59,8 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
     name: 'browser_agent',
     displayName: 'Browser Agent',
-    description: 'Complete complex, multi-step web tasks autonomously using AI to navigate and interact.',
+    description:
+      'Complete complex, multi-step web tasks autonomously using AI to navigate and interact.',
   },
   {
     name: 'send_email',
@@ -116,7 +116,7 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
     name: 'send_sms_as_user',
     displayName: 'Send SMS As User',
-    description: 'Send SMS messages through your Mac\'s iMessage account.',
+    description: "Send SMS messages through your Mac's iMessage account.",
     desktopOnly: true,
   },
 ];
@@ -138,8 +138,8 @@ export default function RoseToolSetChip() {
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent 
-        className="w-[400px] max-h-[500px] overflow-y-auto p-4 z-50" 
+      <PopoverContent
+        className="w-[400px] max-h-[500px] overflow-y-auto p-4 z-50"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}
@@ -150,65 +150,68 @@ export default function RoseToolSetChip() {
           </p>
           <div className="space-y-2">
             {ROSE_SYSTEM_TOOLS.map((tool) => {
-            const Icon = TOOL_ICONS[tool.name] || TOOL_ICONS.default;
-            return (
-              <div
-                key={tool.name}
-                className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors"
-              >
-                <div className="flex-shrink-0 mt-0.5">
-                  {isX402Tool(tool.name) ? (
-                    <img src={x402IconSrc} alt="x402" className="h-4 w-4 opacity-50 dark:invert dark:opacity-60" />
-                  ) : tool.name === 'claude_code' ? (
-                    <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
-                  ) : (
-                    <Icon className="h-4 w-4 text-muted-foreground" />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="font-medium text-sm text-foreground">
-                      {tool.displayName}
-                    </span>
-                    {tool.desktopOnly && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/5 text-primary font-medium">
-                        Desktop Version Only
-                      </span>
+              const Icon = TOOL_ICONS[tool.name] || TOOL_ICONS.default;
+              return (
+                <div
+                  key={tool.name}
+                  className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors"
+                >
+                  <div className="flex-shrink-0 mt-0.5">
+                    {isX402Tool(tool.name) ? (
+                      <img
+                        src={x402IconSrc}
+                        alt="x402"
+                        className="h-4 w-4 opacity-50 dark:invert dark:opacity-60"
+                      />
+                    ) : tool.name === 'claude_code' ? (
+                      <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
+                    ) : (
+                      <Icon className="h-4 w-4 text-muted-foreground" />
                     )}
                   </div>
-                  <div className="text-xs text-muted-foreground leading-snug mt-0.5">
-                    {tool.description}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="font-medium text-sm text-foreground">
+                        {tool.displayName}
+                      </span>
+                      {tool.desktopOnly && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/5 text-primary font-medium">
+                          Desktop Version Only
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground leading-snug mt-0.5">
+                      {tool.description}
+                    </div>
+                    {tool.desktopOnly && (
+                      <a
+                        href="/download"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Download for Mac
+                      </a>
+                    )}
+                    {tool.link && (
+                      <a
+                        href={tool.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        View x402 Ecosystem →
+                      </a>
+                    )}
                   </div>
-                  {tool.desktopOnly && (
-                    <a
-                      href="/download"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      Download for Mac
-                    </a>
-                  )}
-                  {tool.link && (
-                    <a
-                      href={tool.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      View x402 Ecosystem →
-                    </a>
-                  )}
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
           </div>
         </div>
       </PopoverContent>
     </Popover>
   );
 }
-

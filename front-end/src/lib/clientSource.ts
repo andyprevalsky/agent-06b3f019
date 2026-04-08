@@ -6,11 +6,3 @@ export function getClientSource(): ClientSource {
   }
   return 'WEB';
 }
-
-
-
-
-
-
-
-

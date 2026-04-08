@@ -27,19 +27,13 @@ describe('ResearchBlog page', () => {
     it('renders download link with correct DMG URL', () => {
       renderWithProviders(<ResearchBlog />);
       const downloadLink = screen.getByRole('link', { name: /download/i });
-      expect(downloadLink).toHaveAttribute(
-        'href',
-        expect.stringContaining('Rose-mac.dmg')
-      );
+      expect(downloadLink).toHaveAttribute('href', expect.stringContaining('Rose-mac.dmg'));
     });
 
     it('download link points to Supabase storage', () => {
       renderWithProviders(<ResearchBlog />);
       const downloadLink = screen.getByRole('link', { name: /download/i });
-      expect(downloadLink).toHaveAttribute(
-        'href',
-        expect.stringContaining('supabase.co/storage')
-      );
+      expect(downloadLink).toHaveAttribute('href', expect.stringContaining('supabase.co/storage'));
     });
   });
 
@@ -127,9 +121,18 @@ describe('ResearchBlog page', () => {
     it('footer contains company links (About, Privacy, Terms)', () => {
       renderWithProviders(<ResearchBlog />);
       const footer = document.querySelector('footer')!;
-      expect(within(footer).getByRole('link', { name: /^about$/i })).toHaveAttribute('href', '/about');
-      expect(within(footer).getByRole('link', { name: /^privacy$/i })).toHaveAttribute('href', '/privacy');
-      expect(within(footer).getByRole('link', { name: /^terms$/i })).toHaveAttribute('href', '/terms');
+      expect(within(footer).getByRole('link', { name: /^about$/i })).toHaveAttribute(
+        'href',
+        '/about',
+      );
+      expect(within(footer).getByRole('link', { name: /^privacy$/i })).toHaveAttribute(
+        'href',
+        '/privacy',
+      );
+      expect(within(footer).getByRole('link', { name: /^terms$/i })).toHaveAttribute(
+        'href',
+        '/terms',
+      );
     });
 
     it('footer renders Rose Labs branding', () => {

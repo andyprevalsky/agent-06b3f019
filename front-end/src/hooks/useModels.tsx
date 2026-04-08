@@ -37,7 +37,10 @@ interface UseModelsReturn {
 }
 
 // Normalize URL - strip trailing slash to prevent double slashes
-const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 
 export function useModels(): UseModelsReturn {
   const [models, setModels] = useState<Model[]>([]);
@@ -50,7 +53,7 @@ export function useModels(): UseModelsReturn {
       setError(null);
 
       const response = await fetch(`${BACKEND_API_URL}/api/models`);
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch models: ${response.statusText}`);
       }
@@ -77,4 +80,3 @@ export function useModels(): UseModelsReturn {
     refresh: fetchModels,
   };
 }
-

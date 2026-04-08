@@ -42,7 +42,14 @@ import { getTools, generateLLMJudgePrompt, Tool } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData } from '@/hooks/useAppData';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
 import { cn } from '@/lib/utils';
 
 interface CreateAgentModalProps {
@@ -86,9 +93,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
 
   const handleToolToggle = (toolId: string) => {
     setSelectedTools((prev) =>
-      prev.includes(toolId)
-        ? prev.filter((id) => id !== toolId)
-        : [...prev, toolId]
+      prev.includes(toolId) ? prev.filter((id) => id !== toolId) : [...prev, toolId],
     );
   };
 
@@ -146,7 +151,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
       setGoal(defaultGoal);
       setSelectedModel('rose-labs/rose-1-lite');
       setReasoningEffort('high');
-      
+
       onClose();
     } catch (error) {
       toast({
@@ -226,8 +231,8 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent 
-                className="p-0 bg-card dark:bg-navi-black border-border" 
+              <PopoverContent
+                className="p-0 bg-card dark:bg-navi-black border-border"
                 align="start"
                 style={{ width: 'var(--radix-popover-trigger-width)' }}
               >
@@ -243,8 +248,8 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                         >
                           <Check
                             className={cn(
-                              "mr-2 h-4 w-4",
-                              reasoningEffort === effort ? "opacity-100" : "opacity-0"
+                              'mr-2 h-4 w-4',
+                              reasoningEffort === effort ? 'opacity-100' : 'opacity-0',
                             )}
                           />
                           <span className="capitalize">{effort}</span>
@@ -275,14 +280,14 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent 
-                className="p-0 bg-card dark:bg-navi-black border-border" 
+              <PopoverContent
+                className="p-0 bg-card dark:bg-navi-black border-border"
                 align="start"
                 style={{ width: 'var(--radix-popover-trigger-width)' }}
               >
                 <Command className="bg-transparent">
-                  <CommandInput 
-                    placeholder="Search models..." 
+                  <CommandInput
+                    placeholder="Search models..."
                     value={modelSearch}
                     onValueChange={setModelSearch}
                   />
@@ -290,9 +295,12 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                     <CommandEmpty>No model found.</CommandEmpty>
                     <CommandGroup>
                       {models
-                        .filter(m => 
-                          modelSearch === '' || 
-                          `${m.provider}/${m.name}`.toLowerCase().includes(modelSearch.toLowerCase())
+                        .filter(
+                          (m) =>
+                            modelSearch === '' ||
+                            `${m.provider}/${m.name}`
+                              .toLowerCase()
+                              .includes(modelSearch.toLowerCase()),
                         )
                         .map((model) => {
                           const formatPrice = (price?: string) => {
@@ -301,11 +309,14 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                             if (num === 0) return 'FREE';
                             return `$${(num * 1000000).toFixed(2)}/M`;
                           };
-                          
+
                           const inputPrice = formatPrice(model.pricing?.prompt);
                           const outputPrice = formatPrice(model.pricing?.completion);
-                          const priceText = inputPrice && outputPrice ? `${inputPrice} in · ${outputPrice} out` : '';
-                          
+                          const priceText =
+                            inputPrice && outputPrice
+                              ? `${inputPrice} in · ${outputPrice} out`
+                              : '';
+
                           return (
                             <CommandItem
                               key={model.id}
@@ -319,14 +330,18 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                             >
                               <Check
                                 className={cn(
-                                  "mr-2 h-4 w-4 shrink-0",
-                                  selectedModel === model.id ? "opacity-100" : "opacity-0"
+                                  'mr-2 h-4 w-4 shrink-0',
+                                  selectedModel === model.id ? 'opacity-100' : 'opacity-0',
                                 )}
                               />
                               <div className="flex flex-col flex-1 min-w-0 gap-0.5">
-                                <span className="truncate">{model.provider}/{model.name}</span>
+                                <span className="truncate">
+                                  {model.provider}/{model.name}
+                                </span>
                                 {priceText && (
-                                  <span className="text-[10px] text-muted-foreground truncate">{priceText}</span>
+                                  <span className="text-[10px] text-muted-foreground truncate">
+                                    {priceText}
+                                  </span>
                                 )}
                               </div>
                             </CommandItem>
@@ -350,9 +365,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
                     key={tool.id}
                     variant={isSelected ? 'default' : 'outline'}
                     className={`cursor-pointer transition-all ${
-                      isSelected
-                        ? 'bg-primary text-primary-foreground'
-                        : 'hover:bg-secondary'
+                      isSelected ? 'bg-primary text-primary-foreground' : 'hover:bg-secondary'
                     }`}
                     onClick={() => handleToolToggle(tool.id)}
                   >
@@ -388,4 +401,3 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
     </Dialog>
   );
 }
-

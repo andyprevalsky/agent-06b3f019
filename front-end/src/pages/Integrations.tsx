@@ -51,7 +51,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Loader2, RefreshCw, Check } from 'lucide-react';
-import { useIntegrationHandlers, type BrowserType, type BrowserInfo } from '@/contexts/IntegrationHandlersContext';
+import {
+  useIntegrationHandlers,
+  type BrowserType,
+  type BrowserInfo,
+} from '@/contexts/IntegrationHandlersContext';
 import { getStoredSession } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
 import AtlasPasswordModal from '@/components/AtlasPasswordModal';
@@ -65,11 +69,20 @@ import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 import claudeIcon from '@/assets/claude-color.svg';
 import geminiIcon from '@/assets/gemini-icon.png';
 
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api') ? API_BASE_URL : `${API_BASE_URL}/api`;
 
 // Browser icon component
-const BrowserIcon = ({ type, className = "w-4 h-4" }: { type: BrowserType; className?: string }) => {
+const BrowserIcon = ({
+  type,
+  className = 'w-4 h-4',
+}: {
+  type: BrowserType;
+  className?: string;
+}) => {
   switch (type) {
     case 'chrome':
       return <img src={chromeIcon} alt="Chrome" className={className} />;
@@ -78,16 +91,22 @@ const BrowserIcon = ({ type, className = "w-4 h-4" }: { type: BrowserType; class
         <svg className={className} viewBox="0 0 48 48">
           <defs>
             <linearGradient id="edge1" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#0078D4"/>
-              <stop offset="100%" stopColor="#1AEBFF"/>
+              <stop offset="0%" stopColor="#0078D4" />
+              <stop offset="100%" stopColor="#1AEBFF" />
             </linearGradient>
             <linearGradient id="edge2" x1="0%" y1="100%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#50E6FF"/>
-              <stop offset="100%" stopColor="#32BEDD"/>
+              <stop offset="0%" stopColor="#50E6FF" />
+              <stop offset="100%" stopColor="#32BEDD" />
             </linearGradient>
           </defs>
-          <path fill="url(#edge1)" d="M24 4C12.95 4 4 12.95 4 24c0 6.63 3.23 12.5 8.2 16.15 1.15-5.35 5.8-9.35 11.35-9.35 3.05 0 5.85 1.2 7.95 3.15C37.5 31.5 42 28.1 42 24c0-11.05-8.05-20-18-20z"/>
-          <path fill="url(#edge2)" d="M23.55 30.8c-5.55 0-10.2 4-11.35 9.35C16.35 43.1 20 44 24 44c11.05 0 20-8.95 20-20 0 4.1-4.5 7.5-10.5 9.95-2.1-1.95-4.9-3.15-7.95-3.15z"/>
+          <path
+            fill="url(#edge1)"
+            d="M24 4C12.95 4 4 12.95 4 24c0 6.63 3.23 12.5 8.2 16.15 1.15-5.35 5.8-9.35 11.35-9.35 3.05 0 5.85 1.2 7.95 3.15C37.5 31.5 42 28.1 42 24c0-11.05-8.05-20-18-20z"
+          />
+          <path
+            fill="url(#edge2)"
+            d="M23.55 30.8c-5.55 0-10.2 4-11.35 9.35C16.35 43.1 20 44 24 44c11.05 0 20-8.95 20-20 0 4.1-4.5 7.5-10.5 9.95-2.1-1.95-4.9-3.15-7.95-3.15z"
+          />
         </svg>
       );
     case 'brave':
@@ -97,40 +116,46 @@ const BrowserIcon = ({ type, className = "w-4 h-4" }: { type: BrowserType; class
         <svg className={className} viewBox="0 0 48 48">
           <defs>
             <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#FF6B6B"/>
-              <stop offset="25%" stopColor="#FF8E53"/>
-              <stop offset="50%" stopColor="#FFCD56"/>
-              <stop offset="75%" stopColor="#6BCB77"/>
-              <stop offset="100%" stopColor="#4D96FF"/>
+              <stop offset="0%" stopColor="#FF6B6B" />
+              <stop offset="25%" stopColor="#FF8E53" />
+              <stop offset="50%" stopColor="#FFCD56" />
+              <stop offset="75%" stopColor="#6BCB77" />
+              <stop offset="100%" stopColor="#4D96FF" />
             </linearGradient>
           </defs>
-          <circle cx="24" cy="24" r="20" fill="url(#arcGrad)"/>
-          <circle cx="24" cy="24" r="12" fill="white"/>
+          <circle cx="24" cy="24" r="20" fill="url(#arcGrad)" />
+          <circle cx="24" cy="24" r="12" fill="white" />
         </svg>
       );
     case 'opera':
       return (
         <svg className={className} viewBox="0 0 48 48">
-          <ellipse cx="24" cy="24" rx="20" ry="22" fill="#FF1B2D"/>
-          <ellipse cx="24" cy="24" rx="10" ry="16" fill="white"/>
+          <ellipse cx="24" cy="24" rx="20" ry="22" fill="#FF1B2D" />
+          <ellipse cx="24" cy="24" rx="10" ry="16" fill="white" />
         </svg>
       );
     case 'vivaldi':
       return (
         <svg className={className} viewBox="0 0 48 48">
-          <circle cx="24" cy="24" r="22" fill="#EF3939"/>
-          <path fill="white" d="M24 8c-8.8 0-16 7.2-16 16s7.2 16 16 16c4 0 7.6-1.5 10.4-3.9L24 24l10.4-12.1C31.6 9.5 28 8 24 8z"/>
+          <circle cx="24" cy="24" r="22" fill="#EF3939" />
+          <path
+            fill="white"
+            d="M24 8c-8.8 0-16 7.2-16 16s7.2 16 16 16c4 0 7.6-1.5 10.4-3.9L24 24l10.4-12.1C31.6 9.5 28 8 24 8z"
+          />
         </svg>
       );
     case 'chromium':
       return (
         <svg className={className} viewBox="0 0 48 48">
-          <circle cx="24" cy="24" r="22" fill="#4587F3"/>
-          <path fill="#7BAAF7" d="M24 2C12.95 2 4 10.95 4 22h20l9.5-16.5A21.9 21.9 0 0024 2z"/>
-          <path fill="#A8C7FA" d="M4 22c0 11.05 8.95 20 20 20 4.57 0 8.78-1.53 12.17-4.1L26.5 22H4z"/>
-          <path fill="#669DF6" d="M24 42c8.28 0 15.35-5.03 18.37-12.2L33.5 16.5 24 22v20z"/>
-          <circle cx="24" cy="24" r="10" fill="white"/>
-          <circle cx="24" cy="24" r="8" fill="#4587F3"/>
+          <circle cx="24" cy="24" r="22" fill="#4587F3" />
+          <path fill="#7BAAF7" d="M24 2C12.95 2 4 10.95 4 22h20l9.5-16.5A21.9 21.9 0 0024 2z" />
+          <path
+            fill="#A8C7FA"
+            d="M4 22c0 11.05 8.95 20 20 20 4.57 0 8.78-1.53 12.17-4.1L26.5 22H4z"
+          />
+          <path fill="#669DF6" d="M24 42c8.28 0 15.35-5.03 18.37-12.2L33.5 16.5 24 22v20z" />
+          <circle cx="24" cy="24" r="10" fill="white" />
+          <circle cx="24" cy="24" r="8" fill="#4587F3" />
         </svg>
       );
     case 'atlas':
@@ -138,8 +163,8 @@ const BrowserIcon = ({ type, className = "w-4 h-4" }: { type: BrowserType; class
     default:
       return (
         <svg className={className} viewBox="0 0 48 48">
-          <circle cx="24" cy="24" r="20" fill="#888"/>
-          <circle cx="24" cy="24" r="8" fill="white"/>
+          <circle cx="24" cy="24" r="20" fill="#888" />
+          <circle cx="24" cy="24" r="8" fill="white" />
         </svg>
       );
   }
@@ -152,7 +177,7 @@ function getAuthHeaders() {
     throw new Error('Not authenticated');
   }
   return {
-    'Authorization': `Bearer ${token}`,
+    Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
   };
 }
@@ -200,7 +225,9 @@ export default function Integrations() {
   const [chromePasswordsSynced, setChromePasswordsSynced] = useState(false);
   const [applePasswordsSynced, setApplePasswordsSynced] = useState(false);
   const [atlasPasswordsSynced, setAtlasPasswordsSynced] = useState(false);
-  const [passwordSyncLoading, setPasswordSyncLoading] = useState<'chrome' | 'apple' | 'atlas' | null>(null);
+  const [passwordSyncLoading, setPasswordSyncLoading] = useState<
+    'chrome' | 'apple' | 'atlas' | null
+  >(null);
   const [passwordRequestExpanded, setPasswordRequestExpanded] = useState(false);
   const [passwordRequestInput, setPasswordRequestInput] = useState('');
   const [passwordRequestSending, setPasswordRequestSending] = useState(false);
@@ -220,16 +247,18 @@ export default function Integrations() {
   // Accordion mutual exclusivity - only one section open at a time
   type AccordionSection = 'browsers' | 'passwords' | 'messagesSync' | 'compute' | 'socials';
   const toggleSection = (section: AccordionSection) => {
-    setBrowsersExpanded(prev => section === 'browsers' ? !prev : false);
-    setPasswordsExpanded(prev => section === 'passwords' ? !prev : false);
-    setMessagesSyncExpanded(prev => section === 'messagesSync' ? !prev : false);
-    setComputeExpanded(prev => section === 'compute' ? !prev : false);
-    setSocialsExpanded(prev => section === 'socials' ? !prev : false);
+    setBrowsersExpanded((prev) => (section === 'browsers' ? !prev : false));
+    setPasswordsExpanded((prev) => (section === 'passwords' ? !prev : false));
+    setMessagesSyncExpanded((prev) => (section === 'messagesSync' ? !prev : false));
+    setComputeExpanded((prev) => (section === 'compute' ? !prev : false));
+    setSocialsExpanded((prev) => (section === 'socials' ? !prev : false));
   };
   const [iMessageSynced, setIMessageSynced] = useState(false);
   const [whatsAppConnected, setWhatsAppConnected] = useState(false);
   const [telegramConnected, setTelegramConnected] = useState(false);
-  const [messageSyncLoading, setMessageSyncLoading] = useState<'imessage' | 'whatsapp' | 'telegram' | null>(null);
+  const [messageSyncLoading, setMessageSyncLoading] = useState<
+    'imessage' | 'whatsapp' | 'telegram' | null
+  >(null);
 
   const fetchIntegrations = useCallback(async () => {
     try {
@@ -243,7 +272,16 @@ export default function Integrations() {
         setConnectedIntegrations(integrations);
 
         // Check for browser cookie integrations
-        const validBrowserTypes: BrowserType[] = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
+        const validBrowserTypes: BrowserType[] = [
+          'chrome',
+          'edge',
+          'brave',
+          'arc',
+          'opera',
+          'vivaldi',
+          'chromium',
+          'atlas',
+        ];
         const newConnectedBrowsers = new Set<BrowserType>();
         for (const integration of integrations) {
           if (validBrowserTypes.includes(integration.name as BrowserType)) {
@@ -253,29 +291,41 @@ export default function Integrations() {
         setConnectedBrowsers(newConnectedBrowsers);
 
         // Check for password integrations
-        const chromePasswordsIntegration = integrations.find((i: ConnectedIntegration) =>
-          (i.name === 'chrome_passwords' || i.name === 'chrome')
+        const chromePasswordsIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'chrome_passwords' || i.name === 'chrome',
         );
         setChromePasswordsSynced(!!chromePasswordsIntegration);
 
         // Apple passwords have their own integration
-        const applePasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'apple_passwords');
+        const applePasswordsIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'apple_passwords',
+        );
         setApplePasswordsSynced(!!applePasswordsIntegration);
 
         // Atlas passwords have their own integration
-        const atlasPasswordsIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'atlas_passwords');
+        const atlasPasswordsIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'atlas_passwords',
+        );
         setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
 
         // Claude Code credentials
-        const claudeCodeIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'claude_code');
+        const claudeCodeIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'claude_code',
+        );
         setClaudeCodeSynced(!!claudeCodeIntegration);
 
         // Messaging integrations
-        const imessageIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'imessage');
+        const imessageIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'imessage',
+        );
         setIMessageSynced(!!imessageIntegration);
-        const whatsappIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'whatsapp');
+        const whatsappIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'whatsapp',
+        );
         setWhatsAppConnected(!!whatsappIntegration);
-        const telegramIntegration = integrations.find((i: ConnectedIntegration) => i.name === 'telegram');
+        const telegramIntegration = integrations.find(
+          (i: ConnectedIntegration) => i.name === 'telegram',
+        );
         setTelegramConnected(!!telegramIntegration);
       }
     } catch (err) {
@@ -319,7 +369,7 @@ export default function Integrations() {
 
   // Handle browser sync click
   const handleBrowserSync = async (browserType: BrowserType) => {
-    const browser = installedBrowsers.find(b => b.type === browserType);
+    const browser = installedBrowsers.find((b) => b.type === browserType);
     if (!browser || !handlers.browserCookies) return;
 
     // For Atlas (or any browser needing manual password), open the password modal
@@ -334,7 +384,7 @@ export default function Integrations() {
     setError(null);
     try {
       await handlers.browserCookies.syncBrowser(browserType);
-      setConnectedBrowsers(prev => new Set([...prev, browserType]));
+      setConnectedBrowsers((prev) => new Set([...prev, browserType]));
       await fetchIntegrations();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to sync ${browserType} cookies`);
@@ -350,7 +400,7 @@ export default function Integrations() {
     setBrowserSyncLoading(pendingAtlasBrowser);
     try {
       await handlers.browserCookies.syncBrowser(pendingAtlasBrowser, password);
-      setConnectedBrowsers(prev => new Set([...prev, pendingAtlasBrowser]));
+      setConnectedBrowsers((prev) => new Set([...prev, pendingAtlasBrowser]));
 
       // Store the password for background sync
       await handlers.browserCookies.storeAtlasPassword(password);
@@ -405,7 +455,7 @@ export default function Integrations() {
       const response = await fetch(`${API_BASE_WITH_PATH}/integrations/passwords/apple/upload`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
         },
         body: formData,
       });
@@ -433,7 +483,9 @@ export default function Integrations() {
     setPasswordSyncLoading('atlas');
     setError(null);
     try {
-      const result = await handlers.browserCookies.syncBrowserPasswords('atlas', { keychainPassword });
+      const result = await handlers.browserCookies.syncBrowserPasswords('atlas', {
+        keychainPassword,
+      });
       if (!result.success) {
         throw new Error(result.message || 'Failed to sync Atlas passwords');
       }
@@ -470,7 +522,7 @@ export default function Integrations() {
 
       setPasswordRequestSent(true);
       setPasswordRequestInput('');
-      setSuccess('Request sent! We\'ll add the integration within 24 hours.');
+      setSuccess("Request sent! We'll add the integration within 24 hours.");
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send request');
     } finally {
@@ -538,7 +590,7 @@ Steps:
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token}`,
+          Authorization: `Bearer ${session?.access_token}`,
         },
         body: JSON.stringify({
           goal,
@@ -578,14 +630,15 @@ Steps:
       const formData = new FormData();
       formData.append('file', file);
 
-      const endpoint = type === 'vcf' 
-        ? `${API_BASE_WITH_PATH}/integrations/contacts/upload`
-        : `${API_BASE_WITH_PATH}/integrations/email/upload`;
+      const endpoint =
+        type === 'vcf'
+          ? `${API_BASE_WITH_PATH}/integrations/contacts/upload`
+          : `${API_BASE_WITH_PATH}/integrations/email/upload`;
 
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
         },
         body: formData,
       });
@@ -596,7 +649,9 @@ Steps:
       }
 
       if (type === 'vcf') {
-        setSuccess(`Imported ${payload.created} new contacts, updated ${payload.updated}, skipped ${payload.skipped}`);
+        setSuccess(
+          `Imported ${payload.created} new contacts, updated ${payload.updated}, skipped ${payload.skipped}`,
+        );
       } else {
         setSuccess(payload.message || 'File uploaded successfully');
       }
@@ -638,7 +693,9 @@ Steps:
         method: 'POST',
         headers,
         // Only send returnUrl for web (not Electron — mac-app polls instead)
-        body: isElectron ? undefined : JSON.stringify({ returnUrl: window.location.origin + window.location.pathname }),
+        body: isElectron
+          ? undefined
+          : JSON.stringify({ returnUrl: window.location.origin + window.location.pathname }),
       });
 
       const payload = await response.json().catch(() => null);
@@ -661,7 +718,9 @@ Steps:
               setConnectingProvider(null);
               fetchIntegrations();
             }
-          } catch { /* retry */ }
+          } catch {
+            /* retry */
+          }
         }, 2000);
 
         setTimeout(() => {
@@ -743,12 +802,17 @@ Steps:
                               <stop offset="100%" stopColor="rgb(57,182,255)" />
                             </radialGradient>
                           </defs>
-                          <path fill="url(#browserCookieGradient)" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                          <path
+                            fill="url(#browserCookieGradient)"
+                            d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
+                          />
                         </svg>
                       </div>
                       <div className="flex flex-col">
                         <h3 className="font-medium">Browser Cookies</h3>
-                        <span className="text-xs text-muted-foreground">Enable web automation and browsing</span>
+                        <span className="text-xs text-muted-foreground">
+                          Enable web automation and browsing
+                        </span>
                       </div>
                     </div>
 
@@ -773,44 +837,49 @@ Steps:
                     <div className="border-t border-border">
                       {installedBrowsers.length === 0 ? (
                         <div className="px-4 py-3 text-xs text-muted-foreground">
-                          No supported browsers detected. Install Chrome, Edge, Brave, Arc, or another Chromium-based browser.
+                          No supported browsers detected. Install Chrome, Edge, Brave, Arc, or
+                          another Chromium-based browser.
                         </div>
-                      ) : installedBrowsers.map((browser, index) => {
-                        const isConnected = connectedBrowsers.has(browser.type);
-                        const isLoading = browserSyncLoading === browser.type;
+                      ) : (
+                        installedBrowsers.map((browser, index) => {
+                          const isConnected = connectedBrowsers.has(browser.type);
+                          const isLoading = browserSyncLoading === browser.type;
 
-                        return (
-                          <div
-                            key={browser.type}
-                            className={`px-4 py-2 flex items-center justify-between ${
-                              index < installedBrowsers.length - 1 ? 'border-b border-border/50' : ''
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <BrowserIcon type={browser.type} className="w-6 h-6" />
-                              <span className="text-sm">{browser.name}</span>
-                            </div>
-
-                            <button
-                              onClick={() => handleBrowserSync(browser.type)}
-                              disabled={isLoading}
-                              className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                                isConnected
-                                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                                  : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                          return (
+                            <div
+                              key={browser.type}
+                              className={`px-4 py-2 flex items-center justify-between ${
+                                index < installedBrowsers.length - 1
+                                  ? 'border-b border-border/50'
+                                  : ''
                               }`}
                             >
-                              {isLoading ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : isConnected ? (
-                                <Check className="w-3.5 h-3.5" />
-                              ) : (
-                                <RefreshCw className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
-                        );
-                      })}
+                              <div className="flex items-center gap-3">
+                                <BrowserIcon type={browser.type} className="w-6 h-6" />
+                                <span className="text-sm">{browser.name}</span>
+                              </div>
+
+                              <button
+                                onClick={() => handleBrowserSync(browser.type)}
+                                disabled={isLoading}
+                                className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                                  isConnected
+                                    ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                    : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                                }`}
+                              >
+                                {isLoading ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : isConnected ? (
+                                  <Check className="w-3.5 h-3.5" />
+                                ) : (
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
                   )}
                 </div>
@@ -827,7 +896,10 @@ Steps:
                             <stop offset="100%" stopColor="rgb(57,182,255)" />
                           </radialGradient>
                         </defs>
-                        <path fill="url(#browserCookieGradientAlt)" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                        <path
+                          fill="url(#browserCookieGradientAlt)"
+                          d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
+                        />
                       </svg>
                     </div>
                     <div className="flex flex-col">
@@ -837,7 +909,9 @@ Steps:
                           Desktop Only
                         </span>
                       </div>
-                      <span className="text-xs text-muted-foreground">Enable web automation and browsing</span>
+                      <span className="text-xs text-muted-foreground">
+                        Enable web automation and browsing
+                      </span>
                     </div>
                   </div>
                   <Button size="sm" variant="outline" asChild>
@@ -852,7 +926,15 @@ Steps:
                 <div className="p-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
-                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="url(#keyGradient)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        className="w-5 h-5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="url(#keyGradient)"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <defs>
                           <linearGradient id="keyGradient" x1="0%" y1="0%" x2="100%" y2="100%">
                             <stop offset="0%" stopColor="#f59e0b" />
@@ -864,7 +946,9 @@ Steps:
                     </div>
                     <div className="flex flex-col">
                       <h3 className="font-medium">Passwords</h3>
-                      <span className="text-xs text-muted-foreground">Auto-fill login credentials</span>
+                      <span className="text-xs text-muted-foreground">
+                        Auto-fill login credentials
+                      </span>
                     </div>
                   </div>
 
@@ -1006,7 +1090,9 @@ Steps:
                           onClick={() => setPasswordRequestExpanded(true)}
                           className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                         >
-                          Don't see your password client? <span className="underline">Request one</span> and we'll add it in &lt; 1 day
+                          Don't see your password client?{' '}
+                          <span className="underline">Request one</span> and we'll add it in &lt; 1
+                          day
                         </button>
                       ) : passwordRequestSent ? (
                         <p className="text-xs text-green-600 dark:text-green-400">
@@ -1060,7 +1146,12 @@ Steps:
                             <stop offset="100%" stopColor="#10b981" />
                           </linearGradient>
                         </defs>
-                        <path fill="url(#chatSyncGradient)" transform="scale(-1,1)" transform-origin="center" d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"/>
+                        <path
+                          fill="url(#chatSyncGradient)"
+                          transform="scale(-1,1)"
+                          transform-origin="center"
+                          d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"
+                        />
                       </svg>
                     </div>
                     <div className="flex flex-col">
@@ -1072,12 +1163,18 @@ Steps:
                   <button
                     onClick={() => toggleSection('messagesSync')}
                     className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                      iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail')
+                      iMessageSynced ||
+                      whatsAppConnected ||
+                      telegramConnected ||
+                      connectedIntegrations.some((i) => i.name === 'gmail')
                         ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                         : 'bg-primary text-primary-foreground hover:bg-primary/90'
                     }`}
                   >
-                    {iMessageSynced || whatsAppConnected || telegramConnected || connectedIntegrations.some(i => i.name === 'gmail') ? (
+                    {iMessageSynced ||
+                    whatsAppConnected ||
+                    telegramConnected ||
+                    connectedIntegrations.some((i) => i.name === 'gmail') ? (
                       <Check className="w-4 h-4" />
                     ) : (
                       <RefreshCw className="w-4 h-4" />
@@ -1100,7 +1197,10 @@ Steps:
                               </linearGradient>
                             </defs>
                             <rect width="24" height="24" rx="5" fill="url(#imessageGrad)" />
-                            <path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z" />
+                            <path
+                              fill="white"
+                              d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z"
+                            />
                           </svg>
                           <span className="text-sm">iMessage</span>
                         </div>
@@ -1128,13 +1228,22 @@ Steps:
                         <div className="flex items-center gap-3">
                           <svg className="w-6 h-6" viewBox="0 0 24 24">
                             <defs>
-                              <linearGradient id="imessageGradAlt" x1="0%" y1="0%" x2="0%" y2="100%">
+                              <linearGradient
+                                id="imessageGradAlt"
+                                x1="0%"
+                                y1="0%"
+                                x2="0%"
+                                y2="100%"
+                              >
                                 <stop offset="0%" stopColor="#5bf675" />
                                 <stop offset="100%" stopColor="#1fcc3f" />
                               </linearGradient>
                             </defs>
                             <rect width="24" height="24" rx="5" fill="url(#imessageGradAlt)" />
-                            <path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z" />
+                            <path
+                              fill="white"
+                              d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z"
+                            />
                           </svg>
                           <div className="flex items-center gap-2">
                             <span className="text-sm">iMessage</span>
@@ -1153,15 +1262,22 @@ Steps:
                     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                       <div className="flex items-center gap-3">
                         <svg className="w-6 h-6" viewBox="0 0 24 24">
-                          <path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/>
+                          <path
+                            fill="#EA4335"
+                            d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"
+                          />
                         </svg>
                         <div className="flex flex-col">
                           <span className="text-sm">Gmail</span>
                           {(() => {
-                            const gmail = connectedIntegrations.find(i => i.name === 'gmail');
-                            const emails = gmail?.config?.connectedEmails || (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
+                            const gmail = connectedIntegrations.find((i) => i.name === 'gmail');
+                            const emails =
+                              gmail?.config?.connectedEmails ||
+                              (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
                             return emails.map((email: string) => (
-                              <span key={email} className="text-xs text-muted-foreground">{email}</span>
+                              <span key={email} className="text-xs text-muted-foreground">
+                                {email}
+                              </span>
                             ));
                           })()}
                         </div>
@@ -1171,14 +1287,14 @@ Steps:
                         onClick={() => handleEmailConnect('gmail')}
                         disabled={connectingProvider === 'gmail'}
                         className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                          connectedIntegrations.some(i => i.name === 'gmail')
+                          connectedIntegrations.some((i) => i.name === 'gmail')
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                             : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
                         }`}
                       >
                         {connectingProvider === 'gmail' ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : connectedIntegrations.some(i => i.name === 'gmail') ? (
+                        ) : connectedIntegrations.some((i) => i.name === 'gmail') ? (
                           <Check className="w-3.5 h-3.5" />
                         ) : (
                           <RefreshCw className="w-3.5 h-3.5" />
@@ -1191,7 +1307,10 @@ Steps:
                       <div className="flex items-center gap-3">
                         <svg className="w-6 h-6" viewBox="0 0 24 24">
                           <rect width="24" height="24" rx="5" fill="#25D366" />
-                          <path fill="white" d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"/>
+                          <path
+                            fill="white"
+                            d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"
+                          />
                         </svg>
                         <span className="text-sm">WhatsApp</span>
                       </div>
@@ -1206,7 +1325,11 @@ Steps:
                       <div className="flex items-center gap-3">
                         <svg className="w-6 h-6" viewBox="0 0 24 24">
                           <rect width="24" height="24" rx="5" fill="#229ED9" />
-                          <path fill="white" d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z" transform="translate(12, 12) scale(1.05) translate(-12, -12)"/>
+                          <path
+                            fill="white"
+                            d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z"
+                            transform="translate(12, 12) scale(1.05) translate(-12, -12)"
+                          />
                         </svg>
                         <span className="text-sm">Telegram</span>
                       </div>
@@ -1227,7 +1350,11 @@ Steps:
                             </linearGradient>
                           </defs>
                           <rect width="24" height="24" rx="5" fill="url(#messengerGrad)" />
-                          <path fill="white" d="M12 4c-4.42 0-8 3.13-8 7 0 2.2 1.1 4.16 2.8 5.45V19l2.4-1.32c.64.18 1.32.27 2.03.27h.77c4.42 0 8-3.13 8-7s-3.58-7-8-7zm.8 9.43l-2.04-2.17-3.98 2.17 4.37-4.64 2.09 2.17 3.93-2.17-4.37 4.64z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                          <path
+                            fill="white"
+                            d="M12 4c-4.42 0-8 3.13-8 7 0 2.2 1.1 4.16 2.8 5.45V19l2.4-1.32c.64.18 1.32.27 2.03.27h.77c4.42 0 8-3.13 8-7s-3.58-7-8-7zm.8 9.43l-2.04-2.17-3.98 2.17 4.37-4.64 2.09 2.17 3.93-2.17-4.37 4.64z"
+                            transform="scale(0.85) translate(2.1, 2.1)"
+                          />
                         </svg>
                         <span className="text-sm">Messenger</span>
                       </div>
@@ -1240,120 +1367,139 @@ Steps:
               </div>
 
               {/* Compute - Expandable Section (hidden for logged-out users) */}
-              {isFullySignedIn && <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
-                {/* Main row */}
-                <div className="p-4 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
-                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
-                        <defs>
-                          <linearGradient id="computeGradientIntegrations" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stopColor="#ef4444" />
-                            <stop offset="100%" stopColor="#f87171" />
-                          </linearGradient>
-                        </defs>
-                        <path d="M13 2L4.5 14h6l-1 8L19.5 10h-6l1-8z" fill="url(#computeGradientIntegrations)" stroke="url(#computeGradientIntegrations)" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </div>
-                    <div className="flex flex-col">
-                      <h3 className="font-medium">Compute</h3>
-                      <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => toggleSection('compute')}
-                    className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                      claudeCodeSynced
-                        ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                        : 'bg-primary text-primary-foreground hover:bg-primary/90'
-                    }`}
-                  >
-                    {claudeCodeSynced ? (
-                      <Check className="w-4 h-4" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-                {claudeCodeSyncLoading && claudeCodeStatus && (
-                  <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
-                    <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">{claudeCodeStatus}</span>
-                  </div>
-                )}
-
-                {/* Expanded compute options */}
-                {computeExpanded && (
-                  <div className="border-t border-border">
-                    {/* Claude Subscription */}
-                    {handlers.claudeCode?.isAvailable ? (
-                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                        <div className="flex items-center gap-3">
-                          <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
-                          <span className="text-sm">Claude Subscription</span>
-                        </div>
-
-                        <button
-                          onClick={handleClaudeCodeSync}
-                          disabled={claudeCodeSyncLoading}
-                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                            claudeCodeSynced
-                              ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                          }`}
-                        >
-                          {claudeCodeSyncLoading ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : claudeCodeSynced ? (
-                            <Check className="w-3.5 h-3.5" />
-                          ) : (
-                            <RefreshCw className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                        <div className="flex items-center gap-3">
-                          <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm">Claude Subscription</span>
-                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                              Desktop Only
-                            </span>
-                          </div>
-                        </div>
-                        <Button size="sm" variant="ghost" asChild className="h-8 px-2">
-                          <a href="/download" className="text-xs">Get App</a>
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* ChatGPT Subscription - Coming Soon */}
-                    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                      <div className="flex items-center gap-3">
-                        <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z" />
+              {isFullySignedIn && (
+                <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
+                  {/* Main row */}
+                  <div className="p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+                        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                          <defs>
+                            <linearGradient
+                              id="computeGradientIntegrations"
+                              x1="0%"
+                              y1="0%"
+                              x2="100%"
+                              y2="100%"
+                            >
+                              <stop offset="0%" stopColor="#ef4444" />
+                              <stop offset="100%" stopColor="#f87171" />
+                            </linearGradient>
+                          </defs>
+                          <path
+                            d="M13 2L4.5 14h6l-1 8L19.5 10h-6l1-8z"
+                            fill="url(#computeGradientIntegrations)"
+                            stroke="url(#computeGradientIntegrations)"
+                            strokeWidth="1"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
                         </svg>
-                        <span className="text-sm">ChatGPT Subscription</span>
                       </div>
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        Coming Soon
-                      </span>
-                    </div>
-
-                    {/* Gemini Subscription - Coming Soon */}
-                    <div className="px-4 py-2 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />
-                        <span className="text-sm">Gemini Subscription</span>
+                      <div className="flex flex-col">
+                        <h3 className="font-medium">Compute</h3>
+                        <span className="text-xs text-muted-foreground">
+                          Connect AI subscriptions
+                        </span>
                       </div>
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        Coming Soon
-                      </span>
                     </div>
+                    <button
+                      onClick={() => toggleSection('compute')}
+                      className={`h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                        claudeCodeSynced
+                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                          : 'bg-primary text-primary-foreground hover:bg-primary/90'
+                      }`}
+                    >
+                      {claudeCodeSynced ? (
+                        <Check className="w-4 h-4" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
+                    </button>
                   </div>
-                )}
-              </div>}
+                  {claudeCodeSyncLoading && claudeCodeStatus && (
+                    <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
+                      <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                      <span className="text-xs text-muted-foreground">{claudeCodeStatus}</span>
+                    </div>
+                  )}
+
+                  {/* Expanded compute options */}
+                  {computeExpanded && (
+                    <div className="border-t border-border">
+                      {/* Claude Subscription */}
+                      {handlers.claudeCode?.isAvailable ? (
+                        <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                          <div className="flex items-center gap-3">
+                            <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                            <span className="text-sm">Claude Subscription</span>
+                          </div>
+
+                          <button
+                            onClick={handleClaudeCodeSync}
+                            disabled={claudeCodeSyncLoading}
+                            className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
+                              claudeCodeSynced
+                                ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            {claudeCodeSyncLoading ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : claudeCodeSynced ? (
+                              <Check className="w-3.5 h-3.5" />
+                            ) : (
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                          <div className="flex items-center gap-3">
+                            <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm">Claude Subscription</span>
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                Desktop Only
+                              </span>
+                            </div>
+                          </div>
+                          <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+                            <a href="/download" className="text-xs">
+                              Get App
+                            </a>
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* ChatGPT Subscription - Coming Soon */}
+                      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+                        <div className="flex items-center gap-3">
+                          <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.676l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5z" />
+                          </svg>
+                          <span className="text-sm">ChatGPT Subscription</span>
+                        </div>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                          Coming Soon
+                        </span>
+                      </div>
+
+                      {/* Gemini Subscription - Coming Soon */}
+                      <div className="px-4 py-2 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />
+                          <span className="text-sm">Gemini Subscription</span>
+                        </div>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                          Coming Soon
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Socials - Expandable Section */}
               <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
@@ -1368,16 +1514,32 @@ Steps:
                             <stop offset="100%" stopColor="#6366f1" />
                           </linearGradient>
                         </defs>
-                        <circle cx="5" cy="12" r="2.5" fill="url(#socialsGradient)"/>
-                        <circle cx="19" cy="5" r="2.5" fill="url(#socialsGradient)"/>
-                        <circle cx="19" cy="19" r="2.5" fill="url(#socialsGradient)"/>
-                        <line x1="7.5" y1="11" x2="16.5" y2="6" stroke="url(#socialsGradient)" strokeWidth="1.5"/>
-                        <line x1="7.5" y1="13" x2="16.5" y2="18" stroke="url(#socialsGradient)" strokeWidth="1.5"/>
+                        <circle cx="5" cy="12" r="2.5" fill="url(#socialsGradient)" />
+                        <circle cx="19" cy="5" r="2.5" fill="url(#socialsGradient)" />
+                        <circle cx="19" cy="19" r="2.5" fill="url(#socialsGradient)" />
+                        <line
+                          x1="7.5"
+                          y1="11"
+                          x2="16.5"
+                          y2="6"
+                          stroke="url(#socialsGradient)"
+                          strokeWidth="1.5"
+                        />
+                        <line
+                          x1="7.5"
+                          y1="13"
+                          x2="16.5"
+                          y2="18"
+                          stroke="url(#socialsGradient)"
+                          strokeWidth="1.5"
+                        />
                       </svg>
                     </div>
                     <div className="flex flex-col">
                       <h3 className="font-medium">Socials</h3>
-                      <span className="text-xs text-muted-foreground">Connect social media accounts</span>
+                      <span className="text-xs text-muted-foreground">
+                        Connect social media accounts
+                      </span>
                     </div>
                   </div>
 
@@ -1397,7 +1559,11 @@ Steps:
                       <div className="flex items-center gap-3">
                         <svg className="w-6 h-6" viewBox="0 0 24 24">
                           <rect width="24" height="24" rx="5" fill="#000000" />
-                          <path fill="white" d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z" transform="scale(0.72) translate(4.7, 4.7)"/>
+                          <path
+                            fill="white"
+                            d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z"
+                            transform="scale(0.72) translate(4.7, 4.7)"
+                          />
                         </svg>
                         <span className="text-sm">X</span>
                       </div>
@@ -1412,7 +1578,11 @@ Steps:
                         <div className="flex items-center gap-3">
                           <svg className="w-6 h-6" viewBox="0 0 24 24">
                             <rect width="24" height="24" rx="5" fill="#0A66C2" />
-                            <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                            <path
+                              fill="white"
+                              d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z"
+                              transform="scale(0.85) translate(2.1, 2.1)"
+                            />
                           </svg>
                           <span className="text-sm">LinkedIn</span>
                         </div>
@@ -1434,7 +1604,11 @@ Steps:
                         <div className="flex items-center gap-3">
                           <svg className="w-6 h-6" viewBox="0 0 24 24">
                             <rect width="24" height="24" rx="5" fill="#0A66C2" />
-                            <path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/>
+                            <path
+                              fill="white"
+                              d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z"
+                              transform="scale(0.85) translate(2.1, 2.1)"
+                            />
                           </svg>
                           <div className="flex items-center gap-2">
                             <span className="text-sm">LinkedIn</span>
@@ -1463,8 +1637,24 @@ Steps:
                             </linearGradient>
                           </defs>
                           <rect width="24" height="24" rx="5" fill="url(#igGrad)" />
-                          <rect x="6" y="6" width="12" height="12" rx="3.5" stroke="white" strokeWidth="1.5" fill="none" />
-                          <circle cx="12" cy="12" r="3" stroke="white" strokeWidth="1.5" fill="none" />
+                          <rect
+                            x="6"
+                            y="6"
+                            width="12"
+                            height="12"
+                            rx="3.5"
+                            stroke="white"
+                            strokeWidth="1.5"
+                            fill="none"
+                          />
+                          <circle
+                            cx="12"
+                            cy="12"
+                            r="3"
+                            stroke="white"
+                            strokeWidth="1.5"
+                            fill="none"
+                          />
                           <circle cx="16.5" cy="7.5" r="1" fill="white" />
                         </svg>
                         <span className="text-sm">Instagram</span>
@@ -1511,4 +1701,3 @@ Steps:
     </div>
   );
 }
-

@@ -17,11 +17,7 @@
  * Only visible in development mode.
  */
 
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useState, useEffect, useRef } from 'react';
 
 interface TestPrompt {
@@ -34,7 +30,8 @@ interface TestPrompt {
 const TEST_PROMPTS: TestPrompt[] = [
   {
     title: 'Build New Boxing Payment Flow',
-    description: 'Tests building and hosting a full payment site with waivers, Stripe, and email confirmations',
+    description:
+      'Tests building and hosting a full payment site with waivers, Stripe, and email confirmations',
     prompt: `My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.
 We need to create and host a site that can be accessed via QR code or direct link.
 
@@ -94,7 +91,8 @@ Return to me:
   {
     title: 'Test Spawn Sub Agents',
     description: 'Tests recursive sub-agent spawning with depth parameter',
-    prompt: 'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.',
+    prompt:
+      'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.',
   },
   {
     title: 'Test Web Search',
@@ -109,17 +107,20 @@ Return to me:
   {
     title: 'Test Parallel Tool Calls',
     description: 'Tests parallel execution of multiple tools in one turn',
-    prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',
+    prompt:
+      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',
   },
   {
     title: 'Test Claude Code Agent',
     description: 'Tests Claude Code agent in ephemeral E2B sandbox',
-    prompt: 'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
+    prompt:
+      'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
   },
   {
     title: 'Test DAG Executor',
     description: 'Tests DAG executor with plan mode (no web searches during planning)',
-    prompt: 'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
+    prompt:
+      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
   },
   {
     title: 'Test Image Handling',
@@ -130,7 +131,8 @@ Return to me:
   {
     title: 'Test Files in Sub Agents',
     description: 'Tests file_pointer output schema with sub-agents creating color variants',
-    prompt: 'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation',
+    prompt:
+      'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation',
     attachmentUrls: ['/test-assets/rs.jpeg'],
   },
   {
@@ -171,12 +173,14 @@ For any services that require a API Key or Credential, mock the service for now 
   {
     title: 'Test Call Phone Number',
     description: 'Tests phone call tool with Vapi voice AI',
-    prompt: 'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
+    prompt:
+      'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
   },
   {
     title: 'Test Event Planning',
     description: 'Tests coordination of event planning with budget constraints',
-    prompt: 'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
+    prompt:
+      'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
   },
   {
     title: 'Test Wait For',
@@ -186,12 +190,14 @@ For any services that require a API Key or Credential, mock the service for now 
   {
     title: 'Test Explore Agent',
     description: 'Tests explore agent with network search, sorting, and external research',
-    prompt: 'Get me all VCs I know, sort them by most recently contacted, then find a piece of information about them that you didnt get from my messages. Use Explore Agent',
+    prompt:
+      'Get me all VCs I know, sort them by most recently contacted, then find a piece of information about them that you didnt get from my messages. Use Explore Agent',
   },
   {
     title: 'Test Message Person',
     description: 'Tests unified message_person tool with email and iMessage channels',
-    prompt: "Send an email and a imessage to myself, 972-977-7432, for testing purposes, don't ask any questions. The message should try to get me to launch this product.",
+    prompt:
+      "Send an email and a imessage to myself, 972-977-7432, for testing purposes, don't ask any questions. The message should try to get me to launch this product.",
   },
   {
     title: 'Test Website Mapping',
@@ -336,13 +342,19 @@ async function fetchTestPromptFiles(attachmentUrls: string[]): Promise<File[]> {
       const filename = url.split('/').pop() || 'attachment';
       const ext = filename.split('.').pop()?.toLowerCase();
       const mimeByExt: Record<string, string> = {
-        jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png',
-        gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
-        pdf: 'application/pdf', csv: 'text/csv', txt: 'text/plain',
+        jpeg: 'image/jpeg',
+        jpg: 'image/jpeg',
+        png: 'image/png',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        svg: 'image/svg+xml',
+        pdf: 'application/pdf',
+        csv: 'text/csv',
+        txt: 'text/plain',
       };
       const mimeType = (ext && mimeByExt[ext]) || blob.type;
       return new File([blob], filename, { type: mimeType });
-    })
+    }),
   );
   return files.filter((f): f is File => f !== null);
 }
@@ -361,7 +373,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
     if (!import.meta.env.DEV || hasAutoLoaded.current) return;
     hasAutoLoaded.current = true;
 
-    const defaultPrompt = TEST_PROMPTS.find(p => p.title === DEV_DEFAULT_PROMPT_TITLE);
+    const defaultPrompt = TEST_PROMPTS.find((p) => p.title === DEV_DEFAULT_PROMPT_TITLE);
     if (!defaultPrompt) return;
 
     (async () => {
@@ -380,9 +392,10 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
   const handleSelectPrompt = async (testPrompt: TestPrompt) => {
     setIsLoading(true);
     try {
-      const files = testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0
-        ? await fetchTestPromptFiles(testPrompt.attachmentUrls)
-        : undefined;
+      const files =
+        testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0
+          ? await fetchTestPromptFiles(testPrompt.attachmentUrls)
+          : undefined;
 
       onSelectPrompt(testPrompt.prompt, files);
     } catch (error) {
@@ -416,9 +429,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
         onMouseLeave={() => setIsOpen(false)}
       >
         <div className="space-y-3">
-          <p className="text-xs text-muted-foreground">
-            Dev test prompts for tool testing
-          </p>
+          <p className="text-xs text-muted-foreground">Dev test prompts for tool testing</p>
           <div className="space-y-2">
             {TEST_PROMPTS.map((testPrompt) => (
               <button

@@ -73,7 +73,7 @@ describe('SystemCustomization component', () => {
     it('renders the personality prompt placeholder text', () => {
       renderWithProviders(<SystemCustomization {...defaultProps} />);
       const textarea = screen.getByPlaceholderText(
-        'Describe how you want your assistant to behave...'
+        'Describe how you want your assistant to behave...',
       );
       expect(textarea).toBeInTheDocument();
     });
@@ -88,21 +88,21 @@ describe('SystemCustomization component', () => {
     it('renders description text for the assistant name', () => {
       renderWithProviders(<SystemCustomization {...defaultProps} />);
       expect(
-        screen.getByText('This name will appear in approval messages and SMS notifications')
+        screen.getByText('This name will appear in approval messages and SMS notifications'),
       ).toBeInTheDocument();
     });
 
     it('renders description text for the profile picture', () => {
       renderWithProviders(<SystemCustomization {...defaultProps} />);
       expect(
-        screen.getByText('This image will appear on the contact card saved to your phone')
+        screen.getByText('This image will appear on the contact card saved to your phone'),
       ).toBeInTheDocument();
     });
 
     it('renders description text for the personality prompt', () => {
       renderWithProviders(<SystemCustomization {...defaultProps} />);
       expect(
-        screen.getByText('This personality will be applied to all your conversations')
+        screen.getByText('This personality will be applied to all your conversations'),
       ).toBeInTheDocument();
     });
   });

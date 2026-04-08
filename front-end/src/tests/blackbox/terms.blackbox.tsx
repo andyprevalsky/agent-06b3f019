@@ -22,23 +22,33 @@ describe('Terms page', () => {
     expect(screen.getByRole('heading', { name: /2\. waitlist sign-up/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /3\. intellectual property/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /4\. no warranties/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /5\. limitation of liability/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /5\. limitation of liability/i }),
+    ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /6\. links to other sites/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /7\. changes to these terms/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /7\. changes to these terms/i }),
+    ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /8\. sms\/text messaging/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /9\. contact/i })).toBeInTheDocument();
   });
 
   it('renders agreement statement at the bottom', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/by using this website, you agree to these terms of service/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/by using this website, you agree to these terms of service/i),
+    ).toBeInTheDocument();
   });
 
   // --- Section Content ---
 
   it('renders welcome/intro content with agreement language', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/by using our website or joining our waitlist, you agree to these terms of service/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /by using our website or joining our waitlist, you agree to these terms of service/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   it('renders section 1 - Use of Our Website content', () => {
@@ -48,12 +58,16 @@ describe('Terms page', () => {
 
   it('renders section 2 - Waitlist Sign-Up content', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/if you join our waitlist, you agree to provide accurate information/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/if you join our waitlist, you agree to provide accurate information/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 3 - Intellectual Property content', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/all content on this site.*is owned by rose labs/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/all content on this site.*is owned by rose labs/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 4 - No Warranties content', () => {
@@ -63,7 +77,9 @@ describe('Terms page', () => {
 
   it('renders section 5 - Limitation of Liability content', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/rose labs is not liable for any damages or losses/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/rose labs is not liable for any damages or losses/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 6 - Links to Other Sites content', () => {
@@ -91,13 +107,17 @@ describe('Terms page', () => {
   it('renders SMS opt-out and help instructions', () => {
     renderWithProviders(<Terms />);
     expect(screen.getByText(/message frequency varies/i)).toBeInTheDocument();
-    expect(screen.getByText(/you can stop receiving text messages at any time by replying stop/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/you can stop receiving text messages at any time by replying stop/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/for assistance, reply help to any message/i)).toBeInTheDocument();
   });
 
   it('renders carrier liability disclaimer', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/carriers are not liable for delayed or undelivered messages/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/carriers are not liable for delayed or undelivered messages/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 9 - Contact content', () => {

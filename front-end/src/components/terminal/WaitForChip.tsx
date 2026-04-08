@@ -32,7 +32,16 @@
  *   Flush to bottom/sides of card, separated by border-t
  */
 
-import { ChevronRight, CheckCircle, XCircle, Clock, Search, Sparkles, Lightbulb, Globe } from 'lucide-react';
+import {
+  ChevronRight,
+  CheckCircle,
+  XCircle,
+  Clock,
+  Search,
+  Sparkles,
+  Lightbulb,
+  Globe,
+} from 'lucide-react';
 import { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
@@ -123,7 +132,7 @@ function getExploreStepIcon(toolName?: string) {
   if (!toolName) return Search;
   if (toolName === 'web_search') return Globe;
   if (toolName === 'spawn_agent') return Lightbulb;
-  return (TOOL_ICONS[toolName]) || Search;
+  return TOOL_ICONS[toolName] || Search;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -142,12 +151,12 @@ function InlineExploreChip({
 
   const toggle = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    setIsExpanded(prev => !prev);
+    setIsExpanded((prev) => !prev);
   }, []);
 
   const toggleStep = useCallback((index: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    setExpandedSteps(prev => {
+    setExpandedSteps((prev) => {
       const next = new Set(prev);
       next.has(index) ? next.delete(index) : next.add(index);
       return next;
@@ -172,19 +181,16 @@ function InlineExploreChip({
       >
         {isInProgress ? (
           <div className="h-3.5 w-3.5 flex-shrink-0">
-            <ThinkingAnimation
-              autoplay
-              loop
-              playbackSpeed={1}
-              style={{ width: 14, height: 14 }}
-            />
+            <ThinkingAnimation autoplay loop playbackSpeed={1} style={{ width: 14, height: 14 }} />
           </div>
         ) : (
-          <Sparkles className={cn(
-            'h-3.5 w-3.5 flex-shrink-0',
-            isComplete && 'text-emerald-400',
-            isError && 'text-red-400',
-          )} />
+          <Sparkles
+            className={cn(
+              'h-3.5 w-3.5 flex-shrink-0',
+              isComplete && 'text-emerald-400',
+              isError && 'text-red-400',
+            )}
+          />
         )}
 
         <span className="text-[11px] text-foreground/70 flex-1 truncate">
@@ -227,11 +233,12 @@ function InlineExploreChip({
             if (thinking) {
               const thinkingText = step.message?.trim();
               return (
-                <div key={`${step.timestamp}-${i}`} className="flex items-start gap-1.5 text-[10px] text-muted-foreground/60 py-0.5">
+                <div
+                  key={`${step.timestamp}-${i}`}
+                  className="flex items-start gap-1.5 text-[10px] text-muted-foreground/60 py-0.5"
+                >
                   <Lightbulb className="h-2.5 w-2.5 flex-shrink-0 text-amber-400/70 mt-0.5" />
-                  <span className="italic flex-1">
-                    {thinkingText || 'Thinking...'}
-                  </span>
+                  <span className="italic flex-1">{thinkingText || 'Thinking...'}</span>
                 </div>
               );
             }
@@ -309,14 +316,16 @@ const WaitForChip = memo(function WaitForChip({
 
   // Determine the live check (latest IN_PROGRESS check with explore data)
   const liveCheck = isInProgress
-    ? [...checks].reverse().find(c => c.status === 'IN_PROGRESS' && c.explore)
+    ? [...checks].reverse().find((c) => c.status === 'IN_PROGRESS' && c.explore)
     : undefined;
 
   // Past checks (all non-live, chronological: Check 1 at top, Check N at bottom)
-  const pastChecks = checks.filter(c => c !== liveCheck);
+  const pastChecks = checks.filter((c) => c !== liveCheck);
 
   // Completed check count (FINISHED or ERROR checks)
-  const completedChecks = checks.filter(c => c.status === 'FINISHED' || c.status === 'ERROR').length;
+  const completedChecks = checks.filter(
+    (c) => c.status === 'FINISHED' || c.status === 'ERROR',
+  ).length;
 
   // Update next-check countdown every second
   useEffect(() => {
@@ -326,7 +335,7 @@ const WaitForChip = memo(function WaitForChip({
       // Next check countdown (condition mode, in progress)
       if (isInProgress && isConditionMode && metadata?.checkIntervalSeconds) {
         // Find the latest FINISHED check to compute countdown from
-        const latestFinished = [...checks].reverse().find(c => c.status === 'FINISHED');
+        const latestFinished = [...checks].reverse().find((c) => c.status === 'FINISHED');
 
         if (liveCheck) {
           // Currently running a check (explore active)
@@ -337,7 +346,7 @@ const WaitForChip = memo(function WaitForChip({
           const nextCheckTime = lastCheckTime + metadata.checkIntervalSeconds * 1000;
           const remaining = Math.max(0, Math.floor((nextCheckTime - now) / 1000));
           setNextCheckIn(remaining > 0 ? `next in ${formatDuration(remaining)}` : 'checking...');
-        } else if (checks.some(c => c.status === 'IN_PROGRESS')) {
+        } else if (checks.some((c) => c.status === 'IN_PROGRESS')) {
           // First check is running (no finished checks yet)
           setNextCheckIn('checking...');
         } else {
@@ -347,7 +356,7 @@ const WaitForChip = memo(function WaitForChip({
       }
 
       // Tick for timeAgo recalculation
-      setTick(t => t + 1);
+      setTick((t) => t + 1);
     };
 
     update();
@@ -359,19 +368,17 @@ const WaitForChip = memo(function WaitForChip({
 
   const toggleExpanded = useCallback(() => {
     if (isConditionMode) {
-      setIsExpanded(prev => !prev);
+      setIsExpanded((prev) => !prev);
     }
   }, [isConditionMode]);
 
   // Extract condition text
-  const condition = metadata?.condition
-    || title.replace(/^Waiting for /, '').replace(/^Polling: /, '');
+  const condition =
+    metadata?.condition || title.replace(/^Waiting for /, '').replace(/^Polling: /, '');
 
   // ─── Timestamp mode: simple one-liner ──────────────────────────────────────
   if (isTimestampMode) {
-    const targetDate = metadata?.untilTimestamp
-      ? new Date(metadata.untilTimestamp)
-      : null;
+    const targetDate = metadata?.untilTimestamp ? new Date(metadata.untilTimestamp) : null;
     const formattedTarget = targetDate
       ? targetDate.toLocaleString(undefined, {
           month: 'short',
@@ -524,7 +531,7 @@ const WaitForChip = memo(function WaitForChip({
                   const isError = check.status === 'ERROR';
                   const checkPassed = check.conditionMet === true;
                   const checkFailed = check.conditionMet === false;
-                  const checkLabel = `Check ${check.checkNum || (i + 1)}`;
+                  const checkLabel = `Check ${check.checkNum || i + 1}`;
                   const ago = check.timestamp ? timeAgo(check.timestamp) : '';
 
                   return (
@@ -542,9 +549,7 @@ const WaitForChip = memo(function WaitForChip({
                         )}
                         <span className="text-[11px] text-muted-foreground/70 flex-1">
                           {checkLabel}
-                          {ago && (
-                            <span className="text-muted-foreground/40"> · {ago}</span>
-                          )}
+                          {ago && <span className="text-muted-foreground/40"> · {ago}</span>}
                         </span>
                       </div>
 

@@ -41,10 +41,10 @@ interface CostLimitModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   agentId: string;
-  currentLimitCents: number;  // from agent.price_limit_cents
-  currentCostCents: number;   // from agent.tree_cost_cents
-  onIncrease?: () => void;    // Called after successful increase
-  onDelete?: () => void;      // Called after successful delete
+  currentLimitCents: number; // from agent.price_limit_cents
+  currentCostCents: number; // from agent.tree_cost_cents
+  onIncrease?: () => void; // Called after successful increase
+  onDelete?: () => void; // Called after successful delete
 }
 
 function formatCentsAsDollars(cents: number): string {
@@ -173,105 +173,109 @@ export default function CostLimitModal({
         }}
       >
         <div className="p-6" style={{ backgroundColor: 'transparent' }}>
-        <DialogHeader>
-          <DialogTitle className="text-foreground">
-            This Task Has Crossed the Price Limit Set
-          </DialogTitle>
-        </DialogHeader>
+          <DialogHeader>
+            <DialogTitle className="text-foreground">
+              This Task Has Crossed the Price Limit Set
+            </DialogTitle>
+          </DialogHeader>
 
-        <div className="space-y-6 py-4">
-          {/* Current Cost Display */}
-          <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50 border">
-            <div>
-              <p className="text-sm text-muted-foreground">Current Cost Consumed</p>
-              <p className="text-2xl font-bold font-mono">{formatCentsAsDollars(currentCostCents)}</p>
+          <div className="space-y-6 py-4">
+            {/* Current Cost Display */}
+            <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50 border">
+              <div>
+                <p className="text-sm text-muted-foreground">Current Cost Consumed</p>
+                <p className="text-2xl font-bold font-mono">
+                  {formatCentsAsDollars(currentCostCents)}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-sm text-muted-foreground">Price Limit</p>
+                <p className="text-lg font-mono text-muted-foreground">
+                  {formatCentsAsDollars(currentLimitCents)}
+                </p>
+              </div>
             </div>
-            <div className="text-right">
-              <p className="text-sm text-muted-foreground">Price Limit</p>
-              <p className="text-lg font-mono text-muted-foreground">{formatCentsAsDollars(currentLimitCents)}</p>
-            </div>
-          </div>
 
-          {/* New Limit Input */}
-          <div className="space-y-2">
-            <Label htmlFor="new-limit">New Price Limit</Label>
-            <div className="relative">
-              <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                id="new-limit"
-                value={newLimitInput}
-                onChange={(e) => setNewLimitInput(e.target.value)}
-                placeholder="0.75"
-                className="pl-8 font-mono"
-                disabled={isUpdating}
-              />
+            {/* New Limit Input */}
+            <div className="space-y-2">
+              <Label htmlFor="new-limit">New Price Limit</Label>
+              <div className="relative">
+                <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="new-limit"
+                  value={newLimitInput}
+                  onChange={(e) => setNewLimitInput(e.target.value)}
+                  placeholder="0.75"
+                  className="pl-8 font-mono"
+                  disabled={isUpdating}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Must be at least {formatCentsAsDollars(currentCostCents)} (current cost)
+              </p>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Must be at least {formatCentsAsDollars(currentCostCents)} (current cost)
-            </p>
-          </div>
 
-          {/* Action Buttons */}
-          <div className="flex items-center gap-3">
-            {/* Delete Section (Left) */}
-            {!showDeleteConfirm ? (
-              <Button
-                onClick={() => setShowDeleteConfirm(true)}
-                variant="outline"
-                size="sm"
-                className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-500/30"
-                disabled={isUpdating}
-              >
-                <Trash2 className="h-4 w-4 mr-1" />
-                Delete
-              </Button>
-            ) : (
-              <div className="flex gap-2">
+            {/* Action Buttons */}
+            <div className="flex items-center gap-3">
+              {/* Delete Section (Left) */}
+              {!showDeleteConfirm ? (
                 <Button
-                  onClick={() => setShowDeleteConfirm(false)}
+                  onClick={() => setShowDeleteConfirm(true)}
                   variant="outline"
                   size="sm"
-                  disabled={isDeleting}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-500/30"
+                  disabled={isUpdating}
                 >
-                  Cancel
+                  <Trash2 className="h-4 w-4 mr-1" />
+                  Delete
                 </Button>
-                <Button
-                  onClick={handleDelete}
-                  disabled={isDeleting || !confirmEnabled}
-                  size="sm"
-                  className="bg-red-600 hover:bg-red-700 text-white"
-                >
-                  {isDeleting ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : confirmEnabled ? (
-                    'Confirm'
-                  ) : (
-                    'Wait...'
-                  )}
-                </Button>
-              </div>
-            )}
-
-            {/* Spacer */}
-            <div className="flex-1" />
-
-            {/* Increase Limit Button (Right) */}
-            <Button
-              onClick={handleIncrease}
-              disabled={isUpdating || showDeleteConfirm}
-              className="bg-black hover:bg-black/90 text-white dark:bg-white dark:hover:bg-white/90 dark:text-black"
-            >
-              {isUpdating ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Updating...
-                </>
               ) : (
-                'Increase Limit'
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    variant="outline"
+                    size="sm"
+                    disabled={isDeleting}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleDelete}
+                    disabled={isDeleting || !confirmEnabled}
+                    size="sm"
+                    className="bg-red-600 hover:bg-red-700 text-white"
+                  >
+                    {isDeleting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : confirmEnabled ? (
+                      'Confirm'
+                    ) : (
+                      'Wait...'
+                    )}
+                  </Button>
+                </div>
               )}
-            </Button>
+
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Increase Limit Button (Right) */}
+              <Button
+                onClick={handleIncrease}
+                disabled={isUpdating || showDeleteConfirm}
+                className="bg-black hover:bg-black/90 text-white dark:bg-white dark:hover:bg-white/90 dark:text-black"
+              >
+                {isUpdating ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Updating...
+                  </>
+                ) : (
+                  'Increase Limit'
+                )}
+              </Button>
+            </div>
           </div>
-        </div>
         </div>
       </DialogContent>
     </Dialog>

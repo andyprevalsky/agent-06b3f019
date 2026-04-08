@@ -83,10 +83,10 @@ function FadeInMarkdown({
         const text = node.textContent;
         if (text.trim().length === 0) {
           // Just whitespace - still needs ALL metadata
-          wordArray.push({ 
-            word: text, 
+          wordArray.push({
+            word: text,
             isWord: false,
-            ...formatting 
+            ...formatting,
           });
           return;
         }
@@ -99,14 +99,14 @@ function FadeInMarkdown({
             wordArray.push({
               word: part,
               isWord: true,
-              ...formatting
+              ...formatting,
             });
           } else if (part.length > 0) {
             // It's whitespace - still needs ALL metadata
-            wordArray.push({ 
-              word: part, 
+            wordArray.push({
+              word: part,
               isWord: false,
-              ...formatting 
+              ...formatting,
             });
           }
         });
@@ -131,7 +131,7 @@ function FadeInMarkdown({
         if (tagName === 'code') {
           newFormatting.isCode = true;
         }
-        
+
         // Block-level elements - blockquote and pre take priority over p
         // Each block element gets a unique blockIndex
         if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre'].includes(tagName)) {
@@ -142,26 +142,26 @@ function FadeInMarkdown({
           newFormatting.blockType = 'p';
           newFormatting.blockIndex = blockIndexCounter++;
         }
-        
+
         // Track parent list type for li elements
         if (tagName === 'ul' || tagName === 'ol') {
           newFormatting.listType = tagName as 'ul' | 'ol';
         }
-        
+
         // Recurse through children
-        Array.from(node.childNodes).forEach(child => {
+        Array.from(node.childNodes).forEach((child) => {
           extractWords(child, newFormatting);
         });
       }
     };
 
     extractWords(tempRef.current);
-    
+
     setWords(wordArray);
   }, [markdown]);
-  
+
   // Calculate word count for hook order consistency
-  const wordCount = words.filter(w => w.isWord).length;
+  const wordCount = words.filter((w) => w.isWord).length;
 
   // Step 2: When animation completes
   const handleLastWordComplete = () => {
@@ -172,18 +172,16 @@ function FadeInMarkdown({
 
   // If words haven't been extracted yet, render hidden markdown
   if (words.length === 0) {
-  return (
+    return (
       <div ref={tempRef} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-          {markdown}
-        </ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
       </div>
     );
   }
 
   // Step 3: Render each word with its formatting preserved
   let wordIndex = 0; // Counter for actual words only (for delay calculation)
-  
+
   // Find the last word item in the words array (for animation completion)
   const lastWordItem = (() => {
     for (let i = words.length - 1; i >= 0; i--) {
@@ -191,14 +189,14 @@ function FadeInMarkdown({
     }
     return null;
   })();
-  
+
   // Calculate dynamic delay based on word count to ensure 3s max animation
   const maxAnimationTime = 3.0; // seconds
   const baseDelay = 0.05; // initial delay before first word
   const fadeDuration = 0.35; // duration for each word fade-in
   const availableTime = maxAnimationTime - baseDelay - fadeDuration;
   const perWordDelay = Math.min(0.04, availableTime / Math.max(wordCount, 1));
-  
+
   // Group words by blocks for proper rendering
   const renderWords = (animate: boolean) => {
     const elements: React.ReactNode[] = [];
@@ -208,28 +206,28 @@ function FadeInMarkdown({
     let listItems: React.ReactNode[] = [];
     let currentListType: 'ul' | 'ol' | undefined = undefined;
     let currentBlockFirstWordIndex = 0; // Track first word index for block animation
-    
+
     // Track ordered list numbering across multiple <ol> elements
     let olItemCount = 0;
     let olStartNumber = 1;
-    
+
     // Group consecutive words with same inline formatting
-    let inlineGroup: typeof words[0][] = [];
+    let inlineGroup: (typeof words)[0][] = [];
     let lastFormatting: string = '';
     let inlineGroupFirstWordIndex = 0; // Track first word index for inline code animation
-    
+
     const flushInlineGroup = () => {
       if (inlineGroup.length === 0) return null;
-      
+
       const firstItem = inlineGroup[0];
       const groupKey = `group-${currentBlock.length}`;
       const groupFirstWordIndex = inlineGroupFirstWordIndex; // Capture for animation
-      
+
       // For inline code, separate leading/trailing whitespace from the code content
-      let processedGroup = [...inlineGroup];
-      let leadingWhitespace: typeof words[0] | null = null;
-      let trailingWhitespace: typeof words[0] | null = null;
-      
+      const processedGroup = [...inlineGroup];
+      let leadingWhitespace: (typeof words)[0] | null = null;
+      let trailingWhitespace: (typeof words)[0] | null = null;
+
       if (firstItem.isCode && firstItem.blockType !== 'pre') {
         // Extract leading whitespace
         if (processedGroup.length > 0 && !processedGroup[0].isWord) {
@@ -240,24 +238,24 @@ function FadeInMarkdown({
           trailingWhitespace = processedGroup.pop()!;
         }
       }
-      
+
       // Create animated/static spans for each word in the group
       const wordSpans = processedGroup.map((item, idx) => {
         let content;
-        
+
         const currentWordIndex = wordIndex;
         // Only increment wordIndex for actual words (for delay calculation)
         if (item.isWord) {
           wordIndex++;
         }
-        
+
         const shouldAnimateWord = animate && !reduce;
-        
+
         if (shouldAnimateWord) {
-          const delay = baseDelay + (currentWordIndex * perWordDelay);
+          const delay = baseDelay + currentWordIndex * perWordDelay;
           // Check if this is the last word item by object reference
           const isLastWord = item === lastWordItem;
-          
+
           content = (
             <motion.span
               key={`word-${idx}`}
@@ -266,7 +264,7 @@ function FadeInMarkdown({
               transition={{
                 delay,
                 duration: fadeDuration,
-                ease: 'easeOut'
+                ease: 'easeOut',
               }}
               onAnimationComplete={isLastWord ? handleLastWordComplete : undefined}
             >
@@ -276,17 +274,17 @@ function FadeInMarkdown({
         } else {
           content = <span key={`word-${idx}`}>{item.word}</span>;
         }
-        
+
         return content;
       });
-      
+
       let groupContent = <React.Fragment key={groupKey}>{wordSpans}</React.Fragment>;
-      
+
       // Wrap the entire group with formatting
       if (firstItem.isCode) {
         // Animate inline code pill (not code blocks)
         if (firstItem.blockType !== 'pre' && animate && !reduce) {
-          const delay = baseDelay + (groupFirstWordIndex * perWordDelay);
+          const delay = baseDelay + groupFirstWordIndex * perWordDelay;
           groupContent = (
             <motion.code
               key={groupKey}
@@ -295,18 +293,14 @@ function FadeInMarkdown({
               transition={{
                 delay,
                 duration: 0.35,
-                ease: 'easeOut'
+                ease: 'easeOut',
               }}
             >
               {wordSpans}
             </motion.code>
           );
         } else {
-          groupContent = (
-            <code key={groupKey}>
-              {wordSpans}
-            </code>
-          );
+          groupContent = <code key={groupKey}>{wordSpans}</code>;
         }
       } else {
         if (firstItem.isBold) {
@@ -318,10 +312,14 @@ function FadeInMarkdown({
         }
         if (firstItem.isLink && firstItem.href) {
           const wrapped = groupContent;
-          groupContent = <a key={`${groupKey}-link`} href={firstItem.href}>{wrapped}</a>;
+          groupContent = (
+            <a key={`${groupKey}-link`} href={firstItem.href}>
+              {wrapped}
+            </a>
+          );
         }
       }
-      
+
       // For inline code, add back the leading/trailing whitespace outside the code element
       if (firstItem.isCode && firstItem.blockType !== 'pre') {
         return (
@@ -332,29 +330,32 @@ function FadeInMarkdown({
           </React.Fragment>
         );
       }
-      
+
       return groupContent;
     };
-    
+
     // Helper to flush list with proper start attribute for ol
     const flushList = (listType: 'ul' | 'ol', items: React.ReactNode[], startNum?: number) => {
       if (listType === 'ol' && startNum && startNum > 1) {
-        elements.push(<ol key={`list-${elements.length}`} start={startNum}>{items}</ol>);
+        elements.push(
+          <ol key={`list-${elements.length}`} start={startNum}>
+            {items}
+          </ol>,
+        );
       } else if (listType === 'ol') {
         elements.push(<ol key={`list-${elements.length}`}>{items}</ol>);
       } else {
         elements.push(<ul key={`list-${elements.length}`}>{items}</ul>);
       }
     };
-    
+
     words.forEach((item, index) => {
       if (!item.isWord) {
         // For whitespace, keep it in group if we're in an inline code or link group (not pre/code blocks)
-        const isInInlineCodeGroup = inlineGroup.length > 0 && 
-                                    inlineGroup[0].isCode && 
-                                    inlineGroup[0].blockType !== 'pre';
+        const isInInlineCodeGroup =
+          inlineGroup.length > 0 && inlineGroup[0].isCode && inlineGroup[0].blockType !== 'pre';
         const isInLinkGroup = inlineGroup.length > 0 && inlineGroup[0].isLink;
-        
+
         if (isInInlineCodeGroup || isInLinkGroup) {
           inlineGroup.push(item);
         } else {
@@ -367,25 +368,24 @@ function FadeInMarkdown({
         }
         return;
       }
-      
+
       // Check if we need to start a new block
       // Use blockIndex to detect new block elements (each li, p, etc. gets a unique index)
       const isListItem = item.blockType === 'li';
-      const shouldStartNewBlock = item.blockType && 
-        (item.blockIndex !== currentBlockIndex) &&
-        currentBlock.length > 0;
-        
+      const shouldStartNewBlock =
+        item.blockType && item.blockIndex !== currentBlockIndex && currentBlock.length > 0;
+
       if (shouldStartNewBlock) {
         // Flush inline group
         const flushed = flushInlineGroup();
         if (flushed) currentBlock.push(flushed);
         inlineGroup = [];
         lastFormatting = '';
-        
+
         // Finish current block
         if (currentBlockType === 'li') {
           // Add list item to collection with animation
-          const blockDelay = baseDelay + (currentBlockFirstWordIndex * perWordDelay);
+          const blockDelay = baseDelay + currentBlockFirstWordIndex * perWordDelay;
           if (animate && !reduce) {
             listItems.push(
               <motion.li
@@ -395,23 +395,23 @@ function FadeInMarkdown({
                 transition={{
                   delay: blockDelay,
                   duration: 0.35,
-                  ease: 'easeOut'
+                  ease: 'easeOut',
                 }}
               >
                 {currentBlock}
-              </motion.li>
+              </motion.li>,
             );
           } else {
             listItems.push(<li key={`li-${listItems.length}`}>{currentBlock}</li>);
           }
-          
+
           // Track ol items for numbering
           if (currentListType === 'ol') {
             olItemCount++;
           }
-          
+
           currentBlock = [];
-          
+
           // If next block is NOT a list item OR list type changed, flush the accumulated list
           if (!isListItem && listItems.length > 0 && currentListType) {
             flushList(currentListType, listItems, olStartNumber);
@@ -432,14 +432,18 @@ function FadeInMarkdown({
             }
             currentListType = undefined;
           }
-          
+
           // Then add the current block
           if (currentBlockType) {
             const BlockTag = currentBlockType as any;
-            const blockDelay = baseDelay + (currentBlockFirstWordIndex * perWordDelay);
-            
+            const blockDelay = baseDelay + currentBlockFirstWordIndex * perWordDelay;
+
             // Animate special block types
-            if ((currentBlockType === 'blockquote' || currentBlockType === 'pre') && animate && !reduce) {
+            if (
+              (currentBlockType === 'blockquote' || currentBlockType === 'pre') &&
+              animate &&
+              !reduce
+            ) {
               if (currentBlockType === 'blockquote') {
                 elements.push(
                   <motion.blockquote
@@ -450,11 +454,11 @@ function FadeInMarkdown({
                     transition={{
                       delay: blockDelay,
                       duration: 0.35,
-                      ease: 'easeOut'
+                      ease: 'easeOut',
                     }}
                   >
                     {currentBlock}
-                  </motion.blockquote>
+                  </motion.blockquote>,
                 );
               } else {
                 elements.push(
@@ -465,11 +469,11 @@ function FadeInMarkdown({
                     transition={{
                       delay: blockDelay,
                       duration: 0.35,
-                      ease: 'easeOut'
+                      ease: 'easeOut',
                     }}
                   >
                     {currentBlock}
-                  </motion.pre>
+                  </motion.pre>,
                 );
               }
             } else {
@@ -477,7 +481,7 @@ function FadeInMarkdown({
                 elements.push(
                   <BlockTag key={`block-${elements.length}`} className="custom-blockquote">
                     {currentBlock}
-                  </BlockTag>
+                  </BlockTag>,
                 );
               } else {
                 elements.push(<BlockTag key={`block-${elements.length}`}>{currentBlock}</BlockTag>);
@@ -489,7 +493,7 @@ function FadeInMarkdown({
           currentBlock = [];
         }
       }
-      
+
       // Track list type for li elements
       if (isListItem && item.listType) {
         // If list type changed, flush previous list
@@ -502,44 +506,44 @@ function FadeInMarkdown({
         }
         currentListType = item.listType;
       }
-      
+
       currentBlockType = item.blockType;
       currentBlockIndex = item.blockIndex;
-      
+
       // Track first word index when starting a new block
       if (currentBlock.length === 0) {
         currentBlockFirstWordIndex = wordIndex;
       }
-      
+
       // Create formatting key for grouping
       const formatting = `${item.isBold || ''}-${item.isItalic || ''}-${item.isCode || ''}-${item.isLink || ''}-${item.href || ''}`;
-      
+
       // If formatting changed, flush previous group
       if (formatting !== lastFormatting && inlineGroup.length > 0) {
         const flushed = flushInlineGroup();
         if (flushed) currentBlock.push(flushed);
         inlineGroup = [];
       }
-      
+
       lastFormatting = formatting;
-      
+
       // Track first word index when starting a new inline group
       if (inlineGroup.length === 0) {
         inlineGroupFirstWordIndex = wordIndex;
       }
-      
+
       inlineGroup.push(item);
     });
-    
+
     // Flush any remaining inline group
     const flushed = flushInlineGroup();
     if (flushed) currentBlock.push(flushed);
-    
+
     // Flush remaining block
     if (currentBlock.length > 0) {
       if (currentBlockType === 'li') {
         // Add final list item with animation
-        const blockDelay = baseDelay + (currentBlockFirstWordIndex * perWordDelay);
+        const blockDelay = baseDelay + currentBlockFirstWordIndex * perWordDelay;
         if (animate && !reduce) {
           listItems.push(
             <motion.li
@@ -549,16 +553,16 @@ function FadeInMarkdown({
               transition={{
                 delay: blockDelay,
                 duration: 0.35,
-                ease: 'easeOut'
+                ease: 'easeOut',
               }}
             >
               {currentBlock}
-            </motion.li>
+            </motion.li>,
           );
         } else {
           listItems.push(<li key={`li-${listItems.length}`}>{currentBlock}</li>);
         }
-        
+
         // Track ol items
         if (currentListType === 'ol') {
           olItemCount++;
@@ -572,21 +576,20 @@ function FadeInMarkdown({
             olStartNumber = olItemCount + 1;
           }
         }
-        
+
         // Then add the current block
         if (currentBlockType) {
           const BlockTag = currentBlockType as any;
-          const blockDelay = baseDelay + (currentBlockFirstWordIndex * perWordDelay);
-          
+          const blockDelay = baseDelay + currentBlockFirstWordIndex * perWordDelay;
+
           // For code blocks, trim trailing newlines
-          let blockContent = [...currentBlock];
+          const blockContent = [...currentBlock];
           if (currentBlockType === 'pre') {
             // Remove trailing whitespace/newline-only fragments
             while (blockContent.length > 0) {
               const lastItem = blockContent[blockContent.length - 1];
               // Check if it's a Fragment with only whitespace or newlines
-              if (React.isValidElement(lastItem) && 
-                  lastItem.type === React.Fragment) {
+              if (React.isValidElement(lastItem) && lastItem.type === React.Fragment) {
                 const children = lastItem.props.children;
                 // Match whitespace, newlines, or any combination
                 if (typeof children === 'string' && /^[\s\n]*$/.test(children)) {
@@ -597,9 +600,13 @@ function FadeInMarkdown({
               break;
             }
           }
-          
+
           // Animate special block types
-          if ((currentBlockType === 'blockquote' || currentBlockType === 'pre') && animate && !reduce) {
+          if (
+            (currentBlockType === 'blockquote' || currentBlockType === 'pre') &&
+            animate &&
+            !reduce
+          ) {
             if (currentBlockType === 'blockquote') {
               elements.push(
                 <motion.blockquote
@@ -610,11 +617,11 @@ function FadeInMarkdown({
                   transition={{
                     delay: blockDelay,
                     duration: 0.35,
-                    ease: 'easeOut'
+                    ease: 'easeOut',
                   }}
                 >
                   {blockContent}
-                </motion.blockquote>
+                </motion.blockquote>,
               );
             } else {
               elements.push(
@@ -625,11 +632,11 @@ function FadeInMarkdown({
                   transition={{
                     delay: blockDelay,
                     duration: 0.35,
-                    ease: 'easeOut'
+                    ease: 'easeOut',
                   }}
                 >
                   {blockContent}
-                </motion.pre>
+                </motion.pre>,
               );
             }
           } else {
@@ -637,7 +644,7 @@ function FadeInMarkdown({
               elements.push(
                 <BlockTag key={`block-${elements.length}`} className="custom-blockquote">
                   {blockContent}
-                </BlockTag>
+                </BlockTag>,
               );
             } else {
               elements.push(<BlockTag key={`block-${elements.length}`}>{blockContent}</BlockTag>);
@@ -648,15 +655,15 @@ function FadeInMarkdown({
         }
       }
     }
-    
+
     // Final flush of any remaining list items
     if (listItems.length > 0 && currentListType) {
       flushList(currentListType, listItems, olStartNumber);
     }
-    
+
     return elements;
   };
-  
+
   return (
     <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
       <style>{`
@@ -780,20 +787,22 @@ function FadeInMarkdown({
  * This handles cases where the LLM or backend sends escaped characters as string literals.
  */
 function normalizeMarkdownText(text: string): string {
-  return text
-    // Convert literal \n to actual newlines
-    .replace(/\\n/g, '\n')
-    // Convert literal \t to actual tabs
-    .replace(/\\t/g, '\t')
-    // Unescape markdown syntax characters that may have been double-escaped
-    .replace(/\\\*/g, '*')   // \* → *
-    .replace(/\\_/g, '_')    // \_ → _
-    .replace(/\\`/g, '`')    // \` → `
-    .replace(/\\#/g, '#')    // \# → #
-    .replace(/\\\[/g, '[')   // \[ → [
-    .replace(/\\\]/g, ']')   // \] → ]
-    .replace(/\\\(/g, '(')   // \( → (
-    .replace(/\\\)/g, ')');  // \) → )
+  return (
+    text
+      // Convert literal \n to actual newlines
+      .replace(/\\n/g, '\n')
+      // Convert literal \t to actual tabs
+      .replace(/\\t/g, '\t')
+      // Unescape markdown syntax characters that may have been double-escaped
+      .replace(/\\\*/g, '*') // \* → *
+      .replace(/\\_/g, '_') // \_ → _
+      .replace(/\\`/g, '`') // \` → `
+      .replace(/\\#/g, '#') // \# → #
+      .replace(/\\\[/g, '[') // \[ → [
+      .replace(/\\\]/g, ']') // \] → ]
+      .replace(/\\\(/g, '(') // \( → (
+      .replace(/\\\)/g, ')')
+  ); // \) → )
 }
 
 /**
@@ -806,7 +815,6 @@ export const MarkdownText = memo(function MarkdownText({
   className,
   breaks = false,
 }: MarkdownTextProps) {
-
   // Normalize text to handle escape sequences from LLM/backend
   const normalizedText = normalizeMarkdownText(text);
 
@@ -815,9 +823,7 @@ export const MarkdownText = memo(function MarkdownText({
   if (breaks && !shouldAnimate) {
     return (
       <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
-        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-          {normalizedText}
-        </ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{normalizedText}</ReactMarkdown>
       </div>
     );
   }

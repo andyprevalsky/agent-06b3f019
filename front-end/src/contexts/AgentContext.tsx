@@ -87,12 +87,7 @@ import {
   type InsertMessagePayload,
   type UpdateAgentPayload,
 } from '@/lib/realtime';
-import {
-  getAgent,
-  postMessage as postMessageAPI,
-  AgentDetail,
-  Message
-} from '@/lib/api';
+import { getAgent, postMessage as postMessageAPI, AgentDetail, Message } from '@/lib/api';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -149,7 +144,7 @@ export interface AgentContextValue {
   streamingBubbles: Map<string, StreamingBubble>;
   streamingPlan: StreamingPlan | null;
   streamingAttention: StreamingAttention | null;
-  streamingTools: Map<string, StreamingTool>;  // tool_call_id -> streaming tool
+  streamingTools: Map<string, StreamingTool>; // tool_call_id -> streaming tool
 
   // Streamed texts - used by MessageList to skip animation for already-streamed content
   streamedTextsRef: React.MutableRefObject<Set<string>>;
@@ -184,7 +179,13 @@ interface AgentProviderProps {
   onLoadAgents?: () => void; // Callback to refresh agent list in sidebar
 }
 
-export function AgentProvider({ children, user, isAuthenticated, realtimeReady, onLoadAgents }: AgentProviderProps) {
+export function AgentProvider({
+  children,
+  user,
+  isAuthenticated,
+  realtimeReady,
+  onLoadAgents,
+}: AgentProviderProps) {
   // canSubscribe requires both authentication AND realtime auth to be set
   // This prevents subscribing before setRealtimeAuth has been called
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
@@ -197,7 +198,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
   });
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
-  
+
   // Streaming state
   const [streamingBubbles, setStreamingBubbles] = useState<Map<string, StreamingBubble>>(new Map());
   const [streamingPlan, setStreamingPlan] = useState<StreamingPlan | null>(null);
@@ -206,20 +207,20 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
 
   // Chat mode state - derived from agent.temporal_workflow_id being null
   const [isChatMode, setIsChatMode] = useState(true);
-  
+
   // Realtime refs
   const channelRef = useRef<RealtimeChannel | null>(null);
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const isReconnectingRef = useRef<boolean>(false);
   const [forceResubscribeCounter, setForceResubscribeCounter] = useState(0);
-  
+
   // Track if initial load has happened to avoid double-fetch
   const initialLoadDoneRef = useRef<string | null>(null);
-  
+
   // Message handlers map - MessageList instances register here
   const messageHandlersRef = useRef<Map<string | null, MessageHandler>>(new Map());
-  
+
   // Track streamed texts to skip re-animation on INSERT
   const streamedTextsRef = useRef<Set<string>>(new Set());
 
@@ -228,25 +229,25 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
   // ═══════════════════════════════════════════════════════════════════════════
   // Message Handler Registration
   // ═══════════════════════════════════════════════════════════════════════════
-  
-  const registerMessageHandler = useCallback((
-    subAgentId: string | null, 
-    handler: MessageHandler
-  ): (() => void) => {
-    messageHandlersRef.current.set(subAgentId, handler);
-    return () => {
-      messageHandlersRef.current.delete(subAgentId);
-    };
-  }, []);
+
+  const registerMessageHandler = useCallback(
+    (subAgentId: string | null, handler: MessageHandler): (() => void) => {
+      messageHandlersRef.current.set(subAgentId, handler);
+      return () => {
+        messageHandlersRef.current.delete(subAgentId);
+      };
+    },
+    [],
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Dispatch message to appropriate handler
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const dispatchMessage = useCallback((message: Message) => {
     const targetSubAgentId = message.metadata?.subAgentId ?? null;
     const handler = messageHandlersRef.current.get(targetSubAgentId);
-    
+
     if (handler) {
       handler(message);
     } else if (targetSubAgentId !== null) {
@@ -269,9 +270,9 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
       setAgent(data.agent);
       // Merge API messages with any realtime messages that arrived during fetch
       // This prevents the race condition where realtime messages get overwritten
-      setMessages(prev => {
-        const apiIds = new Set(data.messages.map(m => m.message_id));
-        const realtimeOnly = prev.filter(m => !apiIds.has(m.message_id));
+      setMessages((prev) => {
+        const apiIds = new Set(data.messages.map((m) => m.message_id));
+        const realtimeOnly = prev.filter((m) => !apiIds.has(m.message_id));
         return [...data.messages, ...realtimeOnly];
       });
       // Set chat mode based on whether agent has a Temporal workflow
@@ -307,83 +308,89 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
   // Kill connections → flush state → connect new (handlers filter by agentId)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  const setSelectedAgentId = useCallback((id: string | null) => {
-    // ═══════════════════════════════════════════════════════════════════════
-    // 0. SYNC URL - update query param to match selected agent
-    // ═══════════════════════════════════════════════════════════════════════
-    const url = new URL(window.location.href);
-    if (id) {
-      url.searchParams.set('agent-id', id);
-    } else {
-      url.searchParams.delete('agent-id');
-    }
-    window.history.replaceState({}, '', url.toString());
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 1. KILL CONNECTIONS - synchronous, before any React state updates
-    // ═══════════════════════════════════════════════════════════════════════
-    if (channelRef.current) {
-      unsubscribe(channelRef.current);
-      channelRef.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    isReconnectingRef.current = false;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // 2. FLUSH STATE - clear all messages and streaming state
-    // ═══════════════════════════════════════════════════════════════════════
-    setMessages([]);
-    setStreamingBubbles(prev => {
-      for (const [_, bubble] of prev) {
-        if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
+  const setSelectedAgentId = useCallback(
+    (id: string | null) => {
+      // ═══════════════════════════════════════════════════════════════════════
+      // 0. SYNC URL - update query param to match selected agent
+      // ═══════════════════════════════════════════════════════════════════════
+      const url = new URL(window.location.href);
+      if (id) {
+        url.searchParams.set('agent-id', id);
+      } else {
+        url.searchParams.delete('agent-id');
       }
-      return new Map();
-    });
-    setStreamingPlan(null);
-    setStreamingAttention(null);
-    setStreamingTools(new Map());
-    setAgent(null);
-    streamedTextsRef.current.clear();
-    initialLoadDoneRef.current = null;
-    setIsChatMode(true); // Reset to chat mode default
+      window.history.replaceState({}, '', url.toString());
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // 3. UPDATE SELECTED - triggers useEffect to subscribe to new channel
-    // Handlers filter by agentId so late messages from old agent are ignored
-    // ═══════════════════════════════════════════════════════════════════════
-    setSelectedAgentIdState(id);
+      // ═══════════════════════════════════════════════════════════════════════
+      // 1. KILL CONNECTIONS - synchronous, before any React state updates
+      // ═══════════════════════════════════════════════════════════════════════
+      if (channelRef.current) {
+        unsubscribe(channelRef.current);
+        channelRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      isReconnectingRef.current = false;
 
-    if (id) {
-      loadAgentDetail(id);
-    }
-  }, [loadAgentDetail]);
+      // ═══════════════════════════════════════════════════════════════════════
+      // 2. FLUSH STATE - clear all messages and streaming state
+      // ═══════════════════════════════════════════════════════════════════════
+      setMessages([]);
+      setStreamingBubbles((prev) => {
+        for (const [_, bubble] of prev) {
+          if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
+        }
+        return new Map();
+      });
+      setStreamingPlan(null);
+      setStreamingAttention(null);
+      setStreamingTools(new Map());
+      setAgent(null);
+      streamedTextsRef.current.clear();
+      initialLoadDoneRef.current = null;
+      setIsChatMode(true); // Reset to chat mode default
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 3. UPDATE SELECTED - triggers useEffect to subscribe to new channel
+      // Handlers filter by agentId so late messages from old agent are ignored
+      // ═══════════════════════════════════════════════════════════════════════
+      setSelectedAgentIdState(id);
+
+      if (id) {
+        loadAgentDetail(id);
+      }
+    },
+    [loadAgentDetail],
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Send Message
   // ═══════════════════════════════════════════════════════════════════════════
-  
-  const sendMessage = useCallback(async (text: string) => {
-    if (!selectedAgentId) {
-      throw new Error('No agent selected');
-    }
-    await postMessageAPI(selectedAgentId, text);
-  }, [selectedAgentId]);
+
+  const sendMessage = useCallback(
+    async (text: string) => {
+      if (!selectedAgentId) {
+        throw new Error('No agent selected');
+      }
+      await postMessageAPI(selectedAgentId, text);
+    },
+    [selectedAgentId],
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Force Resubscribe
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   const forceResubscribe = useCallback(() => {
-    setForceResubscribeCounter(prev => prev + 1);
+    setForceResubscribeCounter((prev) => prev + 1);
   }, []);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Realtime Subscription
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   useEffect(() => {
     let cancelled = false;
 
@@ -392,19 +399,19 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
       cancelled = true;
       console.log('🧹 AgentContext: cleanup running');
       isReconnectingRef.current = false;
-      
+
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
-      
+
       if (channelRef.current) {
         unsubscribe(channelRef.current);
         channelRef.current = null;
       }
-      
+
       // Clear streaming bubbles and their timeouts
-      setStreamingBubbles(prev => {
+      setStreamingBubbles((prev) => {
         for (const [_, bubble] of prev) {
           if (bubble.timeoutId) {
             window.clearTimeout(bubble.timeoutId);
@@ -412,7 +419,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
         }
         return new Map();
       });
-      
+
       setStreamingPlan(null);
       setStreamingAttention(null);
     };
@@ -451,7 +458,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
       reconnectAttemptRef.current += 1;
 
       reconnectTimeoutRef.current = window.setTimeout(() => {
-        setForceResubscribeCounter(prev => prev + 1);
+        setForceResubscribeCounter((prev) => prev + 1);
       }, delay);
     };
 
@@ -461,7 +468,10 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
           onInsert: (data: InsertMessagePayload) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (data.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: INSERT discarded (wrong agent)', { expected: selectedAgentId, got: data.agentId });
+              console.log('🚪 AgentContext: INSERT discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: data.agentId,
+              });
               return;
             }
 
@@ -474,18 +484,18 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
               metadata: data.metadata ?? undefined,
               file_pointer: data.file_pointer ?? undefined,
             };
-            
+
             console.log(`📥 AgentContext INSERT:`, {
               role: message.role,
               message_id: message.message_id,
               subAgentId: message.metadata?.subAgentId,
             });
-            
+
             // Clear streaming bubbles on ASSISTANT INSERT
             // Both main agent and browser agent now send thinking as ASSISTANT messages
             if (message.role === 'ASSISTANT') {
               const subAgentId = message.metadata?.subAgentId ?? null;
-              setStreamingBubbles(prev => {
+              setStreamingBubbles((prev) => {
                 const newMap = new Map(prev);
                 // Clear bubbles for this subAgentId (or all if null)
                 for (const [streamId, bubble] of newMap) {
@@ -499,23 +509,24 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
                 return newMap;
               });
             }
-            
+
             // Clear streaming plan on set_plan FINISHED
-            if (message.role === 'TOOL' &&
-                message.metadata?.toolName === 'set_plan' &&
-                message.metadata?.toolStatus === 'FINISHED') {
+            if (
+              message.role === 'TOOL' &&
+              message.metadata?.toolName === 'set_plan' &&
+              message.metadata?.toolStatus === 'FINISHED'
+            ) {
               setStreamingPlan(null);
             }
-            
+
             // Clear streaming attention on send_message_to_user
-            if (message.role === 'TOOL' && 
-                message.metadata?.toolName === 'send_message_to_user') {
+            if (message.role === 'TOOL' && message.metadata?.toolName === 'send_message_to_user') {
               setStreamingAttention(null);
             }
-            
+
             // Clear streaming tool when real TOOL message arrives with same toolCallId
             if (message.role === 'TOOL' && message.metadata?.toolCallId) {
-              setStreamingTools(prev => {
+              setStreamingTools((prev) => {
                 if (prev.has(message.metadata!.toolCallId)) {
                   const newMap = new Map(prev);
                   newMap.delete(message.metadata!.toolCallId);
@@ -524,18 +535,18 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
                 return prev;
               });
             }
-            
+
             // Add to messages history
-            setMessages(prev => [...prev, message]);
-            
+            setMessages((prev) => [...prev, message]);
+
             // Dispatch to appropriate MessageList handler
             dispatchMessage(message);
           },
-          
+
           onUpdate: (updated: UpdateAgentPayload) => {
             // Agent updates don't need agentId filtering - they're about the agent state,
             // not messages. Late updates are harmless since they just update progress/status.
-            setAgent(prev => {
+            setAgent((prev) => {
               if (!prev) return prev;
               return {
                 ...prev,
@@ -550,9 +561,10 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
                 message_count: updated.messageCount ?? prev.message_count,
                 tree_cost_cents: updated.treeCostCents ?? prev.tree_cost_cents,
                 updated_at: updated.updatedAt ?? prev.updated_at,
-                temporal_workflow_id: updated.temporalWorkflowId !== undefined
-                  ? updated.temporalWorkflowId
-                  : prev.temporal_workflow_id,
+                temporal_workflow_id:
+                  updated.temporalWorkflowId !== undefined
+                    ? updated.temporalWorkflowId
+                    : prev.temporal_workflow_id,
               };
             });
 
@@ -563,11 +575,14 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
 
             onLoadAgents?.();
           },
-          
+
           onAssistantStream: (chunk: AssistantStreamPayload) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (chunk.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: ASSISTANT_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: chunk.agentId });
+              console.log('🚪 AgentContext: ASSISTANT_STREAM discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: chunk.agentId,
+              });
               return;
             }
 
@@ -577,33 +592,33 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
               done: chunk.done,
             });
 
-            setStreamingBubbles(prev => {
+            setStreamingBubbles((prev) => {
               const newMap = new Map(prev);
               const existing = newMap.get(chunk.stream_id);
-              
+
               if (!existing || chunk.sequence >= existing.sequence) {
                 if (existing?.timeoutId) {
                   window.clearTimeout(existing.timeoutId);
                 }
-                
+
                 const accumulatedText = (existing?.text || '') + chunk.delta;
-                
+
                 let timeoutId: number | undefined;
                 if (chunk.done) {
                   if (accumulatedText.trim()) {
                     streamedTextsRef.current.add(accumulatedText.trim());
                   }
-                  
+
                   timeoutId = window.setTimeout(() => {
                     console.warn(`Stream ${chunk.stream_id} timeout`);
-                    setStreamingBubbles(p => {
+                    setStreamingBubbles((p) => {
                       const m = new Map(p);
                       m.delete(chunk.stream_id);
                       return m;
                     });
                   }, STREAM_TIMEOUT_MS);
                 }
-                
+
                 newMap.set(chunk.stream_id, {
                   text: accumulatedText,
                   sequence: chunk.sequence,
@@ -615,15 +630,18 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
                   isClaude: chunk.is_claude ?? existing?.isClaude ?? false,
                 });
               }
-              
+
               return newMap;
             });
           },
-          
+
           onPlanStream: (plan: PlanStreamPayload) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (plan.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: PLAN_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: plan.agentId });
+              console.log('🚪 AgentContext: PLAN_STREAM discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: plan.agentId,
+              });
               return;
             }
 
@@ -635,11 +653,14 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
               char_count: plan.char_count ?? 0,
             });
           },
-          
+
           onAttentionStream: (attention: AttentionStreamPayload) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (attention.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: ATTENTION_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: attention.agentId });
+              console.log('🚪 AgentContext: ATTENTION_STREAM discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: attention.agentId,
+              });
               return;
             }
 
@@ -651,16 +672,19 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
               is_question: false,
             });
           },
-          
+
           onToolStream: (tool: ToolStreamPayload) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (tool.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: TOOL_STREAM discarded (wrong agent)', { expected: selectedAgentId, got: tool.agentId });
+              console.log('🚪 AgentContext: TOOL_STREAM discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: tool.agentId,
+              });
               return;
             }
 
             console.log(`🔧 AgentContext TOOL STREAM:`, tool);
-            setStreamingTools(prev => {
+            setStreamingTools((prev) => {
               const newMap = new Map(prev);
               newMap.set(tool.tool_call_id, {
                 stream_id: tool.stream_id,
@@ -675,7 +699,10 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
           onAgentModeStarted: (data) => {
             // Filter by agentId to prevent cross-agent message contamination
             if (data.agentId !== selectedAgentId) {
-              console.log('🚪 AgentContext: AGENT_MODE_STARTED discarded (wrong agent)', { expected: selectedAgentId, got: data.agentId });
+              console.log('🚪 AgentContext: AGENT_MODE_STARTED discarded (wrong agent)', {
+                expected: selectedAgentId,
+                got: data.agentId,
+              });
               return;
             }
 
@@ -698,7 +725,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
         channelRef.current = channel;
         reconnectAttemptRef.current = 0;
         isReconnectingRef.current = false;
-        
+
         // Only refetch if this is a reconnection (e.g., tab visibility change), not initial load
         // Initial load is handled by loadAgentDetail to avoid double-fetch which breaks opacity transition
         const isReconnection = initialLoadDoneRef.current === selectedAgentId;
@@ -707,9 +734,9 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
             const data = await getAgent(selectedAgentId);
             if (cancelled) return;
             // Merge API messages with any realtime messages that arrived during fetch
-            setMessages(prev => {
-              const apiIds = new Set(data.messages.map(m => m.message_id));
-              const realtimeOnly = prev.filter(m => !apiIds.has(m.message_id));
+            setMessages((prev) => {
+              const apiIds = new Set(data.messages.map((m) => m.message_id));
+              const realtimeOnly = prev.filter((m) => !apiIds.has(m.message_id));
               return [...data.messages, ...realtimeOnly];
             });
             setAgent(data.agent);
@@ -735,14 +762,14 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
   // ═══════════════════════════════════════════════════════════════════════════
   // Tab visibility reconnect
   // ═══════════════════════════════════════════════════════════════════════════
-  
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!document.hidden && selectedAgentId) {
         if (channelRef.current?.state === 'joined') return;
         setTimeout(() => {
           if (selectedAgentId) {
-            setForceResubscribeCounter(prev => prev + 1);
+            setForceResubscribeCounter((prev) => prev + 1);
           }
         }, 1000);
       }
@@ -753,7 +780,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
         if (channelRef.current?.state === 'joined') return;
         setTimeout(() => {
           if (selectedAgentId) {
-            setForceResubscribeCounter(prev => prev + 1);
+            setForceResubscribeCounter((prev) => prev + 1);
           }
         }, 500);
       }
@@ -782,8 +809,10 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
         !isReconnectingRef.current;
 
       if (shouldReconnect) {
-        console.warn(`[AgentContext] Health check: ${!channelRef.current ? 'no channel' : `state="${state}"`}, triggering reconnect`);
-        setForceResubscribeCounter(prev => prev + 1);
+        console.warn(
+          `[AgentContext] Health check: ${!channelRef.current ? 'no channel' : `state="${state}"`}, triggering reconnect`,
+        );
+        setForceResubscribeCounter((prev) => prev + 1);
       }
     }, 10000);
 
@@ -847,11 +876,7 @@ export function AgentProvider({ children, user, isAuthenticated, realtimeReady, 
     isChatMode,
   };
 
-  return (
-    <AgentContext.Provider value={value}>
-      {children}
-    </AgentContext.Provider>
-  );
+  return <AgentContext.Provider value={value}>{children}</AgentContext.Provider>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -867,4 +892,3 @@ export function useAgentContext() {
 }
 
 export default AgentContext;
-

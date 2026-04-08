@@ -47,7 +47,10 @@ export interface BrowserCookiesHandler {
   isAvailable: boolean;
   getInstalledBrowsers: () => Promise<BrowserInfo[]>;
   syncBrowser: (browserType: BrowserType, keychainPassword?: string) => Promise<void>;
-  syncBrowserPasswords: (browserType: BrowserType, config?: { keychainPassword?: string }) => Promise<{ success: boolean; message?: string }>;
+  syncBrowserPasswords: (
+    browserType: BrowserType,
+    config?: { keychainPassword?: string },
+  ) => Promise<{ success: boolean; message?: string }>;
   storeAtlasPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
 }
@@ -67,11 +70,11 @@ export interface IntegrationHandlers {
 
 const IntegrationHandlersContext = createContext<IntegrationHandlers>({});
 
-export function IntegrationHandlersProvider({ 
-  children, 
-  handlers 
-}: { 
-  children: ReactNode; 
+export function IntegrationHandlersProvider({
+  children,
+  handlers,
+}: {
+  children: ReactNode;
   handlers?: IntegrationHandlers;
 }) {
   return (
@@ -84,5 +87,3 @@ export function IntegrationHandlersProvider({
 export function useIntegrationHandlers() {
   return useContext(IntegrationHandlersContext);
 }
-
-

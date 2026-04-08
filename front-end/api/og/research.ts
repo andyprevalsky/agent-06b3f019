@@ -26,7 +26,7 @@ export default async function handler(req: Request) {
   const safeTitle = escapeHtml(post.title);
   const safeDesc = escapeHtml(post.description);
 
-  let modified = html
+  const modified = html
     // Title tag
     .replace(/<title>[^<]*<\/title>/, `<title>${safeTitle} | Rose Labs</title>`)
     // Basic meta

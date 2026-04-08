@@ -90,7 +90,10 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
 
     try {
       setActionState('rejecting');
-      await rejectAttentionRequest(pendingApproval.attentionRequestId, contextInput.trim() || undefined);
+      await rejectAttentionRequest(
+        pendingApproval.attentionRequestId,
+        contextInput.trim() || undefined,
+      );
 
       toast({
         title: 'Rejected',
@@ -122,9 +125,7 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
           <div className="flex items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span className="text-sm font-medium text-foreground">
-                Approval Required
-              </span>
+              <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
           </div>
 

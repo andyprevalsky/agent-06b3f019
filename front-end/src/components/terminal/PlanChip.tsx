@@ -58,10 +58,7 @@ interface TaskWithDeps {
  * Topologically sort tasks by their dependencies.
  * Tasks with no dependencies come first, then tasks whose deps are satisfied.
  */
-function topologicalSort(
-  tasks: PlanTask[],
-  deps: Record<string, string[]> | null
-): TaskWithDeps[] {
+function topologicalSort(tasks: PlanTask[], deps: Record<string, string[]> | null): TaskWithDeps[] {
   const n = tasks.length;
   const normalizedDeps = deps || {};
 
@@ -70,7 +67,7 @@ function topologicalSort(
     originalIndex: idx,
     text: task.goal,
     toolName: task.tool_name,
-    deps: (normalizedDeps[String(idx)] || []).map(d => parseInt(d)),
+    deps: (normalizedDeps[String(idx)] || []).map((d) => parseInt(d)),
   }));
 
   // Kahn's algorithm for topological sort
@@ -130,19 +127,22 @@ function topologicalSort(
   }
 
   // Return tasks in sorted order
-  return sorted.map(idx => taskInfos[idx]);
+  return sorted.map((idx) => taskInfos[idx]);
 }
 
 /**
  * Detect structure type from dependencies
  */
-function detectStructure(tasks: PlanTask[], deps: Record<string, string[]> | null): 'sequential' | 'parallel' | 'dag' {
+function detectStructure(
+  tasks: PlanTask[],
+  deps: Record<string, string[]> | null,
+): 'sequential' | 'parallel' | 'dag' {
   if (!deps || Object.keys(deps).length === 0) {
     return 'parallel';
   }
 
   // Check if all tasks have no deps
-  const hasDeps = Object.values(deps).some(d => d.length > 0);
+  const hasDeps = Object.values(deps).some((d) => d.length > 0);
   if (!hasDeps) {
     return 'parallel';
   }
@@ -177,7 +177,7 @@ function formatDeps(deps: number[]): string {
 
   // Sort deps and convert to 1-based display numbers
   const sorted = [...deps].sort((a, b) => a - b);
-  const displayNums = sorted.map(d => d + 1);
+  const displayNums = sorted.map((d) => d + 1);
 
   return `→ after ${displayNums.join(', ')}`;
 }
@@ -190,17 +190,19 @@ function formatDeps(deps: number[]): string {
 function formatToolName(toolName: string): string {
   if (!toolName) return '';
 
-  return toolName
-    // Remove spawn_ prefix
-    .replace(/^spawn_/, '')
-    // Remove version suffixes like _v3, _v2
-    .replace(/_v\d+$/, '')
-    // Replace underscores with spaces
-    .replace(/_/g, ' ')
-    // Title case each word
-    .split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
+  return (
+    toolName
+      // Remove spawn_ prefix
+      .replace(/^spawn_/, '')
+      // Remove version suffixes like _v3, _v2
+      .replace(/_v\d+$/, '')
+      // Replace underscores with spaces
+      .replace(/_/g, ' ')
+      // Title case each word
+      .split(' ')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ')
+  );
 }
 
 /**
@@ -209,7 +211,12 @@ function formatToolName(toolName: string): string {
  * Shows as a compact chip when collapsed, expands vertically to show full plan content.
  * Displays tasks as a flat numbered list in topological order with inline dependency notation.
  */
-export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = 'FINISHED', charCount = 0 }: PlanChipProps) {
+export const PlanChip = memo(function PlanChip({
+  plan,
+  className,
+  toolStatus = 'FINISHED',
+  charCount = 0,
+}: PlanChipProps) {
   const isError = toolStatus === 'ERROR';
   const [isExpanded, setIsExpanded] = useState(isError); // Auto-expand on error to show message
   const isStreaming = toolStatus === 'IN_PROGRESS';
@@ -257,7 +264,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
           isError
             ? 'bg-destructive/10 dark:bg-destructive/10 border-destructive/40'
             : 'bg-[#EEEFF2]/60 dark:bg-[#1a1a1a]/60 border-border/60',
-          !isError && 'hover:bg-[#EEEFF2]/80 dark:hover:bg-[#1a1a1a]/80 hover:border-border'
+          !isError && 'hover:bg-[#EEEFF2]/80 dark:hover:bg-[#1a1a1a]/80 hover:border-border',
         )}
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
@@ -265,24 +272,28 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
         <button
           onClick={toggleExpanded}
           className={cn(
-            "w-full flex items-center justify-between px-3 py-2.5 text-left",
-            !plan.content && "cursor-default"
+            'w-full flex items-center justify-between px-3 py-2.5 text-left',
+            !plan.content && 'cursor-default',
           )}
         >
           <div className="flex items-center gap-2 min-w-0">
             {/* Plan icon (error icon when failed) */}
-            {isError
-              ? <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
-              : <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            }
+            {isError ? (
+              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+            ) : (
+              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            )}
 
             {/* Title - shimmer effect when streaming */}
-            <span className={cn(
-              "text-sm font-medium truncate",
-              isError && "text-destructive",
-              isStreaming && "animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent",
-              !isStreaming && !isError && "text-foreground"
-            )}>
+            <span
+              className={cn(
+                'text-sm font-medium truncate',
+                isError && 'text-destructive',
+                isStreaming &&
+                  'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
+                !isStreaming && !isError && 'text-foreground',
+              )}
+            >
               {plan.title}
             </span>
 
@@ -300,7 +311,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
             <ChevronDown
               className={cn(
                 'h-4 w-4 text-muted-foreground transition-transform duration-200 flex-shrink-0',
-                isExpanded && 'rotate-180'
+                isExpanded && 'rotate-180',
               )}
             />
           )}
@@ -319,11 +330,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
               <div className="px-3 pb-3">
                 {/* Content Section */}
                 <div className="text-sm text-muted-foreground border-t border-border/50 pt-3">
-                  <MarkdownText
-                    text={plan.content}
-                    shouldAnimate={false}
-                    className="prose-sm"
-                  />
+                  <MarkdownText text={plan.content} shouldAnimate={false} className="prose-sm" />
                 </div>
               </div>
             </motion.div>
@@ -335,9 +342,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
           <div className="px-3 pb-3 border-t border-border/50">
             {/* Section Header */}
             <div className="flex items-center justify-between pt-2 mb-2">
-              <span className="text-xs text-muted-foreground font-medium">
-                {headerText}
-              </span>
+              <span className="text-xs text-muted-foreground font-medium">{headerText}</span>
             </div>
 
             {/* Flat Task List */}
@@ -347,10 +352,7 @@ export const PlanChip = memo(function PlanChip({ plan, className, toolStatus = '
                 const hasDeps = task.deps.length > 0;
 
                 return (
-                  <li
-                    key={task.originalIndex}
-                    className="flex items-start gap-2"
-                  >
+                  <li key={task.originalIndex} className="flex items-start gap-2">
                     {/* Task number or hypothesis icon */}
                     <span className="text-muted-foreground/60 flex-shrink-0 mt-0.5 text-sm tabular-nums min-w-[1.25rem]">
                       {isHypothesis ? '◇' : `${displayIndex + 1}.`}

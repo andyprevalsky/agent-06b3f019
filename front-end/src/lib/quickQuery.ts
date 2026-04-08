@@ -11,7 +11,6 @@ export function dispatchQuickQueryEvent(payload: QuickLauncherPayload) {
   }
 
   window.dispatchEvent(
-    new CustomEvent<QuickLauncherPayload>(QUICK_QUERY_EVENT, { detail: payload })
+    new CustomEvent<QuickLauncherPayload>(QUICK_QUERY_EVENT, { detail: payload }),
   );
 }
-

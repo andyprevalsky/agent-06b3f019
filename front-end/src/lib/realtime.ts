@@ -141,7 +141,7 @@ export async function subscribeToChannel(
 
   // Private channel - requires auth, worker uses service_role_key to broadcast
   const channel = supabase.channel(channelName, {
-    config: { private: true }
+    config: { private: true },
   });
 
   // Attach all event handlers
@@ -218,7 +218,7 @@ export interface AgentHandlers {
  */
 export async function subscribeToAgent(
   agentId: string,
-  handlers: AgentHandlers
+  handlers: AgentHandlers,
 ): Promise<RealtimeChannel> {
   const eventHandlers: EventHandlers = {};
 
@@ -293,7 +293,7 @@ export interface AttentionRequestHandlers {
  */
 export async function subscribeToAttentionRequests(
   userId: string,
-  handlers: AttentionRequestHandlers
+  handlers: AttentionRequestHandlers,
 ): Promise<RealtimeChannel> {
   const eventHandlers: EventHandlers = {};
 
@@ -307,7 +307,12 @@ export async function subscribeToAttentionRequests(
     eventHandlers['DELETE'] = handlers.onDelete;
   }
 
-  return subscribeToChannel(`user:${userId}`, eventHandlers, 'User attention', handlers.onDisconnect);
+  return subscribeToChannel(
+    `user:${userId}`,
+    eventHandlers,
+    'User attention',
+    handlers.onDisconnect,
+  );
 }
 
 /**
@@ -330,7 +335,7 @@ export interface BusHandlers {
  */
 export async function subscribeToBus(
   busId: string,
-  handlers: BusHandlers
+  handlers: BusHandlers,
 ): Promise<RealtimeChannel> {
   const eventHandlers: EventHandlers = {};
 

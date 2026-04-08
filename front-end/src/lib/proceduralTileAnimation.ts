@@ -1,6 +1,6 @@
 /**
  * Frame-based tile animation player with pixel manipulation
- * 
+ *
  * Plays back pre-recorded frames from the animation video as raw pixel data
  * Supports multiple animations with rotation
  */
@@ -53,24 +53,26 @@ const reconstructedFrameCache: Map<string, Map<number, number[]>> = new Map();
 // Reusable temporary canvases (one per animation size)
 const tempCanvases: Map<string, [HTMLCanvasElement, CanvasRenderingContext2D]> = new Map();
 
-function getTempCanvas(animationData: AnimationData): [HTMLCanvasElement, CanvasRenderingContext2D] {
+function getTempCanvas(
+  animationData: AnimationData,
+): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const key = `${animationData.width}x${animationData.height}`;
-  
+
   if (!tempCanvases.has(key)) {
     const canvas = document.createElement('canvas');
     canvas.width = animationData.width;
     canvas.height = animationData.height;
-    const ctx = canvas.getContext('2d', { 
+    const ctx = canvas.getContext('2d', {
       alpha: true,
-      willReadFrequently: false
+      willReadFrequently: false,
     })!;
-    
+
     // Disable image smoothing for crisp pixels
     ctx.imageSmoothingEnabled = false;
-    
+
     tempCanvases.set(key, [canvas, ctx]);
   }
-  
+
   return tempCanvases.get(key)!;
 }
 
@@ -80,22 +82,22 @@ function getTempCanvas(animationData: AnimationData): [HTMLCanvasElement, Canvas
  */
 function reconstructFrame(animationData: AnimationData, frameIndex: number): number[] {
   const animId = animationData.id;
-  
+
   // Get or create cache for this animation
   if (!reconstructedFrameCache.has(animId)) {
     reconstructedFrameCache.set(animId, new Map());
   }
   const cache = reconstructedFrameCache.get(animId)!;
-  
+
   // Check cache first
   if (cache.has(frameIndex)) {
     return cache.get(frameIndex)!;
   }
-  
+
   const frames = animationData.frames as CompressedFrame[];
   const frame = frames[frameIndex];
   let indices: number[];
-  
+
   if (frame.type === 'full') {
     // Full frame - return the indices
     indices = frame.indices;
@@ -103,17 +105,17 @@ function reconstructFrame(animationData: AnimationData, frameIndex: number): num
     // Delta frame - reconstruct from previous frame
     const prevIndices = reconstructFrame(animationData, frameIndex - 1);
     indices = [...prevIndices]; // Copy previous frame
-    
+
     // Apply deltas: [pixel_index, color_index]
     for (const delta of frame.deltas) {
       const [pixelIdx, colorIdx] = delta;
       indices[pixelIdx] = colorIdx;
     }
   }
-  
+
   // Cache it
   cache.set(frameIndex, indices);
-  
+
   return indices;
 }
 
@@ -128,13 +130,13 @@ function reconstructFrame(animationData: AnimationData, frameIndex: number): num
 function mapColorByIndex(colorIdx: number): [number, number, number] {
   // Tile background: #f9f9fb (249, 249, 251)
   const tileBackground = [249, 249, 251] as [number, number, number];
-  
+
   // Border color: #e5e7eb (229, 231, 235)
   const borderColor = [229, 231, 235] as [number, number, number];
-  
+
   // Flicker color: #f3f4f6 (243, 244, 246) - lighter than border
   const flickerColor = [243, 244, 246] as [number, number, number];
-  
+
   switch (colorIdx) {
     case 0: // Background (most common)
       return tileBackground;
@@ -155,45 +157,45 @@ function mapColorByIndex(colorIdx: number): [number, number, number] {
  */
 function createImageData(animationData: AnimationData, frameIndex: number): ImageData {
   const animId = animationData.id;
-  
+
   // Get or create cache for this animation
   if (!imageDataCache.has(animId)) {
     imageDataCache.set(animId, new Map());
   }
   const cache = imageDataCache.get(animId)!;
-  
+
   // Check cache first
   if (cache.has(frameIndex)) {
     return cache.get(frameIndex)!;
   }
-  
+
   // Reconstruct frame indices from deltas
   const colorIndices = reconstructFrame(animationData, frameIndex);
   const width = animationData.width;
   const height = animationData.height;
-  
+
   // Create ImageData
   const imageData = new ImageData(width, height);
   const data = imageData.data;
-  
+
   // Convert indices to RGB pixels (direct mapping to theme colors)
   let dstIndex = 0;
-  
+
   for (let i = 0; i < width * height; i++) {
     const colorIdx = colorIndices[i];
-    
+
     // Map color index to theme color
     const [r, g, b] = mapColorByIndex(colorIdx);
-    
+
     data[dstIndex++] = r;
     data[dstIndex++] = g;
     data[dstIndex++] = b;
     data[dstIndex++] = 255; // Alpha
   }
-  
+
   // Cache it
   cache.set(frameIndex, imageData);
-  
+
   return imageData;
 }
 
@@ -207,26 +209,26 @@ export function renderProceduralAnimationSync(
   y: number,
   tileSize: number,
   elapsedMs: number,
-  animationId: string
+  animationId: string,
 ): boolean {
   // Find the animation data
-  const animationData = availableAnimations.find(a => a.id === animationId);
+  const animationData = availableAnimations.find((a) => a.id === animationId);
   if (!animationData) {
     console.error(`Animation not found: ${animationId}`);
     return false;
   }
-  
+
   // Calculate current frame based on elapsed time (NO looping - play once)
   const msPerFrame = 1000 / animationData.fps;
   const frameNumber = Math.floor(elapsedMs / msPerFrame);
-  
+
   // Check if animation is complete
   if (frameNumber >= animationData.frame_count) {
     return false; // Animation complete
   }
-  
+
   const currentFrame = frameNumber;
-  
+
   // Get or create ImageData for this frame
   let imageData: ImageData;
   try {
@@ -235,19 +237,19 @@ export function renderProceduralAnimationSync(
     console.error(`Error creating frame ${currentFrame} for ${animationId}:`, error);
     return true; // Continue trying
   }
-  
+
   // Clear the tile area
   ctx.clearRect(x, y, tileSize, tileSize);
-  
+
   // Get reusable temp canvas
   const [canvas, canvasCtx] = getTempCanvas(animationData);
-  
+
   // Put the pixel data
   canvasCtx.putImageData(imageData, 0, 0);
-  
+
   // Save context state
   ctx.save();
-  
+
   // Disable ALL forms of image smoothing for pixel-perfect rendering
   ctx.imageSmoothingEnabled = false;
   // @ts-ignore - vendor prefixes for older browsers
@@ -256,19 +258,18 @@ export function renderProceduralAnimationSync(
   ctx.webkitImageSmoothingEnabled = false;
   // @ts-ignore
   ctx.msImageSmoothingEnabled = false;
-  
+
   // Add padding (10% on each side = 80% of tile size)
   const padding = tileSize * 0.1;
-  const paddedSize = tileSize - (padding * 2);
+  const paddedSize = tileSize - padding * 2;
   const paddedX = x + padding;
   const paddedY = y + padding;
-  
+
   // Draw scaled to padded size
   ctx.drawImage(canvas, paddedX, paddedY, paddedSize, paddedSize);
-  
+
   // Restore context state
   ctx.restore();
-  
+
   return true; // Animation still playing
 }
-

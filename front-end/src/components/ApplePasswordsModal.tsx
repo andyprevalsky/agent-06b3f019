@@ -84,10 +84,7 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={handleClose}
-      />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={handleClose} />
 
       {/* Modal */}
       <div className="relative bg-card border border-border rounded-xl shadow-xl w-full max-w-xl mx-4 overflow-hidden max-h-[90vh] overflow-y-auto">
@@ -112,9 +109,13 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
             {/* Step 1: Open Passwords app */}
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">1</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  1
+                </span>
                 <div className="flex-1">
-                  <span>Open the <strong className="text-foreground">Passwords</strong> app on your Mac</span>
+                  <span>
+                    Open the <strong className="text-foreground">Passwords</strong> app on your Mac
+                  </span>
                   <p className="text-xs text-muted-foreground mt-1">
                     Search for "Passwords" in Spotlight (Cmd + Space)
                   </p>
@@ -125,9 +126,12 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
             {/* Step 2: Export passwords */}
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">2</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  2
+                </span>
                 <span>
-                  Click <strong className="text-foreground">File</strong> → <strong className="text-foreground">Export All Passwords to File...</strong>
+                  Click <strong className="text-foreground">File</strong> →{' '}
+                  <strong className="text-foreground">Export All Passwords to File...</strong>
                 </span>
               </div>
               <div className="flex justify-center mt-2">
@@ -160,18 +164,27 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
             {/* Step 3: Upload the CSV */}
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">3</span>
-                <span>Save the file and <strong className="text-foreground">upload it below</strong></span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  3
+                </span>
+                <span>
+                  Save the file and <strong className="text-foreground">upload it below</strong>
+                </span>
               </div>
             </li>
 
             {/* Step 4: Delete local file */}
             <li className="space-y-2">
               <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">4</span>
+                <span className="flex-shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
+                  4
+                </span>
                 <div className="flex items-center gap-2">
                   <Trash2 className="w-4 h-4 text-muted-foreground" />
-                  <span><strong className="text-foreground">Delete the CSV file</strong> from your computer after import</span>
+                  <span>
+                    <strong className="text-foreground">Delete the CSV file</strong> from your
+                    computer after import
+                  </span>
                 </div>
               </div>
             </li>
@@ -183,8 +196,8 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
               isDragOver
                 ? 'border-primary bg-primary/5'
                 : file
-                ? 'border-green-500 bg-green-500/5'
-                : 'border-border hover:border-primary/50'
+                  ? 'border-green-500 bg-green-500/5'
+                  : 'border-border hover:border-primary/50'
             }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -203,15 +216,14 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
               <div className="flex flex-col items-center gap-2">
                 <FileText className="w-8 h-8 text-green-600 dark:text-green-400" />
                 <p className="text-sm font-medium text-foreground">{file.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  Click or drag to replace
-                </p>
+                <p className="text-xs text-muted-foreground">Click or drag to replace</p>
               </div>
             ) : (
               <div className="flex flex-col items-center gap-2">
                 <Upload className="w-8 h-8 text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">
-                  <span className="font-medium text-foreground">Click to upload</span> or drag and drop
+                  <span className="font-medium text-foreground">Click to upload</span> or drag and
+                  drop
                 </p>
                 <p className="text-xs text-muted-foreground">CSV file only</p>
               </div>
@@ -222,15 +234,14 @@ const ApplePasswordsModal = ({ isOpen, onClose, onSync }: ApplePasswordsModalPro
           <div className="flex items-start gap-2 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
             <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-emerald-800 dark:text-emerald-200">
-              <span className="font-medium">Your passwords are encrypted end-to-end.</span>{' '}
-              They are encrypted using RSA-2048 and can only be decrypted by Rose's secure workers. The CSV never touches our servers in plaintext.
+              <span className="font-medium">Your passwords are encrypted end-to-end.</span> They are
+              encrypted using RSA-2048 and can only be decrypted by Rose's secure workers. The CSV
+              never touches our servers in plaintext.
             </div>
           </div>
 
           {/* Error message */}
-          {error && (
-            <p className="text-sm text-red-500">{error}</p>
-          )}
+          {error && <p className="text-sm text-red-500">{error}</p>}
         </div>
 
         {/* Footer */}

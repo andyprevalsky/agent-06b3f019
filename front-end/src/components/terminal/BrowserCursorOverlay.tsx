@@ -54,7 +54,12 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
   const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 }); // Center
   const lastProcessedMessageRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [viewportBounds, setViewportBounds] = useState({ offsetX: 0, offsetY: 0, width: 0, height: 0 });
+  const [viewportBounds, setViewportBounds] = useState({
+    offsetX: 0,
+    offsetY: 0,
+    width: 0,
+    height: 0,
+  });
 
   // Calculate viewport bounds within container (fit-contain logic)
   // Step 1: Calculate where the browser WINDOW fits (1288x891)
@@ -87,8 +92,8 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
     const scale = windowWidth / BROWSER_WINDOW_WIDTH;
 
     // Content viewport position within the rendered window
-    const vpOffsetX = windowOffsetX + (CHROME_OFFSET_X * scale);
-    const vpOffsetY = windowOffsetY + (CHROME_OFFSET_Y * scale);
+    const vpOffsetX = windowOffsetX + CHROME_OFFSET_X * scale;
+    const vpOffsetY = windowOffsetY + CHROME_OFFSET_Y * scale;
     const vpWidth = CONTENT_VIEWPORT_WIDTH * scale;
     const vpHeight = CONTENT_VIEWPORT_HEIGHT * scale;
 
@@ -107,9 +112,8 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
 
   // Filter for this browser's messages with coordinates
   const latestWithCoords = useMemo(() => {
-    const browserMessages = messages.filter(m =>
-      m.metadata?.task_id === taskId &&
-      m.metadata?.auxiliary?.coordinates
+    const browserMessages = messages.filter(
+      (m) => m.metadata?.task_id === taskId && m.metadata?.auxiliary?.coordinates,
     );
     return browserMessages[browserMessages.length - 1];
   }, [messages, taskId]);
@@ -129,8 +133,10 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
   }, [latestWithCoords]);
 
   // Convert browser coords (in content viewport space 1280x800) to pixel position
-  const cursorLeft = viewportBounds.offsetX + (cursorPos.x / CONTENT_VIEWPORT_WIDTH) * viewportBounds.width;
-  const cursorTop = viewportBounds.offsetY + (cursorPos.y / CONTENT_VIEWPORT_HEIGHT) * viewportBounds.height;
+  const cursorLeft =
+    viewportBounds.offsetX + (cursorPos.x / CONTENT_VIEWPORT_WIDTH) * viewportBounds.width;
+  const cursorTop =
+    viewportBounds.offsetY + (cursorPos.y / CONTENT_VIEWPORT_HEIGHT) * viewportBounds.height;
 
   return (
     <div

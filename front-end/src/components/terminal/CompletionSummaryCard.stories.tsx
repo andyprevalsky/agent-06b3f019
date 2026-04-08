@@ -45,7 +45,8 @@ export const Simple: Story = {
 export const WithMultipleOutputs: Story = {
   args: {
     data: {
-      summary: 'Successfully found contact information for John Smith and verified email deliverability.',
+      summary:
+        'Successfully found contact information for John Smith and verified email deliverability.',
       outputs: [
         {
           key: 'contact_email',
@@ -80,7 +81,8 @@ export const WithMultipleOutputs: Story = {
 export const WithSubAgents: Story = {
   args: {
     data: {
-      summary: 'Completed market research analysis by spawning multiple sub-agents to gather data from different sources.',
+      summary:
+        'Completed market research analysis by spawning multiple sub-agents to gather data from different sources.',
       outputs: [
         {
           key: 'competitors_found',
@@ -112,10 +114,9 @@ export const WithSubAgents: Story = {
 export const MinimalNoOutputs: Story = {
   args: {
     data: {
-      summary: 'Task completed successfully. The agent performed the requested operation without returning structured data.',
-      toolUsage: [
-        { name: 'send_message_to_user', count: 1 },
-      ],
+      summary:
+        'Task completed successfully. The agent performed the requested operation without returning structured data.',
+      toolUsage: [{ name: 'send_message_to_user', count: 1 }],
       totalToolCalls: 1,
       durationSeconds: 3,
     } satisfies CompletionSummaryData,
@@ -154,7 +155,8 @@ export const SMSSent: Story = {
 export const LongRunningTask: Story = {
   args: {
     data: {
-      summary: 'Completed comprehensive competitive analysis after extensive web research and data gathering across multiple sources.',
+      summary:
+        'Completed comprehensive competitive analysis after extensive web research and data gathering across multiple sources.',
       outputs: [
         {
           key: 'report_url',

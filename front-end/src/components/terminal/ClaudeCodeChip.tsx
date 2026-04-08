@@ -29,7 +29,19 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, Maximize2, X, FileJson, FileIcon, Download, ExternalLink } from 'lucide-react';
+import {
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ChevronDown,
+  ChevronUp,
+  Maximize2,
+  X,
+  FileJson,
+  FileIcon,
+  Download,
+  ExternalLink,
+} from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -40,20 +52,32 @@ import { ResponseSchemaField, FilePointer } from '@/lib/api';
 import ClaudeIcon from '@/assets/claude-color.svg';
 import { supabase, getSession } from '@/lib/supabase';
 
-const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
+const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
+  /\/$/,
+  '',
+);
 
 // Format field type for display
 function formatFieldType(type: ResponseSchemaField['type']): string {
   switch (type) {
-    case 'str': return 'string';
-    case 'int': return 'integer';
-    case 'float': return 'number';
-    case 'bool': return 'boolean';
-    case 'list[str]': return 'string[]';
-    case 'list[int]': return 'integer[]';
-    case 'file_pointer': return 'file';
-    case 'list[file_pointer]': return 'file[]';
-    default: return type;
+    case 'str':
+      return 'string';
+    case 'int':
+      return 'integer';
+    case 'float':
+      return 'number';
+    case 'bool':
+      return 'boolean';
+    case 'list[str]':
+      return 'string[]';
+    case 'list[int]':
+      return 'integer[]';
+    case 'file_pointer':
+      return 'file';
+    case 'list[file_pointer]':
+      return 'file[]';
+    default:
+      return type;
   }
 }
 
@@ -103,10 +127,10 @@ export function FilePointerDisplay({ file }: { file: FilePointer }) {
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
-        "inline-flex items-center gap-1.5 px-2 py-1 rounded-md",
-        "bg-muted hover:bg-muted/80 transition-colors",
-        "text-sm text-foreground",
-        !downloadUrl && "pointer-events-none opacity-60"
+        'inline-flex items-center gap-1.5 px-2 py-1 rounded-md',
+        'bg-muted hover:bg-muted/80 transition-colors',
+        'text-sm text-foreground',
+        !downloadUrl && 'pointer-events-none opacity-60',
       )}
     >
       <FileIcon className="h-3.5 w-3.5 text-muted-foreground" />
@@ -121,7 +145,7 @@ export function FilePointerDisplay({ file }: { file: FilePointer }) {
 function SchemaChip({
   outputSchema,
   size = 'sm',
-  tooltipPosition = 'bottom'
+  tooltipPosition = 'bottom',
 }: {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   size?: 'sm' | 'md';
@@ -173,34 +197,51 @@ function SchemaChip({
       >
         <div
           onClick={(e) => e.stopPropagation()}
-          className={cn(padding, "rounded hover:bg-muted transition-colors cursor-default")}
+          className={cn(padding, 'rounded hover:bg-muted transition-colors cursor-default')}
         >
-          <FileJson className={cn(iconSize, hasSchema ? "text-muted-foreground" : "text-muted-foreground/50")} />
+          <FileJson
+            className={cn(
+              iconSize,
+              hasSchema ? 'text-muted-foreground' : 'text-muted-foreground/50',
+            )}
+          />
         </div>
       </div>
-      {isHovered && createPortal(
-        <div style={tooltipStyle} className="pointer-events-none">
-          <div className="rounded-lg border border-border p-3 shadow-lg bg-background/80" style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
-            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Output Schema</div>
-            {hasSchema ? (
-              <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
-                {outputSchema.fields.map((field, idx) => (
-                  <div key={idx} className="text-xs">
-                    <div className="flex items-center gap-1.5">
-                      <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">{field.name}</code>
-                      <span className="text-muted-foreground text-[10px]">{formatFieldType(field.type)}</span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">{field.description}</p>
-                  </div>
-                ))}
+      {isHovered &&
+        createPortal(
+          <div style={tooltipStyle} className="pointer-events-none">
+            <div
+              className="rounded-lg border border-border p-3 shadow-lg bg-background/80"
+              style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+            >
+              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                Output Schema
               </div>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">No schema defined</p>
-            )}
-          </div>
-        </div>,
-        document.body
-      )}
+              {hasSchema ? (
+                <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
+                  {outputSchema.fields.map((field, idx) => (
+                    <div key={idx} className="text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">
+                          {field.name}
+                        </code>
+                        <span className="text-muted-foreground text-[10px]">
+                          {formatFieldType(field.type)}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">
+                        {field.description}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground italic">No schema defined</p>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -208,7 +249,7 @@ function SchemaChip({
 // Structured response display (shown when task completes with extracted data)
 function StructuredResponseDisplay({
   structuredResponse,
-  outputSchema
+  outputSchema,
 }: {
   structuredResponse: Record<string, unknown> | undefined;
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
@@ -255,24 +296,30 @@ function StructuredResponseDisplay({
       formattedValue = String(value);
     }
 
-    return <p className="text-muted-foreground break-words whitespace-pre-wrap">{formattedValue}</p>;
+    return (
+      <p className="text-muted-foreground break-words whitespace-pre-wrap">{formattedValue}</p>
+    );
   };
 
   return (
     <div className="mt-3 rounded-lg border border-border bg-muted/30 p-3">
-      <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Extracted Output</div>
+      <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+        Extracted Output
+      </div>
       <div className="space-y-2">
         {Object.entries(structuredResponse).map(([key, value]) => {
           // Find the field definition if available
-          const fieldDef = outputSchema?.fields?.find(f => f.name === key);
-          const formattedKey = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+          const fieldDef = outputSchema?.fields?.find((f) => f.name === key);
+          const formattedKey = key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
           return (
             <div key={key} className="text-sm">
               <div className="flex items-center gap-1.5 mb-0.5">
                 <span className="font-medium text-foreground">{formattedKey}</span>
                 {fieldDef && (
-                  <span className="text-[10px] text-muted-foreground">({formatFieldType(fieldDef.type)})</span>
+                  <span className="text-[10px] text-muted-foreground">
+                    ({formatFieldType(fieldDef.type)})
+                  </span>
                 )}
               </div>
               {renderValue(value, fieldDef?.type)}
@@ -324,29 +371,45 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   const isCompletedRef = useRef(false);
 
   // Extract data from context messages
-  const { isComplete, isSuccess, isVerifying, outputSchema, structuredResponse, failureMessage, githubRepoUrl } = useMemo(() => {
-    const claudeCodeMessages = messages.filter(m => m.metadata?.task_id === taskId);
+  const {
+    isComplete,
+    isSuccess,
+    isVerifying,
+    outputSchema,
+    structuredResponse,
+    failureMessage,
+    githubRepoUrl,
+  } = useMemo(() => {
+    const claudeCodeMessages = messages.filter((m) => m.metadata?.task_id === taskId);
     const lastMessage = claudeCodeMessages[claudeCodeMessages.length - 1];
 
     const complete = lastMessage?.metadata?.action_type === 'task_complete';
     const success = complete && lastMessage?.metadata?.title?.includes('Completed');
 
     // Check if verifier is running
-    const verifying = !complete && lastMessage?.metadata?.action_type === 'system' &&
+    const verifying =
+      !complete &&
+      lastMessage?.metadata?.action_type === 'system' &&
       lastMessage?.metadata?.title?.includes('Verifying') &&
       lastMessage?.metadata?.toolStatus === 'IN_PROGRESS';
 
     // Extract output schema from init message
-    const initMessage = claudeCodeMessages.find(m => m.metadata?.output_schema);
-    const schema = initMessage?.metadata?.output_schema as { fields: ResponseSchemaField[] } | undefined;
+    const initMessage = claudeCodeMessages.find((m) => m.metadata?.output_schema);
+    const schema = initMessage?.metadata?.output_schema as
+      | { fields: ResponseSchemaField[] }
+      | undefined;
 
     // Extract structured response from completion message
-    const completionMsg = claudeCodeMessages.find(m => m.metadata?.action_type === 'task_complete');
-    const extracted = completionMsg?.metadata?.structured_response as Record<string, unknown> | undefined;
+    const completionMsg = claudeCodeMessages.find(
+      (m) => m.metadata?.action_type === 'task_complete',
+    );
+    const extracted = completionMsg?.metadata?.structured_response as
+      | Record<string, unknown>
+      | undefined;
 
     // Extract failure message - check ERROR status first, then Task Incomplete
     let failureText: string | null = null;
-    const errorMsg = claudeCodeMessages.find(m => m.metadata?.toolStatus === 'ERROR');
+    const errorMsg = claudeCodeMessages.find((m) => m.metadata?.toolStatus === 'ERROR');
     if (errorMsg?.text) {
       failureText = errorMsg.text;
     } else if (complete && !success && completionMsg?.text) {
@@ -393,7 +456,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
 
       const response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       });
@@ -483,66 +546,69 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
   }, []);
 
   // Connect to WebSocket with retry logic
-  const connectWebSocket = useCallback((attempt: number = 0) => {
-    if (!wsUrl || isCompletedRef.current) return;
+  const connectWebSocket = useCallback(
+    (attempt: number = 0) => {
+      if (!wsUrl || isCompletedRef.current) return;
 
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-    ws.onopen = () => {
-      setChipState('live');
-    };
+      ws.onopen = () => {
+        setChipState('live');
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const msg: WsMessage = JSON.parse(event.data);
+      ws.onmessage = (event) => {
+        try {
+          const msg: WsMessage = JSON.parse(event.data);
 
-        switch (msg.type) {
-          case 'buffer':
-            // Full history buffer from server
-            outputBuffer.current = msg.data;
-            terminalInstance.current?.write(msg.data);
-            break;
-          case 'stdout':
-          case 'stderr':
-            // Live output - append to buffer and write
-            outputBuffer.current += msg.data;
-            terminalInstance.current?.write(msg.data);
-            break;
-          case 'stdin_echo':
-            // PTY already echoes stdin via stdout — don't double-display
-            break;
-          case 'exit':
-            isCompletedRef.current = true;
-            setChipState(msg.code === 0 ? 'completed' : 'failed');
-            break;
-          case 'error':
-            terminalInstance.current?.write(`\r\n\x1b[31mError: ${msg.data}\x1b[0m\r\n`);
-            break;
+          switch (msg.type) {
+            case 'buffer':
+              // Full history buffer from server
+              outputBuffer.current = msg.data;
+              terminalInstance.current?.write(msg.data);
+              break;
+            case 'stdout':
+            case 'stderr':
+              // Live output - append to buffer and write
+              outputBuffer.current += msg.data;
+              terminalInstance.current?.write(msg.data);
+              break;
+            case 'stdin_echo':
+              // PTY already echoes stdin via stdout — don't double-display
+              break;
+            case 'exit':
+              isCompletedRef.current = true;
+              setChipState(msg.code === 0 ? 'completed' : 'failed');
+              break;
+            case 'error':
+              terminalInstance.current?.write(`\r\n\x1b[31mError: ${msg.data}\x1b[0m\r\n`);
+              break;
+          }
+        } catch {
+          // Not JSON, treat as raw data
+          outputBuffer.current += event.data;
+          terminalInstance.current?.write(event.data);
         }
-      } catch {
-        // Not JSON, treat as raw data
-        outputBuffer.current += event.data;
-        terminalInstance.current?.write(event.data);
-      }
-    };
+      };
 
-    ws.onerror = () => {
-      // Error handling done in onclose
-    };
+      ws.onerror = () => {
+        // Error handling done in onclose
+      };
 
-    ws.onclose = () => {
-      // Retry with fixed delays (only if not complete)
-      // Don't set failed state here - let DB messages drive state via realtime
-      // WS close is expected when task completes (backend closes connection)
-      // Use ref to avoid stale closure — isComplete from DB may lag behind WS exit
-      if (attempt < MAX_RETRIES - 1 && !isCompletedRef.current) {
-        const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
-        setTimeout(() => connectWebSocket(attempt + 1), delay);
-      }
-      // State will be updated via useEffect when isComplete changes from DB
-    };
-  }, [wsUrl]);
+      ws.onclose = () => {
+        // Retry with fixed delays (only if not complete)
+        // Don't set failed state here - let DB messages drive state via realtime
+        // WS close is expected when task completes (backend closes connection)
+        // Use ref to avoid stale closure — isComplete from DB may lag behind WS exit
+        if (attempt < MAX_RETRIES - 1 && !isCompletedRef.current) {
+          const delay = RETRY_DELAYS[attempt] || RETRY_DELAYS[RETRY_DELAYS.length - 1];
+          setTimeout(() => connectWebSocket(attempt + 1), delay);
+        }
+        // State will be updated via useEffect when isComplete changes from DB
+      };
+    },
+    [wsUrl],
+  );
 
   // Connect WS on mount
   useEffect(() => {
@@ -647,10 +713,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
 
         {/* Terminal */}
         <div className="flex-1 bg-[#1a1a1a] relative">
-          <div
-            ref={fullscreenTerminalRef}
-            className="w-full h-full px-2"
-          />
+          <div ref={fullscreenTerminalRef} className="w-full h-full px-2" />
         </div>
 
         {/* Footer */}
@@ -660,7 +723,7 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
           </p>
         </div>
       </div>,
-      document.body
+      document.body,
     );
   }
 
@@ -703,9 +766,15 @@ export default function ClaudeCodeChip({ taskId, wsUrl, forceShow = false }: Cla
         </div>
 
         {/* Structured response (extracted output) - only show when expanded and completed successfully */}
-        {isExpanded && chipState === 'completed' && structuredResponse && Object.keys(structuredResponse).length > 0 && (
-          <StructuredResponseDisplay structuredResponse={structuredResponse} outputSchema={outputSchema} />
-        )}
+        {isExpanded &&
+          chipState === 'completed' &&
+          structuredResponse &&
+          Object.keys(structuredResponse).length > 0 && (
+            <StructuredResponseDisplay
+              structuredResponse={structuredResponse}
+              outputSchema={outputSchema}
+            />
+          )}
 
         {/* Failure message - show when expanded and failed */}
         {isExpanded && chipState === 'failed' && failureMessage && (

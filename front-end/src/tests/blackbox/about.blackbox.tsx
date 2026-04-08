@@ -56,9 +56,7 @@ describe('About page', () => {
 
     it('includes the full mission description about personal journey', () => {
       renderWithProviders(<About />);
-      expect(
-        screen.getByText(/super intelligent companion/i)
-      ).toBeInTheDocument();
+      expect(screen.getByText(/super intelligent companion/i)).toBeInTheDocument();
     });
   });
 
@@ -88,18 +86,18 @@ describe('About page', () => {
     it('renders founder introduction text', () => {
       renderWithProviders(<About />);
       expect(
-        screen.getByText(/i'm andy, the solo founder and builder behind rose labs/i)
+        screen.getByText(/i'm andy, the solo founder and builder behind rose labs/i),
       ).toBeInTheDocument();
     });
 
     it('renders founder description about mission and values', () => {
       renderWithProviders(<About />);
       expect(
-        screen.getByText(/passionate software engineer, artist, and creator/i)
+        screen.getByText(/passionate software engineer, artist, and creator/i),
       ).toBeInTheDocument();
     });
 
-    it('renders LinkedIn link pointing to Andy\'s profile', () => {
+    it("renders LinkedIn link pointing to Andy's profile", () => {
       renderWithProviders(<About />);
       const link = screen.getByRole('link', { name: /linkedin/i });
       expect(link).toBeInTheDocument();
@@ -129,7 +127,9 @@ describe('About page', () => {
     it('renders the hiring call-to-action description', () => {
       renderWithProviders(<About />);
       expect(
-        screen.getByText(/help us build artificial life, frontier ai, agents, and delightful hardware/i)
+        screen.getByText(
+          /help us build artificial life, frontier ai, agents, and delightful hardware/i,
+        ),
       ).toBeInTheDocument();
     });
 
@@ -213,7 +213,9 @@ describe('About page', () => {
         expect(screen.getByText(/come help us build the next apple/i)).toBeInTheDocument();
       });
       // The default subtitle should NOT be present
-      expect(screen.queryByText(/have questions\? we'd love to hear from you/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/have questions\? we'd love to hear from you/i),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -381,7 +383,9 @@ describe('About page', () => {
 
       // Footer contact modal uses default subtitle (no custom subtitle passed)
       await waitFor(() => {
-        expect(screen.getByText(/have questions\? we'd love to hear from you/i)).toBeInTheDocument();
+        expect(
+          screen.getByText(/have questions\? we'd love to hear from you/i),
+        ).toBeInTheDocument();
       });
     });
   });

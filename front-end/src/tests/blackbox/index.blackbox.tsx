@@ -58,9 +58,7 @@ describe('Index (landing) page', () => {
       expect(elements.length).toBeGreaterThanOrEqual(1);
 
       // The section heading is a span.gradient-text inside an h2
-      const h2Heading = elements.find(
-        (el) => el.closest('h2') !== null,
-      );
+      const h2Heading = elements.find((el) => el.closest('h2') !== null);
       expect(h2Heading).toBeTruthy();
     });
 
@@ -130,29 +128,37 @@ describe('Index (landing) page', () => {
 
       // Wait for auth to settle so the page is fully rendered
       await waitFor(() => {
-        expect(screen.getAllByRole('button', { name: 'Join Waitlist' }).length).toBeGreaterThanOrEqual(3);
+        expect(
+          screen.getAllByRole('button', { name: 'Join Waitlist' }).length,
+        ).toBeGreaterThanOrEqual(3);
       });
 
       // Target the Custom variant's "Join Waitlist" button via H3 heading
-      const customHeading = screen.getAllByText('Custom').find(
-        (el) => el.tagName === 'H3',
-      )!;
+      const customHeading = screen.getAllByText('Custom').find((el) => el.tagName === 'H3')!;
       expect(customHeading).toBeTruthy();
       const customWrapper = customHeading.closest('.w-full')!;
       expect(customWrapper).toBeTruthy();
 
-      const joinButton = within(customWrapper as HTMLElement).getByRole('button', { name: 'Join Waitlist' });
+      const joinButton = within(customWrapper as HTMLElement).getByRole('button', {
+        name: 'Join Waitlist',
+      });
       await user.click(joinButton);
 
       // Form fields should now be visible within the custom wrapper
-      const nameInput = await within(customWrapper as HTMLElement).findByPlaceholderText('John Doe');
-      const emailInput = await within(customWrapper as HTMLElement).findByPlaceholderText('john@example.com');
+      const nameInput = await within(customWrapper as HTMLElement).findByPlaceholderText(
+        'John Doe',
+      );
+      const emailInput = await within(customWrapper as HTMLElement).findByPlaceholderText(
+        'john@example.com',
+      );
 
       await user.type(nameInput, 'Test User');
       await user.type(emailInput, 'test@example.com');
 
       // Find the submit button (type=submit) within the custom wrapper
-      const submitButton = within(customWrapper as HTMLElement).getByRole('button', { name: 'Join Waitlist' });
+      const submitButton = within(customWrapper as HTMLElement).getByRole('button', {
+        name: 'Join Waitlist',
+      });
       await user.click(submitButton);
 
       // Wait for the API call to be captured
@@ -186,20 +192,26 @@ describe('Index (landing) page', () => {
 
       // Wait for auth to settle
       await waitFor(() => {
-        expect(screen.getAllByRole('button', { name: 'Join Waitlist' }).length).toBeGreaterThanOrEqual(3);
+        expect(
+          screen.getAllByRole('button', { name: 'Join Waitlist' }).length,
+        ).toBeGreaterThanOrEqual(3);
       });
 
       // Target the Custom variant
-      const customHeading = screen.getAllByText('Custom').find(
-        (el) => el.tagName === 'H3',
-      )!;
+      const customHeading = screen.getAllByText('Custom').find((el) => el.tagName === 'H3')!;
       const customWrapper = customHeading.closest('.w-full')!;
 
-      const joinButton = within(customWrapper as HTMLElement).getByRole('button', { name: 'Join Waitlist' });
+      const joinButton = within(customWrapper as HTMLElement).getByRole('button', {
+        name: 'Join Waitlist',
+      });
       await user.click(joinButton);
 
-      const nameInput = await within(customWrapper as HTMLElement).findByPlaceholderText('John Doe');
-      const emailInput = await within(customWrapper as HTMLElement).findByPlaceholderText('john@example.com');
+      const nameInput = await within(customWrapper as HTMLElement).findByPlaceholderText(
+        'John Doe',
+      );
+      const emailInput = await within(customWrapper as HTMLElement).findByPlaceholderText(
+        'john@example.com',
+      );
 
       await user.type(nameInput, 'Test User');
       // Use "user@bad" which passes HTML5 email validation but fails the custom
@@ -207,7 +219,9 @@ describe('Index (landing) page', () => {
       await user.type(emailInput, 'user@bad');
 
       // Submit
-      const submitButton = within(customWrapper as HTMLElement).getByRole('button', { name: 'Join Waitlist' });
+      const submitButton = within(customWrapper as HTMLElement).getByRole('button', {
+        name: 'Join Waitlist',
+      });
       await user.click(submitButton);
 
       // Error message should appear

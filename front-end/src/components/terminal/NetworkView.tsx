@@ -55,7 +55,15 @@ import { getPeople, PeoplePaginatedResponse } from '@/lib/api';
 import { ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-type SortKey = 'firstName' | 'lastName' | 'email' | 'phoneNumber' | 'messagesExchanged' | 'company' | 'title' | 'communicationFrequency';
+type SortKey =
+  | 'firstName'
+  | 'lastName'
+  | 'email'
+  | 'phoneNumber'
+  | 'messagesExchanged'
+  | 'company'
+  | 'title'
+  | 'communicationFrequency';
 type SortDirection = 'asc' | 'desc';
 type SortState = { key: SortKey; direction: SortDirection } | null;
 
@@ -70,7 +78,7 @@ export default function NetworkView() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   const handleSort = (key: SortKey) => {
-    setSort(prev => {
+    setSort((prev) => {
       if (prev?.key !== key) return { key, direction: 'asc' };
       if (prev.direction === 'asc') return { key, direction: 'desc' };
       return null;
@@ -142,9 +150,7 @@ export default function NetworkView() {
       <div className="container max-w-[1400px] mx-auto px-6 flex flex-col flex-1 min-h-0">
         <div className="mb-4 backdrop-blur-md bg-background/80 p-6 rounded-xl border border-border/50 dark:border-navi-light-light-black/50 shrink-0">
           <h1 className="text-4xl font-bold mb-2">Network</h1>
-          <p className="text-muted-foreground">
-            Your personal and professional connections
-          </p>
+          <p className="text-muted-foreground">Your personal and professional connections</p>
         </div>
 
         <div className="backdrop-blur-[12px] shadow-lg border border-border/50 dark:border-navi-light-light-black/50 rounded-xl overflow-hidden flex flex-col flex-1 min-h-0">
@@ -178,7 +184,7 @@ export default function NetworkView() {
                       'px-3 py-1 text-sm rounded border border-border/50 dark:border-navi-light-light-black/50',
                       currentPage === 1
                         ? 'opacity-50 cursor-not-allowed'
-                        : 'hover:bg-white/10 dark:hover:bg-black/10 cursor-pointer'
+                        : 'hover:bg-white/10 dark:hover:bg-black/10 cursor-pointer',
                     )}
                   >
                     <ChevronLeft className="h-4 w-4" />
@@ -193,7 +199,7 @@ export default function NetworkView() {
                       'px-3 py-1 text-sm rounded border border-border/50 dark:border-navi-light-light-black/50',
                       currentPage === data.pagination.totalPages
                         ? 'opacity-50 cursor-not-allowed'
-                        : 'hover:bg-white/10 dark:hover:bg-black/10 cursor-pointer'
+                        : 'hover:bg-white/10 dark:hover:bg-black/10 cursor-pointer',
                     )}
                   >
                     <ChevronRight className="h-4 w-4" />
@@ -205,86 +211,99 @@ export default function NetworkView() {
 
           {/* Fixed height scrollable table container */}
           <div className="flex-1 overflow-auto relative flex">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 backdrop-blur-md border-b border-border/50 dark:border-navi-light-light-black/50 z-10">
-              <tr>
-                {([
-                  ['firstName', 'First'],
-                  ['lastName', 'Last'],
-                  ['email', 'Email'],
-                  ['phoneNumber', 'Phone'],
-                  ['messagesExchanged', 'Messages'],
-                  ['company', 'Company'],
-                  ['title', 'Title'],
-                  ['communicationFrequency', 'Communication Frequency'],
-                ] as [SortKey, string][]).map(([key, label]) => (
-                  <th
-                    key={key}
-                    onClick={() => handleSort(key)}
-                    className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground transition-colors"
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      {label}
-                      {sort?.key === key ? (
-                        sort.direction === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
-                      ) : (
-                        <ChevronDown className="h-3 w-3 opacity-0" />
-                      )}
-                    </span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading && !data ? (
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 backdrop-blur-md border-b border-border/50 dark:border-navi-light-light-black/50 z-10">
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
-                    Loading network...
-                  </td>
+                  {(
+                    [
+                      ['firstName', 'First'],
+                      ['lastName', 'Last'],
+                      ['email', 'Email'],
+                      ['phoneNumber', 'Phone'],
+                      ['messagesExchanged', 'Messages'],
+                      ['company', 'Company'],
+                      ['title', 'Title'],
+                      ['communicationFrequency', 'Communication Frequency'],
+                    ] as [SortKey, string][]
+                  ).map(([key, label]) => (
+                    <th
+                      key={key}
+                      onClick={() => handleSort(key)}
+                      className="px-4 py-3 text-left font-medium text-muted-foreground whitespace-nowrap cursor-pointer select-none hover:text-foreground transition-colors"
+                    >
+                      <span className="inline-flex items-center gap-1">
+                        {label}
+                        {sort?.key === key ? (
+                          sort.direction === 'asc' ? (
+                            <ChevronUp className="h-3 w-3" />
+                          ) : (
+                            <ChevronDown className="h-3 w-3" />
+                          )
+                        ) : (
+                          <ChevronDown className="h-3 w-3 opacity-0" />
+                        )}
+                      </span>
+                    </th>
+                  ))}
                 </tr>
-              ) : error ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-red-500">
-                    Error: {error}
-                  </td>
-                </tr>
-              ) : showEmptyState ? (
-                <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center">
-                    <div className="space-y-2">
-                      <p className="text-muted-foreground">
-                        {debouncedSearch ? 'No contacts match your search' : 'No people in your network yet'}
-                      </p>
-                      {!debouncedSearch && (
-                        <p className="text-sm text-muted-foreground/70">
-                          Connect your integrations to start building your network
+              </thead>
+              <tbody>
+                {loading && !data ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
+                      Loading network...
+                    </td>
+                  </tr>
+                ) : error ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-12 text-center text-red-500">
+                      Error: {error}
+                    </td>
+                  </tr>
+                ) : showEmptyState ? (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-12 text-center">
+                      <div className="space-y-2">
+                        <p className="text-muted-foreground">
+                          {debouncedSearch
+                            ? 'No contacts match your search'
+                            : 'No people in your network yet'}
                         </p>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ) : hasData ? (
-                data.people.map((person) => (
-                <tr
-                  key={person.id}
-                  className="border-b border-border/30 dark:border-navi-light-light-black/30 hover:bg-white/20 dark:hover:bg-black/20 transition-colors"
-                >
-                  <td className="px-4 py-3 whitespace-nowrap">{person.firstName}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{person.lastName}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.email)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.phoneNumber)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap font-semibold">{person.messagesExchanged}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.company)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.title)}</td>
-                  <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.communicationFrequency)}</td>
-                </tr>
-              ))
-              ) : null}
-            </tbody>
-          </table>
-
+                        {!debouncedSearch && (
+                          <p className="text-sm text-muted-foreground/70">
+                            Connect your integrations to start building your network
+                          </p>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ) : hasData ? (
+                  data.people.map((person) => (
+                    <tr
+                      key={person.id}
+                      className="border-b border-border/30 dark:border-navi-light-light-black/30 hover:bg-white/20 dark:hover:bg-black/20 transition-colors"
+                    >
+                      <td className="px-4 py-3 whitespace-nowrap">{person.firstName}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{person.lastName}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.email)}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {formatValue(person.phoneNumber)}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap font-semibold">
+                        {person.messagesExchanged}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.company)}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{formatValue(person.title)}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {formatValue(person.communicationFrequency)}
+                      </td>
+                    </tr>
+                  ))
+                ) : null}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
       </div>
     </div>
   );

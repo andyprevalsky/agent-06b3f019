@@ -266,9 +266,7 @@ describe('Usage page', () => {
       });
 
       // After component has settled, check no credit API calls were made
-      const apiCalls = capturedRequests.filter(
-        (r) => r.url.includes('/credits/'),
-      );
+      const apiCalls = capturedRequests.filter((r) => r.url.includes('/credits/'));
       expect(apiCalls).toHaveLength(0);
     });
   });

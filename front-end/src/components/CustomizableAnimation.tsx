@@ -10,7 +10,7 @@
  * Animation loop runs continuously via requestAnimationFrame
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from 'react';
 
 interface EmblemData {
   id: string;
@@ -23,14 +23,16 @@ const llmProviders: EmblemData[] = [
   { id: 'google', src: '/src/assets/google-ai-logo.png', alt: 'Google AI' },
   { id: 'meta', src: '/src/assets/meta-logo.png', alt: 'Meta' },
   { id: 'cerebras', src: '/src/assets/cerebras-logo.png', alt: 'Cerebras' },
-  { id: 'anthropic', src: '/src/assets/anthropic-logo.png', alt: 'Anthropic' }
+  { id: 'anthropic', src: '/src/assets/anthropic-logo.png', alt: 'Anthropic' },
 ];
 
-const placeholderEmblems: EmblemData[] = Array(5).fill(null).map((_, i) => ({
-  id: `openai-${i}`,
-  src: '/src/assets/openai-logo.png',
-  alt: 'OpenAI'
-}));
+const placeholderEmblems: EmblemData[] = Array(5)
+  .fill(null)
+  .map((_, i) => ({
+    id: `openai-${i}`,
+    src: '/src/assets/openai-logo.png',
+    alt: 'OpenAI',
+  }));
 
 interface ColumnProps {
   emblems: EmblemData[];
@@ -44,12 +46,12 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
       {/* Gradient fade overlays - contained within column */}
       <div className="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
       <div className="absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-surface via-surface/80 to-transparent z-10 pointer-events-none" />
-      
+
       {/* Emblems container with smooth transform */}
-      <div 
+      <div
         className="flex flex-col items-center transition-transform duration-1000 ease-in-out"
-        style={{ 
-          transform: `translateY(${-centerIndex * 100}px)` // Smooth translation based on center index
+        style={{
+          transform: `translateY(${-centerIndex * 100}px)`, // Smooth translation based on center index
         }}
       >
         {/* Create extended array for smooth transitions */}
@@ -58,21 +60,17 @@ const Column = ({ emblems, centerIndex, columnIndex }: ColumnProps) => {
           const emblem = emblems[emblemIndex];
           const position = i - emblems.length - centerIndex; // Position relative to center
           const opacity = Math.abs(position) >= 4 ? 0.3 : 1;
-          
+
           return (
             <div
               key={`${emblem.id}-${i}`}
               className="w-20 h-20 flex items-center justify-center transition-opacity duration-500"
-              style={{ 
+              style={{
                 opacity,
-                marginBottom: '20px'
+                marginBottom: '20px',
               }}
             >
-              <img 
-                src={emblem.src} 
-                alt={emblem.alt}
-                className="w-20 h-20 object-contain"
-              />
+              <img src={emblem.src} alt={emblem.alt} className="w-20 h-20 object-contain" />
             </div>
           );
         })}
@@ -89,10 +87,22 @@ interface CircleConnectionProps {
   hasTriggered: boolean;
 }
 
-const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, hasTriggered }: CircleConnectionProps) => {
+const CircleConnection = ({
+  show,
+  slideReveal,
+  overlayPosition,
+  overlayOpacity,
+  hasTriggered,
+}: CircleConnectionProps) => {
   return (
     <div className="absolute inset-0 z-0 pointer-events-none">
-      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+      <svg
+        width="100%"
+        height="100%"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"
+      >
         <defs>
           <linearGradient id="naviGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#FE7503" />
@@ -113,9 +123,9 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
             <stop offset="100%" stopColor="hsl(var(--surface))" stopOpacity="1" />
           </linearGradient>
         </defs>
-        
+
         {/* Gradient path */}
-        <path 
+        <path
           d="M 16.5 41.4
              L 27.5 41.4
              Q 29.5 41.4 29.5 43.4
@@ -150,12 +160,12 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
              L 70.5 43.4
              Q 70.5 41.4 72.5 41.4
              Z"
-          stroke="url(#naviGradient)" 
-          strokeWidth="0.8" 
+          stroke="url(#naviGradient)"
+          strokeWidth="0.8"
           fill="none"
           style={{ opacity: hasTriggered ? 1 : 0 }}
         />
-        
+
         {/* Solid white rectangle overlay */}
         <rect
           x="-20"
@@ -165,13 +175,14 @@ const CircleConnection = ({ show, slideReveal, overlayPosition, overlayOpacity, 
           rx="2"
           fill="url(#whiteLeftFade)"
           style={{
-                        transform: `translateX(${overlayPosition}%)`,
+            transform: `translateX(${overlayPosition}%)`,
             opacity: overlayOpacity,
-            transition: overlayPosition === 120 
-              ? 'transform 1.6s ease-in-out, opacity 0s'
-              : overlayPosition === 0 && overlayOpacity === 1 
-              ? 'transform 0s, opacity 0.3s ease-in-out'
-              : 'transform 0s, opacity 0s'
+            transition:
+              overlayPosition === 120
+                ? 'transform 1.6s ease-in-out, opacity 0s'
+                : overlayPosition === 0 && overlayOpacity === 1
+                  ? 'transform 0s, opacity 0.3s ease-in-out'
+                  : 'transform 0s, opacity 0s',
           }}
         />
       </svg>
@@ -212,7 +223,7 @@ export const CustomizableAnimation = () => {
           setHasTriggered(false);
         }
       },
-      { threshold: 0.1 }
+      { threshold: 0.1 },
     );
 
     if (containerRef.current) {
@@ -228,10 +239,10 @@ export const CustomizableAnimation = () => {
 
     const animationCycle = () => {
       // Step 1: Rotation happens (elements move)
-      setCenterIndices(prev => [
+      setCenterIndices((prev) => [
         (prev[0] + 1) % llmProviders.length, // Column 1: move down 1 emblem
-        (prev[1] - 2 + placeholderEmblems.length) % placeholderEmblems.length, // Column 2: move up 2 emblems  
-        (prev[2] + 2) % placeholderEmblems.length  // Column 3: move down 2 emblems
+        (prev[1] - 2 + placeholderEmblems.length) % placeholderEmblems.length, // Column 2: move up 2 emblems
+        (prev[2] + 2) % placeholderEmblems.length, // Column 3: move down 2 emblems
       ]);
 
       // Step 2: After rotation ends, slide overlay to 120% with ease (800ms)
@@ -244,7 +255,7 @@ export const CustomizableAnimation = () => {
         setOverlayOpacity(0);
       }, 2600);
 
-      // Step 4: Snap back to translate 0% instantly 
+      // Step 4: Snap back to translate 0% instantly
       setTimeout(() => {
         setOverlayPosition(0);
       }, 2650);
@@ -258,8 +269,8 @@ export const CustomizableAnimation = () => {
     // Ensure overlay is ready for first rotation
     setOverlayOpacity(1);
     setOverlayPosition(0);
-    
-    // Start first cycle immediately 
+
+    // Start first cycle immediately
     const initialTimer = setTimeout(animationCycle, 0);
 
     // Continue cycling
@@ -272,33 +283,21 @@ export const CustomizableAnimation = () => {
   }, [isAnimating]);
 
   return (
-    <div 
+    <div
       ref={containerRef}
       className="w-full h-[450px] relative overflow-hidden flex items-center justify-center isolate"
     >
-      <CircleConnection 
-        show={showConnections} 
+      <CircleConnection
+        show={showConnections}
         slideReveal={slideReveal}
         overlayPosition={overlayPosition}
         overlayOpacity={overlayOpacity}
         hasTriggered={hasTriggered}
       />
       <div className="w-full h-full flex relative z-10 justify-center items-center gap-4">
-        <Column 
-          emblems={llmProviders} 
-          centerIndex={centerIndices[0]} 
-          columnIndex={0}
-        />
-        <Column 
-          emblems={placeholderEmblems} 
-          centerIndex={centerIndices[1]} 
-          columnIndex={1}
-        />
-        <Column 
-          emblems={placeholderEmblems} 
-          centerIndex={centerIndices[2]} 
-          columnIndex={2}
-        />
+        <Column emblems={llmProviders} centerIndex={centerIndices[0]} columnIndex={0} />
+        <Column emblems={placeholderEmblems} centerIndex={centerIndices[1]} columnIndex={1} />
+        <Column emblems={placeholderEmblems} centerIndex={centerIndices[2]} columnIndex={2} />
       </div>
     </div>
   );

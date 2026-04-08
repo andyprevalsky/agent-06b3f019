@@ -40,13 +40,16 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
 }
 
 // Singleton cache for shared bus subscriptions
-const busSubscriptions = new Map<string, {
-  nodes: Map<string, TreeNode>;
-  listeners: Set<(nodes: Map<string, TreeNode>) => void>;
-  channel: RealtimeChannel | null;
-  reconnectAttempt: number;
-  reconnectTimeout: number | null;
-}>();
+const busSubscriptions = new Map<
+  string,
+  {
+    nodes: Map<string, TreeNode>;
+    listeners: Set<(nodes: Map<string, TreeNode>) => void>;
+    channel: RealtimeChannel | null;
+    reconnectAttempt: number;
+    reconnectTimeout: number | null;
+  }
+>();
 
 /**
  * Hook for subscribing to sub-agent tree state via Supabase bus channel.
@@ -96,7 +99,9 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
       const delay = Math.min(1000 * Math.pow(2, sub.reconnectAttempt), 30000);
       sub.reconnectAttempt += 1;
 
-      console.log(`[useAgentTree] Scheduling reconnect in ${delay}ms (attempt ${sub.reconnectAttempt})`);
+      console.log(
+        `[useAgentTree] Scheduling reconnect in ${delay}ms (attempt ${sub.reconnectAttempt})`,
+      );
 
       sub.reconnectTimeout = window.setTimeout(() => {
         setForceResubscribe((prev) => prev + 1);
@@ -236,7 +241,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
  */
 export function filterTreeBySpawn(
   allNodes: Map<string, TreeNode>,
-  subAgentIds: string[]
+  subAgentIds: string[],
 ): Map<string, TreeNode> {
   const relevant = new Map<string, TreeNode>();
   const queue = [...subAgentIds];

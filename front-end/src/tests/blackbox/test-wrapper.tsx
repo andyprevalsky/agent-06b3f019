@@ -44,7 +44,7 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
 
 export function renderWithProviders(
   ui: React.ReactElement,
-  options?: TestWrapperOptions & Omit<RenderOptions, 'wrapper'>
+  options?: TestWrapperOptions & Omit<RenderOptions, 'wrapper'>,
 ) {
   const { route, routerProps, ...renderOptions } = options ?? {};
   return render(ui, {

@@ -137,7 +137,7 @@ describe('BlogHeader', () => {
     renderWithProviders(<BlogHeader post={minimalPost} />);
     const formatted = formatDate(minimalPost.date);
     expect(
-      screen.getByText(new RegExp(`${formatted}\\s+by\\s+${minimalPost.author}`))
+      screen.getByText(new RegExp(`${formatted}\\s+by\\s+${minimalPost.author}`)),
     ).toBeInTheDocument();
   });
 
