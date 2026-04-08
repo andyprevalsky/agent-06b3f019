@@ -6,7 +6,7 @@
  * [MOUNTED] --> renders intro paragraph + all sections
  */
 
-import { BlogPost } from '@/data/blogPosts';
+import { type BlogPost } from '@/data/blogPosts';
 
 interface BlogContentProps {
   post: BlogPost;

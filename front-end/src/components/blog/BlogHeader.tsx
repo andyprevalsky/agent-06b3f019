@@ -6,7 +6,7 @@
  * [MOUNTED] --> renders header with title, date, author
  */
 
-import { BlogPost, formatDate } from '@/data/blogPosts';
+import { type BlogPost, formatDate } from '@/data/blogPosts';
 
 interface BlogHeaderProps {
   post: BlogPost;

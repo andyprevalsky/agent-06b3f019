@@ -38,7 +38,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Loader2, Sparkles, X, Check, ChevronsUpDown } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { getTools, generateLLMJudgePrompt, Tool } from '@/lib/api';
+import { getTools, generateLLMJudgePrompt, type Tool } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { useAppData } from '@/hooks/useAppData';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';

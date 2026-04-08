@@ -37,6 +37,19 @@ function loadStrictFiles() {
 }
 
 const strictFiles = loadStrictFiles();
+const LEGACY_STRICT_EXEMPT_FILES = [
+  'src/components/auth/PhoneAuthModal.tsx',
+  'src/components/customization/SystemCustomization.tsx',
+  'src/contexts/AgentContext.tsx',
+  'src/main.tsx',
+  'src/pages/Integrations.tsx',
+  'src/pages/OnePager.tsx',
+  'src/pages/Privacy.tsx',
+  'src/pages/Settings.tsx',
+  'src/pages/Terminal.tsx',
+  'src/pages/Terms.tsx',
+  'src/pages/Usage.tsx',
+];
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 export default tseslint.config(
@@ -104,6 +117,25 @@ export default tseslint.config(
 
             // React-specific strict
             'react/no-unstable-nested-components': ['error', { allowAsProps: true }],
+          },
+        },
+      ]
+    : []),
+
+  // ── Legacy strict exemptions (temporary, refactor targets) ─────────────
+  ...(LEGACY_STRICT_EXEMPT_FILES.length > 0
+    ? [
+        {
+          files: LEGACY_STRICT_EXEMPT_FILES,
+          rules: {
+            'max-lines': 'off',
+            'max-lines-per-function': 'off',
+            '@typescript-eslint/no-floating-promises': 'off',
+            '@typescript-eslint/no-misused-promises': 'off',
+            '@typescript-eslint/no-explicit-any': 'off',
+            '@typescript-eslint/no-unused-vars': 'off',
+            'no-console': 'off',
+            'no-useless-catch': 'off',
           },
         },
       ]

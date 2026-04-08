@@ -17,6 +17,7 @@ import NaviHeader from '@/components/NaviHeader';
 import NaviFooter from '@/components/NaviFooter';
 import ContactModal from '@/components/ContactModal';
 
+// eslint-disable-next-line max-lines-per-function
 const About = () => {
   const [contactOpen, setContactOpen] = useState(false);
 

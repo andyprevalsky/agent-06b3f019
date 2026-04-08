@@ -83,13 +83,13 @@ import {
   findBlueprintByGoal,
   submitBlueprintFeedback,
   InviteCodeInfo,
-  Agent,
-  AgentDetail,
-  Message,
-  CreateAgentPayload,
-  AncestorNode,
-  BlueprintFeedback,
-  FilePointer,
+  type Agent,
+  type AgentDetail,
+  type Message,
+  type CreateAgentPayload,
+  type AncestorNode,
+  type BlueprintFeedback,
+  type FilePointer,
 } from '@/lib/api';
 import { getClientSource } from '@/lib/clientSource';
 import CreateAgentModal from '@/components/terminal/CreateAgentModal';
@@ -111,7 +111,7 @@ import CostLimitModal from '@/components/terminal/CostLimitModal';
 import NetworkView from '@/components/terminal/NetworkView';
 import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
 import { useToast } from '@/hooks/use-toast';
-import { useAppData, Model } from '@/hooks/useAppData';
+import { useAppData, type Model } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 // RealtimeChannel now in AgentContext
 import { colorPalette, frameSequence, getTileColorsForFrame } from '@/lib/tileAnimation';

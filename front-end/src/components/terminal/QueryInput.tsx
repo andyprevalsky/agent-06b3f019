@@ -82,10 +82,10 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/use-toast';
-import { Model } from '@/hooks/useAppData';
+import { type Model } from '@/hooks/useAppData';
 import {
-  AgentDetail,
-  FilePointer,
+  type AgentDetail,
+  type FilePointer,
   uploadAttachment,
   updateAgent,
   MAX_FILE_SIZE,

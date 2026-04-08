@@ -42,7 +42,12 @@
  * Renders different content based on message.role and message.type.
  */
 
-import { Message, respondToAttentionRequest, FilePointer, getAttachmentUrl } from '@/lib/api';
+import {
+  type Message,
+  respondToAttentionRequest,
+  type FilePointer,
+  getAttachmentUrl,
+} from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Bot,
@@ -68,9 +73,9 @@ import SubAgentTree from './SubAgentTree';
 import ClaudeCodeChip from './ClaudeCodeChip';
 import { MarkdownText } from './MarkdownText';
 import { PlanChip } from './PlanChip';
-import { PhoneCallCard, PhoneCallMetadata } from './PhoneCallCard';
-import { CompletionSummaryCard, CompletionSummaryData } from './CompletionSummaryCard';
-import { FeedbackBanner, FeedbackData } from './FeedbackBanner';
+import { PhoneCallCard, type PhoneCallMetadata } from './PhoneCallCard';
+import { CompletionSummaryCard, type CompletionSummaryData } from './CompletionSummaryCard';
+import { FeedbackBanner, type FeedbackData } from './FeedbackBanner';
 import {
   getToolIcon,
   isX402Tool,

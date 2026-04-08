@@ -34,7 +34,7 @@
 
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
-import { useState, useEffect, RefObject } from 'react';
+import { useState, useEffect, type RefObject } from 'react';
 import { sendOTP, verifyOTP } from '@/lib/supabase';
 import { X } from 'lucide-react';
 import * as amplitude from '@amplitude/analytics-browser';

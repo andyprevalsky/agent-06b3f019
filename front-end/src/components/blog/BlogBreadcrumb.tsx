@@ -7,7 +7,7 @@
  */
 
 import { Link } from 'react-router-dom';
-import { BlogCategory } from '@/data/blogPosts';
+import { type BlogCategory } from '@/data/blogPosts';
 
 interface BlogBreadcrumbProps {
   category: BlogCategory;

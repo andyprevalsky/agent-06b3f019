@@ -26,7 +26,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, FileText, ArrowDown, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from './MarkdownText';
-import { PlanTask } from '@/lib/realtime-types';
+import { type PlanTask } from '@/lib/realtime-types';
 import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 
 interface PlanData {

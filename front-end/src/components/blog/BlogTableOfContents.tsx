@@ -10,7 +10,7 @@
  */
 
 import { useState } from 'react';
-import { BlogSection } from '@/data/blogPosts';
+import { type BlogSection } from '@/data/blogPosts';
 import { ChevronUp } from 'lucide-react';
 
 interface BlogTableOfContentsProps {

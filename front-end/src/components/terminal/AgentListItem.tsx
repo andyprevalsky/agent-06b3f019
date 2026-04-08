@@ -11,7 +11,7 @@
  * - agent.progress: number (0-1 for progress wheel)
  */
 
-import { Agent } from '@/lib/api';
+import { type Agent } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Play, Loader2, CreditCard, Bot, DollarSign } from 'lucide-react';
 

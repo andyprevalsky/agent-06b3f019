@@ -21,7 +21,7 @@ import { memo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Check, ChevronDown, Copy } from 'lucide-react';
-import { FilePointer } from '@/lib/api';
+import { type FilePointer } from '@/lib/api';
 import { isFilePointer, FilePointerDisplay } from './ClaudeCodeChip';
 
 // Tool name → Human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES)

@@ -37,7 +37,11 @@ import { getToolIcon } from '@/lib/toolIcons';
 import { getStoredSession } from '@/lib/supabase';
 import { MessageList } from './MessageList';
 import { useAgentContext } from '@/contexts/AgentContext';
-import { ResponseSchemaField, respondToAttentionRequest, rejectAttentionRequest } from '@/lib/api';
+import {
+  type ResponseSchemaField,
+  respondToAttentionRequest,
+  rejectAttentionRequest,
+} from '@/lib/api';
 import BrowserBorderGlow from './BrowserBorderGlow';
 import BrowserCursorOverlay from './BrowserCursorOverlay';
 import ThinkingAnimation from '@/components/ThinkingAnimation';

@@ -30,10 +30,10 @@ import {
   filterTreeBySpawn,
   getCircleState,
   getStatusText,
-  TreeNode,
+  type TreeNode,
 } from '@/hooks/useAgentTree';
-import { OutputSchema, OutputSchemaField, FilePointer } from '@/lib/api';
-import { FailureContext } from '@/lib/realtime';
+import { type OutputSchema, type OutputSchemaField, type FilePointer } from '@/lib/api';
+import { type FailureContext } from '@/lib/realtime';
 import { getToolIcon, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 
 // Format field type for display
