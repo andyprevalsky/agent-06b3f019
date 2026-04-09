@@ -20,11 +20,12 @@ class BenchmarkTask:
     requires_browser_agent: bool
     requires_claude_code: bool
     attachment: Optional[str]
-    approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", or None
+    approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", "count_only", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
     attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
+    expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

@@ -379,8 +379,8 @@ async def build_llm_messages(
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
-    # Filter TOOL messages: skip IN_PROGRESS, keep only latest FINISHED per toolCallId
-    # This ensures condensed results replace full results in context
+    # Filter TOOL messages: skip IN_PROGRESS, keep only latest terminal message
+    # (FINISHED/ERROR) per toolCallId.
 
     def parse_timestamp(ts) -> datetime:
         """Parse timestamp to datetime, return epoch for invalid/missing."""
@@ -398,7 +398,7 @@ async def build_llm_messages(
         except (ValueError, AttributeError):
             return epoch
 
-    tool_messages_by_id: Dict[str, Dict] = {}  # toolCallId -> latest FINISHED message
+    tool_messages_by_id: Dict[str, Dict] = {}  # toolCallId -> latest terminal message
     filtered_context = []
 
     for msg in context:
@@ -418,8 +418,8 @@ async def build_llm_messages(
             if tool_status == "IN_PROGRESS":
                 continue
 
-            # For FINISHED messages, keep only the latest per toolCallId
-            if tool_status == "FINISHED" and tool_call_id:
+            # For terminal tool messages, keep only the latest per toolCallId
+            if tool_status in ("FINISHED", "ERROR") and tool_call_id:
                 existing = tool_messages_by_id.get(tool_call_id)
                 if existing:
                     # Compare timestamps properly, keep the later one
@@ -453,6 +453,7 @@ async def build_llm_messages(
     # and the static system prompt already has guidance on passing files via attachments.
 
     messages = [{"role": "system", "content": system_prompt}]
+    declared_tool_call_ids: set[str] = set()
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -533,12 +534,130 @@ async def build_llm_messages(
         if role == "USER":
             llm_role = "user"
             full_text = text
-        elif role == "ASSISTANT":
+
+            if metadata_texts:
+                full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+
+            if content:
+                # Has multimodal content - use content array format
+                content.insert(0, {"type": "text", "text": full_text})
+                messages.append({"role": llm_role, "content": content})
+            else:
+                messages.append({"role": llm_role, "content": full_text})
+            continue
+
+        if role == "ASSISTANT":
             llm_role = "assistant"
             full_text = text
-        elif role in ("TOOL", "SYSTEM"):
+
+            if metadata_texts:
+                full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+
+            if content:
+                # LLM APIs reject multimodal blocks in assistant messages.
+                # Convert image/PDF blocks to metadata text so content isn't silently lost.
+                for block in content:
+                    if block.get("type") == "image_url":
+                        full_text += "\n\n[Attached image]"
+                    elif block.get("type") == "file":
+                        fname = block.get("file", {}).get("filename", "file")
+                        full_text += f"\n\n[Attached file: {fname}]"
+
+            assistant_msg: Dict[str, Any] = {"role": llm_role, "content": full_text}
+
+            raw_tool_calls = metadata.get("tool_calls")
+            if raw_tool_calls:
+                if not isinstance(raw_tool_calls, list):
+                    raise ValueError(f"ASSISTANT message metadata.tool_calls must be a list (got {type(raw_tool_calls).__name__})")
+                parsed_tool_calls = []
+                for idx, tc in enumerate(raw_tool_calls):
+                    if not isinstance(tc, dict):
+                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] must be an object (got {type(tc).__name__})")
+                    tool_name = tc.get("tool")
+                    tool_call_id = tc.get("tool_call_id")
+                    if not tool_name:
+                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool'")
+                    if not tool_call_id:
+                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'")
+                    declared_tool_call_ids.add(str(tool_call_id))
+                    args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
+                    parsed_tool_calls.append({
+                        "id": str(tool_call_id),
+                        "type": "function",
+                        "function": {
+                            "name": str(tool_name),
+                            "arguments": json.dumps(args),
+                        },
+                    })
+                assistant_msg["tool_calls"] = parsed_tool_calls
+
+            messages.append(assistant_msg)
+            continue
+
+        if role == "TOOL":
+            # Verifier messages are already mirrored back into context as SYSTEM text.
+            # Skip raw verifier TOOL rows to avoid duplicate context.
+            if metadata.get("verifierMessage"):
+                continue
+
+            tool_status = metadata.get("toolStatus")
+            if tool_status == "IN_PROGRESS":
+                continue
+
+            tool_call_id = metadata.get("toolCallId")
+            tool_name = metadata.get("toolName")
+
+            # Strict invariant: all terminal tool messages must match a declared assistant tool_call_id
+            if tool_status in ("FINISHED", "ERROR"):
+                if not tool_call_id:
+                    raise ValueError(
+                        f"Terminal TOOL message missing toolCallId (toolName={tool_name}, message_id={msg.get('message_id')})"
+                    )
+                if str(tool_call_id) not in declared_tool_call_ids:
+                    raise ValueError(
+                        f"Terminal TOOL message has unmatched toolCallId '{tool_call_id}' "
+                        f"(toolName={tool_name}, message_id={msg.get('message_id')})"
+                    )
+
+                tool_content = text
+                if metadata.get("title"):
+                    tool_content = f"{metadata['title']}: {tool_content}"
+                if metadata.get("structured_response"):
+                    tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+                if metadata_texts:
+                    tool_content = tool_content + "\n\n" + "\n\n".join(metadata_texts)
+                if content:
+                    for block in content:
+                        if block.get("type") == "image_url":
+                            tool_content += "\n\n[Attached image]"
+                        elif block.get("type") == "file":
+                            fname = block.get("file", {}).get("filename", "file")
+                            tool_content += f"\n\n[Attached file: {fname}]"
+
+                tool_msg: Dict[str, Any] = {
+                    "role": "tool",
+                    "content": tool_content,
+                    "tool_call_id": str(tool_call_id),
+                }
+                if tool_name:
+                    tool_msg["name"] = tool_name
+                messages.append(tool_msg)
+                continue
+
+            # Non-terminal TOOL messages are passed as context text.
+            full_text = f"[TOOL]: {text}"
+            if metadata_texts:
+                full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+            if content:
+                content.insert(0, {"type": "text", "text": full_text})
+                messages.append({"role": "user", "content": content})
+            else:
+                messages.append({"role": "user", "content": full_text})
+            continue
+
+        if role == "SYSTEM":
             llm_role = "user"
-            full_text = f"[{role}]: {text}"
+            full_text = f"[SYSTEM]: {text}"
         else:
             llm_role = "user"
             full_text = text
@@ -546,18 +665,7 @@ async def build_llm_messages(
         if metadata_texts:
             full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
 
-        if content and llm_role == "assistant":
-            # LLM APIs reject multimodal blocks in assistant messages.
-            # Convert image/PDF blocks to metadata text so content isn't silently lost.
-            for block in content:
-                if block.get("type") == "image_url":
-                    full_text += "\n\n[Attached image]"
-                elif block.get("type") == "file":
-                    fname = block.get("file", {}).get("filename", "file")
-                    full_text += f"\n\n[Attached file: {fname}]"
-            messages.append({"role": llm_role, "content": full_text})
-        elif content:
-            # Has multimodal content - use content array format
+        if content:
             content.insert(0, {"type": "text", "text": full_text})
             messages.append({"role": llm_role, "content": content})
         else:

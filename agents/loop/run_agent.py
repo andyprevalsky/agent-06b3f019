@@ -105,7 +105,7 @@ async def run_agent(
     # Skip update_agent_status broadcasts (used by explore agent to avoid overwriting parent's context_size)
     skip_status_updates: bool = False,
     
-    # PLAN phase mode - requires set_plan before completion, posts "sit back" message
+    # PLAN phase mode - requires set_plan before completion
     is_plan_loop: bool = False,
 
     # Response schema for structured output extraction
@@ -560,23 +560,14 @@ async def run_agent(
         # 8. Extract response and tool calls
         response_text = result.response if hasattr(result, 'response') else ""
         tool_calls = result.tool_calls if hasattr(result, 'tool_calls') else []
-        
-        # 9. Post assistant message
-        if response_text and post_message:
-            await post_message(response_text, "ASSISTANT", None)
-            context.append({
-                "role": "ASSISTANT",
-                "text": response_text,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-        
-        # 10. Execute tool calls (tool_calls is always List[dict] at this point)
+
+        # 9. Pre-process tool calls to assign stable IDs (used for both
+        # assistant metadata persistence and tool execution/results).
         # Track which detected tools have been used (for matching multiple same-name tools in order)
         detected_tool_usage_count: Dict[str, int] = {}
-
-        # Pre-process tool calls to assign IDs and separate special tools
         processed_tools = []
         attempt_completion_tool = None
+        assistant_tool_calls = []
 
         for tc_dict in tool_calls:
             tc_dict = tc_dict.copy()  # Don't mutate original
@@ -601,6 +592,13 @@ async def run_agent(
             if not tool_call_id:
                 tool_call_id = str(uuid.uuid4())
 
+            # Persist assistant declarations with explicit tool_call_id mapping
+            assistant_tool_calls.append({
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                **tool_args,
+            })
+
             # Special: set_plan - track that it was called (for is_plan_loop)
             if tool_name == "set_plan":
                 set_plan_called = True
@@ -612,6 +610,20 @@ async def run_agent(
 
             processed_tools.append((tool_name, tool_args, tool_call_id))
 
+        # 10. Persist assistant message (including tool-only declaration turns)
+        assistant_metadata = {"tool_calls": assistant_tool_calls} if assistant_tool_calls else None
+        if (response_text or assistant_tool_calls) and post_message:
+            await post_message(response_text, "ASSISTANT", assistant_metadata)
+            new_assistant_msg = {
+                "role": "ASSISTANT",
+                "text": response_text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            if assistant_metadata:
+                new_assistant_msg["metadata"] = assistant_metadata
+            context.append(new_assistant_msg)
+
+        # 11. Execute tool calls (tool_calls is always List[dict] at this point)
         # Execute regular tools in parallel
         if processed_tools and execute_tool:
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
@@ -656,7 +668,12 @@ async def run_agent(
                         "role": "TOOL",
                         "text": f"Error executing {tool_name}: {str(error)}",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"toolName": tool_name, "error": True}
+                        "metadata": {
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "toolStatus": "ERROR",
+                            "error": True,
+                        }
                     })
                     continue
 
@@ -700,14 +717,23 @@ async def run_agent(
                         "role": "TOOL",
                         "text": f"Error: {result_message}",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"toolName": tool_name, "error": True}
+                        "metadata": {
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "toolStatus": "ERROR",
+                            "error": True,
+                        }
                     }
                 else:
                     new_msg = {
                         "role": "TOOL",
                         "text": result_message,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"toolName": tool_name}
+                        "metadata": {
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "toolStatus": "FINISHED",
+                        }
                     }
                 context.append(new_msg)
                 logger.debug(
@@ -752,36 +778,9 @@ async def run_agent(
                     except Exception as e:
                         logger.warning(f"attempt_completion tool error (non-fatal): {e}")
 
-                # PLAN phase: post "sit back, relax" message and complete
+                # PLAN phase: complete immediately after attempt_completion
                 if is_plan_loop:
                     logger.info("✅ PLAN phase complete")
-
-                    # Extract goal from first USER message in context
-                    goal = "your goal"
-                    for msg in context:
-                        if msg.get("role") == "USER":
-                            full_goal = msg.get("text", "your goal").strip()
-                            goal = (full_goal[:300] + "...") if len(full_goal) > 300 else full_goal
-                            break
-
-                    fyi_message = f"Looks like I have everything I need in order to accomplish your goal - **{goal}**\n\nWe will now proceed to fulfill your request, just sit back, relax, and let us figure out the rest :)"
-                    await post_message(
-                        fyi_message,
-                        "TOOL",
-                        {
-                            "toolCallId": tool_call_id,
-                            "toolName": "plan_complete",
-                            "toolStatus": "FINISHED",
-                            "title": "✨ Plan Ready",
-                            "isUserAttentionMessage": True,
-                            "attentionMessage": fyi_message,
-                            "sendMessageToUser": {
-                                "isQuestion": False,
-                                "attentionKind": "info",
-                                "isWaitingForUser": False,
-                            },
-                        }
-                    )
 
                     _log_cache_summary("completed")
                     return {

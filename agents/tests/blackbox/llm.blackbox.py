@@ -174,6 +174,125 @@ async def test_fetch_claude_max_token_activity_not_found():
     assert result is None
 
 
+async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
+    """build_llm_messages should preserve assistant tool_calls and emit matched tool role messages."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "Find recent updates", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "latest updates"}
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Found 3 recent updates",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolName": "web_search",
+                "toolCallId": "tc-1",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        messages = await build_llm_messages(context, "System prompt")
+
+    assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+
+    assert len(assistant_msgs) >= 1
+    assert len(tool_msgs) >= 1
+
+    assistant = assistant_msgs[0]
+    assert "tool_calls" in assistant
+    assert assistant["tool_calls"][0]["id"] == "tc-1"
+    assert assistant["tool_calls"][0]["function"]["name"] == "web_search"
+
+    tool_msg = tool_msgs[0]
+    assert tool_msg["tool_call_id"] == "tc-1"
+    assert tool_msg["name"] == "web_search"
+    assert "Found 3 recent updates" in tool_msg["content"]
+
+
+async def test_build_llm_messages_unmatched_terminal_tool_raises():
+    """Terminal TOOL message without matching assistant declaration should hard-fail."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "Find data", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Found alpha",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolName": "web_search",
+                "toolCallId": "tc-2",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        try:
+            await build_llm_messages(context, "System prompt")
+            raise AssertionError("Expected ValueError for unmatched terminal TOOL message")
+        except ValueError as e:
+            assert "unmatched toolCallId" in str(e)
+
+
+async def test_build_llm_messages_terminal_tool_missing_id_raises():
+    """Terminal TOOL message without toolCallId should hard-fail."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "Find data", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Found alpha",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        try:
+            await build_llm_messages(context, "System prompt")
+            raise AssertionError("Expected ValueError for terminal TOOL message without toolCallId")
+        except ValueError as e:
+            assert "missing toolCallId" in str(e)
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -186,6 +305,9 @@ async def run_all_tests():
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
+    await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
+    await r.record_async("build_llm_messages_unmatched_terminal_tool_raises", test_build_llm_messages_unmatched_terminal_tool_raises)
+    await r.record_async("build_llm_messages_terminal_tool_missing_id_raises", test_build_llm_messages_terminal_tool_missing_id_raises)
     teardown_mock()
     return r.summary()
 
