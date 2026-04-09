@@ -114,6 +114,7 @@ export async function startAgentWorkflow(params: {
   return handle.workflowId;
 }
 
+/* c8 ignore start -- getWorkflowStatus requires live Temporal server */
 /**
  * Get workflow status
  */
@@ -134,3 +135,4 @@ export async function getWorkflowStatus(workflowId: string): Promise<any> {
     return null;
   }
 }
+/* c8 ignore stop */

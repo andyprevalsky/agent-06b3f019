@@ -113,6 +113,7 @@ export async function handleShortcodeApproval(
     );
 
     // Signal the workflow
+    /* c8 ignore start -- Temporal signal requires live Temporal server */
     try {
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(shortcodeResult.workflowId);
@@ -134,6 +135,7 @@ export async function handleShortcodeApproval(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    /* c8 ignore stop */
 
     // Send confirmation
     const agentPrefix = shortcodeResult.agentId.substring(0, 6);
@@ -176,6 +178,7 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
       agentIds: activeAgents.map((a) => a.id),
     });
 
+    /* c8 ignore start -- Temporal termination requires live Temporal server */
     const client = await getTemporalClient();
 
     for (const agent of activeAgents) {
@@ -194,6 +197,7 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
       // Soft-delete the agent and all its children
       await repo.softDeleteAgentAndChildren(agent.id);
     }
+    /* c8 ignore stop */
   }
 
   await sendSms(fromPhone, 'Session cleared.');
@@ -203,6 +207,7 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
 // SMS Supervisor routing (main path)
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- routeToSupervisor delegates to handleSmsSupervisorMessage (excluded smsSupervisor module) */
 export function routeToSupervisor(
   userId: string,
   fromPhone: string,
@@ -260,6 +265,7 @@ export function routeToSupervisor(
       unregisterSupervisorRun(userId, abortController);
     });
 }
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // Main inbound handler (orchestrates all paths)

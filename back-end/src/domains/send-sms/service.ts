@@ -165,6 +165,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   return { success: true };
 }
 
+/* c8 ignore start -- dispatchByEventType delegates to smsSupervisor outboundEvents (excluded from coverage) */
 /** Route to the correct outbound event handler based on event_type. */
 async function dispatchByEventType(
   data: NotifyInput,
@@ -217,3 +218,4 @@ async function dispatchByEventType(
       log.warn('Unknown event type, skipping', { eventType: data.event_type });
   }
 }
+/* c8 ignore stop */

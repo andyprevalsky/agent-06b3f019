@@ -18,6 +18,7 @@ import { TopupValidationError, AgentNotFoundError } from './service';
 const log = createLogger('X402');
 const router = Router();
 
+/* c8 ignore start -- topup route requires x402 payment middleware (blockchain transactions) */
 /**
  * POST /api/x402/topup
  * Add credits to wallet account (x402 protected)
@@ -44,6 +45,7 @@ router.post(
     }
   })
 );
+/* c8 ignore stop */
 
 /**
  * GET /api/x402/agents/:id/status

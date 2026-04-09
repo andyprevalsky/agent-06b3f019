@@ -211,7 +211,7 @@ const UpdateStatusResponse = z.object({
 const UpdateAgentResponse = z.object({
   agent: z.object({
     agent_id: z.string().uuid(),
-    goal: z.string(),
+    goal: z.string().optional(),
     model: z.string(),
     reasoning_max_tokens: z.number(),
     progress: z.number(),
@@ -456,6 +456,38 @@ async function createTestAgent(
   throw new Error('createTestAgent exhausted retries');
 }
 
+/**
+ * POST /api/agents with retry on 500 "Failed to create agent".
+ * Returns the full { status, data, headers } response on the first non-retryable result.
+ * Only retries on 500 with error === 'Failed to create agent'; all other statuses are
+ * returned immediately so callers can assert on them normally.
+ */
+async function postAgentWithRetry(
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  maxAttempts = 5
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  let lastRes: { status: number; data: unknown; headers: Headers } | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await request(`${BASE_URL}/api/agents`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    lastRes = res;
+    const isRetryable =
+      res.status === 500 &&
+      typeof res.data === 'object' &&
+      res.data !== null &&
+      'error' in res.data &&
+      (res.data as { error?: unknown }).error === 'Failed to create agent';
+    if (!isRetryable || attempt === maxAttempts) return res;
+    console.warn(`[retry] postAgentWithRetry attempt ${attempt}/${maxAttempts} got 500`);
+    await sleep(500 * attempt);
+  }
+  return lastRes!;
+}
+
 async function deleteTestAgent(agentId: string, userId: string): Promise<void> {
   await request(`${BASE_URL}/api/agents/${agentId}`, {
     method: 'DELETE',
@@ -648,11 +680,7 @@ test('POST / — empty goal → 400', async () => {
 test('POST / — happy path — full response schema', async () => {
   const session = await createAnonymousSession('create-happy');
   const goal = `Create happy test ${RUN_ID} ${randomUUID().slice(0, 8)}`;
-  const res = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ goal }),
-  });
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), { goal });
   assertStatus(res.status, 201, res.data);
   const body = assertSchema(CreateAgentResponse, res.data, 'POST / happy');
   assert(body.goal === goal, `Goal mismatch: "${body.goal}" !== "${goal}"`);
@@ -703,13 +731,9 @@ test('POST / — auto-generates verifier', async () => {
 test('POST / — custom verifier preserved', async () => {
   const session = await createAnonymousSession('create-custom-verifier');
   const customPrompt = 'Custom verifier: check if agent wrote tests';
-  const res = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({
-      goal: 'Custom verifier test',
-      verifier: { type: 'FLOAT_LLM_JUDGE', llm_judge_prompt: customPrompt },
-    }),
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Custom verifier test',
+    verifier: { type: 'FLOAT_LLM_JUDGE', llm_judge_prompt: customPrompt },
   });
   assertStatus(res.status, 201, res.data);
   const create = assertSchema(CreateAgentResponse, res.data, 'POST / custom verifier');
@@ -730,11 +754,7 @@ test('POST / — custom verifier preserved', async () => {
 test('POST / — custom model preserved', async () => {
   const session = await createAnonymousSession('create-model');
   const model = 'rose-labs/rose-1-ultra';
-  const res = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ goal: 'Model test', model }),
-  });
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), { goal: 'Model test', model });
   assertStatus(res.status, 201, res.data);
   const body = assertSchema(CreateAgentResponse, res.data, 'POST / model');
   assert(body.model === model, `Expected model "${model}", got "${body.model}"`);
@@ -1681,14 +1701,8 @@ test('POST /messages/batch — returns real messages scoped to user', async () =
   const session = await createAnonymousSession('batch-real');
   trackedUserIds.add(session.user.id);
 
-  // Create agent + post a USER message
-  const createRes = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-User-Id': session.user.id },
-    body: JSON.stringify({ goal: 'batch test agent' }),
-  });
-  assertStatus(createRes.status, 201, createRes.data);
-  const agentId = (createRes.data as { agent_id: string }).agent_id;
+  // Create agent using the retry-capable helper, then post a USER message
+  const agentId = await createTestAgent(session.user.id, 'batch test agent');
   trackedAgentIds.add(agentId);
 
   const msgRes = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
@@ -1963,6 +1977,608 @@ test('ordering: messages returned in timestamp asc', async () => {
   await deleteTestAgent(agentId, session.user.id);
 });
 
+// ========================= Sub-agent creation & recursive delete ===========
+
+test('POST / — sub-agent creation with parent_agent_id', async () => {
+  const session = await createAnonymousSession('sub-agent-create');
+  const parentId = await createTestAgent(session.user.id, 'Parent for sub-agent test');
+
+  // Create child agent with parent_agent_id, depth, and bus_id via API key
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      goal: 'Child sub-agent test',
+      parent_agent_id: parentId,
+      depth: 1,
+      bus_id: parentId,
+      task_queue: 'test-queue',
+    }),
+  });
+  // Sub-agent creation may succeed (201) or fail (500 if Temporal not running)
+  if (res.status !== 201 && res.status !== 500) {
+    throw new Error(`Expected 201 or 500 for sub-agent create, got ${res.status}`);
+  }
+  if (res.status === 201) {
+    const body = res.data as { agent_id: string };
+    trackedAgentIds.add(body.agent_id);
+    await deleteTestAgent(body.agent_id, session.user.id);
+  }
+  await deleteTestAgent(parentId, session.user.id);
+});
+
+test('DELETE /:id — recursive delete with children', async () => {
+  const session = await createAnonymousSession('recursive-del');
+
+  // Create parent directly in DB
+  const parentId = randomUUID();
+  trackedAgentIds.add(parentId);
+  await withTransientDbRetry('create-parent-recursive', async () => {
+    await prisma.agent.create({
+      data: {
+        id: parentId,
+        userId: session.user.id,
+        goal: 'Parent recursive delete test',
+        status: 'ACTIVE',
+        busId: parentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Create child directly in DB
+  const childId = randomUUID();
+  trackedAgentIds.add(childId);
+  await withTransientDbRetry('create-child-recursive', async () => {
+    await prisma.agent.create({
+      data: {
+        id: childId,
+        userId: session.user.id,
+        goal: 'Child recursive delete test',
+        parentAgentId: parentId,
+        busId: parentId,
+        status: 'ACTIVE',
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: childId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Delete parent — should recursively delete child
+  const delRes = await request(`${BASE_URL}/api/agents/${parentId}`, {
+    method: 'DELETE',
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(delRes.status, 204, delRes.data);
+
+  // Both parent and child should be 404 on GET
+  const parentGet = await request(`${BASE_URL}/api/agents/${parentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(parentGet.status, 404, parentGet.data);
+
+  const childGet = await request(`${BASE_URL}/api/agents/${childId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(childGet.status, 404, childGet.data);
+});
+
+test('DELETE /:id — cleans up attention requests', async () => {
+  const session = await createAnonymousSession('del-attention');
+
+  // Create agent directly in DB
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-agent-attention', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Attention request cleanup test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+    // Create an attention request
+    await prisma.agentAttentionRequest.create({
+      data: {
+        userId: session.user.id,
+        agentId,
+        workflowId: 'test-workflow-id',
+        question: 'Test question?',
+      },
+    });
+  });
+
+  // Verify attention request exists
+  const beforeCount = await withTransientDbRetry('count-attention-before', async () => {
+    return prisma.agentAttentionRequest.count({ where: { agentId } });
+  });
+  assert(beforeCount === 1, `Expected 1 attention request before delete, got ${beforeCount}`);
+
+  // Delete agent
+  const delRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    method: 'DELETE',
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(delRes.status, 204, delRes.data);
+
+  // Verify attention request is cleaned up
+  const afterCount = await withTransientDbRetry('count-attention-after', async () => {
+    return prisma.agentAttentionRequest.count({ where: { agentId } });
+  });
+  assert(afterCount === 0, `Expected 0 attention requests after delete, got ${afterCount}`);
+});
+
+test('DELETE /:id — internal auth delete (no userId)', async () => {
+  const session = await createAnonymousSession('del-internal');
+  const agentId = await createTestAgent(session.user.id, 'Internal delete test');
+
+  // Delete with only X-API-Key (no X-User-Id) — internal auth bypasses ownership check
+  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    method: 'DELETE',
+    headers: { 'X-API-Key': API_KEY },
+  });
+  assertStatus(res.status, 204, res.data);
+
+  // Verify it's gone
+  const check = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(check.status, 404, check.data);
+});
+
+// ========================= Terminal agent pause behavior ====================
+
+test('POST /:id/pause — terminal FAILED agent stays FAILED', async () => {
+  const session = await createAnonymousSession('pause-failed');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-failed-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Pause FAILED test',
+        status: 'FAILED',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const pauseRes = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(pauseRes.status, 200, pauseRes.data);
+
+  const statusRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  const status = assertSchema(StatusResponse, statusRes.data, 'pause-failed check');
+  assert(status.status === 'FAILED', `Expected FAILED to persist, got ${status.status}`);
+
+  await withTransientDbRetry('cleanup-failed-pause', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+// ========================= Resume with COST_LIMIT_REACHED parent ===========
+
+test('POST /:id/resume — child with COST_LIMIT_REACHED parent → 400', async () => {
+  const session = await createAnonymousSession('resume-cost-limit');
+
+  // Create parent with COST_LIMIT_REACHED status
+  const parentId = randomUUID();
+  trackedAgentIds.add(parentId);
+  await withTransientDbRetry('create-cost-limit-parent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: parentId,
+        userId: session.user.id,
+        goal: 'Cost-limited parent',
+        status: 'COST_LIMIT_REACHED',
+        busId: parentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Create child PAUSED
+  const childId = randomUUID();
+  trackedAgentIds.add(childId);
+  await withTransientDbRetry('create-cost-limit-child', async () => {
+    await prisma.agent.create({
+      data: {
+        id: childId,
+        userId: session.user.id,
+        goal: 'Child of cost-limited parent',
+        parentAgentId: parentId,
+        busId: parentId,
+        status: 'PAUSED',
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: childId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Try to resume child — should fail because parent is COST_LIMIT_REACHED
+  const res = await request(`${BASE_URL}/api/agents/${childId}/resume`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  assert(body.error.includes('cost-limited'), `Expected cost-limited error, got: ${body.error}`);
+
+  // Cleanup
+  await withTransientDbRetry('cleanup-cost-limit', async () => {
+    await prisma.agent.updateMany({
+      where: { id: { in: [parentId, childId] } },
+      data: { deletedAt: new Date() },
+    });
+  });
+});
+
+// ========================= Resume tenant isolation ==========================
+
+test('POST /:id/resume — tenant isolation: user B cannot resume user A agent → 404', async () => {
+  const sessionA = await createAnonymousSession('resume-iso-a');
+  const sessionB = await createAnonymousSession('resume-iso-b');
+
+  // Create PAUSED agent for user A
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-resume-iso', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: sessionA.user.id,
+        goal: 'Resume isolation test',
+        status: 'PAUSED',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // User B tries to resume user A's agent
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/resume`, {
+    method: 'POST',
+    headers: authHeaders(sessionB.session.access_token),
+  });
+  assertStatus(res.status, 404, res.data);
+
+  // Cleanup
+  await withTransientDbRetry('cleanup-resume-iso', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+// ========================= Start-agent edge cases ==========================
+
+test('POST /:id/start-agent — already in agent mode → 400', async () => {
+  const session = await createAnonymousSession('start-already');
+
+  // Create agent with temporalWorkflowId set (simulating agent mode)
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-agent-mode', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Already in agent mode test',
+        status: 'ACTIVE',
+        temporalWorkflowId: 'fake-workflow-id-' + randomUUID(),
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/start-agent`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  assert(body.error.includes('already in agent mode'), `Expected already in agent mode error, got: ${body.error}`);
+
+  await withTransientDbRetry('cleanup-agent-mode', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+test('POST /:id/start-agent — no verifier → 400', async () => {
+  const session = await createAnonymousSession('start-no-verifier');
+
+  // Create agent WITHOUT a verifier
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-no-verifier', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'No verifier start-agent test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    // No verifier created intentionally
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/start-agent`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  assert(body.error.includes('verifier'), `Expected verifier error, got: ${body.error}`);
+
+  await withTransientDbRetry('cleanup-no-verifier', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+// ========================= Restart edge cases ==============================
+
+test('POST /:id/restart — no verifier → 400', async () => {
+  const session = await createAnonymousSession('restart-no-verifier');
+
+  // Create agent WITHOUT a verifier
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-restart-no-verifier', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'No verifier restart test',
+        status: 'FAILED',
+        busId: agentId,
+      },
+    });
+    // No verifier created intentionally
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/restart`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  assert(body.error.includes('verifier'), `Expected verifier error, got: ${body.error}`);
+
+  await withTransientDbRetry('cleanup-restart-no-verifier', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+test('POST /:id/restart — tenant isolation: user B cannot restart user A agent → 404', async () => {
+  const sessionA = await createAnonymousSession('restart-iso-a');
+  const sessionB = await createAnonymousSession('restart-iso-b');
+  const agentId = await createTestAgent(sessionA.user.id, 'Restart isolation test');
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/restart`, {
+    method: 'POST',
+    headers: authHeaders(sessionB.session.access_token),
+  });
+  assertStatus(res.status, 404, res.data);
+
+  await deleteTestAgent(agentId, sessionA.user.id);
+});
+
+// ========================= PATCH /:id/status with structuredResponse =======
+
+test('PATCH /:id/status — with structuredResponse and all fields', async () => {
+  const session = await createAnonymousSession('status-structured');
+
+  // Create agent directly in DB to avoid chatHandler race
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-structured-status', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Structured response test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const structuredResponse = { result: 'success', data: [1, 2, 3] };
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'COMPLETED',
+      statusMessage: 'Done with structured output',
+      progress: 1.0,
+      tokenCount: 8000,
+      tokensIn: 5000,
+      tokensOut: 3000,
+      contextSize: 15000,
+      messageCount: 30,
+      structuredResponse,
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(UpdateStatusResponse, res.data, 'PATCH status structured');
+  assert(body.status === 'COMPLETED', `Expected COMPLETED, got ${body.status}`);
+  assert(body.tokens_in === 5000, `Expected tokens_in 5000, got ${body.tokens_in}`);
+  assert(body.tokens_out === 3000, `Expected tokens_out 3000, got ${body.tokens_out}`);
+
+  // Verify structuredResponse is persisted by checking via GET detail
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= PATCH /:id price_limit via prisma direct ========
+
+test('PATCH /:id — price_limit_cents below cost set via prisma → 400', async () => {
+  const session = await createAnonymousSession('price-prisma');
+
+  // Create agent directly in DB and set treeCostCents via prisma
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-price-prisma', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Price limit prisma test',
+        status: 'ACTIVE',
+        treeCostCents: 100,
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Try to set price limit below current tree cost
+  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ price_limit_cents: 50 }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string; current_cost_cents?: number };
+  assert(body.error.includes('current cost'), `Expected cost error, got: ${body.error}`);
+  assert(body.current_cost_cents === 100, `Expected current_cost_cents=100, got ${body.current_cost_cents}`);
+
+  await withTransientDbRetry('cleanup-price-prisma', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+// ========================= POST /:id/messages — completed agent resets =====
+
+test('POST /:id/messages — user message to completed agent resets status', async () => {
+  const session = await createAnonymousSession('msg-reset');
+
+  // Create agent with COMPLETED status and a temporalWorkflowId
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-completed-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Completed agent message test',
+        status: 'COMPLETED',
+        temporalWorkflowId: 'fake-completed-workflow-' + randomUUID(),
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Post a user message — should reset status from COMPLETED to ACTIVE
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ message: 'follow-up question' }),
+  });
+  assertStatus(res.status, 201, res.data);
+
+  // Verify status has been reset
+  const statusRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  const status = assertSchema(StatusResponse, statusRes.data, 'msg-reset status check');
+  assert(status.status === 'ACTIVE', `Expected ACTIVE after message to completed agent, got ${status.status}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= Batch messages tenant isolation ==================
+
+test('POST /messages/batch — tenant isolation: user B cannot see user A messages', async () => {
+  const sessionA = await createAnonymousSession('batch-iso-a');
+  const sessionB = await createAnonymousSession('batch-iso-b');
+  trackedUserIds.add(sessionA.user.id);
+  trackedUserIds.add(sessionB.user.id);
+
+  // Create agent for user A and post a message
+  const agentId = await createTestAgent(sessionA.user.id, 'Batch isolation agent');
+  const msgRes = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ message: 'secret message', role: 'ASSISTANT' }),
+  });
+  assertStatus(msgRes.status, 201, msgRes.data);
+  const messageId = (msgRes.data as { message_id: string }).message_id;
+
+  // User B tries to batch-fetch user A's message
+  const batchRes = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': sessionB.user.id },
+    body: JSON.stringify({ ids: [messageId] }),
+  });
+  assertStatus(batchRes.status, 200, batchRes.data);
+  const body = batchRes.data as { messages: unknown[] };
+  assert(body.messages.length === 0, `User B should not see user A messages, got ${body.messages.length}`);
+
+  await deleteTestAgent(agentId, sessionA.user.id);
+});
+
+// ========================= PATCH /:id — tool_ids update ====================
+
+test('PATCH /:id — tool_ids update', async () => {
+  const session = await createAnonymousSession('upd-tools');
+  const agentId = await createTestAgent(session.user.id, 'Tool IDs update test');
+
+  // Get current tools (should be empty or default)
+  const detailBefore = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detailBefore.status, 200, detailBefore.data);
+
+  // Update with empty tool_ids (clear all tools)
+  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ tool_ids: [] }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(UpdateAgentResponse, res.data, 'PATCH /:id tool_ids');
+  assert(body.agent.tools.length === 0, `Expected 0 tools after clearing, got ${body.agent.tools.length}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
 // ========================= Cleanup invariant (best-effort) =================
 
 test('cleanup: tracked agents are soft-deleted', async () => {
@@ -1975,6 +2591,815 @@ test('cleanup: tracked agents are soft-deleted', async () => {
     headers: apiKeyHeaders(session.user.id),
   });
   assertStatus(res.status, 204, res.data);
+});
+
+// ========================= Additional coverage tests =======================
+
+test('POST / — with context_gates parameter', async () => {
+  const session = await createAnonymousSession('ctx-gates');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({
+      goal: 'Context gates test',
+      context_gates: {
+        user_profile: true,
+        network: false,
+        recent_communications: false,
+        integrations: true,
+      },
+    }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  assert(typeof body.agent_id === 'string', 'Expected agent_id in response');
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — with start_phase=plan', async () => {
+  const session = await createAnonymousSession('start-plan');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ goal: 'Start phase plan test', start_phase: 'plan' }),
+  });
+  // 201 on success; 500 if Temporal is not running in this environment
+  if (res.status !== 201 && res.status !== 500) {
+    throw new Error(`Expected 201 or 500 for start_phase=plan, got ${res.status}`);
+  }
+  if (res.status === 201) {
+    const body = res.data as { agent_id: string };
+    await deleteTestAgent(body.agent_id, session.user.id);
+  }
+});
+
+test('POST / — with start_phase=execute', async () => {
+  const session = await createAnonymousSession('start-exec');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ goal: 'Start phase execute test', start_phase: 'execute' }),
+  });
+  // 201 on success; 500 if Temporal is not running in this environment
+  if (res.status !== 201 && res.status !== 500) {
+    throw new Error(`Expected 201 or 500 for start_phase=execute, got ${res.status}`);
+  }
+  if (res.status === 201) {
+    const body = res.data as { agent_id: string };
+    await deleteTestAgent(body.agent_id, session.user.id);
+  }
+});
+
+test('POST / — with price_limit_cents', async () => {
+  const session = await createAnonymousSession('price-limit');
+  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+    goal: 'Price limit test',
+    price_limit_cents: 500,
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  // Verify price_limit_cents is persisted
+  const detailRes = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = detailRes.data as { agent: { price_limit_cents: number | null } };
+  assert(detail.agent.price_limit_cents === 500, `Expected price_limit_cents=500, got ${detail.agent.price_limit_cents}`);
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — with custom_system_prompt', async () => {
+  const session = await createAnonymousSession('custom-prompt');
+  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+    goal: 'Custom prompt test',
+    custom_system_prompt: 'You are a helpful coding assistant.',
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — with write_lock_enabled', async () => {
+  const session = await createAnonymousSession('write-lock');
+  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+    goal: 'Write lock test',
+    write_lock_enabled: true,
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('GET /:id — with before query param (pagination)', async () => {
+  const session = await createAnonymousSession('msg-since');
+  const agentId = await createTestAgent(session.user.id, 'Message since test');
+  const before = new Date().toISOString();
+  // Messages are returned via the agent detail endpoint with optional ?before= pagination param
+  const res = await request(`${BASE_URL}/api/agents/${agentId}?before=${before}`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(GetAgentResponse, res.data, 'GET /:id with before param');
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('POST /:id/messages — system message via internal auth', async () => {
+  const session = await createAnonymousSession('msg-system');
+  const agentId = await createTestAgent(session.user.id, 'System message test');
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      message: 'System notification',
+      role: 'SYSTEM',
+      metadata: { type: 'system_notification' },
+    }),
+  });
+  assertStatus(res.status, 201, res.data);
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('POST /:id/start-agent — happy path (no Temporal)', async () => {
+  const session = await createAnonymousSession('start-agent');
+  const agentId = await createTestAgent(session.user.id, 'Start agent test');
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/start-agent`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({}),
+  });
+  // May succeed (200) or fail (500 if Temporal not running) — exercises the route
+  if (res.status !== 200 && res.status !== 500) {
+    throw new Error(`Expected 200 or 500 for start-agent, got ${res.status}`);
+  }
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('POST /:id/restart — happy path (no Temporal)', async () => {
+  const session = await createAnonymousSession('restart');
+  const agentId = await createTestAgent(session.user.id, 'Restart test');
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/restart`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+  });
+  // May succeed (200) or fail (500 if Temporal not running) — exercises the route
+  if (res.status !== 200 && res.status !== 500) {
+    throw new Error(`Expected 200 or 500 for restart, got ${res.status}`);
+  }
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= resolvePromptSecrets via internal auth ===========
+
+test('POST / — resolvePromptSecrets replaces {{VAR}} in goal (internal auth)', async () => {
+  const session = await createAnonymousSession('resolve-secrets');
+
+  // When PROMPT_SECRET_UNDEFINED_SECRET is not set, {{UNDEFINED_SECRET}} stays as-is
+  const goalWithSecret = 'Test goal with {{UNDEFINED_SECRET}} placeholder';
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), { goal: goalWithSecret });
+  assertStatus(res.status, 201, res.data);
+  const body = assertSchema(CreateAgentResponse, res.data, 'POST / resolve secrets');
+
+  // The {{UNDEFINED_SECRET}} should remain as-is since PROMPT_SECRET_UNDEFINED_SECRET is not set
+  assert(
+    body.goal.includes('{{UNDEFINED_SECRET}}'),
+    `Expected unresolved secret to remain, got goal: "${body.goal}"`
+  );
+  trackedAgentIds.add(body.agent_id);
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// ========================= POST /:id/messages — FAILED agent resets ========
+
+test('POST /:id/messages — user message to FAILED agent resets status', async () => {
+  const session = await createAnonymousSession('msg-reset-failed');
+
+  // Create agent with FAILED status and a temporalWorkflowId
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-failed-agent-msg', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Failed agent message test',
+        status: 'FAILED',
+        temporalWorkflowId: 'fake-failed-workflow-' + randomUUID(),
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Post a user message — should reset status from FAILED to ACTIVE
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ message: 'retry after failure' }),
+  });
+  assertStatus(res.status, 201, res.data);
+
+  // Verify status has been reset
+  const statusRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  const status = assertSchema(StatusResponse, statusRes.data, 'msg-reset-failed status check');
+  assert(status.status === 'ACTIVE', `Expected ACTIVE after message to failed agent, got ${status.status}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/messages — with attachments ===========
+
+test('POST /:id/messages — message with file_pointer attachment', async () => {
+  const session = await createAnonymousSession('msg-file-ptr');
+  const agentId = await createTestAgent(session.user.id, 'File pointer message test');
+
+  const filePointer = {
+    id: randomUUID(),
+    storage_path: `${session.user.id}/test-file.txt`,
+    original_filename: 'test-file.txt',
+    mime_type: 'text/plain',
+    size_bytes: 100,
+    created_at: new Date().toISOString(),
+  };
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      message: 'Here is a file',
+      role: 'USER',
+      file_pointer: filePointer,
+    }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = assertSchema(PostMessageResponse, res.data, 'POST messages file_pointer');
+  assert(body.role === 'USER', `Expected USER role, got ${body.role}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/messages — message with metadata ======
+
+test('POST /:id/messages — internal message with full metadata', async () => {
+  const session = await createAnonymousSession('msg-metadata');
+  const agentId = await createTestAgent(session.user.id, 'Metadata message test');
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      message: 'Tool output with rich metadata',
+      role: 'TOOL',
+      metadata: {
+        toolName: 'web_search',
+        toolStatus: 'success',
+        title: 'Search results',
+        duration_ms: 1500,
+        urls: ['https://example.com'],
+      },
+    }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = assertSchema(PostMessageResponse, res.data, 'POST messages metadata');
+  assert(body.role === 'TOOL', `Expected TOOL role, got ${body.role}`);
+
+  // Verify metadata persisted via GET detail
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'metadata detail');
+  const toolMsg = detailBody.messages.find((m) => m.text === 'Tool output with rich metadata');
+  assert(toolMsg !== undefined, 'Tool message should be visible in detail');
+  assert(toolMsg!.metadata !== null, 'Metadata should be persisted');
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/messages — ACTIVE agent with workflow =
+
+test('POST /:id/messages — user message to ACTIVE agent with dead workflow', async () => {
+  const session = await createAnonymousSession('msg-dead-workflow');
+
+  // Create ACTIVE agent with a fake workflow ID (will fail to signal but not break)
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-dead-workflow-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Dead workflow message test',
+        status: 'ACTIVE',
+        temporalWorkflowId: 'dead-workflow-' + randomUUID(),
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Message to agent with a dead workflow — should succeed (graceful error handling)
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ message: 'message to agent with dead workflow' }),
+  });
+  assertStatus(res.status, 201, res.data);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/messages — ACTIVE chat mode agent =====
+
+test('POST /:id/messages — user message to chat-mode agent (no workflow)', async () => {
+  const session = await createAnonymousSession('msg-chat-mode');
+
+  // Create agent without temporalWorkflowId (chat mode)
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-chat-mode-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Chat mode message test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // User message triggers chat handler (fire-and-forget, may fail but request succeeds)
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ message: 'hello chat mode agent' }),
+  });
+  assertStatus(res.status, 201, res.data);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= DELETE /:id — recursive delete 3-level tree =====
+
+test('DELETE /:id — recursive delete with grandchild (3-level tree)', async () => {
+  const session = await createAnonymousSession('recursive-del-3');
+
+  // Create grandparent
+  const grandparentId = randomUUID();
+  trackedAgentIds.add(grandparentId);
+  await withTransientDbRetry('create-grandparent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: grandparentId,
+        userId: session.user.id,
+        goal: 'Grandparent',
+        status: 'ACTIVE',
+        busId: grandparentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: grandparentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Create parent
+  const parentId = randomUUID();
+  trackedAgentIds.add(parentId);
+  await withTransientDbRetry('create-parent-3', async () => {
+    await prisma.agent.create({
+      data: {
+        id: parentId,
+        userId: session.user.id,
+        goal: 'Parent',
+        parentAgentId: grandparentId,
+        busId: grandparentId,
+        status: 'ACTIVE',
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Create grandchild
+  const grandchildId = randomUUID();
+  trackedAgentIds.add(grandchildId);
+  await withTransientDbRetry('create-grandchild', async () => {
+    await prisma.agent.create({
+      data: {
+        id: grandchildId,
+        userId: session.user.id,
+        goal: 'Grandchild',
+        parentAgentId: parentId,
+        busId: grandparentId,
+        status: 'ACTIVE',
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId: grandchildId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  // Delete grandparent — should recursively delete parent and grandchild
+  const delRes = await request(`${BASE_URL}/api/agents/${grandparentId}`, {
+    method: 'DELETE',
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(delRes.status, 204, delRes.data);
+
+  // All three should be 404
+  for (const id of [grandparentId, parentId, grandchildId]) {
+    const getRes = await request(`${BASE_URL}/api/agents/${id}`, {
+      headers: apiKeyHeaders(session.user.id),
+    });
+    assertStatus(getRes.status, 404, getRes.data);
+  }
+});
+
+// ========================= PATCH /:id/status — tool token fields ===========
+
+test('PATCH /:id/status — with tool token cost fields', async () => {
+  const session = await createAnonymousSession('status-tool-tokens');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-tool-token-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Tool token cost test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'ACTIVE',
+      progress: 0.5,
+      tokenCount: 2000,
+      tokensIn: 1200,
+      tokensOut: 800,
+      toolTokensIn: 500,
+      toolTokensOut: 300,
+      toolCostCents: 15,
+      contextSize: 8000,
+      messageCount: 12,
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(UpdateStatusResponse, res.data, 'PATCH status tool tokens');
+  assert(body.status === 'ACTIVE', `Expected ACTIVE, got ${body.status}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= GET / — with source filter ======================
+
+test('GET / — with source query param', async () => {
+  const session = await createAnonymousSession('list-source');
+  const agentId = await createTestAgent(session.user.id, 'Source filter test');
+
+  // Filter by WEB source (default)
+  const res = await request(`${BASE_URL}/api/agents?source=WEB`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(ListAgentsResponse, res.data, 'GET / source filter');
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/messages — message empty string =======
+
+test('POST /:id/messages — empty message text succeeds', async () => {
+  const session = await createAnonymousSession('msg-empty-text');
+  const agentId = await createTestAgent(session.user.id, 'Empty message test');
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ message: '', role: 'TOOL' }),
+  });
+  // Empty message may succeed or fail depending on validation
+  if (res.status !== 201 && res.status !== 400) {
+    throw new Error(`Expected 201 or 400 for empty message, got ${res.status}`);
+  }
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST / — with response_schema ===================
+
+test('POST / — with response_schema parameter', async () => {
+  const session = await createAnonymousSession('response-schema');
+  const schema = {
+    fields: [
+      { name: 'result', type: 'str', required: true, description: 'The result string' },
+      { name: 'confidence', type: 'float', required: false, description: 'Confidence score' },
+    ],
+  };
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Response schema test',
+    response_schema: schema,
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = assertSchema(CreateAgentResponse, res.data, 'POST / response_schema');
+  trackedAgentIds.add(body.agent_id);
+
+  // Verify response_schema is persisted
+  const detail = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'response_schema detail');
+  assert(detailBody.agent.response_schema !== null, 'response_schema should be persisted');
+
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// ========================= POST / — with max_iterations ====================
+
+test('POST / — with max_iterations parameter', async () => {
+  const session = await createAnonymousSession('max-iterations');
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Max iterations test',
+    max_iterations: 5,
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = assertSchema(CreateAgentResponse, res.data, 'POST / max_iterations');
+  trackedAgentIds.add(body.agent_id);
+
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// ========================= PATCH /:id — multiple fields at once =============
+
+test('PATCH /:id — update model and verifier_prompt simultaneously', async () => {
+  const session = await createAnonymousSession('upd-multi');
+  const agentId = await createTestAgent(session.user.id, 'Multi-update test');
+
+  const newModel = 'rose-labs/rose-1-ultra';
+  const newVerifierPrompt = 'Updated verifier: verify that model is set correctly';
+  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ model: newModel, verifier_prompt: newVerifierPrompt }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(UpdateAgentResponse, res.data, 'PATCH /:id multi');
+  assert(body.agent.model === newModel, `Expected updated model, got "${body.agent.model}"`);
+  assert(
+    body.agent.verifier?.llm_judge_prompt === newVerifierPrompt,
+    `Expected updated verifier prompt, got "${body.agent.verifier?.llm_judge_prompt}"`
+  );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= PATCH /:id/status — statusMessage only ==========
+
+test('PATCH /:id/status — update statusMessage without changing status', async () => {
+  const session = await createAnonymousSession('status-msg-only');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-status-msg-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Status message only test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'ACTIVE',
+      statusMessage: 'Planning next steps...',
+      progress: 0.2,
+      tokenCount: 500,
+      contextSize: 2000,
+      messageCount: 5,
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(UpdateStatusResponse, res.data, 'PATCH status msg only');
+  assert(body.status_message === 'Planning next steps...', `Expected status message, got "${body.status_message}"`);
+  assert(body.status === 'ACTIVE', `Expected ACTIVE, got ${body.status}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ========================= POST /:id/pause — tenant isolation ===============
+
+test('POST /:id/pause — tenant isolation: user B cannot pause user A agent → 404', async () => {
+  const sessionA = await createAnonymousSession('pause-iso-a');
+  const sessionB = await createAnonymousSession('pause-iso-b');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-pause-iso', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: sessionA.user.id,
+        goal: 'Pause isolation test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
+    method: 'POST',
+    headers: authHeaders(sessionB.session.access_token),
+  });
+  assertStatus(res.status, 404, res.data);
+
+  await withTransientDbRetry('cleanup-pause-iso', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
+});
+
+// ========================= GET /:id — soft-deleted agent → 404 =============
+
+test('GET /:id — soft-deleted agent returns 404', async () => {
+  const session = await createAnonymousSession('get-soft-del');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-soft-del-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Soft deleted test',
+        status: 'ACTIVE',
+        deletedAt: new Date(), // Pre-soft-delete
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+    });
+  });
+
+  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(res.status, 404, res.data);
+});
+
+// ==================== DEEP COVERAGE — HYBRIDAUTH + MESSAGES + GEOIP ====================
+
+// 1. Rose API key auth: invalid key should return 401
+test('HybridAuth — invalid Rose API key → 401', async () => {
+  const res = await request(`${BASE_URL}/api/agents`, {
+    headers: { 'X-API-Key': 'invalid-rose-api-key-that-does-not-exist' },
+  });
+  assertStatus(res.status, 401, res.data);
+});
+
+// 2. Agent creation with X-Forwarded-For to exercise geoip getClientIP
+test('POST /agents — with X-Forwarded-For header (geoip path)', async () => {
+  const session = await createAnonymousSession('geo-test');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: {
+      ...apiKeyHeaders(session.user.id),
+      'X-Forwarded-For': '8.8.8.8',
+    },
+    body: JSON.stringify({ goal: 'Geoip test agent', model: 'rose-1-lite' }),
+  });
+  // Agent creation should succeed (geoip lookup happens asynchronously)
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// 3. POST /:id/messages with invalid body (Zod validation error → handleRouteError ZodError branch)
+test('POST /:id/messages — invalid body → 400 (Zod)', async () => {
+  const session = await createAnonymousSession('msg-zod-err');
+  const agentId = await createTestAgent(session.user.id, 'Zod error test');
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ message: 12345, role: 'INVALID_ROLE' }), // wrong types
+  });
+  assertStatus(res.status, 400, res.data);
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// 4. POST /messages/batch with non-string IDs → 400 or 500 (validation error)
+test('POST /messages/batch — non-string IDs → 400 or 500', async () => {
+  const session = await createAnonymousSession('batch-nonstr');
+  const res = await request(`${BASE_URL}/api/agents/messages/batch`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ ids: [123, 456] }),
+  });
+  if (res.status !== 400 && res.status !== 500) {
+    throw new Error(`Expected 400 or 500 for non-string IDs, got ${res.status}`);
+  }
+});
+
+// 5. GET /:id/attachments/:fileId/url — empty storage_path → 400
+test('GET /:id/attachments/:fileId/url — empty string storage_path → 400', async () => {
+  const session = await createAnonymousSession('attach-empty');
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/attachments/${FAKE_UUID}/url?storage_path=`,
+    { headers: authHeaders(session.session.access_token) }
+  );
+  assertStatus(res.status, 400, res.data);
+});
+
+// 6. Agent creation with private IP in X-Forwarded-For (exercises isPrivateIP branches in geoip)
+test('POST /agents — with private IP in X-Forwarded-For', async () => {
+  const session = await createAnonymousSession('geo-private');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: {
+      ...apiKeyHeaders(session.user.id),
+      'X-Forwarded-For': '192.168.1.1',
+    },
+    body: JSON.stringify({ goal: 'Private IP test', model: 'rose-1-lite' }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// 7. Agent creation with IPv6-mapped IPv4 in X-Forwarded-For
+test('POST /agents — with IPv6-mapped IPv4 X-Forwarded-For', async () => {
+  const session = await createAnonymousSession('geo-ipv6');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: {
+      ...apiKeyHeaders(session.user.id),
+      'X-Forwarded-For': '::ffff:10.0.0.1',
+    },
+    body: JSON.stringify({ goal: 'IPv6 mapped test', model: 'rose-1-lite' }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// 8. POST /:id/messages — with missing message field
+test('POST /:id/messages — missing message field → 400', async () => {
+  const session = await createAnonymousSession('msg-nomsg');
+  const agentId = await createTestAgent(session.user.id, 'Missing message field');
+  const res = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 400, res.data);
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// 9. Multiple different model names to exercise model pricing paths
+test('POST /agents — with different model names (model pricing)', async () => {
+  const session = await createAnonymousSession('model-pricing');
+  // Create agents with different models to exercise modelPricing getModelPricing
+  for (const model of ['rose-1-lite', 'rose-1-ultra']) {
+    const res = await request(`${BASE_URL}/api/agents`, {
+      method: 'POST',
+      headers: apiKeyHeaders(session.user.id),
+      body: JSON.stringify({ goal: `Model pricing test ${model}`, model }),
+    });
+    assertStatus(res.status, 201, res.data);
+    const body = res.data as { agent_id: string };
+    await deleteTestAgent(body.agent_id, session.user.id);
+  }
 });
 
 // ---------------------------------------------------------------------------

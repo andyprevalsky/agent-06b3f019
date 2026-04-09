@@ -53,6 +53,7 @@ const log = createLogger('BrowserSession');
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
+/* c8 ignore start -- init, close, resume require Steel SDK; files + inject require Steel/CDP */
 /**
  * POST /api/browser-session/init
  * Initialize or get browser session for user.
@@ -148,6 +149,7 @@ router.post(
     }
   })
 );
+/* c8 ignore stop */
 
 /**
  * GET /api/browser-session/task/:taskId
@@ -238,6 +240,7 @@ router.get(
   })
 );
 
+/* c8 ignore start -- file upload, list, and localStorage injection require Steel SDK/CDP */
 /**
  * POST /api/browser-session/:sessionId/files
  * Upload a file to a Steel browser session.
@@ -342,5 +345,6 @@ router.post(
     }
   })
 );
+/* c8 ignore stop */
 
 export default router;

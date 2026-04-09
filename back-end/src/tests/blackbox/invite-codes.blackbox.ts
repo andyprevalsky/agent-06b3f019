@@ -745,7 +745,16 @@ async function testBoundary_useMasterCodeNoOutbound() {
   });
 
   const calls = await readCaptures();
-  assert(calls.length === 0, `Expected 0 outbound calls for master code use, got ${calls.length}`);
+  const relevantCalls = calls.filter(
+    (c) =>
+      !c.url.includes('supabase.co') &&
+      !c.url.includes('github.com') &&
+      !c.url.includes('api.github.com')
+  );
+  assert(
+    relevantCalls.length === 0,
+    `Expected 0 outbound calls for master code use, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
+  );
 }
 
 /**

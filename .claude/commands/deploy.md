@@ -10,18 +10,6 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 ---
 
-# Step 0: Capture original Conductor workspace title
-
-Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge:
-
-```bash
-WORKSPACE_DIR="$(basename "$PWD")"
-ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
-```
-
-If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final rename step.
-
 # Phase 1: Test Loop
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -82,6 +70,14 @@ cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
+
+## Step 4a: Code coverage check (skip if no back-end/ changes)
+
+```bash
+cd back-end && npm run test:coverage
+```
+
+Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
 
 ## Step 5: Spin up local services
 
@@ -327,20 +323,14 @@ If a deploy fails:
 1. Show the failure to the user
 2. If fixable, create a new fix branch/commit, push, create a new PR (Step 8), then continue from Step 9.
 
-## Step 14: Restore workspace name via rename
+## Step 14: New branch
 
-End the deploy flow by restoring the Conductor workspace title that was captured in Step 0:
-
-```bash
-/rename $ORIGINAL_WORKSPACE_TITLE
-```
-
-If `ORIGINAL_WORKSPACE_TITLE` was empty, skip this step.
+Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
 
 ## Step 15: Done
 
-After `/rename` completes (or is skipped because title was empty), report to the user:
+After the new branch is created, report to the user:
 - PR URL
 - Which services were deployed
 - Any review issues that were fixed along the way
-- The restored workspace title
+- The new branch name

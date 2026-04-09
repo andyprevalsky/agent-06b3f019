@@ -24,6 +24,7 @@ export class AgentNotFoundError extends Error {
   }
 }
 
+/* c8 ignore start -- processTopup requires x402 payment middleware which needs real blockchain transactions */
 /**
  * Process a topup payment: validate, create/find wallet user, add credits.
  */
@@ -62,6 +63,7 @@ export async function processTopup(payment: { amount?: string; payer?: string } 
     available_endpoints: getX402Endpoints(),
   };
 }
+/* c8 ignore stop */
 
 /**
  * Get agent status with recent messages and credit balance.

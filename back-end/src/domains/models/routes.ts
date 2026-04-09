@@ -26,6 +26,7 @@ router.get(
       const result = await service.listModels();
       res.json(result);
     } catch (error) {
+      /* c8 ignore next 6 -- defensive catch for unexpected API errors */
       log.error('Models endpoint error', {
         error: error instanceof Error ? error.message : 'Unknown error',
       });

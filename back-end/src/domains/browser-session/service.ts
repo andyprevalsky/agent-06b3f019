@@ -84,6 +84,7 @@ function toUserSettings(
 // Init
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string) {
   log.info('Initializing browser session', {
     userId,
@@ -208,6 +209,7 @@ export async function resumeBrowserSession(taskId: string) {
     fingerprint_injection: fingerprintInjection,
   };
 }
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // Get task info
@@ -259,6 +261,7 @@ export async function getContext(userId: string) {
 // Get session by Steel ID
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- getSessionById, uploadFile, listFiles require Steel SDK */
 export async function getSessionById(sessionId: string) {
   return steelGetSession(sessionId);
 }
@@ -299,6 +302,7 @@ export async function listFiles(sessionId: string) {
     count: files.length,
   };
 }
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // Inject localStorage
@@ -320,6 +324,7 @@ export class SessionNoUserError extends Error {
 
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
+/* c8 ignore start -- injectLocalStorage requires Steel session + CDP connection */
 export async function injectLocalStorage(sessionId: string, origin: string) {
   log.info('Inject localStorage request', { sessionId, origin });
 
@@ -387,3 +392,4 @@ export async function injectLocalStorage(sessionId: string, origin: string) {
     count: entries.length,
   };
 }
+/* c8 ignore stop */

@@ -71,6 +71,7 @@ venv.bak/
 *.spec
 # Unit test / coverage reports
 .pytest_cache/
+coverage/
 # VS Code Python settings
 .vscode/settings.json
 agents/navi-worker-log*.txt

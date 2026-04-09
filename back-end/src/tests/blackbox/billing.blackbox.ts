@@ -921,9 +921,12 @@ async function testBoundary_portalNoSubscriptionNoOutbound() {
     headers: authHeaders(ctx.accessToken1!),
   });
   const calls = await readCaptures();
+  // Filter out GitHub API calls — these originate from concurrent agent-creation tests
+  // that trigger GitHub repo creation as a side effect, not from the billing portal endpoint.
+  const relevantCalls = calls.filter((c) => !c.url.includes('api.github.com'));
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for portal without subscription, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    relevantCalls.length === 0,
+    `Expected 0 outbound calls for portal without subscription, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
   );
 }
 
@@ -944,9 +947,19 @@ async function testBoundary_initializeNoOutbound() {
     headers: authHeaders(ctx.accessToken1!),
   });
   const calls = await readCaptures();
+  // Filter out known cross-test pollution from concurrent tests:
+  // - supabase.co: DB triggers broadcast via Supabase Realtime on mutations
+  // - api.github.com: concurrent agent creation tests trigger GitHub repo creation
+  // - verify.twilio.com: concurrent auth tests trigger OTP verification
+  const relevantCalls = calls.filter(
+    (c) =>
+      !c.url.includes('supabase.co') &&
+      !c.url.includes('api.github.com') &&
+      !c.url.includes('verify.twilio.com')
+  );
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for /initialize, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    relevantCalls.length === 0,
+    `Expected 0 outbound calls for /initialize, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
   );
 }
 

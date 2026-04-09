@@ -12,18 +12,6 @@ Fast-track merge to main. Runs local validation tests, pushes directly to main, 
 
 ---
 
-# Step 0: Capture original Conductor workspace title
-
-Before tests/merge, capture the current Conductor workspace title so it can be restored at the end:
-
-```bash
-WORKSPACE_DIR="$(basename "$PWD")"
-ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
-```
-
-If `ORIGINAL_WORKSPACE_TITLE` is empty, continue push but skip the final rename step.
-
 ## Step 1: Run local tests
 
 All commands run from repo root. Compute changed files once:
@@ -57,7 +45,13 @@ cd back-end && npx tsc --noEmit
 cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 ```
 
-### 1e. Blackbox API tests (skip if no back-end/ changes)
+### 1e. Code coverage (skip if no back-end/ changes)
+
+```bash
+cd back-end && npm run test:coverage
+```
+
+### 1f. Blackbox API tests (skip if no back-end/ changes)
 
 Spin up an isolated backend, run tests, tear down:
 
@@ -98,16 +92,6 @@ git push origin main
 
 Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
 
-## Step 5: Restore workspace name via rename
+## Step 5: Done
 
-End the push flow by restoring the Conductor workspace title captured in Step 0:
-
-```bash
-/rename $ORIGINAL_WORKSPACE_TITLE
-```
-
-If `ORIGINAL_WORKSPACE_TITLE` is empty, skip this step.
-
-## Step 6: Done
-
-Report what was pushed (files changed, commit summary), the new branch name, and the restored workspace title.
+Report what was pushed (files changed, commit summary) and the new branch name.

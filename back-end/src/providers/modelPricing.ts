@@ -45,6 +45,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
   // Cache miss or expired - fetch from OpenRouter
   console.log(`🔄 Fetching fresh pricing for ${modelId} from OpenRouter`);
 
+  /* c8 ignore start -- OpenRouter API fetch depends on external API key and response shape */
   try {
     const response = await fetch('https://openrouter.ai/api/v1/models', {
       headers: {
@@ -109,6 +110,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     console.error(`Error fetching model pricing for ${modelId}:`, error);
     return null;
   }
+  /* c8 ignore stop */
 }
 
 /**

@@ -70,6 +70,7 @@ async function resolveCreateMetadata(model: string, clientIP: string | null) {
   return { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo };
 }
 
+/* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
 /** Start a sub-agent workflow and update DB. */
 async function startSubAgentWorkflow(
   body: CreateAgentBody,
@@ -178,6 +179,7 @@ function startChatMode(
       );
   });
 }
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // Create agent
@@ -243,6 +245,7 @@ export async function createAgent(
   };
 }
 
+/* c8 ignore start -- launchAgentWorkflow delegates to Temporal-dependent functions */
 async function launchAgentWorkflow(
   body: CreateAgentBody,
   agent: Awaited<ReturnType<typeof repo.createAgentTransaction>>,
@@ -280,6 +283,7 @@ async function launchAgentWorkflow(
   startChatMode(body, agent.agent.id, agentId, userId);
   return null;
 }
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // Delete agent
@@ -294,6 +298,7 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
     await deleteAgentRecursive(child.id);
   }
   await cleanupAgentSessions(agentId);
+  /* c8 ignore start -- Temporal termination requires live Temporal server */
   if (agent.temporalWorkflowId !== null) {
     try {
       const client = await getTemporalClient();
@@ -320,6 +325,7 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
       }
     }
   } else {
+  /* c8 ignore stop */
     log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
   }
   await repo.deleteAttentionRequests(agentId);

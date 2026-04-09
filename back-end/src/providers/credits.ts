@@ -94,6 +94,7 @@ export async function getUserUsage(userId: string) {
   };
 }
 
+/* c8 ignore start -- hasCreditsRemaining and addSubscriptionCredit have no callers in the codebase */
 /**
  * Check if user has sufficient credits to continue
  */
@@ -142,6 +143,7 @@ export async function addSubscriptionCredit(
   });
   return credit;
 }
+/* c8 ignore stop */
 
 /**
  * Get current subscription tier for a user

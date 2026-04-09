@@ -295,12 +295,14 @@ async function testBoundary_noOutboundCalls() {
   const captures = (capturesRes.data as { captures: { id: number; url: string }[] }).captures;
 
   // Filter out captures that are clearly from other concurrent test domains (Supabase storage,
-  // Twilio, etc.). The tools domain never calls any external service.
+  // Twilio, GitHub, Surge, etc.). The tools domain never calls any external service.
   const toolsCaptures = captures.filter((c) => {
     const url = c.url.toLowerCase();
     // Known third-party URLs used by other domains — not from the tools domain
     if (url.includes('supabase.co')) return false;
     if (url.includes('twilio.com')) return false;
+    if (url.includes('api.github.com')) return false;
+    if (url.includes('api.surge.app')) return false;
     if (url.includes('googleapis.com')) return false;
     if (url.includes('perplexity.ai')) return false;
     if (url.includes('exa.ai')) return false;
