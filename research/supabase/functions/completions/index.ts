@@ -2977,17 +2977,118 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
   const systemParts: string[] = [];
   const anthropicMessages: any[] = [];
 
-  for (const msg of messages) {
+  for (const [idx, msg] of messages.entries()) {
     if (msg.role === 'system') {
       systemParts.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
-    } else {
-      // Transform content blocks if content is an array
+      continue;
+    }
+
+    // OpenAI-style assistant tool_calls -> Anthropic assistant tool_use blocks
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const contentBlocks: any[] = [];
+
+      // Preserve assistant text/content if present
       if (Array.isArray(msg.content)) {
-        const transformedContent = msg.content.map(transformContentBlockForAnthropic);
-        anthropicMessages.push({ ...msg, content: transformedContent });
-      } else {
-        anthropicMessages.push(msg);
+        contentBlocks.push(...msg.content.map(transformContentBlockForAnthropic));
+      } else if (typeof msg.content === 'string') {
+        if (msg.content.length > 0) {
+          contentBlocks.push({ type: 'text', text: msg.content });
+        }
+      } else if (msg.content !== undefined && msg.content !== null) {
+        contentBlocks.push({ type: 'text', text: JSON.stringify(msg.content) });
       }
+
+      for (const [toolIdx, tc] of msg.tool_calls.entries()) {
+        const toolCallId = tc?.id;
+        const toolName = tc?.function?.name;
+        const rawArgs = tc?.function?.arguments;
+
+        if (typeof toolCallId !== 'string' || toolCallId.length === 0) {
+          throw new Error(`transformMessagesForAnthropic: assistant tool_call missing id (message_index=${idx}, tool_index=${toolIdx})`);
+        }
+        if (typeof toolName !== 'string' || toolName.length === 0) {
+          throw new Error(`transformMessagesForAnthropic: assistant tool_call missing function.name (message_index=${idx}, tool_index=${toolIdx})`);
+        }
+
+        let parsedArgs: any = {};
+        if (rawArgs === undefined || rawArgs === null || rawArgs === '') {
+          parsedArgs = {};
+        } else if (typeof rawArgs === 'string') {
+          try {
+            parsedArgs = JSON.parse(rawArgs);
+          } catch {
+            const preview = rawArgs.slice(0, 200);
+            throw new Error(
+              `transformMessagesForAnthropic: invalid tool_call arguments JSON ` +
+              `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, preview=${preview})`
+            );
+          }
+        } else if (typeof rawArgs === 'object') {
+          parsedArgs = rawArgs;
+        } else {
+          throw new Error(
+            `transformMessagesForAnthropic: unsupported tool_call arguments type ` +
+            `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, type=${typeof rawArgs})`
+          );
+        }
+
+        if (parsedArgs === null || Array.isArray(parsedArgs) || typeof parsedArgs !== 'object') {
+          throw new Error(
+            `transformMessagesForAnthropic: tool_call arguments must decode to an object ` +
+            `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName})`
+          );
+        }
+
+        contentBlocks.push({
+          type: 'tool_use',
+          id: toolCallId,
+          name: toolName,
+          input: parsedArgs,
+        });
+      }
+
+      anthropicMessages.push({
+        role: 'assistant',
+        content: contentBlocks.length > 0 ? contentBlocks : [{ type: 'text', text: '' }],
+      });
+      continue;
+    }
+
+    // OpenAI-style tool message -> Anthropic user/tool_result
+    if (msg.role === 'tool') {
+      const toolCallId = msg.tool_call_id;
+      if (typeof toolCallId !== 'string' || toolCallId.length === 0) {
+        throw new Error(`transformMessagesForAnthropic: tool message missing tool_call_id (message_index=${idx})`);
+      }
+
+      let toolResultContent: any;
+      if (Array.isArray(msg.content)) {
+        toolResultContent = msg.content.map(transformContentBlockForAnthropic);
+      } else if (typeof msg.content === 'string') {
+        toolResultContent = msg.content;
+      } else if (msg.content === undefined || msg.content === null) {
+        toolResultContent = '';
+      } else {
+        toolResultContent = JSON.stringify(msg.content);
+      }
+
+      anthropicMessages.push({
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: toolCallId,
+          content: toolResultContent,
+        }],
+      });
+      continue;
+    }
+
+    // Transform content blocks if content is an array
+    if (Array.isArray(msg.content)) {
+      const transformedContent = msg.content.map(transformContentBlockForAnthropic);
+      anthropicMessages.push({ ...msg, content: transformedContent });
+    } else {
+      anthropicMessages.push(msg);
     }
   }
 

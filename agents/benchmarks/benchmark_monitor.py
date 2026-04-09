@@ -232,9 +232,10 @@ def _format_cell(
 # Main monitor loop
 # ---------------------------------------------------------------------------
 
-async def monitor(agent_id: str, base_url: str, interval: int = 60) -> int:
+async def monitor(agent_id: str, base_url: str, interval: int = 60, count_only_approvals: Optional[int] = None) -> int:
     start = time.time()
     prev_total_msgs = -1
+    seen_approval_ids: set = set()
 
     print(f"{DIM}── {_elapsed_str(start)} {'─' * 56}{RESET}")
     print(f"  Monitoring agent {BOLD}{agent_id[:12]}{RESET}")
@@ -365,43 +366,136 @@ async def monitor(agent_id: str, base_url: str, interval: int = 60) -> int:
             return 0
 
         elif has_approvals:
-            cell = _format_cell(
-                elapsed=_elapsed_str(start),
-                verdict="🔔 APPROVAL NEEDED",
-                verdict_color=MAGENTA,
-                root_id=agent_id,
-                root_status=root_status,
-                root_msg_count=root_msg_count,
-                root_cost=root_cost,
-                root_idle=root_idle,
-                root_goal=root_goal,
-                sub_agents=sub_agents,
-                anomalies_by_agent=anomalies_by_agent,
-                errors_by_agent=errors_by_agent,
-                approvals=approvals,
-            )
-            print(cell)
-            return 2
+            # Track unique approval IDs
+            for req in approvals:
+                seen_approval_ids.add(req.get("id"))
+
+            if count_only_approvals is not None:
+                # count_only mode: don't exit, just count approvals
+                target = count_only_approvals
+                current = len(seen_approval_ids)
+                verdict = f"🔔 COUNTING APPROVALS ({current}/{target})"
+                if current >= target:
+                    cell = _format_cell(
+                        elapsed=_elapsed_str(start),
+                        verdict=f"🎉 ALL APPROVALS RECEIVED ({current}/{target})",
+                        verdict_color=GREEN,
+                        root_id=agent_id,
+                        root_status=root_status,
+                        root_msg_count=root_msg_count,
+                        root_cost=root_cost,
+                        root_idle=root_idle,
+                        root_goal=root_goal,
+                        sub_agents=sub_agents,
+                        anomalies_by_agent=anomalies_by_agent,
+                        errors_by_agent=errors_by_agent,
+                        approvals=approvals,
+                        total_elapsed=_elapsed_str(start),
+                    )
+                    print(cell)
+                    return 0
+                else:
+                    cell = _format_cell(
+                        elapsed=_elapsed_str(start),
+                        verdict=verdict,
+                        verdict_color=MAGENTA,
+                        root_id=agent_id,
+                        root_status=root_status,
+                        root_msg_count=root_msg_count,
+                        root_cost=root_cost,
+                        root_idle=root_idle,
+                        root_goal=root_goal,
+                        sub_agents=sub_agents,
+                        anomalies_by_agent=anomalies_by_agent,
+                        errors_by_agent=errors_by_agent,
+                        approvals=approvals,
+                    )
+                    print(cell)
+                    # Don't return — keep polling
+            else:
+                cell = _format_cell(
+                    elapsed=_elapsed_str(start),
+                    verdict="🔔 APPROVAL NEEDED",
+                    verdict_color=MAGENTA,
+                    root_id=agent_id,
+                    root_status=root_status,
+                    root_msg_count=root_msg_count,
+                    root_cost=root_cost,
+                    root_idle=root_idle,
+                    root_goal=root_goal,
+                    sub_agents=sub_agents,
+                    anomalies_by_agent=anomalies_by_agent,
+                    errors_by_agent=errors_by_agent,
+                    approvals=approvals,
+                )
+                print(cell)
+                return 2
 
         elif has_terminal_failure or has_anomalies or has_errors or stall_warning:
-            cell = _format_cell(
-                elapsed=_elapsed_str(start),
-                verdict="🔴 ACTION REQUIRED",
-                verdict_color=RED,
-                root_id=agent_id,
-                root_status=root_status,
-                root_msg_count=root_msg_count,
-                root_cost=root_cost,
-                root_idle=root_idle,
-                root_goal=root_goal,
-                sub_agents=sub_agents,
-                anomalies_by_agent=anomalies_by_agent,
-                errors_by_agent=errors_by_agent,
-                approvals=[],
-                stall_warning=stall_warning,
-            )
-            print(cell)
-            return 1
+            # In count_only mode, only exit on ROOT terminal failure — sub-agent anomalies,
+            # stuck tools, and stalls are expected with many concurrent agents.
+            if count_only_approvals is not None:
+                root_failed = root_status in ("FAILED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS")
+                if root_failed:
+                    cell = _format_cell(
+                        elapsed=_elapsed_str(start),
+                        verdict="🔴 ROOT AGENT FAILED",
+                        verdict_color=RED,
+                        root_id=agent_id,
+                        root_status=root_status,
+                        root_msg_count=root_msg_count,
+                        root_cost=root_cost,
+                        root_idle=root_idle,
+                        root_goal=root_goal,
+                        sub_agents=sub_agents,
+                        anomalies_by_agent=anomalies_by_agent,
+                        errors_by_agent=errors_by_agent,
+                        approvals=[],
+                        stall_warning=stall_warning,
+                    )
+                    print(cell)
+                    return 1
+                else:
+                    # Show warnings but keep polling
+                    approvals_count = len(seen_approval_ids)
+                    verdict = f"⚠ WARNINGS ({approvals_count}/{count_only_approvals} approvals)"
+                    cell = _format_cell(
+                        elapsed=_elapsed_str(start),
+                        verdict=verdict,
+                        verdict_color=YELLOW,
+                        root_id=agent_id,
+                        root_status=root_status,
+                        root_msg_count=root_msg_count,
+                        root_cost=root_cost,
+                        root_idle=root_idle,
+                        root_goal=root_goal,
+                        sub_agents=sub_agents,
+                        anomalies_by_agent=anomalies_by_agent,
+                        errors_by_agent=errors_by_agent,
+                        approvals=[],
+                        stall_warning=stall_warning,
+                    )
+                    print(cell)
+                    # Keep polling — don't return
+            else:
+                cell = _format_cell(
+                    elapsed=_elapsed_str(start),
+                    verdict="🔴 ACTION REQUIRED",
+                    verdict_color=RED,
+                    root_id=agent_id,
+                    root_status=root_status,
+                    root_msg_count=root_msg_count,
+                    root_cost=root_cost,
+                    root_idle=root_idle,
+                    root_goal=root_goal,
+                    sub_agents=sub_agents,
+                    anomalies_by_agent=anomalies_by_agent,
+                    errors_by_agent=errors_by_agent,
+                    approvals=[],
+                    stall_warning=stall_warning,
+                )
+                print(cell)
+                return 1
 
         else:
             # Healthy — print status and keep polling
@@ -428,9 +522,10 @@ def main():
     parser.add_argument("agent_id", help="Root agent ID to monitor")
     parser.add_argument("--url", required=True, help="Base API URL (e.g. http://localhost:3001)")
     parser.add_argument("--interval", type=int, default=60, help="Poll interval in seconds (default: 60)")
+    parser.add_argument("--count-only-approvals", type=int, default=None, help="Count approvals without responding; exit 0 when N reached")
     args = parser.parse_args()
 
-    exit_code = asyncio.run(monitor(args.agent_id, args.url, args.interval))
+    exit_code = asyncio.run(monitor(args.agent_id, args.url, args.interval, args.count_only_approvals))
     sys.exit(exit_code)
 
 

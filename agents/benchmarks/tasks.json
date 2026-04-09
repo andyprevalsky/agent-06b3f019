@@ -188,10 +188,11 @@
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": "vcs-and-angels.csv",
-    "approval_handling": "prompt_user",
+    "approval_handling": "count_only",
     "start_phase": "plan",
-    "row_start": 41,
-    "row_end": 50
+    "row_start": 71,
+    "row_end": 110,
+    "expected_approval_count": 40
   },
   {
     "name": "build-boxing-payment",

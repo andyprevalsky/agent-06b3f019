@@ -30,7 +30,6 @@ TOOL_DISPLAY_NAMES = {
 EXCLUDED_TOOLS = {
     "check_progress",
     "completion_summary",
-    "plan_complete",
     "attempt_completion",
     "enable_write_permissions",
     "request_user_approval",
