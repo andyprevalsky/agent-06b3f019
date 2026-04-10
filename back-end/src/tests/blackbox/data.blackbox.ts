@@ -441,7 +441,6 @@ async function testSummary_freshUserEmpty() {
   }
 }
 
-
 // ==================== POST /api/data/grep (agent_network sources) ====================
 
 const AgentNetworkGrepResponse = z.object({
@@ -577,7 +576,6 @@ async function testGrepAgentNetwork_sourcesInValidList() {
     }
   }
 }
-
 
 // ==================== INVARIANTS ====================
 

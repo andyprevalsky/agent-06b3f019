@@ -534,22 +534,52 @@ async function runAll() {
       fn: testGrep_noMatchesDefaultSinceLabel,
     },
     { name: 'POST /data/grep -- limit=100000 clamped to MAX_RESULTS', fn: testGrep_limitAtMax },
-    { name: 'POST /data/grep -- since=5min ago returns valid shape', fn: testGrep_sinceRecentTimestamp },
+    {
+      name: 'POST /data/grep -- since=5min ago returns valid shape',
+      fn: testGrep_sinceRecentTimestamp,
+    },
     // deep coverage — person_id resolution paths
-    { name: 'POST /data/grep -- person_id by email not found -> 400', fn: testGrep_personByEmailNotFound },
-    { name: 'POST /data/grep -- person_id by phone not found -> 400', fn: testGrep_personByPhoneNotFound },
-    { name: 'POST /data/grep -- person_id by name not found -> 400', fn: testGrep_personByNameNotFound },
+    {
+      name: 'POST /data/grep -- person_id by email not found -> 400',
+      fn: testGrep_personByEmailNotFound,
+    },
+    {
+      name: 'POST /data/grep -- person_id by phone not found -> 400',
+      fn: testGrep_personByPhoneNotFound,
+    },
+    {
+      name: 'POST /data/grep -- person_id by name not found -> 400',
+      fn: testGrep_personByNameNotFound,
+    },
     // deep coverage — summary
-    { name: 'GET /data/summary -- fresh user has null date range', fn: testSummary_freshUserDateRange },
-    { name: 'GET /data/summary -- 5 parallel requests consistent total_messages', fn: testSummary_parallelConsistency },
+    {
+      name: 'GET /data/summary -- fresh user has null date range',
+      fn: testSummary_freshUserDateRange,
+    },
+    {
+      name: 'GET /data/summary -- 5 parallel requests consistent total_messages',
+      fn: testSummary_parallelConsistency,
+    },
     // deep coverage — source routing & input edge cases
-    { name: "POST /data/grep -- source='messages' explicit echoed in response", fn: testGrep_explicitMessagesSource },
+    {
+      name: "POST /data/grep -- source='messages' explicit echoed in response",
+      fn: testGrep_explicitMessagesSource,
+    },
     { name: 'POST /data/grep -- undefined person_id ignored', fn: testGrep_undefinedPersonId },
-    { name: "POST /data/grep -- special-char pattern (what's up?)", fn: testGrep_specialCharPattern },
+    {
+      name: "POST /data/grep -- special-char pattern (what's up?)",
+      fn: testGrep_specialCharPattern,
+    },
     { name: 'POST /data/grep -- unicode emoji pattern', fn: testGrep_unicodePattern },
     // deep coverage — API key combinations
-    { name: 'GET /data/summary -- API key without X-User-Id -> 401', fn: testSummary_apiKeyNoUserId },
-    { name: 'POST /data/grep -- API key with user_id in body -> 200', fn: testGrep_apiKeyBodyUserId },
+    {
+      name: 'GET /data/summary -- API key without X-User-Id -> 401',
+      fn: testSummary_apiKeyNoUserId,
+    },
+    {
+      name: 'POST /data/grep -- API key with user_id in body -> 200',
+      fn: testGrep_apiKeyBodyUserId,
+    },
   ];
 
   console.log(`Running ${parallelTests.length} tests (concurrency=${CASE_CONCURRENCY})...`);
