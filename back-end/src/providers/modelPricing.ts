@@ -7,7 +7,10 @@
  */
 
 import { prisma } from './database';
+import { createLogger } from './logger';
 import { ROSE_MODEL_POOLS, normalizeRoseAlias } from './roseModels';
+
+const log = createLogger('ModelPricing');
 
 interface ModelPricing {
   prompt: string; // Price per token in dollars (e.g., "0.000001")
@@ -35,7 +38,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
 
   // If cache exists and hasn't expired, use it
   if (cached && cached.expiresAt > now) {
-    console.log(`💾 Using cached pricing for ${modelId}`);
+    log.info(`Using cached pricing for ${modelId}`);
     return {
       prompt: (cached.tokenInPriceMicrodollars / 1_000_000).toString(),
       completion: (cached.tokenOutPriceMicrodollars / 1_000_000).toString(),
@@ -43,7 +46,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
   }
 
   // Cache miss or expired - fetch from OpenRouter
-  console.log(`🔄 Fetching fresh pricing for ${modelId} from OpenRouter`);
+  log.info(`Fetching fresh pricing for ${modelId} from OpenRouter`);
 
   /* c8 ignore start -- OpenRouter API fetch depends on external API key and response shape */
   try {
@@ -54,11 +57,11 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     });
 
     if (!response.ok) {
-      console.error(`Failed to fetch models from OpenRouter: ${response.status}`);
+      log.error(`Failed to fetch models from OpenRouter: ${response.status}`);
       return null;
     }
 
-    const data = (await response.json()) as any;
+    const data = (await response.json()) as { data: OpenRouterModel[] };
     const models: OpenRouterModel[] = data.data || [];
 
     const normalizedAlias = normalizeRoseAlias(modelId);
@@ -74,7 +77,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
         );
 
       if (pricingEntries.length === 0) {
-        console.error(`No pricing found for pool models of alias: ${modelId}`);
+        log.error(`No pricing found for pool models of alias: ${modelId}`);
         return null;
       }
 
@@ -95,7 +98,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     }
 
     if (!model?.pricing) {
-      console.error(`No pricing found for model: ${modelId}`);
+      log.error(`No pricing found for model: ${modelId}`);
       return null;
     }
 
@@ -107,7 +110,7 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     await upsertPricing(modelId, pricing, now);
     return pricing;
   } catch (error) {
-    console.error(`Error fetching model pricing for ${modelId}:`, error);
+    log.error(`Error fetching model pricing for ${modelId}`, { error: String(error) });
     return null;
   }
   /* c8 ignore stop */
@@ -141,5 +144,5 @@ async function upsertPricing(modelId: string, pricing: ModelPricing, now: Date) 
     },
   });
 
-  console.log(`✅ Cached pricing for ${modelId} (expires in 24h)`);
+  log.info(`Cached pricing for ${modelId} (expires in 24h)`);
 }

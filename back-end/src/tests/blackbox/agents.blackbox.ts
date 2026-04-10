@@ -754,7 +754,10 @@ test('POST / — custom verifier preserved', async () => {
 test('POST / — custom model preserved', async () => {
   const session = await createAnonymousSession('create-model');
   const model = 'rose-labs/rose-1-ultra';
-  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), { goal: 'Model test', model });
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Model test',
+    model,
+  });
   assertStatus(res.status, 201, res.data);
   const body = assertSchema(CreateAgentResponse, res.data, 'POST / model');
   assert(body.model === model, `Expected model "${model}", got "${body.model}"`);
@@ -2300,7 +2303,10 @@ test('POST /:id/start-agent — already in agent mode → 400', async () => {
   });
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string };
-  assert(body.error.includes('already in agent mode'), `Expected already in agent mode error, got: ${body.error}`);
+  assert(
+    body.error.includes('already in agent mode'),
+    `Expected already in agent mode error, got: ${body.error}`
+  );
 
   await withTransientDbRetry('cleanup-agent-mode', async () => {
     await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
@@ -2474,7 +2480,10 @@ test('PATCH /:id — price_limit_cents below cost set via prisma → 400', async
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string; current_cost_cents?: number };
   assert(body.error.includes('current cost'), `Expected cost error, got: ${body.error}`);
-  assert(body.current_cost_cents === 100, `Expected current_cost_cents=100, got ${body.current_cost_cents}`);
+  assert(
+    body.current_cost_cents === 100,
+    `Expected current_cost_cents=100, got ${body.current_cost_cents}`
+  );
 
   await withTransientDbRetry('cleanup-price-prisma', async () => {
     await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
@@ -2518,7 +2527,10 @@ test('POST /:id/messages — user message to completed agent resets status', asy
     headers: apiKeyHeaders(session.user.id),
   });
   const status = assertSchema(StatusResponse, statusRes.data, 'msg-reset status check');
-  assert(status.status === 'ACTIVE', `Expected ACTIVE after message to completed agent, got ${status.status}`);
+  assert(
+    status.status === 'ACTIVE',
+    `Expected ACTIVE after message to completed agent, got ${status.status}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -2549,7 +2561,10 @@ test('POST /messages/batch — tenant isolation: user B cannot see user A messag
   });
   assertStatus(batchRes.status, 200, batchRes.data);
   const body = batchRes.data as { messages: unknown[] };
-  assert(body.messages.length === 0, `User B should not see user A messages, got ${body.messages.length}`);
+  assert(
+    body.messages.length === 0,
+    `User B should not see user A messages, got ${body.messages.length}`
+  );
 
   await deleteTestAgent(agentId, sessionA.user.id);
 });
@@ -2574,7 +2589,10 @@ test('PATCH /:id — tool_ids update', async () => {
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(UpdateAgentResponse, res.data, 'PATCH /:id tool_ids');
-  assert(body.agent.tools.length === 0, `Expected 0 tools after clearing, got ${body.agent.tools.length}`);
+  assert(
+    body.agent.tools.length === 0,
+    `Expected 0 tools after clearing, got ${body.agent.tools.length}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -2664,7 +2682,10 @@ test('POST / — with price_limit_cents', async () => {
   });
   assertStatus(detailRes.status, 200, detailRes.data);
   const detail = detailRes.data as { agent: { price_limit_cents: number | null } };
-  assert(detail.agent.price_limit_cents === 500, `Expected price_limit_cents=500, got ${detail.agent.price_limit_cents}`);
+  assert(
+    detail.agent.price_limit_cents === 500,
+    `Expected price_limit_cents=500, got ${detail.agent.price_limit_cents}`
+  );
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
@@ -2805,7 +2826,10 @@ test('POST /:id/messages — user message to FAILED agent resets status', async 
     headers: apiKeyHeaders(session.user.id),
   });
   const status = assertSchema(StatusResponse, statusRes.data, 'msg-reset-failed status check');
-  assert(status.status === 'ACTIVE', `Expected ACTIVE after message to failed agent, got ${status.status}`);
+  assert(
+    status.status === 'ACTIVE',
+    `Expected ACTIVE after message to failed agent, got ${status.status}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -3209,7 +3233,10 @@ test('PATCH /:id/status — update statusMessage without changing status', async
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(UpdateStatusResponse, res.data, 'PATCH status msg only');
-  assert(body.status_message === 'Planning next steps...', `Expected status message, got "${body.status_message}"`);
+  assert(
+    body.status_message === 'Planning next steps...',
+    `Expected status message, got "${body.status_message}"`
+  );
   assert(body.status === 'ACTIVE', `Expected ACTIVE, got ${body.status}`);
 
   await deleteTestAgent(agentId, session.user.id);

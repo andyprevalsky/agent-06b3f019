@@ -45,6 +45,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { retryWithBackoff } from '../../providers/retry';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -271,34 +272,44 @@ async function createAgentWithRetry(
   userId: string,
   goal: string
 ): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const maxAttempts = 6;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await request(`${BASE_URL}/api/agents`, {
-      method: 'POST',
-      headers: { ...apiKeyHeaders(), 'X-User-Id': userId },
-      body: JSON.stringify({ goal, source: 'WEB' }),
-    });
-    if (res.status === 200 || res.status === 201) {
-      return res;
+  class RetryableAgentError extends Error {
+    retryable = true as const;
+    res: { status: number; data: unknown; headers: Headers };
+    constructor(res: { status: number; data: unknown; headers: Headers }) {
+      super('Failed to create agent');
+      this.res = res;
     }
-    const isRetryable500 =
-      res.status === 500 &&
-      typeof res.data === 'object' &&
-      res.data !== null &&
-      'error' in res.data &&
-      (res.data as { error?: unknown }).error === 'Failed to create agent';
-    if (isRetryable500 && attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 500 * attempt + Math.random() * 300));
-      continue;
-    }
-    return res;
   }
-  // Return the last response if all retries exhausted
-  return request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-User-Id': userId },
-    body: JSON.stringify({ goal, source: 'WEB' }),
-  });
+
+  try {
+    return await retryWithBackoff(
+      async () => {
+        const res = await request(`${BASE_URL}/api/agents`, {
+          method: 'POST',
+          headers: { ...apiKeyHeaders(), 'X-User-Id': userId },
+          body: JSON.stringify({ goal, source: 'WEB' }),
+        });
+        if (res.status === 200 || res.status === 201) return res;
+        const isRetryable500 =
+          res.status === 500 &&
+          typeof res.data === 'object' &&
+          res.data !== null &&
+          'error' in res.data &&
+          (res.data as { error?: unknown }).error === 'Failed to create agent';
+        if (isRetryable500) throw new RetryableAgentError(res);
+        return res;
+      },
+      {
+        maxRetries: 6,
+        fixedDelays: [500, 1000, 1500, 2000, 2500],
+        isRetryable: (err) => err instanceof RetryableAgentError,
+        component: 'createAgentWithRetry',
+      }
+    );
+  } catch (err) {
+    if (err instanceof RetryableAgentError) return err.res;
+    throw err;
+  }
 }
 
 // ==================== SETUP ====================
@@ -801,9 +812,7 @@ async function testBoundary_verifyOtpCallOrdering() {
     // so there may be 0 Twilio calls even on a successful verify. That is a valid path.
     const twilioIdx = calls.findIndex((c) => c.url.includes('verify.twilio.com'));
     // Only match the admin users endpoint, not realtime broadcasts or other Supabase URLs
-    const supabaseIdx = calls.findIndex(
-      (c) => c.url.includes('supabase.co/auth/v1/admin/users')
-    );
+    const supabaseIdx = calls.findIndex((c) => c.url.includes('supabase.co/auth/v1/admin/users'));
 
     if (twilioIdx >= 0 && supabaseIdx >= 0) {
       // Both were called — assert ordering: Twilio BEFORE Supabase
@@ -1034,10 +1043,16 @@ async function testVerifyOtp_fullFlowWithNames() {
   }
 
   if (res.status === 200) {
-    const body = res.data as { user?: { id?: string; phone?: string }; session?: { access_token?: string } };
+    const body = res.data as {
+      user?: { id?: string; phone?: string };
+      session?: { access_token?: string };
+    };
     assert(typeof body.user?.id === 'string', 'Expected user.id to be a string');
     assert(typeof body.user?.phone === 'string', 'Expected user.phone to be a string');
-    assert(typeof body.session?.access_token === 'string', 'Expected session.access_token to be a string');
+    assert(
+      typeof body.session?.access_token === 'string',
+      'Expected session.access_token to be a string'
+    );
   }
 }
 
@@ -1125,7 +1140,9 @@ async function testVerifyOtp_anonMergeWithAgents() {
 
   // Agent creation should succeed (200 or 201)
   if (agentRes.status !== 200 && agentRes.status !== 201) {
-    throw new Error(`Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`);
+    throw new Error(
+      `Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`
+    );
   }
 
   // Now verify OTP with the anonymousUserId to exercise merge
@@ -1184,7 +1201,9 @@ async function testCompleteOnboarding_viaApiKey() {
   // The authenticate middleware checks for Bearer token or API key + X-User-Id
   // Accept 200 (if hybridAuth supports it) or 401 (if it requires Bearer)
   if (res.status !== 200 && res.status !== 401) {
-    throw new Error(`Expected 200 or 401 for API key auth, got ${res.status}: ${JSON.stringify(res.data)}`);
+    throw new Error(
+      `Expected 200 or 401 for API key auth, got ${res.status}: ${JSON.stringify(res.data)}`
+    );
   }
 }
 
@@ -1304,7 +1323,9 @@ async function testVerifyOtp_newUserWithAnonymousIdAndAgents() {
   const agentRes = await createAgentWithRetry(anonUserId, 'Agent for merge test');
 
   if (agentRes.status !== 200 && agentRes.status !== 201) {
-    throw new Error(`Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`);
+    throw new Error(
+      `Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`
+    );
   }
 
   // Now verify OTP with the anonymousUserId — exercises the full merge path
@@ -1549,7 +1570,10 @@ async function runAll() {
     { name: 'POST /send-otp -- invalid phone format', fn: testSendOtp_invalidPhoneFormat },
     { name: 'POST /verify-otp -- wrong code', fn: testVerifyOtp_wrongCode },
     { name: 'POST /verify-otp -- with anonymous userId', fn: testVerifyOtp_withAnonymousUserId },
-    { name: 'POST /verify-otp -- without optional fields', fn: testVerifyOtp_withoutOptionalFields },
+    {
+      name: 'POST /verify-otp -- without optional fields',
+      fn: testVerifyOtp_withoutOptionalFields,
+    },
     // Complete onboarding
     { name: 'POST /complete-onboarding -- happy path', fn: testCompleteOnboarding_happyPath },
     { name: 'POST /complete-onboarding -- idempotent', fn: testCompleteOnboarding_idempotent },
@@ -1557,29 +1581,71 @@ async function runAll() {
     { name: 'POST /verify-otp -- full flow with names', fn: testVerifyOtp_fullFlowWithNames },
     { name: 'POST /verify-otp -- firstName only', fn: testVerifyOtp_firstNameOnly },
     { name: 'POST /verify-otp -- empty anonymousUserId', fn: testVerifyOtp_emptyAnonymousUserId },
-    { name: 'POST /verify-otp -- second verify same phone (existing user)', fn: testVerifyOtp_secondVerifySamePhone },
-    { name: 'POST /verify-otp -- existing user name update', fn: testVerifyOtp_existingUserNameUpdate },
+    {
+      name: 'POST /verify-otp -- second verify same phone (existing user)',
+      fn: testVerifyOtp_secondVerifySamePhone,
+    },
+    {
+      name: 'POST /verify-otp -- existing user name update',
+      fn: testVerifyOtp_existingUserNameUpdate,
+    },
     { name: 'POST /verify-otp -- anon merge with agents', fn: testVerifyOtp_anonMergeWithAgents },
-    { name: 'POST /complete-onboarding -- after phone verify (SMS path)', fn: testCompleteOnboarding_afterPhoneVerify },
+    {
+      name: 'POST /complete-onboarding -- after phone verify (SMS path)',
+      fn: testCompleteOnboarding_afterPhoneVerify,
+    },
     { name: 'POST /complete-onboarding -- via API key', fn: testCompleteOnboarding_viaApiKey },
     { name: 'POST /send-otp -- valid E.164 international', fn: testSendOtp_validE164 },
-    { name: 'POST /verify-otp -- wrong code error message', fn: testVerifyOtp_wrongCodeErrorMessage },
-    { name: 'POST /anonymous -- 5 parallel sessions unique IDs', fn: testAnonymous_multipleSessionsParallel },
+    {
+      name: 'POST /verify-otp -- wrong code error message',
+      fn: testVerifyOtp_wrongCodeErrorMessage,
+    },
+    {
+      name: 'POST /anonymous -- 5 parallel sessions unique IDs',
+      fn: testAnonymous_multipleSessionsParallel,
+    },
     { name: 'GET /credits/usage -- after anonymous', fn: testCreditsUsage_afterAnonymous },
-    { name: 'GET /credits/usage -- via API key with userId', fn: testCreditsUsage_viaApiKeyWithUserId },
-    { name: 'GET /credits/subscription -- after anonymous', fn: testCreditsSubscription_afterAnonymous },
+    {
+      name: 'GET /credits/usage -- via API key with userId',
+      fn: testCreditsUsage_viaApiKeyWithUserId,
+    },
+    {
+      name: 'GET /credits/subscription -- after anonymous',
+      fn: testCreditsSubscription_afterAnonymous,
+    },
     { name: 'GET /credits/stats -- after anonymous', fn: testCreditsStats_afterAnonymous },
     // Deep coverage tests
-    { name: 'POST /verify-otp -- new user with anonymous agents (merge)', fn: testVerifyOtp_newUserWithAnonymousIdAndAgents },
-    { name: 'POST /verify-otp -- existing user name update with both names', fn: testVerifyOtp_existingUserNameUpdate_BothNames },
-    { name: 'POST /complete-onboarding -- anon user no SMS branch', fn: testCompleteOnboarding_anonUserNoSms },
+    {
+      name: 'POST /verify-otp -- new user with anonymous agents (merge)',
+      fn: testVerifyOtp_newUserWithAnonymousIdAndAgents,
+    },
+    {
+      name: 'POST /verify-otp -- existing user name update with both names',
+      fn: testVerifyOtp_existingUserNameUpdate_BothNames,
+    },
+    {
+      name: 'POST /complete-onboarding -- anon user no SMS branch',
+      fn: testCompleteOnboarding_anonUserNoSms,
+    },
     { name: 'POST /verify-otp -- lastName only', fn: testVerifyOtp_lastNameOnly },
-    { name: 'POST /verify-otp -- anonymousUserId same as userId', fn: testVerifyOtp_anonIdSameAsUserId },
-    { name: 'POST /anonymous -- each session gets initial credit', fn: testAnonymous_eachGetInitialCredit },
-    { name: 'POST /complete-onboarding -- triple idempotency', fn: testCompleteOnboarding_tripleIdempotency },
+    {
+      name: 'POST /verify-otp -- anonymousUserId same as userId',
+      fn: testVerifyOtp_anonIdSameAsUserId,
+    },
+    {
+      name: 'POST /anonymous -- each session gets initial credit',
+      fn: testAnonymous_eachGetInitialCredit,
+    },
+    {
+      name: 'POST /complete-onboarding -- triple idempotency',
+      fn: testCompleteOnboarding_tripleIdempotency,
+    },
     { name: 'POST /send-otp -- phone with spaces', fn: testSendOtp_variousFormats },
     { name: 'POST /verify-otp -- empty name strings', fn: testVerifyOtp_emptyNameStrings },
-    { name: 'POST /anonymous -- session timing consistency', fn: testAnonymous_sessionTimingConsistency },
+    {
+      name: 'POST /anonymous -- session timing consistency',
+      fn: testAnonymous_sessionTimingConsistency,
+    },
   ];
 
   console.log(

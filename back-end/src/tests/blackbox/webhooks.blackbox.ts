@@ -177,7 +177,8 @@ async function testStripe_unhandledEventType() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'stripe-signature': 't=1234567890,v1=0000000000000000000000000000000000000000000000000000000000000000',
+      'stripe-signature':
+        't=1234567890,v1=0000000000000000000000000000000000000000000000000000000000000000',
     },
     body: JSON.stringify({
       type: 'customer.created',
@@ -194,7 +195,8 @@ async function testStripe_paymentSucceededNoSub() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'stripe-signature': 't=1234567890,v1=0000000000000000000000000000000000000000000000000000000000000000',
+      'stripe-signature':
+        't=1234567890,v1=0000000000000000000000000000000000000000000000000000000000000000',
     },
     body: JSON.stringify({
       type: 'invoice.payment_succeeded',

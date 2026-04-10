@@ -105,18 +105,7 @@ const StatsResponse = z.object({
   topModels: z.array(ModelStat),
 });
 
-const PortalResponse = z.object({
-  url: z.string(),
-});
-
-const AgentStatusResponse = z.object({
-  agent_id: z.string(),
-  goal: z.string(),
-  model: z.string(),
-  status: z.string(),
-  credits_remaining: z.number(),
-  available_endpoints: z.unknown(),
-});
+// PortalResponse and AgentStatusResponse schemas reserved for future billing endpoint coverage
 
 // ==================== CAPTURE TYPES ====================
 

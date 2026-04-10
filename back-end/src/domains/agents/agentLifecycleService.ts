@@ -325,7 +325,7 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
       }
     }
   } else {
-  /* c8 ignore stop */
+    /* c8 ignore stop */
     log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
   }
   await repo.deleteAttentionRequests(agentId);

@@ -1754,7 +1754,10 @@ async function testGenericUpload_withFile() {
   );
   assertStatus(res.status, 200, res.data);
   const body = res.data as { message: string; integration: unknown };
-  assert(body.message.includes('uploaded'), `Expected upload success message, got: ${body.message}`);
+  assert(
+    body.message.includes('uploaded'),
+    `Expected upload success message, got: ${body.message}`
+  );
 }
 
 async function testGenericUpload_missingIntegrationType() {
@@ -1990,7 +1993,10 @@ async function testBoundary_createNoOutbound() {
       !c.url.includes('api.surge.app') &&
       !c.url.includes('openrouter.ai')
   );
-  assert(relevantCalls.length === 0, `Expected 0 outbound calls for create, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`);
+  assert(
+    relevantCalls.length === 0,
+    `Expected 0 outbound calls for create, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
+  );
 
   // Cleanup
   await request(`${BASE_URL}/api/integrations/${name}`, {
@@ -2252,7 +2258,10 @@ async function testUpdateIntegration_status() {
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(PatchIntegrationResponse, res.data, 'update status');
-  assert(body.integration.status === 'CONNECTED', `Expected CONNECTED, got ${body.integration.status}`);
+  assert(
+    body.integration.status === 'CONNECTED',
+    `Expected CONNECTED, got ${body.integration.status}`
+  );
 
   // Cleanup
   await request(`${BASE_URL}/api/integrations/${name}`, {
@@ -2469,20 +2478,37 @@ async function testEmailStart_gmailPkceFields() {
   const res = await request(`${BASE_URL}/api/integrations/email/gmail/start`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
-    body: JSON.stringify({ returnUrl: 'https://roselabs.ai/settings', errorUrl: 'https://roselabs.ai/error' }),
+    body: JSON.stringify({
+      returnUrl: 'https://roselabs.ai/settings',
+      errorUrl: 'https://roselabs.ai/error',
+    }),
   });
   if (res.status === 200) {
-    const body = res.data as { authUrl: string; state: string; expiresAt: string; credentialId: string };
+    const body = res.data as {
+      authUrl: string;
+      state: string;
+      expiresAt: string;
+      credentialId: string;
+    };
     // Verify PKCE code_challenge is present in the authUrl
     assert(body.authUrl.includes('code_challenge='), 'Expected code_challenge in authUrl');
-    assert(body.authUrl.includes('code_challenge_method=S256'), 'Expected S256 code_challenge_method');
+    assert(
+      body.authUrl.includes('code_challenge_method=S256'),
+      'Expected S256 code_challenge_method'
+    );
     // Verify state token is present
-    assert(typeof body.state === 'string' && body.state.length > 10, 'Expected non-trivial state token');
+    assert(
+      typeof body.state === 'string' && body.state.length > 10,
+      'Expected non-trivial state token'
+    );
     // Verify expiresAt is in the future
     const expiresAt = new Date(body.expiresAt);
     assert(expiresAt > new Date(), 'Expected expiresAt to be in the future');
     // Verify credentialId is present
-    assert(typeof body.credentialId === 'string' && body.credentialId.length > 0, 'Expected credentialId');
+    assert(
+      typeof body.credentialId === 'string' && body.credentialId.length > 0,
+      'Expected credentialId'
+    );
     // Verify Gmail-specific OAuth params
     assert(body.authUrl.includes('access_type=offline'), 'Expected access_type=offline for Gmail');
     assert(body.authUrl.includes('prompt=consent'), 'Expected prompt=consent for Gmail');
@@ -2500,7 +2526,10 @@ async function testEmailStart_yahooOAuthUrl() {
   if (res.status === 200) {
     const body = res.data as { authUrl: string; state: string; expiresAt: string };
     // Yahoo should NOT have Gmail-specific params
-    assert(!body.authUrl.includes('access_type=offline'), 'Yahoo should NOT have access_type=offline');
+    assert(
+      !body.authUrl.includes('access_type=offline'),
+      'Yahoo should NOT have access_type=offline'
+    );
     assert(body.authUrl.includes('code_challenge='), 'Expected code_challenge in Yahoo authUrl');
     assert(typeof body.state === 'string', 'Expected state string for Yahoo');
   } else if (res.status !== 500) {
@@ -2576,10 +2605,15 @@ async function testPatch_statusAndConfigTogether() {
   const patchRes = await request(`${BASE_URL}/api/integrations/${name}`, {
     method: 'PATCH',
     headers: authHeaders(ctx.accessToken1!),
-    body: JSON.stringify({ status: 'CONNECTED', isActive: true, config: { tool: 'test', version: 2 } }),
+    body: JSON.stringify({
+      status: 'CONNECTED',
+      isActive: true,
+      config: { tool: 'test', version: 2 },
+    }),
   });
   assertStatus(patchRes.status, 200, patchRes.data);
-  const patched = (patchRes.data as { integration: { status: string; isActive: boolean } }).integration;
+  const patched = (patchRes.data as { integration: { status: string; isActive: boolean } })
+    .integration;
   assert(patched.status === 'CONNECTED', `Expected CONNECTED, got ${patched.status}`);
   assert(patched.isActive === true, 'Expected isActive=true');
 
@@ -2602,7 +2636,10 @@ async function testEmailSend_noFromEmailNoAccounts() {
   // Anonymous user has no Gmail connected → should report "Gmail not connected"
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string; message: string };
-  assert(body.error === 'Gmail not connected', `Expected 'Gmail not connected', got '${body.error}'`);
+  assert(
+    body.error === 'Gmail not connected',
+    `Expected 'Gmail not connected', got '${body.error}'`
+  );
 }
 
 // --- Email messages: exercises limit param parsing ---
@@ -2641,7 +2678,12 @@ async function testClaudeCodeRateLimited_poolSource() {
   });
   // Exercises markTokenRateLimited pool path
   if (res.status === 200) {
-    const body = res.data as { ok: boolean; source: string; poolTokenId: string; rateLimitedUntil: string };
+    const body = res.data as {
+      ok: boolean;
+      source: string;
+      poolTokenId: string;
+      rateLimitedUntil: string;
+    };
     assert(body.ok === true, 'Expected ok=true');
     assert(body.source === 'pool', 'Expected source=pool');
   } else if (res.status !== 400 && res.status !== 500) {
@@ -2658,7 +2700,10 @@ async function testClaudeCodeRateLimited_invalidSource() {
   // Should return 400 for invalid source
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string };
-  assert(body.error.includes('Invalid source'), `Expected 'Invalid source' error, got: ${body.error}`);
+  assert(
+    body.error.includes('Invalid source'),
+    `Expected 'Invalid source' error, got: ${body.error}`
+  );
 }
 
 async function testClaudeCodeRateLimited_poolMissingId() {
@@ -2769,7 +2814,10 @@ async function testContactsUpload_validVcf() {
   assertStatus(res.status, 200, res.data);
   const body = res.data as { message: string; parsed: number; created: number; updated: number };
   assert(body.parsed === 2, `Expected 2 parsed contacts, got ${body.parsed}`);
-  assert(body.message.includes('imported'), `Expected import success message, got: ${body.message}`);
+  assert(
+    body.message.includes('imported'),
+    `Expected import success message, got: ${body.message}`
+  );
 }
 
 async function testContactsUpload_emptyVcf() {
@@ -2803,7 +2851,10 @@ async function testGenericUpload_toolSetupType() {
   );
   assertStatus(res.status, 200, res.data);
   const body = res.data as { message: string; integration: { name: string } };
-  assert(body.integration.name === 'custom_tool_config', `Expected custom_tool_config, got ${body.integration.name}`);
+  assert(
+    body.integration.name === 'custom_tool_config',
+    `Expected custom_tool_config, got ${body.integration.name}`
+  );
 }
 
 // --- Integration list: exercises getIntegrations with authenticated domains ---
@@ -3155,7 +3206,10 @@ async function runAll() {
     { name: 'POST /email/send missing body -> 400', fn: testEmailSend_missingBody },
     { name: 'POST /email/send missing from_email', fn: testEmailSend_missingFromEmail },
     { name: 'POST /email/send account not found', fn: testEmailSend_accountNotFound },
-    { name: 'GET /email/messages valid since empty account', fn: testEmailMessages_validSinceEmptyAccount },
+    {
+      name: 'GET /email/messages valid since empty account',
+      fn: testEmailMessages_validSinceEmptyAccount,
+    },
 
     // File upload validation
     { name: 'POST /passwords/apple/upload no file -> 400', fn: testApplePasswordsUpload_noFile },
@@ -3166,16 +3220,37 @@ async function runAll() {
 
     // Apple passwords CSV upload
     { name: 'POST /passwords/apple/upload valid CSV', fn: testApplePasswordsUpload_validCsv },
-    { name: 'POST /passwords/apple/upload tab delimited', fn: testApplePasswordsUpload_tabDelimited },
-    { name: 'POST /passwords/apple/upload no valid passwords -> 400', fn: testApplePasswordsUpload_noValidPasswords },
-    { name: 'POST /passwords/apple/upload header only -> 400', fn: testApplePasswordsUpload_headerOnly },
-    { name: 'POST /passwords/apple/upload missing columns -> 400', fn: testApplePasswordsUpload_missingColumns },
-    { name: 'POST /passwords/apple/upload quoted fields', fn: testApplePasswordsUpload_quotedFields },
-    { name: 'POST /passwords/apple/upload dedup origin+username', fn: testApplePasswordsUpload_duplicateOriginUsername },
+    {
+      name: 'POST /passwords/apple/upload tab delimited',
+      fn: testApplePasswordsUpload_tabDelimited,
+    },
+    {
+      name: 'POST /passwords/apple/upload no valid passwords -> 400',
+      fn: testApplePasswordsUpload_noValidPasswords,
+    },
+    {
+      name: 'POST /passwords/apple/upload header only -> 400',
+      fn: testApplePasswordsUpload_headerOnly,
+    },
+    {
+      name: 'POST /passwords/apple/upload missing columns -> 400',
+      fn: testApplePasswordsUpload_missingColumns,
+    },
+    {
+      name: 'POST /passwords/apple/upload quoted fields',
+      fn: testApplePasswordsUpload_quotedFields,
+    },
+    {
+      name: 'POST /passwords/apple/upload dedup origin+username',
+      fn: testApplePasswordsUpload_duplicateOriginUsername,
+    },
 
     // Generic file upload
     { name: 'POST /upload with file happy path', fn: testGenericUpload_withFile },
-    { name: 'POST /upload missing integrationType -> 400', fn: testGenericUpload_missingIntegrationType },
+    {
+      name: 'POST /upload missing integrationType -> 400',
+      fn: testGenericUpload_missingIntegrationType,
+    },
 
     // File type validation
     { name: 'POST /linkedin/upload non-zip -> 400', fn: testLinkedinUpload_nonZipFile },
@@ -3193,7 +3268,10 @@ async function runAll() {
     // Additional coverage tests (OAuth, CRUD, email, Claude Code)
     { name: 'POST /email/gmail/start with returnUrl', fn: testOAuthStart_gmail },
     { name: 'POST /email/yahoo/start', fn: testOAuthStart_yahoo },
-    { name: 'POST /email/outlook/start invalid provider -> 400', fn: testOAuthStart_invalidProvider },
+    {
+      name: 'POST /email/outlook/start invalid provider -> 400',
+      fn: testOAuthStart_invalidProvider,
+    },
     { name: 'POST /email/gmail/start no auth -> 401', fn: testOAuthStart_noAuth },
     { name: 'GET /email/gmail/callback no code -> 400', fn: testOAuthCallback_noCode },
     { name: 'GET /email/gmail/callback invalid state', fn: testOAuthCallback_invalidState },
@@ -3206,30 +3284,69 @@ async function runAll() {
     { name: 'GET /email/messages no auth -> 401 (coverage)', fn: testEmailMessages_noAuthCoverage },
     { name: 'GET /email/messages empty (no gmail) -> 404', fn: testEmailMessages_empty },
     { name: 'POST /passwords/request basic', fn: testPasswordsRequest_basic },
-    { name: 'POST /claude-code/credentials/upload with payload', fn: testClaudeCodeCredentials_upload },
-    { name: 'GET /claude-code/credentials/token anon -> 404', fn: testClaudeCodeCredentials_getToken },
+    {
+      name: 'POST /claude-code/credentials/upload with payload',
+      fn: testClaudeCodeCredentials_upload,
+    },
+    {
+      name: 'GET /claude-code/credentials/token anon -> 404',
+      fn: testClaudeCodeCredentials_getToken,
+    },
     { name: 'POST /claude-code/token/rate-limited internal', fn: testClaudeCodeTokenRateLimited },
     { name: 'integration CRUD full lifecycle', fn: testIntegrationCRUD_fullLifecycle },
     { name: 'POST /email/send with from_email no gmail', fn: testEmailSend_withCredentials },
 
     // Deep coverage tests
-    { name: 'POST /email/gmail/start PKCE fields verification', fn: testEmailStart_gmailPkceFields },
+    {
+      name: 'POST /email/gmail/start PKCE fields verification',
+      fn: testEmailStart_gmailPkceFields,
+    },
     { name: 'POST /email/yahoo/start OAuth URL verification', fn: testEmailStart_yahooOAuthUrl },
     { name: 'GET /email/yahoo/callback invalid state', fn: testOAuthCallback_yahooInvalidState },
-    { name: 'GET /email/gmail/callback missing both params', fn: testOAuthCallback_missingBothParams },
+    {
+      name: 'GET /email/gmail/callback missing both params',
+      fn: testOAuthCallback_missingBothParams,
+    },
     { name: 'PATCH /:name isActive toggle', fn: testPatch_isActiveToggle },
-    { name: 'PATCH /:name status + config + isActive together', fn: testPatch_statusAndConfigTogether },
+    {
+      name: 'PATCH /:name status + config + isActive together',
+      fn: testPatch_statusAndConfigTogether,
+    },
     { name: 'POST /email/send no from_email no accounts', fn: testEmailSend_noFromEmailNoAccounts },
     { name: 'GET /email/messages limit clamping (999)', fn: testEmailMessages_limitClamping },
     { name: 'GET /email/messages limit negative (-5)', fn: testEmailMessages_limitNegative },
-    { name: 'POST /claude-code/token/rate-limited pool source', fn: testClaudeCodeRateLimited_poolSource },
-    { name: 'POST /claude-code/token/rate-limited invalid source', fn: testClaudeCodeRateLimited_invalidSource },
-    { name: 'POST /claude-code/token/rate-limited pool missing id', fn: testClaudeCodeRateLimited_poolMissingId },
-    { name: 'POST /claude-code/token/rate-limited user missing userId', fn: testClaudeCodeRateLimited_userMissingUserId },
-    { name: 'POST /claude-code/pool-token/rate-limited happy path', fn: testClaudeCodePoolRateLimited_happyPath },
-    { name: 'POST /claude-code/pool-token/rate-limited missing id', fn: testClaudeCodePoolRateLimited_missingPoolTokenId },
-    { name: 'GET /claude-code/credentials/token via API key (forcePool)', fn: testClaudeCodeToken_viaApiKeyInternal },
-    { name: 'GET /claude-code/credentials/token exclude pool tokens', fn: testClaudeCodeToken_excludePoolTokens },
+    {
+      name: 'POST /claude-code/token/rate-limited pool source',
+      fn: testClaudeCodeRateLimited_poolSource,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited invalid source',
+      fn: testClaudeCodeRateLimited_invalidSource,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited pool missing id',
+      fn: testClaudeCodeRateLimited_poolMissingId,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited user missing userId',
+      fn: testClaudeCodeRateLimited_userMissingUserId,
+    },
+    {
+      name: 'POST /claude-code/pool-token/rate-limited happy path',
+      fn: testClaudeCodePoolRateLimited_happyPath,
+    },
+    {
+      name: 'POST /claude-code/pool-token/rate-limited missing id',
+      fn: testClaudeCodePoolRateLimited_missingPoolTokenId,
+    },
+    {
+      name: 'GET /claude-code/credentials/token via API key (forcePool)',
+      fn: testClaudeCodeToken_viaApiKeyInternal,
+    },
+    {
+      name: 'GET /claude-code/credentials/token exclude pool tokens',
+      fn: testClaudeCodeToken_excludePoolTokens,
+    },
     { name: 'POST /contacts/upload valid VCF', fn: testContactsUpload_validVcf },
     { name: 'POST /contacts/upload empty VCF', fn: testContactsUpload_emptyVcf },
     { name: 'POST /upload tool_setup integration type', fn: testGenericUpload_toolSetupType },
@@ -3237,16 +3354,34 @@ async function runAll() {
     { name: 'POST /passwords/request long request text', fn: testPasswordsRequest_longRequest },
 
     // Deep coverage — service paths
-    { name: 'POST / create with invalid type -> service error', fn: testCreateIntegration_invalidType },
-    { name: 'PATCH /:name update with invalid status -> service error', fn: testUpdateIntegration_invalidStatus },
-    { name: 'POST /claude-code/token/rate-limited invalid source', fn: testRateLimited_invalidSource },
-    { name: 'POST /claude-code/token/rate-limited pool missing poolTokenId', fn: testRateLimited_poolMissingId },
-    { name: 'POST /claude-code/token/rate-limited user missing userId', fn: testRateLimited_userMissingUserId },
+    {
+      name: 'POST / create with invalid type -> service error',
+      fn: testCreateIntegration_invalidType,
+    },
+    {
+      name: 'PATCH /:name update with invalid status -> service error',
+      fn: testUpdateIntegration_invalidStatus,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited invalid source',
+      fn: testRateLimited_invalidSource,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited pool missing poolTokenId',
+      fn: testRateLimited_poolMissingId,
+    },
+    {
+      name: 'POST /claude-code/token/rate-limited user missing userId',
+      fn: testRateLimited_userMissingUserId,
+    },
     { name: 'GET / no cached domains branch', fn: testGetIntegrations_noCachedDomains },
     { name: 'GET /email/messages no Gmail integration', fn: testEmailMessages_noGmail },
     { name: 'POST /email/send no Gmail credentials', fn: testEmailSend_noGmail },
     { name: 'POST /passwords/request happy path (anon session)', fn: testPasswordRequest_happy },
-    { name: 'GET /claude-code/credentials/token no onboarding -> 404', fn: testClaudeCodeToken_noOnboarding },
+    {
+      name: 'GET /claude-code/credentials/token no onboarding -> 404',
+      fn: testClaudeCodeToken_noOnboarding,
+    },
   ];
 
   console.log(
