@@ -689,12 +689,11 @@ async function testBoundary_githubAccessCheckDbOnly() {
     res.status === 403,
     `Expected 403 GITHUB_ACCESS_DENIED (DB-only check), got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
   );
-  const body = res.data as { error: string; code?: string };
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 total outbound calls (403 short-circuits before E2B), got ${calls.length}: ${calls.map((c) => c.url).join(', ')}`
   );
-  void githubCalls; // declared above for documentation; covered by filterInfraCalls assertion
+  void githubCalls;
 }
 
 async function testBoundary_healthCallsE2bApi() {
