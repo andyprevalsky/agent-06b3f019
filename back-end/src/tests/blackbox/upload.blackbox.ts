@@ -405,7 +405,7 @@ async function testReproducibility_threeSequential() {
 function readCaptureCursor(data: unknown): number | null {
   if (data === null || data === undefined || typeof data !== 'object') return null;
   const nextId = (data as { nextId?: unknown }).nextId;
-  return typeof nextId === 'number' && Number.isFinite(nextId) && nextId >= 1
+  return typeof nextId === 'number' && Number.isInteger(nextId) && nextId >= 1
     ? nextId - 1
     : null;
 }
