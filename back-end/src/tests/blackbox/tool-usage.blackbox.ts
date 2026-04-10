@@ -469,11 +469,12 @@ function isThirdPartyCapture(url: string): boolean {
 }
 
 async function testBoundary_noOutboundCalls() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) {
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) {
     console.warn('    SKIP: capture harness not active (BLACKBOX_TEST_CAPTURE_OUTBOUND not set)');
     return;
   }
+  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
   await postUsage({
     agent_id: ctx.agentId,
     user_id: ctx.user1Id,
@@ -482,7 +483,7 @@ async function testBoundary_noOutboundCalls() {
     usage_items: [],
   });
   await getUsage(ctx.agentId!, apiKeyHeaders(ctx.user1Id!));
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const captures = (capturesRes.data as { captures: { id: number; url: string }[] }).captures;
   const domainCaptures = captures.filter((c) => !isThirdPartyCapture(c.url));

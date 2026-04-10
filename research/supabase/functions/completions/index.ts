@@ -4171,16 +4171,17 @@ serve(async (req) => {
 
         const identityBlock = { type: 'text' as const, text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
         const disclaimerBlock = { type: 'text' as const, text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
-        const anthropicBody = {
+        const anthropicBody: any = {
           model: 'claude-opus-4-6',
           system: [identityBlock, disclaimerBlock, ...systemBlocks],
           messages: anthropicMessages,
-          max_tokens: 4096,
+          max_tokens: 16000,
           temperature: 0.3,
+          thinking: { type: 'enabled', budget_tokens: 10000 },
         };
 
         slog('info', `[${requestId}] Claude mode: calling Anthropic with cache controls`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        slog('info', `[Claude Mode] System blocks: ${systemBlocks.length}, Messages: ${anthropicMessages.length}`);
+        slog('info', `[Claude Mode] System blocks: ${anthropicBody.system.length}, Messages: ${anthropicMessages.length}`);
 
         const startTime = Date.now();
         const response = await fetch(ANTHROPIC_API_URL, {

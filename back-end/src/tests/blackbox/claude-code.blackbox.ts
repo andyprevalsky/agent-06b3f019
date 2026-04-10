@@ -813,8 +813,9 @@ async function testSmoke_trustDialogDismissed() {
         // remove remaining escape sequences.
         // eslint-disable-next-line no-control-regex
         const ansiCursorFwd = /\x1b\[\d*C/g;
-        // eslint-disable-next-line no-control-regex
-        const ansiOther = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
+        const ansiOther =
+          // eslint-disable-next-line no-control-regex
+          /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
         const clean = wsOutput.replace(ansiCursorFwd, ' ').replace(ansiOther, '');
         // Claude Code is past the trust dialog if we see post-dialog content:
         // - The startup banner (model/context info like "context", "pricing")

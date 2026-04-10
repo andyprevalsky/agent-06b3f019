@@ -295,9 +295,22 @@ async function testBoundary_noOutboundCalls() {
   const captures = (afterRes.data as { captures: { url: string }[] }).captures;
 
   // Filter infrastructure calls from concurrent test domains.
-  const INFRA = ['supabase.co', 'twilio.com', 'googleapis.com', 'perplexity.ai', 'exa.ai',
-    'anthropic.com', 'openai.com', 'github.com', 'openrouter.ai', 'ip-api.com', 'surge.app',
-    'stripe.com', 'e2b.app', 'verify.twilio.com'];
+  const INFRA = [
+    'supabase.co',
+    'twilio.com',
+    'googleapis.com',
+    'perplexity.ai',
+    'exa.ai',
+    'anthropic.com',
+    'openai.com',
+    'github.com',
+    'openrouter.ai',
+    'ip-api.com',
+    'surge.app',
+    'stripe.com',
+    'e2b.app',
+    'verify.twilio.com',
+  ];
   const toolsCaptures = captures.filter((c) => !INFRA.some((p) => c.url.includes(p)));
 
   assert(

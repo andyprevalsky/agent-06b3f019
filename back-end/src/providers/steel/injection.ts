@@ -41,6 +41,10 @@ export async function injectUserData(
   ];
   const uniqueDomains = [...new Set(domainVariants)];
   const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
+  // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
+  // origins like "ttps://domain.com" (truncated https). Filter to the startUrl's
+  // registrable domain to avoid fetching the entire user's browser state (can be 16MB+).
+  const originDomainFilter = { userId, origin: { contains: registrableDomain } };
   log.info(
     `  [cookies] Filtering to domains for start_url "${startUrl}": ${uniqueDomains.join(', ')}`
   );
@@ -59,10 +63,10 @@ export async function injectUserData(
     prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'browser_fingerprint' } },
     }),
-    prisma.localStorageOrigin.findMany({ where: { userId } }),
-    prisma.indexedDBOrigin.findMany({ where: { userId } }),
-    prisma.browserPermission.findMany({ where: { userId } }),
-    prisma.cacheStorageOrigin.findMany({ where: { userId } }),
+    prisma.localStorageOrigin.findMany({ where: originDomainFilter }),
+    prisma.indexedDBOrigin.findMany({ where: originDomainFilter }),
+    prisma.browserPermission.findMany({ where: originDomainFilter }),
+    prisma.cacheStorageOrigin.findMany({ where: originDomainFilter }),
   ]);
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
