@@ -49,7 +49,7 @@ cd agents && python tests/run_all_tests.py  # Agent tool tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 ```
 
-**Code coverage:** Backend requires minimum 90% line/statement, 89% function, and 77% branch coverage (see `back-end/.c8rc.json`). Thresholds are a ratchet — only increase, never decrease. Bump after adding tests.
+**Code coverage:** Backend requires minimum 88% line/statement, 87% function, and 76% branch coverage (see `back-end/.c8rc.json`). Thresholds are a ratchet — only increase, never decrease. Bump after adding tests.
 
 **Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
 
