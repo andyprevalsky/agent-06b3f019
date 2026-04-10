@@ -38,6 +38,7 @@ reviews:
     - "!**/package-lock.json"
     - "!**/pnpm-lock.yaml"
     - "!back-end/src/routes/**"
+    - "!claude-code-src/**"
 
   path_instructions:
     - path: "agents/**"
