@@ -42,13 +42,15 @@ export async function injectUserData(
   const uniqueDomains = [...new Set(domainVariants)];
   const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
   // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
-  // origins like "https://domain.com". Use boundary-aware matching to avoid
-  // false positives (e.g. "evilamazon.com" matching "amazon.com").
+  // origins like "https://domain.com". Use boundary-aware endsWith matching to
+  // avoid false positives (e.g. "evilamazon.com" matching "amazon.com").
   const originDomainFilter = {
     userId,
     OR: [
       { origin: { endsWith: `://${registrableDomain}` } }, // exact: https://amazon.com
-      { origin: { contains: `.${registrableDomain}` } }, // subdomains: https://www.amazon.com
+      { origin: { contains: `://${registrableDomain}:` } }, // exact with port: https://amazon.com:8443
+      { origin: { endsWith: `.${registrableDomain}` } }, // subdomain: https://www.amazon.com
+      { origin: { contains: `.${registrableDomain}:` } }, // subdomain with port: https://www.amazon.com:8443
     ],
   };
   log.info(
