@@ -541,6 +541,9 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
+  // Warm the cache once before parallel tests to avoid thundering herd on cold start
+  await ensureCacheWarm();
+
   // Parallel groups — read-only tests that never mutate cache state
   // ensureCacheWarm() only adds to cache, never clears, so it's safe concurrently
   const parallelGroups: TestGroup[] = [

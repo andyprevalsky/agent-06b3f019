@@ -26,7 +26,8 @@ export MAC_APP_PORT=$(($BACKEND_PORT + 4))
 export ALLOWED_ORIGINS=http://localhost:$FRONTEND_PORT,http://localhost:$MAC_APP_PORT
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT research=$RESEARCH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE"
+export LOCAL_DB_PORT=$(($BACKEND_PORT + 10))
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT research=$RESEARCH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE"
 
 # ── Pre-flight: ensure Docker is running ──
 if ! docker ps &>/dev/null 2>&1; then
@@ -47,6 +48,57 @@ if ! docker ps &>/dev/null 2>&1; then
     else
         echo "⚠️  Docker Desktop not installed — research service may fail"
     fi
+fi
+
+# ── Pre-flight: start local Postgres for backend ──
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
+LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+export DATABASE_URL="$LOCAL_DB_URL"
+export DIRECT_URL="$LOCAL_DB_URL"
+
+if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+    echo "🐘 Local Postgres already running ($DB_CONTAINER)"
+elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+    echo "🐘 Starting stopped Postgres container..."
+    docker start "$DB_CONTAINER" >/dev/null
+else
+    echo "🐘 Creating local Postgres container..."
+    docker run -d \
+        --name "$DB_CONTAINER" \
+        -e POSTGRES_PASSWORD=postgres \
+        -e POSTGRES_DB=victoria \
+        -p "$LOCAL_DB_PORT:5432" \
+        -v "$DB_VOLUME:/var/lib/postgresql/data" \
+        postgres:16-alpine >/dev/null
+fi
+
+# Wait for Postgres to accept connections
+echo -n "   Waiting for Postgres..."
+for i in $(seq 1 30); do
+    if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+        echo " ready (${i}s)"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo " ❌ timed out"
+        exit 1
+    fi
+    sleep 1
+done
+
+# Sync Prisma schema to local DB (idempotent, dev-only)
+echo "🐘 Syncing Prisma schema..."
+(cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+
+# Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
+USER_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -d victoria -tAc \
+  "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
+if [ "$USER_EXISTS" = "0" ]; then
+    echo "🌱 Syncing production data to local database (first run)..."
+    (cd back-end && npx tsx scripts/seed-local.ts)
+else
+    echo "🌱 Local database already seeded (skipping sync)"
 fi
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
@@ -83,7 +135,7 @@ if [ -f research/supabase/config.toml ] && command -v supabase &>/dev/null && do
 fi
 
 # Pre-flight: kill anything holding our ports from a previous run (skip Docker processes)
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
     pids=$(lsof -ti :"$port" 2>/dev/null) || true
     if [ -n "$pids" ]; then
         # Filter out Docker processes to avoid killing the Docker engine
@@ -122,6 +174,8 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree "$pid"
     done
+    # Stop local Postgres container (data persists in named volume)
+    docker stop "$DB_CONTAINER" 2>/dev/null || true
     # Stop Supabase containers gracefully
     if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
         (cd research/supabase && supabase stop 2>/dev/null) || true
