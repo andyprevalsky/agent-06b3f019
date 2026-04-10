@@ -640,12 +640,13 @@ async function testTenantIsolation_crossUserInvisible() {
 // --- boundary capture: OpenAI embeddings on create ---
 
 async function testBoundary_openAIEmbeddingsOnCreate() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   await createBlueprint(ctx.accessToken!, 'Boundary embed test ' + Date.now());
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
@@ -672,8 +673,9 @@ async function testBoundary_openAIEmbeddingsOnCreate() {
 // --- boundary capture: OpenAI embeddings on search ---
 
 async function testBoundary_openAIEmbeddingsOnSearch() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/blueprints/search`, {
     method: 'POST',
@@ -681,7 +683,7 @@ async function testBoundary_openAIEmbeddingsOnSearch() {
     body: JSON.stringify({ goal: 'Boundary search test' }),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];

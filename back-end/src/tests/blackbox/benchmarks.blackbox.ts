@@ -431,23 +431,64 @@ async function testList_startPhaseValues() {
   }
 }
 
+// ==================== CAPTURE TYPES ====================
+
+interface CapturedCall {
+  id: number;
+  timestamp: string;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string | null;
+  responseStatus: number | null;
+  responseBody: string | null;
+  durationMs: number;
+  error: string | null;
+}
+
+/** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
+// ==================== CAPTURE HELPERS ====================
+
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
+}
+
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { captures: CapturedCall[] }).captures;
+}
+
 // ==================== BOUNDARY CAPTURE — NO OUTBOUND CALLS ====================
 
 async function testBoundary_noOutboundCalls() {
-  // Clear captures, hit the endpoint, then verify zero outbound calls were made.
-  // The capture endpoint may not exist if BLACKBOX_TEST_CAPTURE_OUTBOUND is not set —
-  // skip gracefully in that case.
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active, skip
+  // Probe capture endpoint — if not active, skip gracefully.
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return;
 
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/benchmarks`);
-
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
-  if (body.captures.length > 0) {
+  const calls = await readCapturesAfter(cursor);
+  const real = filterInfraCalls(calls);
+  if (real.length > 0) {
     throw new Error(
-      `Expected 0 outbound calls, got ${body.captures.length}: ${JSON.stringify(body.captures).substring(0, 500)}`
+      `Expected 0 outbound calls, got ${real.length}: ${JSON.stringify(real.map((c) => c.url))}`
     );
   }
 }

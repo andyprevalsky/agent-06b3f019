@@ -24,6 +24,10 @@ If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final renam
 
 # Phase 1: Test Loop
 
+**ABSOLUTE RULE: 100% of tests must pass before proceeding to Phase 2. There are ZERO exceptions.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", "flaky test" — NONE of these are valid excuses. If a test fails, you fix it or you stop and ask the user. You NEVER skip, rationalize, or proceed with failing tests. A deploy with failing tests is a critical failure on your part.
+
+**You must fix ALL failing tests, even if they are not caused by the changes in this branch.** The deploy flow is a gate — it guarantees that main is always green. If a test was already broken before your branch, that is now your responsibility to fix before merging. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else. The bar is simple: every test passes, or you don't merge.
+
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
 
 ## Test Report Tracking
@@ -146,7 +150,9 @@ cd back-end
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/run-blackbox-tests.sh
 ```
 
-If tests fail, run the teardown helper, fix the issue, and re-run from the top of the Test Loop.
+**ALL domains must pass — 0 failures.** If ANY domain fails, you must fix it before proceeding, even if the failing domain was not modified in this PR. "Pre-existing" is not an excuse. Fix it, re-run, get 100%. If you cannot fix a failure, STOP and escalate to the user — do NOT proceed to Phase 2.
+
+**ESCALATE IMMEDIATELY on third-party credit/billing errors.** If any test fails with "insufficient credits", "402", "quota exceeded", or similar billing errors from external providers (OpenRouter, OpenAI, E2B, Twilio, etc.), STOP and tell the user immediately. Do NOT try to fix this in code (e.g., accepting 500s). The user needs to add credits to the provider account.
 
 ## Step 6: Smoke benchmarks + fix
 
@@ -161,6 +167,8 @@ python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --p
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
+
+**ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, or any other failure mode must be diagnosed and fixed. If a benchmark fails due to local resource contention, try running fewer in parallel or running them sequentially. If you cannot get 100% pass rate, STOP and escalate to the user — do NOT proceed to Phase 2.
 
 ### Cleanup: Delete smoke test agents
 
@@ -207,6 +215,18 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
 
 ---
+
+# HARD GATE: Do NOT enter Phase 2 unless ALL of the following are true:
+# 1. Prettier: 0 formatting changes remaining
+# 2. ESLint: 0 errors
+# 3. TypeScript: 0 errors
+# 4. Structural tests: 100% pass
+# 5. Blackbox API tests: 100% pass (ALL domains, not just "your" domains)
+# 6. Smoke benchmarks: 100% pass (all 5)
+#
+# If ANY test has ANY failure, you are BLOCKED. Fix it or escalate to the user.
+# "Pre-existing", "not my code", "flaky", "resource contention" = NOT VALID EXCUSES.
+# Merging with failures is a CRITICAL ERROR. Do not do it. Ever.
 
 # Phase 2: CI/CD Loop
 

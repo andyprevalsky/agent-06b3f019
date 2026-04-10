@@ -41,6 +41,18 @@ export async function injectUserData(
   ];
   const uniqueDomains = [...new Set(domainVariants)];
   const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
+  // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
+  // origins like "https://domain.com". Use boundary-aware endsWith matching to
+  // avoid false positives (e.g. "evilamazon.com" matching "amazon.com").
+  const originDomainFilter = {
+    userId,
+    OR: [
+      { origin: { endsWith: `://${registrableDomain}` } }, // exact: https://amazon.com
+      { origin: { contains: `://${registrableDomain}:` } }, // exact with port: https://amazon.com:8443
+      { origin: { endsWith: `.${registrableDomain}` } }, // subdomain: https://www.amazon.com
+      { origin: { contains: `.${registrableDomain}:` } }, // subdomain with port: https://www.amazon.com:8443
+    ],
+  };
   log.info(
     `  [cookies] Filtering to domains for start_url "${startUrl}": ${uniqueDomains.join(', ')}`
   );
@@ -59,10 +71,10 @@ export async function injectUserData(
     prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'browser_fingerprint' } },
     }),
-    prisma.localStorageOrigin.findMany({ where: { userId } }),
-    prisma.indexedDBOrigin.findMany({ where: { userId } }),
-    prisma.browserPermission.findMany({ where: { userId } }),
-    prisma.cacheStorageOrigin.findMany({ where: { userId } }),
+    prisma.localStorageOrigin.findMany({ where: originDomainFilter }),
+    prisma.indexedDBOrigin.findMany({ where: originDomainFilter }),
+    prisma.browserPermission.findMany({ where: originDomainFilter }),
+    prisma.cacheStorageOrigin.findMany({ where: originDomainFilter }),
   ]);
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
