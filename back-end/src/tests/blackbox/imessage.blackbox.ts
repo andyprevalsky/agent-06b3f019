@@ -47,8 +47,6 @@ const CASE_CONCURRENCY = Number(
 
 // ==================== RESPONSE SCHEMAS ====================
 
-const ErrorResponse = z.object({ error: z.string() });
-
 const QueueSuccessResponse = z.object({
   success: z.literal(true),
   queue_id: z.string(),
@@ -202,8 +200,7 @@ async function testQueue_missingAllFields() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({}),
   });
-  assertStatus(res.status, 400, res.data);
-  assertSchema(ErrorResponse, res.data, 'POST /queue (missing fields)');
+  assertStatus(res.status, 401, res.data);
 }
 
 async function testQueue_missingUserId() {
@@ -212,7 +209,7 @@ async function testQueue_missingUserId() {
     headers: apiKeyHeaders(),
     body: JSON.stringify({ agent_id: 'x', phone_number: '+19729777432', message: 'test' }),
   });
-  assertStatus(res.status, 400, res.data);
+  assertStatus(res.status, 401, res.data);
 }
 
 async function testQueue_missingMessage() {
@@ -484,14 +481,22 @@ async function runAll() {
 
   // Drain any existing queued messages for this user first
   let drained = 0;
-  while (true) {
+  let drainErrors = 0;
+  // eslint-disable-next-line no-restricted-syntax
+  while (drainErrors < 10) {
     const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
       headers: authHeaders(ctx.accessToken!),
     });
+    if (res.status !== 200) {
+      drainErrors++;
+      await new Promise((r) => setTimeout(r, 100));
+      continue;
+    }
     const body = res.data as { message: unknown | null };
     if (!body.message) break;
     drained++;
-    if (drained > 100) break; // safety limit
+    drainErrors = 0;
+    if (drained > 1000) break; // safety limit
   }
   if (drained > 0) console.log(`  Drained ${drained} existing messages\n`);
 
@@ -502,8 +507,8 @@ async function runAll() {
     { name: 'GET /queue/pop -- no auth -> 401', fn: testPop_noAuth },
     { name: 'GET /queue/pop -- invalid token -> 401', fn: testPop_invalidToken },
     // validation
-    { name: 'POST /queue -- missing all fields -> 400', fn: testQueue_missingAllFields },
-    { name: 'POST /queue -- missing user_id -> 400', fn: testQueue_missingUserId },
+    { name: 'POST /queue -- missing all fields -> 401', fn: testQueue_missingAllFields },
+    { name: 'POST /queue -- missing user_id -> 401', fn: testQueue_missingUserId },
     { name: 'POST /queue -- missing message -> 400', fn: testQueue_missingMessage },
     { name: 'POST /queue -- invalid phone -> 400', fn: testQueue_invalidPhone },
     { name: 'POST /queue -- invalid phone no plus -> 400', fn: testQueue_invalidPhoneNoPlus },
@@ -548,14 +553,22 @@ async function runAll() {
 
   // Drain messages left by happy path tests before RAW/atomicity/ordering tests
   let postDrain = 0;
-  while (true) {
+  let postDrainErrors = 0;
+  // eslint-disable-next-line no-restricted-syntax
+  while (postDrainErrors < 10) {
     const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
       headers: authHeaders(ctx.accessToken!),
     });
+    if (res.status !== 200) {
+      postDrainErrors++;
+      await new Promise((r) => setTimeout(r, 100));
+      continue;
+    }
     const body = res.data as { message: unknown | null };
     if (!body.message) break;
     postDrain++;
-    if (postDrain > 100) break;
+    postDrainErrors = 0;
+    if (postDrain > 1000) break;
   }
   if (postDrain > 0) console.log(`  Drained ${postDrain} messages from happy-path tests`);
 

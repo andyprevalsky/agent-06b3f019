@@ -82,7 +82,7 @@ class FetchReplayClient {
   }
 }
 
-let captures: CapturedCall[] = [];
+const captures: CapturedCall[] = [];
 let nextId = 1;
 let fsCache: FileSystemCache | null = null;
 
@@ -224,16 +224,21 @@ export function installFetchCapture(): Router {
   // Build router for test endpoints
   const router = Router();
 
-  // GET / — return all or filtered captures
+  // Soft-clear baseline: DELETE sets this so GET (without ?after) only returns
+  // captures recorded after the clear. Cursor-based reads (?after=N) ignore it,
+  // making them immune to concurrent clears from other test domains.
+  let clearedAfterId = 0;
+
+  // GET / — return captures (respects soft-clear baseline or explicit cursor)
   router.get('/', (req: Request, res: Response) => {
-    const afterId = req.query.after ? Number(req.query.after) : 0;
+    const afterId = req.query.after ? Number(req.query.after) : clearedAfterId;
     const filtered = afterId > 0 ? captures.filter((c) => c.id > afterId) : captures;
     res.json({ captures: filtered, nextId });
   });
 
-  // DELETE / — clear capture log (not cache)
+  // DELETE / — soft-clear capture log (sets baseline, does NOT wipe entries)
   router.delete('/', (_req: Request, res: Response) => {
-    captures = [];
+    clearedAfterId = nextId - 1;
     res.json({ cleared: true, nextId });
   });
 

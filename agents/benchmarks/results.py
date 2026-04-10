@@ -19,8 +19,6 @@ class TaskResult:
     cost_cents: float
     message_count: int
     failure_reason: Optional[str] = None
-    is_transient: bool = False
-    retry_agent_id: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
@@ -39,14 +37,12 @@ class BenchmarkRun:
         total = len(self.task_results)
         passed = sum(1 for r in self.task_results if r.passed)
         failed = total - passed
-        transient = sum(1 for r in self.task_results if r.is_transient)
         total_cost = sum(r.cost_cents for r in self.task_results)
         total_duration = sum(r.duration_seconds for r in self.task_results)
         return {
             "total": total,
             "passed": passed,
             "failed": failed,
-            "transient_failures": transient,
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
             "pass_rate": round(passed / total, 2) if total > 0 else 0.0,
@@ -107,7 +103,6 @@ def compare_runs(path_a: str, path_b: str) -> None:
     print(f"{'Pass rate':<25} {sa['pass_rate']:>9.0%} {sb['pass_rate']:>9.0%} {sb['pass_rate']-sa['pass_rate']:>+9.0%}")
     print(f"{'Passed':<25} {sa['passed']:>10} {sb['passed']:>10} {sb['passed']-sa['passed']:>+10}")
     print(f"{'Failed':<25} {sa['failed']:>10} {sb['failed']:>10} {sb['failed']-sa['failed']:>+10}")
-    print(f"{'Transient':<25} {sa['transient_failures']:>10} {sb['transient_failures']:>10} {sb['transient_failures']-sa['transient_failures']:>+10}")
     print(f"{'Cost (cents)':<25} {sa['total_cost_cents']:>10.1f} {sb['total_cost_cents']:>10.1f} {sb['total_cost_cents']-sa['total_cost_cents']:>+10.1f}")
     print(f"{'Duration (s)':<25} {sa['total_duration_seconds']:>10.1f} {sb['total_duration_seconds']:>10.1f} {sb['total_duration_seconds']-sa['total_duration_seconds']:>+10.1f}")
 

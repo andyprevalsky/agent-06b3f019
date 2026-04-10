@@ -34,7 +34,7 @@
   {
     "name": "parallel-tool-calls",
     "title": "Parallel Web Searches",
-    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.",
+    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table. Do NOT use Claude Code or any code sandbox — just use web search and present the results directly as text.",
     "eval_prompt": "Agent performed multiple web searches for cost of living, neighborhoods, and weather across Austin, Denver, and Lisbon. Results are synthesized into a comparison. At least 3 web_search calls were made.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -86,7 +86,7 @@
     "eval_prompt": "Agent spawned a Claude Code agent that wrote and executed Python code for the Collatz sequence from 27. The output includes the sequence numbers and the step count (111 steps). Agent completed successfully.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
+    "expected_tools": ["spawn_claude_code_agent"],
     "tags": ["claude-code", "smoke"],
     "price_limit_cents": 100,
     "requires_browser_agent": false,

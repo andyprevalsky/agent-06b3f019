@@ -319,6 +319,47 @@ async function request(
   return { status: response.status, data, headers: response.headers };
 }
 
+/**
+ * Wrapper around `request()` that retries on the transient "Failed to create
+ * agent" 500 (e.g., OpenRouter pricing timeout under concurrency).
+ * Unlike `createTestAgent`, this returns the full response so callers can
+ * assert on body fields beyond `agent_id`.
+ */
+async function requestWithRetry(
+  url: string,
+  options: RequestOptions = {},
+  maxAttempts = 5
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: { status: number; data: unknown; headers: Headers };
+    try {
+      res = await request(url, options);
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        console.warn(
+          `[retry] requestWithRetry attempt ${attempt}/${maxAttempts} network error: ${err}`
+        );
+        await sleep(500 * attempt);
+        continue;
+      }
+      throw err;
+    }
+    const isRetryable =
+      res.status === 500 &&
+      typeof res.data === 'object' &&
+      res.data !== null &&
+      'error' in res.data &&
+      (res.data as { error?: unknown }).error === 'Failed to create agent';
+    if (isRetryable && attempt < maxAttempts) {
+      console.warn(`[retry] requestWithRetry attempt ${attempt}/${maxAttempts} got retryable 500`);
+      await sleep(500 * attempt);
+      continue;
+    }
+    return res;
+  }
+  throw new Error('requestWithRetry exhausted retries');
+}
+
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
@@ -648,7 +689,7 @@ test('POST / — empty goal → 400', async () => {
 test('POST / — happy path — full response schema', async () => {
   const session = await createAnonymousSession('create-happy');
   const goal = `Create happy test ${RUN_ID} ${randomUUID().slice(0, 8)}`;
-  const res = await request(`${BASE_URL}/api/agents`, {
+  const res = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({ goal }),
@@ -703,7 +744,7 @@ test('POST / — auto-generates verifier', async () => {
 test('POST / — custom verifier preserved', async () => {
   const session = await createAnonymousSession('create-custom-verifier');
   const customPrompt = 'Custom verifier: check if agent wrote tests';
-  const res = await request(`${BASE_URL}/api/agents`, {
+  const res = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({
@@ -730,7 +771,7 @@ test('POST / — custom verifier preserved', async () => {
 test('POST / — custom model preserved', async () => {
   const session = await createAnonymousSession('create-model');
   const model = 'rose-labs/rose-1-ultra';
-  const res = await request(`${BASE_URL}/api/agents`, {
+  const res = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({ goal: 'Model test', model }),

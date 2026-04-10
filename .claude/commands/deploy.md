@@ -26,6 +26,28 @@ If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final renam
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
 
+## Test Report Tracking
+
+As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. For each step, record:
+- The step name
+- Pass/fail status
+- A brief summary of the output (e.g., "0 errors", "3 files formatted", "5/5 benchmarks passed")
+
+Build the report as a markdown table:
+
+```
+| Step | Status | Summary |
+|------|--------|---------|
+| Prettier | ✅ Pass | 3 files formatted |
+| ESLint | ✅ Pass | 0 errors |
+| TypeScript | ✅ Pass | 0 errors |
+| Structural Tests | ✅ Pass | All invariants hold |
+| Blackbox API Tests | ✅ Pass | 12/12 tests passed |
+| Smoke Benchmarks | ✅ Pass | 5/5 passed, $0.42 total cost |
+```
+
+Carry this report forward into Phase 2 for use in the commit message and PR body.
+
 ## Step 1: Prettier format
 
 All Phase 1 commands run from the repo root. Compute changed files once:
@@ -121,7 +143,7 @@ With the backend running from Step 5:
 
 ```bash
 cd back-end
-TEST_BASE_URL=$SMOKE_BASE_URL npm run test:api
+BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/run-blackbox-tests.sh
 ```
 
 If tests fail, run the teardown helper, fix the issue, and re-run from the top of the Test Loop.
@@ -133,8 +155,7 @@ With the local stack from Step 5 still running, run the smoke benchmark suite ag
 ```bash
 # Run smoke benchmarks against local backend
 cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-BENCHMARK_BASE_URL=$SMOKE_BASE_URL \
-  python benchmarks/run_benchmark.py --suite smoke --ci --parallel
+python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
 ```
 
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
@@ -191,7 +212,19 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 
 ## Step 7: Prepare the branch
 
-1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a descriptive message.
+1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a message that includes the test report:
+   ```bash
+   git commit -m "$(cat <<'EOF'
+   <concise description of changes>
+
+   ## Test Report
+
+   | Step | Status | Summary |
+   |------|--------|---------|
+   | ... test results from Phase 1 ... |
+   EOF
+   )"
+   ```
 2. If on `main`, create a new branch first:
    ```bash
    git checkout -b <descriptive-branch-name>
@@ -209,6 +242,19 @@ Create a PR targeting `main`:
 gh pr create --title "<concise title>" --body "$(cat <<'EOF'
 ## Summary
 <1-3 bullet points describing the changes>
+
+## Test Report
+
+| Step | Status | Summary |
+|------|--------|---------|
+| ... test results from Phase 1 ... |
+
+<details>
+<summary>Test output details</summary>
+
+Include relevant output snippets from each test step — e.g., ESLint summary, structural test output, blackbox test pass/fail counts, smoke benchmark results and costs. Truncate verbose output but keep enough to diagnose any issues.
+
+</details>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

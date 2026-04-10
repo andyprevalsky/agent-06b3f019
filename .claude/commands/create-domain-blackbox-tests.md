@@ -350,16 +350,23 @@ The repo provides a fetch capture harness (e.g., `fetchCapture.ts`, `httpx_captu
 
 For each third-party boundary discovered during the behavior map:
 1. **Run the real request** — send a real HTTP request that triggers the outbound call. Use test credentials, seed DB state, or use validation-passing inputs as needed.
-2. **Clear captures** before each boundary test: `DELETE /api/test/captures`
-3. **Read captures** after the request: `GET /api/test/captures`
-4. **Assert on the captured call** with exact parameter matching:
+2. **Snapshot the capture cursor** before the request: `GET /api/test/captures` → read `nextId - 1` as the cursor.
+3. **Read only new captures** after the request: `GET /api/test/captures?after={cursor}`
+4. **Filter infrastructure noise** — other domains running concurrently on the same server produce background outbound calls (model refresh, realtime heartbeats, etc.). Filter these out before asserting. Define an `INFRA_URL_PATTERNS` list of known infra URLs (`openrouter.ai`, `supabase.co/realtime`, `api.github.com`, `ip-api.com`, `stripe.com`, `e2b.app`, etc.) and exclude matching captures.
+5. **Assert on the captured call** with exact parameter matching:
    - URL pattern (e.g., `https://verify.twilio.com/v2/Services/{SID}/Verifications`)
    - HTTP method
    - Request headers (Content-Type, auth scheme)
    - Request body params (exact key-value pairs)
    - Call ordering (when multiple outbound calls are expected)
 
-**Important constraints:**
+**Concurrency isolation — every test must be safe to run alongside other domain tests hitting the same server simultaneously:**
+- **Never use clear-then-read for captures.** `DELETE /api/test/captures` followed by `GET /api/test/captures` is racy — another domain's outbound call can land in the window between clear and read. Always use cursor-based reads: snapshot cursor before, read `?after=cursor` after.
+- **Check capture availability before running boundary tests.** The capture endpoint returns 401 (not 404) when `BLACKBOX_TEST_CAPTURE_OUTBOUND` is not set, because the catch-all authenticated route intercepts it. Use a `checkCaptureAvailable()` probe that checks for `status === 200` and conditionally skip boundary tests if false.
+- **Queue/resource drain loops must check status codes.** Under concurrent load, pop/drain endpoints may return transient 500s. If your drain loop checks `!body.message` to detect "empty", a 500 response (`{error: "..."}`) has `body.message === undefined` (falsy), falsely breaking the loop. Always verify `status === 200` before interpreting the response body.
+- **Use unique test data per test.** Generate unique IDs, messages, and resource names (e.g., `${prefix}-${Date.now()}-${pid}-${counter}`) so concurrent tests never collide on shared resources like queues, DB rows, or cache keys.
+
+**Other constraints:**
 - Boundary tests MUST run sequentially (not in the parallel pool) because the capture buffer is shared global state.
 - If the third-party service rate-limits or returns errors, still assert on the captured call params — the parameters sent are the contract, not the response received.
 - If the third-party credentials are not configured (e.g., Twilio not set up), skip the boundary test with a clear log message — do not fail.
@@ -426,7 +433,7 @@ Include every relevant invariant below. If one is not relevant, explicitly docum
 - Ensure the domain suite itself executes its test cases in parallel, with a default intra-domain concurrency of `30` unless the repo proves a lower safe ceiling is required.
 - Treat this as a real execution default, not a recommendation: when running a single domain, the suite must actually execute with case concurrency `30` by default unless explicitly justified otherwise.
 - Run at least 2 concurrent invocations of the same domain suite and ensure both pass without interference.
-- Ensure it can run concurrently with other suites.
+- Ensure it can run concurrently with other suites — the test runner runs 6+ domain suites in parallel against the same backend. Tests must not corrupt each other's capture windows, queue state, or DB fixtures.
 - Boundary tests that hit real third-party APIs must handle rate-limit and transient error responses gracefully — assert on the captured call params, not on the third-party response status.
 
 **Frontend flake resistance:**
@@ -643,10 +650,64 @@ Report:
 - whether `onUnhandledRequest: 'error'` caught any missing handlers during development
 - any components that could not be rendered in jsdom (e.g., canvas-based, WebGL) and how they were handled
 
+## Invariant adherence checklist
+
+Before declaring success, emit this checklist verbatim, marking each item PASS, FAIL, or N/A with a one-line justification.
+
+```
+INVARIANT ADHERENCE CHECKLIST
+=============================
+
+Non-negotiable rules:
+[ ] Tests assert only observable behavior, not implementation details
+[ ] No assertions on call counts or "function X was called" (unless X is an external boundary)
+[ ] Real boundary behavior preferred over raw mocks
+[ ] Record/replay harness used for deterministic third-party boundaries (or justified why not)
+[ ] Raw mocks used ONLY when boundary is destructive, unsafe, too costly, or not replayable
+[ ] Tests are deterministic, isolated, cleanup-safe, and parallel-safe
+[ ] Unique test data used — no shared mutable fixtures
+
+Coverage invariants:
+[ ] auth boundary — protected routes/pages reject unauthenticated access
+[ ] error surface — errors return consistent shape / user-friendly messages
+[ ] idempotency / retry — duplicate requests do not corrupt state
+[ ] read-after-write — created resource is immediately retrievable/visible
+[ ] concurrency — concurrent requests do not corrupt shared state
+[ ] state transition — entities move through valid states only
+[ ] ordering / pagination — lists return correct order and page boundaries
+[ ] atomicity — multi-step mutations are atomic
+[ ] referential integrity — FK constraints hold / deleted resources show 404
+[ ] event / job cardinality — each trigger produces exactly expected side effects
+[ ] duplication prevention — duplicate creation is rejected or deduplicated
+[ ] permission / tenant isolation — user A cannot access user B's resources
+[ ] cleanup — suite does not leak ports, processes, temp dirs, subscriptions
+[ ] observability — every failing run points at correct logs and manifest
+[ ] time / clock — timestamp behavior is correct
+[ ] same-input reproducibility — same inputs produce same outputs
+[ ] boundary param — exact params sent to third-party/backend APIs match expected contract
+[ ] call ordering — multiple outbound calls happen in expected order
+[ ] harness independence — background jobs do not affect the suite
+
+Validation gates:
+[ ] New domain suite passes
+[ ] Existing relevant tests still pass
+[ ] Intra-domain case concurrency = 30 (or justified)
+[ ] Concurrent invocations pass without interference
+[ ] Every public entrypoint covered or listed as residual risk
+[ ] Every skipped invariant justified
+[ ] Every third-party boundary has capture test (or justified)
+[ ] Negative-control checks proved tests fail on deliberate breakage
+[ ] Final restored code is green
+```
+
+Mark each item and include the checklist in the final response. Any FAIL item blocks the `Domain safety net ready for autonomous refactoring` declaration.
+
+---
+
 Only say:
 `Domain safety net ready for autonomous refactoring`
 
-if every validation gate passed.
+if every validation gate passed and no checklist item is FAIL.
 
 Otherwise say:
 `Domain safety net not ready for autonomous refactoring`

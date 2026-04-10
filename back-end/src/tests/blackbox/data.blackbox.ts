@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/* eslint-disable no-console, max-lines */
 /**
  * Black-box tests for /api/data
  *
@@ -162,6 +162,41 @@ function assertStatus(actual: number, expected: number, data: unknown): void {
       `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`
     );
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function requestWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxAttempts = 5
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: { status: number; data: unknown; headers: Headers };
+    try {
+      res = await request(url, options);
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      throw err;
+    }
+    const isRetryable =
+      res.status === 500 &&
+      typeof res.data === 'object' &&
+      res.data !== null &&
+      'error' in res.data &&
+      (res.data as { error?: unknown }).error === 'Failed to create agent';
+    if (isRetryable && attempt < maxAttempts) {
+      await sleep(500 * attempt);
+      continue;
+    }
+    return res;
+  }
+  throw new Error('requestWithRetry: exhausted all attempts');
 }
 
 function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
@@ -460,7 +495,7 @@ async function testGrepAgentNetwork_nonexistentAgent() {
 
 async function testGrepAgentNetwork_happyUserMessages() {
   // Create an agent, then search its network (will return empty matches for fresh user)
-  const createRes = await request(`${BASE_URL}/api/agents`, {
+  const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
     body: JSON.stringify({ goal: 'blackbox test agent for grep' }),
@@ -489,7 +524,7 @@ async function testGrepAgentNetwork_happyUserMessages() {
 }
 
 async function testGrepAgentNetwork_happyToolResults() {
-  const createRes = await request(`${BASE_URL}/api/agents`, {
+  const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
     body: JSON.stringify({ goal: 'blackbox test agent for grep tool results' }),

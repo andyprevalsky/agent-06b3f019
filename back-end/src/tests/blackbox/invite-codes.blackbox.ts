@@ -176,6 +176,21 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
 async function runPool(
   tests: { name: string; fn: () => Promise<void> }[],
   concurrency: number
@@ -198,13 +213,14 @@ async function runPool(
 
 // ==================== CAPTURE HELPERS ====================
 
-async function clearCaptures(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
   assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
 }
 
-async function readCaptures(): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
 }
@@ -682,16 +698,16 @@ async function testUse_masterCodeMultipleUsers() {
  * GET /my-code makes NO outbound HTTP calls.
  */
 async function testBoundary_myCodeNoOutboundCalls() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/invite-codes/my-code`, {
     headers: authHeaders(ctx.accessToken1!),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for GET /my-code, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for GET /my-code, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
@@ -699,7 +715,7 @@ async function testBoundary_myCodeNoOutboundCalls() {
  * POST /use (validation failure) makes NO outbound HTTP calls.
  */
 async function testBoundary_useValidationNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/invite-codes/use`, {
     method: 'POST',
@@ -707,10 +723,10 @@ async function testBoundary_useValidationNoOutbound() {
     body: JSON.stringify({}),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for validation failure, got ${calls.length}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for validation failure, got ${filterInfraCalls(calls).length}`
   );
 }
 
@@ -719,7 +735,7 @@ async function testBoundary_useValidationNoOutbound() {
  */
 async function testBoundary_useNotFoundNoOutbound() {
   const { accessToken } = await createAnonSession();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/invite-codes/use`, {
     method: 'POST',
@@ -727,8 +743,11 @@ async function testBoundary_useNotFoundNoOutbound() {
     body: JSON.stringify({ inviteCode: 999999 }),
   });
 
-  const calls = await readCaptures();
-  assert(calls.length === 0, `Expected 0 outbound calls for not-found code, got ${calls.length}`);
+  const calls = await readCapturesAfter(cursor);
+  assert(
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for not-found code, got ${filterInfraCalls(calls).length}`
+  );
 }
 
 /**
@@ -736,7 +755,7 @@ async function testBoundary_useNotFoundNoOutbound() {
  */
 async function testBoundary_useMasterCodeNoOutbound() {
   const { accessToken } = await createAnonSession();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/invite-codes/use`, {
     method: 'POST',
@@ -744,8 +763,11 @@ async function testBoundary_useMasterCodeNoOutbound() {
     body: JSON.stringify({ inviteCode: MASTER_CODE }),
   });
 
-  const calls = await readCaptures();
-  assert(calls.length === 0, `Expected 0 outbound calls for master code use, got ${calls.length}`);
+  const calls = await readCapturesAfter(cursor);
+  assert(
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for master code use, got ${filterInfraCalls(calls).length}`
+  );
 }
 
 /**
@@ -753,16 +775,16 @@ async function testBoundary_useMasterCodeNoOutbound() {
  */
 async function testBoundary_checkNoOutboundCalls() {
   const { accessToken } = await createAnonSession();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/invite-codes/check`, {
     headers: authHeaders(accessToken),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for GET /check, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for GET /check, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
