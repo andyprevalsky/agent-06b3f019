@@ -405,7 +405,9 @@ async function testReproducibility_threeSequential() {
 async function testBoundary_uploadCapturesSupabaseCall() {
   const cursorRes = await request(`${BASE_URL}/api/test/captures`);
   if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
+  const nextId = (cursorRes.data as { nextId?: number }).nextId;
+  if (typeof nextId !== 'number' || !Number.isFinite(nextId) || nextId < 1) return;
+  const cursor = nextId - 1;
 
   await uploadFile(ctx.accessToken!, 'boundary-test.txt', 'Boundary capture test content');
 
@@ -432,7 +434,9 @@ async function testBoundary_uploadCapturesSupabaseCall() {
 async function testBoundary_noFileCapturesZero() {
   const cursorRes = await request(`${BASE_URL}/api/test/captures`);
   if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
+  const nextId = (cursorRes.data as { nextId?: number }).nextId;
+  if (typeof nextId !== 'number' || !Number.isFinite(nextId) || nextId < 1) return;
+  const cursor = nextId - 1;
 
   // Send upload without file — validation fails before any outbound call
   await request(`${BASE_URL}/api/upload`, {

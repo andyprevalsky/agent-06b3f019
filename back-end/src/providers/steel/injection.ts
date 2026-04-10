@@ -42,9 +42,15 @@ export async function injectUserData(
   const uniqueDomains = [...new Set(domainVariants)];
   const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
   // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
-  // origins like "ttps://domain.com" (truncated https). Filter to the startUrl's
-  // registrable domain to avoid fetching the entire user's browser state (can be 16MB+).
-  const originDomainFilter = { userId, origin: { contains: registrableDomain } };
+  // origins like "https://domain.com". Use boundary-aware matching to avoid
+  // false positives (e.g. "evilamazon.com" matching "amazon.com").
+  const originDomainFilter = {
+    userId,
+    OR: [
+      { origin: { endsWith: `://${registrableDomain}` } }, // exact: https://amazon.com
+      { origin: { contains: `.${registrableDomain}` } }, // subdomains: https://www.amazon.com
+    ],
+  };
   log.info(
     `  [cookies] Filtering to domains for start_url "${startUrl}": ${uniqueDomains.join(', ')}`
   );
