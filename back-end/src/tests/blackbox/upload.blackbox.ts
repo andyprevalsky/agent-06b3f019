@@ -402,13 +402,21 @@ async function testReproducibility_threeSequential() {
 
 // ==================== BOUNDARY CAPTURE — SUPABASE STORAGE ====================
 
+function readCaptureCursor(data: unknown): number | null {
+  if (data === null || data === undefined || typeof data !== 'object') return null;
+  const nextId = (data as { nextId?: unknown }).nextId;
+  return typeof nextId === 'number' && Number.isInteger(nextId) && nextId >= 1 ? nextId - 1 : null;
+}
+
 async function testBoundary_uploadCapturesSupabaseCall() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) return; // capture harness not active
+  const cursor = readCaptureCursor(cursorRes.data);
+  if (cursor === null) return;
 
   await uploadFile(ctx.accessToken!, 'boundary-test.txt', 'Boundary capture test content');
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
@@ -429,8 +437,10 @@ async function testBoundary_uploadCapturesSupabaseCall() {
 }
 
 async function testBoundary_noFileCapturesZero() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) return; // capture harness not active
+  const cursor = readCaptureCursor(cursorRes.data);
+  if (cursor === null) return;
 
   // Send upload without file — validation fails before any outbound call
   await request(`${BASE_URL}/api/upload`, {
@@ -438,7 +448,7 @@ async function testBoundary_noFileCapturesZero() {
     headers: authHeaders(ctx.accessToken!),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: unknown[] };
   const supabaseCalls = (body.captures as { url: string }[]).filter(

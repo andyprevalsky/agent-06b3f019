@@ -127,7 +127,10 @@ async function testStripe_invalidSignature() {
 async function testStripe_errorContainsWebhookError() {
   const res = await req(`${BASE_URL}/webhooks/stripe`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'stripe-signature': 't=9999999999,v1=invalidhash',
+    },
     body: JSON.stringify({ type: 'test' }),
   });
   assertStatus(res.status, 400, res.data);

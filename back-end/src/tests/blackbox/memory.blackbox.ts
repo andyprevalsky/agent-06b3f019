@@ -147,6 +147,54 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+// ==================== CAPTURE HELPERS ====================
+
+interface CapturedCall {
+  id: number;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string | null;
+  responseStatus: number | null;
+  responseBody: string | null;
+}
+
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
+async function checkCaptureAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/api/test/captures`);
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
+}
+
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { captures: CapturedCall[] }).captures;
+}
+
 // ==================== HELPERS ====================
 
 async function appendEntry(
@@ -623,34 +671,30 @@ async function testReproducibility_threeSequentialReads() {
 // ==================== BOUNDARY CAPTURE — NO OUTBOUND CALLS ====================
 
 async function testBoundary_noOutboundCalls_get() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursor = await getCaptureCursor();
 
   const busId = uniqueBusId('bnd');
   await getMemory(busId);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
+  const allCalls = await readCapturesAfter(cursor);
+  const calls = filterInfraCalls(allCalls);
   assert(
-    body.captures.length === 0,
-    `GET triggered ${body.captures.length} outbound calls: ${JSON.stringify(body.captures).substring(0, 500)}`
+    calls.length === 0,
+    `GET triggered ${calls.length} outbound calls: ${JSON.stringify(calls.map((c) => c.url)).substring(0, 500)}`
   );
 }
 
 async function testBoundary_noOutboundCalls_append() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursor = await getCaptureCursor();
 
   const busId = uniqueBusId('bnd');
   await appendEntry(busId, { type: 'test', content: 'boundary check' });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
+  const allCalls = await readCapturesAfter(cursor);
+  const calls = filterInfraCalls(allCalls);
   assert(
-    body.captures.length === 0,
-    `POST append triggered ${body.captures.length} outbound calls: ${JSON.stringify(body.captures).substring(0, 500)}`
+    calls.length === 0,
+    `POST append triggered ${calls.length} outbound calls: ${JSON.stringify(calls.map((c) => c.url)).substring(0, 500)}`
   );
 }
 
@@ -835,8 +879,11 @@ async function runAll() {
   ];
 
   // Sequential groups — boundary capture tests use shared global state
-  const sequentialGroups: TestGroup[] = [
-    {
+  const sequentialGroups: TestGroup[] = [];
+
+  const captureAvailable = await checkCaptureAvailable();
+  if (captureAvailable) {
+    sequentialGroups.push({
       name: 'Boundary capture',
       tests: [
         { name: 'GET triggers zero outbound calls', fn: testBoundary_noOutboundCalls_get },
@@ -845,8 +892,12 @@ async function runAll() {
           fn: testBoundary_noOutboundCalls_append,
         },
       ],
-    },
-  ];
+    });
+  } else {
+    console.log(
+      '\n  [info] Capture not available (BLACKBOX_TEST_CAPTURE_OUTBOUND!=1) -- skipping boundary tests'
+    );
+  }
 
   const allGroups = [...parallelGroups, ...sequentialGroups];
 

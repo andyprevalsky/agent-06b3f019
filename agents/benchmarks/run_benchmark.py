@@ -4,8 +4,7 @@
 Agent Benchmark Harness
 
 Spawns real agents against prod (or localhost), polls for completion,
-evaluates pass/fail, handles approvals, retries transient failures,
-and stores results for comparison.
+evaluates pass/fail, handles approvals, and stores results for comparison.
 
 Usage:
     python benchmarks/run_benchmark.py --list
@@ -65,7 +64,6 @@ DEFAULT_BASE_URL = os.environ.get(
     "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
 )
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
-_conductor_port = os.environ.get("CONDUCTOR_PORT", "3001")
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
 # Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
@@ -797,34 +795,6 @@ async def run_single_task(
 
 
 # ============================================================
-# Transient retry
-# ============================================================
-
-async def run_with_retry(base_url: str, task: BenchmarkTask) -> TaskResult:
-    """Run task, retry once on failure. Mark as transient if retry passes."""
-    result = await run_single_task(base_url, task)
-
-    if result.passed:
-        return result
-
-    # Retry once
-    print(f"\n    🔄 Retrying {task.name} (first attempt failed)...")
-    retry_result = await run_single_task(base_url, task)
-
-    if retry_result.passed:
-        # Transient failure — passed on retry
-        retry_result.is_transient = True
-        retry_result.retry_agent_id = result.agent_id
-        print(f"    ⚡ {task.name}: TRANSIENT (failed then passed)")
-        return retry_result
-    else:
-        # Persistent failure
-        retry_result.retry_agent_id = result.agent_id
-        print(f"    ❌ {task.name}: PERSISTENT FAILURE (failed twice)")
-        return retry_result
-
-
-# ============================================================
 # Main
 # ============================================================
 
@@ -855,8 +825,7 @@ async def main_async(args):
         compare_runs(args.compare[0], args.compare[1])
         return
 
-    # Resolve base URL: --url > --prod/--local > default
-    _local_url = f"http://localhost:{_conductor_port}"
+    # Resolve base URL: --url > --prod > --port > error
     if args.url != DEFAULT_BASE_URL:
         # User explicitly passed --url — it takes priority
         base_url = args.url.rstrip("/")
@@ -864,10 +833,12 @@ async def main_async(args):
             print("  ⚠ --prod and --url both set. Using --url value.")
     elif args.prod:
         base_url = PROD_BASE_URL
-    elif args.local:
-        base_url = _local_url
+    elif args.port:
+        base_url = f"http://localhost:{args.port}"
     else:
-        base_url = args.url.rstrip("/")
+        print("ERROR: --port N is required for local runs.")
+        print("Example: python benchmarks/run_benchmark.py --suite smoke --port 3001")
+        sys.exit(1)
 
     tasks = resolve_tasks(args)
     if not tasks:
@@ -908,9 +879,8 @@ async def main_async(args):
         if args.parallel:
             # Run all tasks concurrently
             print(f"\n  Running {len(tasks)} tasks in parallel...")
-            runner = run_single_task if args.no_retry else run_with_retry
             results = await asyncio.gather(
-                *(runner(base_url, task) for task in tasks),
+                *(run_single_task(base_url, task) for task in tasks),
                 return_exceptions=True,
             )
             for task, result in zip(tasks, results):
@@ -930,10 +900,7 @@ async def main_async(args):
                     run.task_results.append(result)
         else:
             for task in tasks:
-                if args.no_retry:
-                    result = await run_single_task(base_url, task)
-                else:
-                    result = await run_with_retry(base_url, task)
+                result = await run_single_task(base_url, task)
                 run.task_results.append(result)
     finally:
         fly_total = await stop_fly_log_collector()
@@ -949,8 +916,6 @@ async def main_async(args):
     print(f"\n{'='*60}")
     print(f"  RESULTS: {s['passed']}/{s['total']} passed ({s['pass_rate']:.0%})")
     print(f"  Cost: {s['total_cost_cents']:.1f}c | Duration: {s['total_duration_seconds']:.0f}s")
-    if s["transient_failures"] > 0:
-        print(f"  Transient failures: {s['transient_failures']}")
     print(f"{'='*60}")
 
     # CI mode: exit non-zero if any task failed
@@ -978,11 +943,6 @@ def main():
         nargs=2,
         metavar="FILE",
         help="Compare two result files",
-    )
-    parser.add_argument(
-        "--no-retry",
-        action="store_true",
-        help="Don't retry failed tasks",
     )
     parser.add_argument(
         "--parallel",
@@ -1013,9 +973,10 @@ def main():
         help=f"Run against production ({PROD_BASE_URL})",
     )
     target_group.add_argument(
-        "--local",
-        action="store_true",
-        help="Run against localhost (default behavior)",
+        "--port",
+        type=int,
+        default=None,
+        help="Run against localhost on this port (e.g. --port 3001)",
     )
     args = parser.parse_args()
 

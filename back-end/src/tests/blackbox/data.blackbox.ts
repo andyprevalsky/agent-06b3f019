@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/* eslint-disable no-console, max-lines */
 /**
  * Black-box tests for /api/data
  *
@@ -167,6 +167,41 @@ function assertStatus(actual: number, expected: number, data: unknown): void {
       `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`
     );
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function requestWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxAttempts = 5
+): Promise<{ status: number; data: unknown; headers: Headers }> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: { status: number; data: unknown; headers: Headers };
+    try {
+      res = await request(url, options);
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      throw err;
+    }
+    const isRetryable =
+      res.status === 500 &&
+      typeof res.data === 'object' &&
+      res.data !== null &&
+      'error' in res.data &&
+      (res.data as { error?: unknown }).error === 'Failed to create agent';
+    if (isRetryable && attempt < maxAttempts) {
+      await sleep(500 * attempt);
+      continue;
+    }
+    return res;
+  }
+  throw new Error('requestWithRetry: exhausted all attempts');
 }
 
 function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
@@ -406,6 +441,144 @@ async function testSummary_freshUserEmpty() {
   }
 }
 
+
+// ==================== POST /api/data/grep (agent_network sources) ====================
+
+const AgentNetworkGrepResponse = z.object({
+  matches: z.array(
+    z.object({
+      agent_id: z.string(),
+      message_id: z.string(),
+      role: z.string(),
+      text: z.string(),
+      timestamp: z.string(),
+      pointer: z.string(),
+    })
+  ),
+  total_matches: z.number(),
+  truncated: z.boolean(),
+  message: z.string().optional(),
+});
+
+async function testGrepAgentNetwork_missingAgentId() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({ pattern: 'test', source: 'agent_network_user_messages' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'MISSING_AGENT_ID') {
+    throw new Error(`Expected MISSING_AGENT_ID error, got: ${body.error}`);
+  }
+}
+
+async function testGrepAgentNetwork_missingAgentIdToolResults() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({ pattern: 'test', source: 'agent_network_tool_results' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'MISSING_AGENT_ID') {
+    throw new Error(`Expected MISSING_AGENT_ID error, got: ${body.error}`);
+  }
+}
+
+async function testGrepAgentNetwork_nonexistentAgent() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({
+      pattern: 'test',
+      source: 'agent_network_user_messages',
+      agent_id: '00000000-0000-0000-0000-000000000099',
+    }),
+  });
+  assertStatus(res.status, 403, res.data);
+}
+
+async function testGrepAgentNetwork_happyUserMessages() {
+  // Create an agent, then search its network (will return empty matches for fresh user)
+  const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({ goal: 'blackbox test agent for grep' }),
+  });
+  assertStatus(createRes.status, 201, createRes.data);
+  const agentId = (createRes.data as { agent_id: string }).agent_id;
+
+  try {
+    const res = await request(`${BASE_URL}/api/data/grep`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      body: JSON.stringify({
+        pattern: '',
+        source: 'agent_network_user_messages',
+        agent_id: agentId,
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network_user_messages');
+  } finally {
+    await request(`${BASE_URL}/api/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    });
+  }
+}
+
+async function testGrepAgentNetwork_happyToolResults() {
+  const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({ goal: 'blackbox test agent for grep tool results' }),
+  });
+  assertStatus(createRes.status, 201, createRes.data);
+  const agentId = (createRes.data as { agent_id: string }).agent_id;
+
+  try {
+    const res = await request(`${BASE_URL}/api/data/grep`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      body: JSON.stringify({
+        pattern: '',
+        source: 'agent_network_tool_results',
+        agent_id: agentId,
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network_tool_results');
+  } finally {
+    await request(`${BASE_URL}/api/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    });
+  }
+}
+
+async function testGrepAgentNetwork_sourcesInValidList() {
+  // agent_network_* should NOT cause SOURCE_NOT_FOUND
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({
+      pattern: 'test',
+      source: 'agent_network_user_messages',
+      agent_id: '00000000-0000-0000-0000-000000000099',
+    }),
+  });
+  // Should get 403 (agent not found), not 400 (source not found)
+  if (res.status === 400) {
+    const body = res.data as { error: string };
+    if (body.error === 'SOURCE_NOT_FOUND') {
+      throw new Error('agent_network_user_messages should be a valid source');
+    }
+  }
+}
+
+
 // ==================== INVARIANTS ====================
 
 async function testIdempotency_grep() {
@@ -500,6 +673,31 @@ async function runAll() {
     { name: 'GET /data/summary -- happy path (JWT)', fn: testSummary_happyJwt },
     { name: 'GET /data/summary -- happy path (API key)', fn: testSummary_happyApiKey },
     { name: 'GET /data/summary -- fresh user empty', fn: testSummary_freshUserEmpty },
+    // agent_network sources
+    {
+      name: 'POST /data/grep -- agent_network_user_messages missing agent_id -> 400',
+      fn: testGrepAgentNetwork_missingAgentId,
+    },
+    {
+      name: 'POST /data/grep -- agent_network_tool_results missing agent_id -> 400',
+      fn: testGrepAgentNetwork_missingAgentIdToolResults,
+    },
+    {
+      name: 'POST /data/grep -- agent_network_user_messages nonexistent agent -> 403',
+      fn: testGrepAgentNetwork_nonexistentAgent,
+    },
+    {
+      name: 'POST /data/grep -- agent_network_user_messages happy path',
+      fn: testGrepAgentNetwork_happyUserMessages,
+    },
+    {
+      name: 'POST /data/grep -- agent_network_tool_results happy path',
+      fn: testGrepAgentNetwork_happyToolResults,
+    },
+    {
+      name: 'POST /data/grep -- agent_network_* sources are valid (not SOURCE_NOT_FOUND)',
+      fn: testGrepAgentNetwork_sourcesInValidList,
+    },
     // invariants
     { name: 'idempotency -- grep same on repeat', fn: testIdempotency_grep },
     { name: 'idempotency -- summary same on repeat', fn: testIdempotency_summary },

@@ -167,7 +167,7 @@ router.post(
       const { taskId } = req.params;
       const { output } = req.body as { output: unknown };
 
-      if (output === undefined || output === null || typeof output !== 'string') {
+      if (output === undefined || output === null || typeof output !== 'string' || output === '') {
         res.status(400).json({ error: 'output field required' });
         return;
       }

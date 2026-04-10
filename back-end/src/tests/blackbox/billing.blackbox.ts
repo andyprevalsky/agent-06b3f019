@@ -203,6 +203,21 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
 async function runPool(
   tests: { name: string; fn: () => Promise<void> }[],
   concurrency: number
@@ -225,13 +240,14 @@ async function runPool(
 
 // ==================== CAPTURE HELPERS ====================
 
-async function clearCaptures(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
   assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
 }
 
-async function readCaptures(): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
 }
@@ -905,79 +921,66 @@ async function testReadAfterWrite_initializeThenUsage() {
 // ==================== BOUNDARY CAPTURE TESTS ====================
 
 async function testBoundary_portalNoSubscriptionNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/billing/portal`, {
     headers: authHeaders(ctx.accessToken1!),
   });
-  const calls = await readCaptures();
-  // Filter out GitHub API calls — these originate from concurrent agent-creation tests
-  // that trigger GitHub repo creation as a side effect, not from the billing portal endpoint.
-  const relevantCalls = calls.filter((c) => !c.url.includes('api.github.com'));
+  const calls = await readCapturesAfter(cursor);
   assert(
-    relevantCalls.length === 0,
-    `Expected 0 outbound calls for portal without subscription, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for portal without subscription, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
 async function testBoundary_usageNoAuthNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/credits/usage`);
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for /usage without auth, got ${calls.length}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for /usage without auth, got ${filterInfraCalls(calls).length}`
   );
 }
 
 async function testBoundary_initializeNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/credits/initialize`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
   });
-  const calls = await readCaptures();
-  // Filter out known cross-test pollution from concurrent tests:
-  // - supabase.co: DB triggers broadcast via Supabase Realtime on mutations
-  // - api.github.com: concurrent agent creation tests trigger GitHub repo creation
-  // - verify.twilio.com: concurrent auth tests trigger OTP verification
-  const relevantCalls = calls.filter(
-    (c) =>
-      !c.url.includes('supabase.co') &&
-      !c.url.includes('api.github.com') &&
-      !c.url.includes('verify.twilio.com')
-  );
+  const calls = await readCapturesAfter(cursor);
   assert(
-    relevantCalls.length === 0,
-    `Expected 0 outbound calls for /initialize, got ${relevantCalls.length}: ${JSON.stringify(relevantCalls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for /initialize, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
 async function testBoundary_subscriptionNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/credits/subscription`, {
     headers: authHeaders(ctx.accessToken1!),
   });
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for /subscription, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for /subscription, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
 async function testBoundary_statsNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/credits/stats`, {
     headers: authHeaders(ctx.accessToken1!),
   });
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for /stats, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for /stats, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
 async function testBoundary_webhookInvalidSigNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await fetch(`${BASE_URL}/webhooks/stripe`, {
     method: 'POST',
     headers: {
@@ -986,22 +989,22 @@ async function testBoundary_webhookInvalidSigNoOutbound() {
     },
     body: JSON.stringify({ type: 'invoice.payment_succeeded' }),
   });
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for webhook with invalid signature, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for webhook with invalid signature, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 
 async function testBoundary_usageAuthenticatedNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/credits/usage`, {
     headers: authHeaders(ctx.accessToken1!),
   });
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for authenticated /usage, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.url))}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for authenticated /usage, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
   );
 }
 

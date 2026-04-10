@@ -323,8 +323,12 @@ async function testReproducibility_threeSequential() {
 // ==================== BOUNDARY CAPTURE — SURGE SMS ====================
 
 async function testBoundary_unknownPhoneCapturesSurgeCall() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping');
+    return;
+  }
+  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/sms/inbound`, {
     method: 'POST',
@@ -339,7 +343,7 @@ async function testBoundary_unknownPhoneCapturesSurgeCall() {
     }),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
@@ -365,15 +369,19 @@ async function testBoundary_unknownPhoneCapturesSurgeCall() {
 }
 
 async function testBoundary_invalidPayloadZeroCaptures() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping');
+    return;
+  }
+  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/sms/inbound`, {
     method: 'POST',
     body: JSON.stringify({}),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: unknown[] };
   if (body.captures.length > 0) {

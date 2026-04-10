@@ -159,19 +159,13 @@ async def run_tests(
     print(f"Concurrency:  {concurrency}")
     print()
 
-    # Run tests with concurrency control
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def run_with_semaphore(
-        tf: Path, d: str
-    ) -> tuple[str, bool, str]:
-        async with semaphore:
-            return await run_single_domain(tf, d)
-
+    # Run tests sequentially — agents tests share global mock state
+    # (_mock_handler, _captures) so concurrent execution causes cross-domain
+    # collisions. Sequential is fine since all HTTP is mocked (fast).
     start = time.monotonic()
-    results = await asyncio.gather(
-        *(run_with_semaphore(tf, d) for tf, d in test_pairs)
-    )
+    results: list[tuple[str, bool, str]] = []
+    for tf, d in test_pairs:
+        results.append(await run_single_domain(tf, d))
     elapsed = time.monotonic() - start
 
     # Print results

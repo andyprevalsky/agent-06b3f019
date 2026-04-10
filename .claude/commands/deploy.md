@@ -12,7 +12,33 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 # Phase 1: Test Loop
 
+**ABSOLUTE RULE: 100% of tests must pass before proceeding to Phase 2. There are ZERO exceptions.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", "flaky test" — NONE of these are valid excuses. If a test fails, you fix it or you stop and ask the user. You NEVER skip, rationalize, or proceed with failing tests. A deploy with failing tests is a critical failure on your part.
+
+**You must fix ALL failing tests, even if they are not caused by the changes in this branch.** The deploy flow is a gate — it guarantees that main is always green. If a test was already broken before your branch, that is now your responsibility to fix before merging. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else. The bar is simple: every test passes, or you don't merge.
+
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
+
+## Test Report Tracking
+
+As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. For each step, record:
+- The step name
+- Pass/fail status
+- A brief summary of the output (e.g., "0 errors", "3 files formatted", "5/5 benchmarks passed")
+
+Build the report as a markdown table:
+
+```
+| Step | Status | Summary |
+|------|--------|---------|
+| Prettier | ✅ Pass | 3 files formatted |
+| ESLint | ✅ Pass | 0 errors |
+| TypeScript | ✅ Pass | 0 errors |
+| Structural Tests | ✅ Pass | All invariants hold |
+| Blackbox API Tests | ✅ Pass | 12/12 tests passed |
+| Smoke Benchmarks | ✅ Pass | 5/5 passed, $0.42 total cost |
+```
+
+Carry this report forward into Phase 2 for use in the commit message and PR body.
 
 ## Step 1: Prettier format
 
@@ -117,10 +143,12 @@ With the backend running from Step 5:
 
 ```bash
 cd back-end
-TEST_BASE_URL=$SMOKE_BASE_URL npm run test:api
+BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/run-blackbox-tests.sh
 ```
 
-If tests fail, run the teardown helper, fix the issue, and re-run from the top of the Test Loop.
+**ALL domains must pass — 0 failures.** If ANY domain fails, you must fix it before proceeding, even if the failing domain was not modified in this PR. "Pre-existing" is not an excuse. Fix it, re-run, get 100%. If you cannot fix a failure, STOP and escalate to the user — do NOT proceed to Phase 2.
+
+**ESCALATE IMMEDIATELY on third-party credit/billing errors.** If any test fails with "insufficient credits", "402", "quota exceeded", or similar billing errors from external providers (OpenRouter, OpenAI, E2B, Twilio, etc.), STOP and tell the user immediately. Do NOT try to fix this in code (e.g., accepting 500s). The user needs to add credits to the provider account.
 
 ## Step 6: Smoke benchmarks + fix
 
@@ -129,13 +157,14 @@ With the local stack from Step 5 still running, run the smoke benchmark suite ag
 ```bash
 # Run smoke benchmarks against local backend
 cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-BENCHMARK_BASE_URL=$SMOKE_BASE_URL \
-  python benchmarks/run_benchmark.py --suite smoke --ci --parallel
+python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
 ```
 
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
+
+**ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, or any other failure mode must be diagnosed and fixed. If a benchmark fails due to local resource contention, try running fewer in parallel or running them sequentially. If you cannot get 100% pass rate, STOP and escalate to the user — do NOT proceed to Phase 2.
 
 ### Cleanup: Delete smoke test agents
 
@@ -183,11 +212,35 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 
 ---
 
+# HARD GATE: Do NOT enter Phase 2 unless ALL of the following are true:
+# 1. Prettier: 0 formatting changes remaining
+# 2. ESLint: 0 errors
+# 3. TypeScript: 0 errors
+# 4. Structural tests: 100% pass
+# 5. Blackbox API tests: 100% pass (ALL domains, not just "your" domains)
+# 6. Smoke benchmarks: 100% pass (all 5)
+#
+# If ANY test has ANY failure, you are BLOCKED. Fix it or escalate to the user.
+# "Pre-existing", "not my code", "flaky", "resource contention" = NOT VALID EXCUSES.
+# Merging with failures is a CRITICAL ERROR. Do not do it. Ever.
+
 # Phase 2: CI/CD Loop
 
 ## Step 7: Prepare the branch
 
-1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a descriptive message.
+1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a message that includes the test report:
+   ```bash
+   git commit -m "$(cat <<'EOF'
+   <concise description of changes>
+
+   ## Test Report
+
+   | Step | Status | Summary |
+   |------|--------|---------|
+   | ... test results from Phase 1 ... |
+   EOF
+   )"
+   ```
 2. If on `main`, create a new branch first:
    ```bash
    git checkout -b <descriptive-branch-name>
@@ -205,6 +258,19 @@ Create a PR targeting `main`:
 gh pr create --title "<concise title>" --body "$(cat <<'EOF'
 ## Summary
 <1-3 bullet points describing the changes>
+
+## Test Report
+
+| Step | Status | Summary |
+|------|--------|---------|
+| ... test results from Phase 1 ... |
+
+<details>
+<summary>Test output details</summary>
+
+Include relevant output snippets from each test step — e.g., ESLint summary, structural test output, blackbox test pass/fail counts, smoke benchmark results and costs. Truncate verbose output but keep enough to diagnose any issues.
+
+</details>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

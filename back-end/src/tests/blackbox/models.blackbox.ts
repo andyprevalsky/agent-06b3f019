@@ -424,17 +424,18 @@ async function testDuplication_modelIdsUnique() {
 // ==================== BOUNDARY CAPTURE — OPENROUTER OUTBOUND CALL ====================
 
 async function testBoundary_openRouterCallOnCacheMiss() {
-  // Clear fetch captures, clear model cache, then hit GET /models.
+  // Snapshot cursor, clear model cache, then hit GET /models.
   // Verify exactly 1 outbound call to OpenRouter with correct URL, method, and headers.
-  const clearCapturesRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearCapturesRes.status === 404) return; // capture harness not active, skip
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active, skip
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   // Clear model cache to force a real outbound call
   await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
 
   await request(`${BASE_URL}/api/models`);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: {
@@ -495,13 +496,14 @@ async function testBoundary_noOutboundCallOnCacheHit() {
   // Warm the cache first
   await ensureCacheWarm();
 
-  // Clear captures, then hit GET /models again (should be cached)
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active, skip
+  // Snapshot cursor, then hit GET /models again (should be cached)
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active, skip
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/models`);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: unknown[] };
   if (body.captures.length > 0) {
@@ -513,12 +515,13 @@ async function testBoundary_noOutboundCallOnCacheHit() {
 
 async function testBoundary_clearCacheNoOutbound() {
   // DELETE /cache should not make any outbound calls
-  const clearCapturesRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearCapturesRes.status === 404) return; // capture harness not active, skip
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active, skip
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: unknown[] };
   if (body.captures.length > 0) {
@@ -537,6 +540,9 @@ async function runAll() {
   console.log('Models Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
+
+  // Warm the cache once before parallel tests to avoid thundering herd on cold start
+  await ensureCacheWarm();
 
   // Parallel groups — read-only tests that never mutate cache state
   // ensureCacheWarm() only adds to cache, never clears, so it's safe concurrently

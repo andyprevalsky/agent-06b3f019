@@ -277,39 +277,41 @@ async function testList_reproducibleAcrossThreeRuns() {
 // ==================== BOUNDARY CAPTURE — NO OUTBOUND CALLS ====================
 
 async function testBoundary_noOutboundCalls() {
-  // Clear captures, then make our request. We use DELETE + GET rather than ?after=N because
-  // the ?after approach still races with concurrent domains. If concurrent domains are
-  // running, captures from their outbound calls can appear between our clear and our read.
-  // To handle this, we filter new captures to only those whose URL could plausibly originate
-  // from the tools domain (which hits only the local database — zero third-party calls).
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) {
-    console.warn('    SKIP: capture harness not active (BLACKBOX_TEST_CAPTURE_OUTBOUND not set)');
+  // Probe capture availability: returns 401 when captures aren't active (catch-all auth route).
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  if (probe.status !== 200) {
+    console.warn('    SKIP: capture harness not active');
     return;
   }
 
+  // Snapshot cursor, make request, read only new captures.
+  const cursorData = probe.data as { nextId: number };
+  const cursor = cursorData.nextId - 1;
+
   await request(`${BASE_URL}/api/tools`);
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const captures = (capturesRes.data as { captures: { id: number; url: string }[] }).captures;
+  const afterRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  assertStatus(afterRes.status, 200, afterRes.data);
+  const captures = (afterRes.data as { captures: { url: string }[] }).captures;
 
-  // Filter out captures that are clearly from other concurrent test domains (Supabase storage,
-  // Twilio, GitHub, Surge, etc.). The tools domain never calls any external service.
-  const toolsCaptures = captures.filter((c) => {
-    const url = c.url.toLowerCase();
-    // Known third-party URLs used by other domains — not from the tools domain
-    if (url.includes('supabase.co')) return false;
-    if (url.includes('twilio.com')) return false;
-    if (url.includes('api.github.com')) return false;
-    if (url.includes('api.surge.app')) return false;
-    if (url.includes('googleapis.com')) return false;
-    if (url.includes('perplexity.ai')) return false;
-    if (url.includes('exa.ai')) return false;
-    if (url.includes('anthropic.com')) return false;
-    if (url.includes('openai.com')) return false;
-    return true;
-  });
+  // Filter infrastructure calls from concurrent test domains.
+  const INFRA = [
+    'supabase.co',
+    'twilio.com',
+    'googleapis.com',
+    'perplexity.ai',
+    'exa.ai',
+    'anthropic.com',
+    'openai.com',
+    'github.com',
+    'openrouter.ai',
+    'ip-api.com',
+    'surge.app',
+    'stripe.com',
+    'e2b.app',
+    'verify.twilio.com',
+  ];
+  const toolsCaptures = captures.filter((c) => !INFRA.some((p) => c.url.includes(p)));
 
   assert(
     toolsCaptures.length === 0,

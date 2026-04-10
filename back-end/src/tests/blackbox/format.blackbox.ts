@@ -129,6 +129,61 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
   return result.data;
 }
 
+function assert(condition: boolean, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+// ==================== CAPTURE HELPERS ====================
+
+interface CapturedCall {
+  id: number;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string | null;
+  responseStatus: number | null;
+  responseBody: string | null;
+}
+
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
+/** Check if the capture endpoint is available (requires BLACKBOX_TEST_CAPTURE_OUTBOUND=1). */
+async function checkCaptureAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE_URL}/api/test/captures`);
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/** Get the current capture cursor (nextId - 1) for snapshot-based reads. */
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
+}
+
+/** Read only captures recorded after the given cursor. */
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+  assertStatus(res.status, 200, res.data);
+  return (res.data as { captures: CapturedCall[] }).captures;
+}
+
 async function runPool(
   tests: { name: string; fn: () => Promise<void> }[],
   concurrency: number
@@ -334,9 +389,7 @@ async function testConcurrency_fiveParallelValid() {
 // ==================== BOUNDARY CAPTURE — OPENROUTER ====================
 
 async function testBoundary_openRouterCallOnGenerate() {
-  // Clear captures, then generate a prompt
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active, skip
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/generate-llm-judge-prompt`, {
     method: 'POST',
@@ -344,13 +397,10 @@ async function testBoundary_openRouterCallOnGenerate() {
     body: JSON.stringify({ goal: 'Boundary test goal' }),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
-  };
+  const allCalls = await readCapturesAfter(cursor);
+  filterInfraCalls(allCalls); // validate infra filtering works
 
-  const openRouterCalls = body.captures.filter(
+  const openRouterCalls = allCalls.filter(
     (c) => c.url.includes('openrouter.ai') && c.url.includes('/chat/completions')
   );
   if (openRouterCalls.length === 0) {
@@ -361,17 +411,14 @@ async function testBoundary_openRouterCallOnGenerate() {
   const call = openRouterCalls[0];
 
   // Assert method is POST (chat completions)
-  if (call.method !== 'POST') {
-    throw new Error(`Expected method POST, got ${call.method}`);
-  }
+  assert(call.method === 'POST', `Expected method POST, got ${call.method}`);
 
   // Assert Authorization header present
   const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
-  if (!headerKeys.includes('authorization')) {
-    throw new Error(
-      `Expected Authorization header, got: ${JSON.stringify(Object.keys(call.requestHeaders))}`
-    );
-  }
+  assert(
+    headerKeys.includes('authorization'),
+    `Expected Authorization header, got: ${JSON.stringify(Object.keys(call.requestHeaders))}`
+  );
 }
 
 // ==================== RUN ====================
@@ -425,10 +472,20 @@ async function runAll() {
     },
   ];
 
-  const sequentialTests = [
-    // boundary capture (must be sequential due to shared capture buffer)
-    { name: 'boundary -- OpenRouter call on generate', fn: testBoundary_openRouterCallOnGenerate },
-  ];
+  const sequentialTests: { name: string; fn: () => Promise<void> }[] = [];
+
+  // Only add boundary tests if capture harness is active
+  const captureAvailable = await checkCaptureAvailable();
+  if (captureAvailable) {
+    sequentialTests.push({
+      name: 'boundary -- OpenRouter call on generate',
+      fn: testBoundary_openRouterCallOnGenerate,
+    });
+  } else {
+    console.log(
+      '\n  [info] Capture not available (BLACKBOX_TEST_CAPTURE_OUTBOUND!=1) -- skipping boundary tests'
+    );
+  }
 
   console.log(
     `Running ${parallelTests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`

@@ -247,8 +247,9 @@ async function testGetCall_nonexistentId() {
 // ==================== BOUNDARY CAPTURE ====================
 
 async function testBoundary_vapiCallCreation() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) return; // capture harness not active
+  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
@@ -260,7 +261,7 @@ async function testBoundary_vapiCallCreation() {
     }),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
@@ -286,14 +287,15 @@ async function testBoundary_vapiCallCreation() {
 }
 
 async function testBoundary_vapiCallPoll() {
-  const clearRes = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
-  if (clearRes.status === 404) return; // capture harness not active
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) return; // capture harness not active
+  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
 
   await request(`${BASE_URL}/api/vapi/call/test-poll-id`, {
     headers: apiKeyHeaders(),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];

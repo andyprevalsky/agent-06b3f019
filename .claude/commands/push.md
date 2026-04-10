@@ -53,17 +53,10 @@ cd back-end && npm run test:coverage
 
 ### 1f. Blackbox API tests (skip if no back-end/ changes)
 
-Spin up an isolated backend, run tests, tear down:
+The blackbox runner auto-starts an isolated backend on a dedicated port:
 
 ```bash
-export SMOKE_PORT=4501
-cd back-end && DISABLE_GMAIL_SYNC=1 PORT=$SMOKE_PORT npx tsx watch src/server.ts &
-BACKEND_PID=$!
-for i in $(seq 1 30); do curl -s http://localhost:$SMOKE_PORT/health > /dev/null 2>&1 && break; sleep 1; done
-
-TEST_BASE_URL=http://localhost:$SMOKE_PORT npm run test:api
-
-lsof -ti :$SMOKE_PORT | xargs kill -9 2>/dev/null || true
+cd back-end && bash scripts/run-blackbox-tests.sh
 ```
 
 If any step fails, fix the issue and re-run from the top.

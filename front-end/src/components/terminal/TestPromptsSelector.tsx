@@ -368,8 +368,9 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
   const [isLoading, setIsLoading] = useState(false);
   const hasAutoLoaded = useRef(false);
 
-  // Auto-load default dev prompt on mount
+  // Auto-load default dev prompt on mount (skip during tests — vitest runs in DEV mode)
   useEffect(() => {
+    if (import.meta.env.VITEST) return;
     if (!import.meta.env.DEV || hasAutoLoaded.current) return;
     hasAutoLoaded.current = true;
 

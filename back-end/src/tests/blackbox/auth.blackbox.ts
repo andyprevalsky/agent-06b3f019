@@ -200,6 +200,21 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
+const INFRA_URL_PATTERNS = [
+  'api.github.com',
+  'openrouter.ai',
+  'ip-api.com',
+  'supabase.co/realtime',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+];
+function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
+  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
+}
+
 async function runPool(
   tests: { name: string; fn: () => Promise<void> }[],
   concurrency: number
@@ -222,15 +237,16 @@ async function runPool(
 
 // ==================== CAPTURE HELPERS ====================
 
-/** Clear all captured outbound calls. */
-async function clearCaptures(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/test/captures`, { method: 'DELETE' });
+/** Get the current capture cursor (nextId) for snapshot-based reading. */
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
   assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
 }
 
-/** Read all captured outbound calls since the last clear. */
-async function readCaptures(): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
+/** Read only captures recorded after the given cursor. */
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
 }
@@ -641,14 +657,14 @@ const TEST_OTP = '181818';
  * All work is local (JWT signing + DB insert).
  */
 async function testBoundary_anonymousNoOutboundCalls() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   // Filter to auth-relevant services only (other concurrent domain tests may trigger unrelated calls)
   const authCalls = calls.filter(
     (c) =>
       c.url.includes('verify.twilio.com') ||
-      c.url.includes('supabase') ||
+      (c.url.includes('supabase') && !c.url.includes('/realtime/')) ||
       c.url.includes('surge.app')
   );
   assert(
@@ -665,7 +681,7 @@ async function testBoundary_anonymousNoOutboundCalls() {
  *   Body:    To={phone}&Channel=sms
  */
 async function testBoundary_sendOtpTwilioCall() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
@@ -684,7 +700,7 @@ async function testBoundary_sendOtpTwilioCall() {
 
   // Assert the outbound call was captured regardless of Twilio's response status.
   // Even if Twilio rate-limits us (400 "Max send attempts"), the call params are still recorded.
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(calls.length === 1, `Expected exactly 1 outbound call, got ${calls.length}`);
 
   const call = calls[0];
@@ -730,7 +746,7 @@ async function testBoundary_sendOtpTwilioCall() {
  * We assert on the outbound call params regardless of the OTP outcome.
  */
 async function testBoundary_verifyOtpTwilioCall() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   // Make the verify-otp request (may return 400 if OTP not approved, but Twilio is still called)
   await request(`${BASE_URL}/api/auth/verify-otp`, {
@@ -738,7 +754,7 @@ async function testBoundary_verifyOtpTwilioCall() {
     body: JSON.stringify({ phone: TEST_PHONE, token: TEST_OTP }),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
 
   // Filter to Twilio calls only (verify-otp might also call Supabase Admin if OTP approved)
   const twilioCalls = calls.filter((c) => c.url.includes('verify.twilio.com'));
@@ -789,14 +805,14 @@ async function testBoundary_verifyOtpTwilioCall() {
  * If Twilio rejects the OTP, asserts that NO Supabase call is made (short-circuit).
  */
 async function testBoundary_verifyOtpCallOrdering() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     body: JSON.stringify({ phone: TEST_PHONE, token: TEST_OTP }),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
 
   if (res.status === 400) {
     // OTP was rejected — Twilio was called but Supabase admin users endpoint should NOT be.
@@ -851,17 +867,17 @@ async function testBoundary_verifyOtpCallOrdering() {
  * Missing phone is caught before any outbound call.
  */
 async function testBoundary_sendOtpValidationNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     body: JSON.stringify({}),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for validation failure, got ${calls.length}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for validation failure, got ${filterInfraCalls(calls).length}`
   );
 }
 
@@ -870,17 +886,17 @@ async function testBoundary_sendOtpValidationNoOutbound() {
  * Missing phone+token is caught before any outbound call.
  */
 async function testBoundary_verifyOtpValidationNoOutbound() {
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     body: JSON.stringify({}),
   });
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   assert(
-    calls.length === 0,
-    `Expected 0 outbound calls for validation failure, got ${calls.length}`
+    filterInfraCalls(calls).length === 0,
+    `Expected 0 outbound calls for validation failure, got ${filterInfraCalls(calls).length}`
   );
 }
 
@@ -892,7 +908,7 @@ async function testBoundary_completeOnboardingAnonNoSms() {
   // Create a dedicated anonymous session for this test
   const { accessToken } = await createAnonSession();
 
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
 
   await request(`${BASE_URL}/api/auth/complete-onboarding`, {
     method: 'POST',
@@ -902,7 +918,7 @@ async function testBoundary_completeOnboardingAnonNoSms() {
   // Small delay to catch any async fire-and-forget calls
   await new Promise((r) => setTimeout(r, 500));
 
-  const calls = await readCaptures();
+  const calls = await readCapturesAfter(cursor);
   const smsCalls = calls.filter((c) => c.url.includes('surge.app'));
   assert(smsCalls.length === 0, `Expected 0 SMS calls for anonymous user, got ${smsCalls.length}`);
 }
