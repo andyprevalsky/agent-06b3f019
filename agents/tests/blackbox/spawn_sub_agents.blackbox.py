@@ -70,6 +70,7 @@ async def test_spawn_sub_agent_boundary():
         )
 
     call = assert_captured_call(
+        index=1,
         url_contains="/api/agents",
         method="POST",
     )

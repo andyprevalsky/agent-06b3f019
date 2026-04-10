@@ -198,7 +198,7 @@ async function runPool(
 async function getCaptureCursor(): Promise<number> {
   const res = await request(`${BASE_URL}/api/test/captures`);
   assertStatus(res.status, 200, res.data);
-  return (res.data as { nextId: number }).nextId;
+  return (res.data as { nextId: number }).nextId - 1;
 }
 
 /** Read captures after a given cursor (concurrent-safe). */
@@ -540,7 +540,7 @@ async function testBoundary_coldCacheCallsOpenRouter() {
   const res = await request(`${BASE_URL}/api/models`);
   assertStatus(res.status, 200, res.data);
 
-  const calls = await readCapturesAfter(cursor - 1);
+  const calls = await readCapturesAfter(cursor);
   const openRouterCalls = calls.filter((c) => c.url.includes('openrouter.ai'));
 
   if (openRouterCalls.length === 0) {
@@ -596,7 +596,7 @@ async function testBoundary_warmCacheNoOutboundCalls() {
   // Second request should be served from cache
   await request(`${BASE_URL}/api/models`);
 
-  const calls = await readCapturesAfter(cursor - 1);
+  const calls = await readCapturesAfter(cursor);
   const openRouterCalls = calls.filter((c) => c.url.includes('openrouter.ai'));
   assert(
     openRouterCalls.length === 0,
@@ -613,7 +613,7 @@ async function testBoundary_cacheClearNoOutboundCalls() {
 
   await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
 
-  const calls = await readCapturesAfter(cursor - 1);
+  const calls = await readCapturesAfter(cursor);
   const openRouterCalls = calls.filter((c) => c.url.includes('openrouter.ai'));
   assert(
     openRouterCalls.length === 0,
@@ -630,7 +630,7 @@ async function testBoundary_openRouterCallNoBody() {
 
   await request(`${BASE_URL}/api/models`);
 
-  const calls = await readCapturesAfter(cursor - 1);
+  const calls = await readCapturesAfter(cursor);
   const openRouterCalls = calls.filter((c) => c.url.includes('openrouter.ai'));
 
   if (openRouterCalls.length === 0) {

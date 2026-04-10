@@ -32,14 +32,15 @@ docs/          → API documentation (Mintlify)
 
 Run all services via Conductor (see `conductor.json`).
 
-**Tests:**
+**Tests:** See `docs/testing.md` for the full guide. Quick:
 ```bash
-cd back-end && npm run test:api         # Backend API tests
-cd agents && python tests/run_all_tests.py  # Agent tool tests
-cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
+bash scripts/test.sh                              # all offline tests
+bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks (requires running services)
+bash scripts/test.sh agents web-search             # single repo/domain
+bash scripts/test.sh --list                        # list available repos/domains
 ```
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks run against **localhost** (`http://localhost:$CONDUCTOR_PORT`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
+**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
 
 ## Log Files
 
@@ -68,7 +69,7 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
        run_tests()
    ```
 
-2. **API changes require tests** - Add to `back-end/src/tests/api-test-suite.ts`
+2. **API changes require tests** - Add to `back-end/src/tests/blackbox/<domain>.blackbox.ts`
 
 3. **No .md files** - Never create markdown docs unless explicitly requested
 

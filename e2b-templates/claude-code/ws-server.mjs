@@ -196,6 +196,8 @@ if (CLAUDE_CODE_CREDENTIALS) {
   };
 }
 
+// Trust configuration: write in BOTH legacy and modern formats so any
+// Claude Code version recognises the workspace as trusted.
 const projects = {
   '/home/user': { allowedTools: ['*'], hasTrustDialogAccepted: true },
   '/': { allowedTools: ['*'], hasTrustDialogAccepted: true },
@@ -203,6 +205,14 @@ const projects = {
 
 writeFileSync(join(home, '.claude.json'), JSON.stringify(config));
 writeFileSync(join(home, '.claude', 'projects.json'), JSON.stringify(projects));
+
+// Modern per-project settings: Claude Code >= 1.x stores trust per directory
+// in ~/.claude/settings.json under an allowedDirectories array.
+const settingsPath = join(home, '.claude', 'settings.json');
+const settings = {
+  allowedDirectories: ['/home/user', '/'],
+};
+writeFileSync(settingsPath, JSON.stringify(settings));
 
 log('info', 'Configuration written');
 
@@ -269,9 +279,11 @@ IMPORTANT: Always push your changes before the session ends. The sandbox is ephe
 `;
     writeFileSync(join(workDir, 'CLAUDE.md'), claudeMd);
 
-    // Trust the repo directory for Claude Code
+    // Trust the repo directory for Claude Code (both legacy and modern formats)
     projects[workDir] = { allowedTools: ['*'], hasTrustDialogAccepted: true };
     writeFileSync(join(home, '.claude', 'projects.json'), JSON.stringify(projects));
+    settings.allowedDirectories.push(workDir);
+    writeFileSync(settingsPath, JSON.stringify(settings));
 
     console.log(`[Setup] Repo cloned to ${workDir}`);
   } catch (err) {
@@ -310,20 +322,39 @@ log('info', 'Claude Code spawned via node-pty', { pid: claude.pid });
 // config, so we detect the dialog in PTY output and press Enter.
 let trustDialogDismissed = false;
 
+// Strip ANSI escape codes so pattern matching works on the visible text,
+// not on raw terminal sequences that can split words unpredictably.
+// Cursor-movement sequences (\x1b[<n>C = cursor forward) are replaced with
+// a space because they represent visual spacing in the rendered terminal.
+function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[\d*C/g, ' ')
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[\?]?[0-9;]*[hl]/g, '');
+}
+
 claude.onData((data) => {
   outputBuffer += data;
   broadcast('stdout', data);
 
-  // Detect trust dialog and auto-dismiss by pressing Enter
-  if (!trustDialogDismissed && outputBuffer.includes('trust') && outputBuffer.includes('Esc to cancel')) {
-    trustDialogDismissed = true;
-    log('info', 'Auto-dismissing trust folder dialog');
-    broadcast('trust_dismissed', true);
-    setTimeout(() => {
-      if (!processExited) {
-        try { claude.write('\r'); } catch (e) { log('error', 'Trust dismiss write failed', { error: e.message }); }
+  // Detect trust dialog and auto-dismiss by pressing Enter.
+  // We strip ANSI codes before matching because the PTY output contains
+  // escape sequences that can fragment the visible text.
+  if (!trustDialogDismissed) {
+    const clean = stripAnsi(outputBuffer);
+    if (clean.includes('trust') && (clean.includes('Esc to cancel') || clean.includes('Yes, I trust'))) {
+      trustDialogDismissed = true;
+      log('info', 'Auto-dismissing trust folder dialog');
+      broadcast('trust_dismissed', true);
+      // Send Enter multiple times with increasing delays — the TUI may not
+      // be interactive on the first attempt if it is still rendering.
+      for (const delay of [300, 800, 1500]) {
+        setTimeout(() => {
+          if (!processExited) {
+            try { claude.write('\r'); } catch (e) { log('error', 'Trust dismiss write failed', { error: e.message }); }
+          }
+        }, delay);
       }
-    }, 500);
+    }
   }
 });
 
