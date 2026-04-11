@@ -4,7 +4,8 @@
     "include": [
       "supabase/functions/api-keys/index.ts",
       "supabase/functions/chat/index.ts",
-      "supabase/functions/cost/index.ts"
+      "supabase/functions/cost/index.ts",
+      "supabase/functions/rose-bench/index.ts"
     ],
     "rules": {
       "tags": ["recommended"],
