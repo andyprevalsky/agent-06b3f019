@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Verify formatting and linting for the research repo.
+# Usage: bash research/scripts/lint-check.sh [--fix]
+
+FIX=false
+[[ "${1:-}" == "--fix" ]] && FIX=true
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# Deno discovers the root package.json workspaces (which includes agents/ with
+# no package.json), so suppress that lookup to avoid a spurious error.
+export DENO_NO_PACKAGE_JSON=1
+
+FAIL=0
+
+echo "=== TypeScript (deno fmt + deno lint) ==="
+if $FIX; then
+  deno fmt || true
+  deno lint --fix || true
+else
+  deno fmt --check || FAIL=1
+  deno lint || FAIL=1
+fi
+
+echo ""
+echo "=== TypeScript strict overlay (cleaned domains) ==="
+if $FIX; then
+  deno lint --fix --config deno-strict.json || true
+else
+  deno lint --config deno-strict.json || FAIL=1
+fi
+
+echo ""
+echo "=== Python (ruff format + ruff check) ==="
+if $FIX; then
+  ruff format .
+  ruff check --fix .
+else
+  ruff format --check . || FAIL=1
+  ruff check . || FAIL=1
+fi
+
+exit $FAIL

@@ -1,0 +1,45 @@
+{
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 100,
+    "indentWidth": 2,
+    "singleQuote": true,
+    "proseWrap": "preserve",
+    "semiColons": true,
+    "include": [
+      "supabase/functions/",
+      "benchmarks/",
+      "shared/",
+      "scripts/",
+      "tests/"
+    ],
+    "exclude": [
+      "node_modules/",
+      "browser-use-repo/"
+    ]
+  },
+  "lint": {
+    "include": [
+      "supabase/functions/",
+      "benchmarks/",
+      "shared/",
+      "scripts/",
+      "tests/"
+    ],
+    "exclude": [
+      "node_modules/",
+      "browser-use-repo/"
+    ],
+    "rules": {
+      "tags": ["recommended"],
+      "include": [
+        "ban-untagged-todo",
+        "no-throw-literal",
+        "no-eval",
+        "eqeqeq",
+        "guard-for-in",
+        "no-self-compare"
+      ]
+    }
+  }
+}

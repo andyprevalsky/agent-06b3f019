@@ -3092,14 +3092,36 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
     }
   }
 
+  // Bundle consecutive tool_result user messages into one
+  // Anthropic docs show all tool results from a single turn in a single user message.
+  // This improves semantic clarity, token efficiency, and API compliance.
+  const bundled: any[] = [];
+  for (const msg of anthropicMessages) {
+    const prev = bundled[bundled.length - 1];
+    const prevIsToolResult = prev?.role === 'user'
+      && Array.isArray(prev.content)
+      && prev.content.length > 0
+      && prev.content.every((b: any) => b.type === 'tool_result');
+    const currIsToolResult = msg.role === 'user'
+      && Array.isArray(msg.content)
+      && msg.content.length > 0
+      && msg.content.every((b: any) => b.type === 'tool_result');
+
+    if (prevIsToolResult && currIsToolResult) {
+      prev.content.push(...msg.content);
+    } else {
+      bundled.push(msg);
+    }
+  }
+
   // Remove trailing assistant messages (not allowed with output_format)
-  while (anthropicMessages.length > 0 && anthropicMessages[anthropicMessages.length - 1].role === 'assistant') {
-    anthropicMessages.pop();
+  while (bundled.length > 0 && bundled[bundled.length - 1].role === 'assistant') {
+    bundled.pop();
   }
 
   return {
     system: systemParts.join('\n\n'),
-    messages: anthropicMessages
+    messages: bundled
   };
 }
 
@@ -3503,6 +3525,9 @@ async function handleStreaming(
     if (temperature !== undefined) {
       anthropicBody.temperature = temperature;
     }
+    if (claudeAuth) {
+      anthropicBody.thinking = { type: 'adaptive' };
+    }
 
     nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
 
@@ -3552,11 +3577,27 @@ async function handleStreaming(
 
     slog('info', `[Anthropic Stream] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
 
+    const anthropicFetchBody = JSON.stringify(anthropicBody);
     fetchResponse = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: anthropicHeaders,
-      body: JSON.stringify(anthropicBody)
+      body: anthropicFetchBody
     });
+
+    // Retry on transient errors (429, 5xx) before starting the stream reader
+    if (!fetchResponse.ok && (fetchResponse.status === 429 || fetchResponse.status >= 500)) {
+      const retryAfterRaw = fetchResponse.headers.get('retry-after');
+      const delayMs = fetchResponse.status === 429
+        ? Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000)
+        : 2000;
+      slog('warn', `[Anthropic Stream] ${fetchResponse.status}, retrying in ${delayMs}ms`);
+      await new Promise(r => setTimeout(r, delayMs));
+      fetchResponse = await fetch(ANTHROPIC_API_URL, {
+        method: 'POST',
+        headers: anthropicHeaders,
+        body: anthropicFetchBody
+      });
+    }
   } else {
     // Call OpenRouter API for other Rose models
     const openRouterBody: any = {
@@ -3639,6 +3680,7 @@ async function handleStreaming(
         let ntCurrentToolName = '';
         let ntToolInputStarted = false;
         let ntToolCount = 0;
+        let stdCurrentBlock: 'text' | 'thinking' | null = null;  // Standard mode: track block type for thinking support
 
         const emitDelta = (content: string) => {
           if (!content) return;
@@ -3673,7 +3715,7 @@ async function handleStreaming(
           } catch (timeoutError) {
             if (!hasReceivedContent && currentStallConfig?.onFallback) {
               // Never got content - seamlessly switch to racing
-              slog('warn', '[Stall] No content from Claude in 20s, switching to racing');
+              slog('warn', '[Stall] No content from Claude in 60s, switching to racing');
               currentReader.cancel();
               if (claudeAuth) currentClaudeTokenError = 'stall';  // Signal transient failure to agent
               try {
@@ -3844,15 +3886,43 @@ async function handleStreaming(
 
                   // === STANDARD MODE: original streaming logic ===
 
+                  // Track current block type for thinking support
+                  if (parsed.type === 'content_block_start') {
+                    if (parsed.content_block?.type === 'thinking') {
+                      stdCurrentBlock = 'thinking';
+                    } else if (parsed.content_block?.type === 'text') {
+                      stdCurrentBlock = 'text';
+                    }
+                    continue;
+                  }
+
+                  if (parsed.type === 'content_block_stop') {
+                    stdCurrentBlock = null;
+                    continue;
+                  }
+
                   // Skip other non-content events
                   if (parsed.type !== 'content_block_delta') {
                     continue;
                   }
 
-                  // Transform to OpenAI format
-                  // Handle both delta.text (normal) and delta.partial_json (JSON schema output)
                   lastContentTime = Date.now();
                   hasReceivedContent = true;
+
+                  // Forward thinking deltas as delta.reasoning (matches OpenRouter format that agents already consume)
+                  if (parsed.delta?.thinking) {
+                    const reasoningChunk: any = {
+                      choices: [{ index: 0, delta: { reasoning: parsed.delta.thinking } }],
+                      requested_model: requestedModel,
+                      actual_model: currentModel,
+                      pool_name: currentPoolName,
+                      pool_size: currentPoolSize,
+                    };
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(reasoningChunk)}\n\n`));
+                    continue;
+                  }
+
+                  // Transform text/partial_json to OpenAI format (unchanged)
                   emitDelta(parsed.delta?.text || parsed.delta?.partial_json || '');
                 } else {
                   // OpenRouter/Cerebras - pass through with metadata
@@ -4731,7 +4801,7 @@ serve(async (req) => {
             { token: claude_token },  // claudeAuth
             !!skip_cache,  // skipCache
             {
-              timeoutMs: 20000,
+              timeoutMs: 60000,
               onFallback: async () => {
                 slog('info', `[${requestId}] Stall fallback: starting model racing`, { request_id: requestId, agent_id: agentId, call_site: callSite });
                 const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
@@ -4756,7 +4826,7 @@ serve(async (req) => {
           const anthropicBody: any = {
             model: claudeApiModel,
             messages: anthropicMessages,
-            max_tokens: maxTokens || 4096,
+            max_tokens: maxTokens || 8192,
           };
           if (system) {
             if (skip_cache) {
@@ -4774,30 +4844,61 @@ serve(async (req) => {
             anthropicBody.system = [identityBlock, disclaimerBlock];
           }
           if (temperature !== undefined) anthropicBody.temperature = temperature;
-          if (cappedReasoning?.max_tokens) {
-            anthropicBody.thinking = { type: 'enabled', budget_tokens: cappedReasoning.max_tokens };
-          }
+          anthropicBody.thinking = { type: 'adaptive' };
 
           const nativeToolMode = applyAnthropicToolConfig(anthropicBody, response_format, true, tools, tool_choice);
 
           slog('info', `[${requestId}] Non-streaming claude token${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
 
-          const response = await fetch(ANTHROPIC_API_URL, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${claude_token}`,
-              'anthropic-version': '2023-06-01',
-              'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
-              'x-app': 'cli',
-              'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify(anthropicBody)
-          });
+          const nsHeaders = {
+            'Authorization': `Bearer ${claude_token}`,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
+            'x-app': 'cli',
+            'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
+            'content-type': 'application/json',
+          };
+          const nsBody = JSON.stringify(anthropicBody);
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+          let response: globalThis.Response | null = null;
+          let lastNsError: Error | null = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              response = await fetch(ANTHROPIC_API_URL, { method: 'POST', headers: nsHeaders, body: nsBody });
+              if (response.ok) break;
+              if (response.status === 429) {
+                const retryAfterRaw = response.headers.get('retry-after');
+                const delayMs = Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000);
+                slog('warn', `[${requestId}] Non-streaming 429, retrying in ${delayMs}ms (attempt ${attempt + 1}/3)`);
+                await new Promise(r => setTimeout(r, delayMs));
+                continue;
+              }
+              if (response.status >= 500) {
+                const delayMs = Math.min(2 ** attempt * 1000, 5000);
+                slog('warn', `[${requestId}] Non-streaming ${response.status}, retrying in ${delayMs}ms (attempt ${attempt + 1}/3)`);
+                await new Promise(r => setTimeout(r, delayMs));
+                continue;
+              }
+              // 4xx (non-429) = don't retry
+              const errorText = await response.text();
+              throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+            } catch (e: any) {
+              lastNsError = e;
+              if (attempt < 2 && !e.message?.startsWith('Anthropic API error:')) {
+                const delayMs = Math.min(2 ** attempt * 1000, 5000);
+                slog('warn', `[${requestId}] Non-streaming fetch error, retrying in ${delayMs}ms (attempt ${attempt + 1}/3): ${e.message}`);
+                await new Promise(r => setTimeout(r, delayMs));
+                continue;
+              }
+              throw e;
+            }
+          }
+          if (!response || !response.ok) {
+            if (response) {
+              const errorText = await response.text();
+              throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+            }
+            throw lastNsError || new Error('Anthropic API request failed after retries');
           }
 
           const data = await response.json() as any;

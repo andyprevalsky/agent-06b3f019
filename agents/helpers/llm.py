@@ -695,6 +695,7 @@ async def call_llm_structured_streaming(
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
+    _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -781,6 +782,7 @@ async def call_llm_structured_streaming(
         pool_name = "unknown"
         pool_size = 0
         claude_token_error = None  # Set when claude_token call failed (auth_error, rate_limit, stall, server_error)
+        final_finish_reason = ""  # Captured from last chunk with finish_reason
         was_cancelled = False
         chunk_count = 0
         stream_usage = None  # Captured from final chunk with stream_options
@@ -841,7 +843,8 @@ async def call_llm_structured_streaming(
             request_start_time = _safe_time()
             ttft_logged = False
             
-            async with httpx.AsyncClient(timeout=300.0) as http_client:
+            last_chunk_time = _safe_time()  # Track time since last chunk for stall detection
+            async with httpx.AsyncClient(timeout=httpx.Timeout(170.0, connect=30.0)) as http_client:
                 async with http_client.stream(
                     'POST',
                     config.rose.api_url,
@@ -869,8 +872,13 @@ async def call_llm_structured_streaming(
                             ttft_ms = int((_safe_time() - request_start_time) * 1000)
                             logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
                             ttft_logged = True
-                        
-                        # Heartbeat moved to after content processing (see below)
+
+                        # Mid-stream stall detection: heartbeat if no chunks for 50s (under 60s heartbeat_timeout)
+                        now = _safe_time()
+                        if now - last_chunk_time > 50:
+                            logger.warning(f"⚠️ Stream stall detected ({int(now - last_chunk_time)}s no data)")
+                            _safe_heartbeat(f"Stream stall {int(now - last_chunk_time)}s")
+                        last_chunk_time = now
                         
                         if chunk_count == 1:
                             logger.info(f"📦 First streaming line received")
@@ -921,7 +929,9 @@ async def call_llm_structured_streaming(
                             reasoning_delta = delta.get("reasoning") or ""
                             content = delta.get("content") or ""
                             fin = choices[0].get("finish_reason") or ""
-                            
+                            if fin:
+                                final_finish_reason = fin
+
                             # DEBUG: Log every 50 chunks with state info
                             if chunk_count % 50 == 0 or fin:
                                 # Determine current state based on content
@@ -1029,7 +1039,7 @@ async def call_llm_structured_streaming(
                                     await on_chunk(response_text, token_count)
                                     last_emitted_for_chunk = response_text
                             
-                            # Heartbeat every 5 chunks with state info
+                            # Heartbeat every 5 chunks with state info (fires on reasoning chunks too)
                             if chunk_count % 5 == 0:
                                 # Determine current phase
                                 if reasoning_delta:
@@ -1087,8 +1097,32 @@ async def call_llm_structured_streaming(
                 }
             return empty_response, usage, detected_tools_ordered
         
-        logger.info(f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars")
-        
+        logger.info(f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars, finish_reason={final_finish_reason}")
+
+        # Escalate max_tokens on truncation (finish_reason=length) — retry once with 32768
+        if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation:
+            logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768")
+            return await call_llm_structured_streaming(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=32768,
+                response_model=response_model,
+                on_chunk=on_chunk,
+                reasoning_max_tokens=reasoning_max_tokens,
+                model_preference=model_preference,
+                model_seed=model_seed,
+                agent_id=agent_id,
+                on_tool_detected=on_tool_detected,
+                on_attention_stream=on_attention_stream,
+                on_raw_progress=on_raw_progress,
+                claude_token=claude_token,
+                on_model_detected=on_model_detected,
+                skip_cache=skip_cache,
+                call_site=call_site,
+                _is_escalation=True,
+            )
+
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
         response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
         if response_text and response_text != last_emitted_for_chunk:

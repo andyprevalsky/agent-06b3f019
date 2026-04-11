@@ -1,0 +1,27 @@
+{
+  "$comment": "Strict lint overlay for cleaned domains. Files listed here get tighter rules. The /setup-formatter-and-linter skill adds file paths as domains are cleaned.",
+  "lint": {
+    "include": [
+      "supabase/functions/api-keys/index.ts",
+      "supabase/functions/chat/index.ts"
+    ],
+    "rules": {
+      "tags": ["recommended"],
+      "include": [
+        "ban-untagged-todo",
+        "no-throw-literal",
+        "no-eval",
+        "eqeqeq",
+        "guard-for-in",
+        "no-self-compare",
+        "no-console",
+        "no-sync-fn-in-async-fn",
+        "no-await-in-loop",
+        "explicit-function-return-type",
+        "no-non-null-assertion",
+        "no-non-null-asserted-optional-chain",
+        "default-param-last"
+      ]
+    }
+  }
+}
