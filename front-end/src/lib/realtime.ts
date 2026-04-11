@@ -139,9 +139,10 @@ export async function subscribeToChannel(
   await supabase.realtime.setAuth(session.access_token);
   console.log(`[Realtime] setAuth completed for ${channelName}`);
 
-  // Private channel - requires auth, worker uses service_role_key to broadcast
+  // Private channels in production (RLS checks Supabase managed DB).
+  // In dev, use public channels since agents live in a local DB.
   const channel = supabase.channel(channelName, {
-    config: { private: true },
+    config: { private: !import.meta.env.DEV },
   });
 
   // Attach all event handlers

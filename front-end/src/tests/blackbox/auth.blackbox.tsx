@@ -5,9 +5,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
-import LoginButton from '@/components/auth/LoginButton';
-import PhoneAuthModal from '@/components/auth/PhoneAuthModal';
-import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import { LoginButton, PhoneAuthModal, ProtectedRoute } from '@/features/auth';
 
 const API_BASE = 'http://localhost:3001/api';
 

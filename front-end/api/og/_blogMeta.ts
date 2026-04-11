@@ -1,5 +1,5 @@
 // Minimal blog metadata for OG social card generation.
-// IMPORTANT: Keep in sync with front-end/src/data/blogPosts.ts
+// IMPORTANT: Keep in sync with front-end/src/features/blog/config.ts
 
 export interface BlogMeta {
   slug: string;

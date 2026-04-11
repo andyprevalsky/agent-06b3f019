@@ -1,3 +1,10 @@
 [
-  "src/pages/ResearchBlogPost.tsx"
+  "src/pages/ResearchBlogPost.tsx",
+  "src/features/research-blog-post/types.ts",
+  "src/features/research-blog-post/config.ts",
+  "src/features/research-blog-post/api.ts",
+  "src/features/research-blog-post/hooks.ts",
+  "src/features/research-blog-post/index.ts",
+  "src/features/research-blog-post/components/ResearchBlogPost.tsx",
+  "src/features/research-blog-post/components/index.ts"
 ]

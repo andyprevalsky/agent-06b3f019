@@ -3536,6 +3536,8 @@ async function testBoundary_createAgentCallOrdering(): Promise<void> {
 
 async function testBoundary_validationShortCircuitNoOutbound(): Promise<void> {
   const session = await createAnonymousSession('boundary-validation');
+  // Drain any in-flight calls from the parallel phase before asserting zero outbound
+  await sleep(500);
   await clearCaptures();
 
   // Missing goal → 400: should not make any outbound calls

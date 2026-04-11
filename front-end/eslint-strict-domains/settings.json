@@ -1,3 +1,25 @@
 [
-  "src/pages/Settings.tsx"
+  "src/features/settings/types.ts",
+  "src/features/settings/config.ts",
+  "src/features/settings/api.ts",
+  "src/features/settings/hooks/index.ts",
+  "src/features/settings/hooks/useSettingsData.ts",
+  "src/features/settings/hooks/useSavePersonalInfo.ts",
+  "src/features/settings/hooks/useSaveCustomization.ts",
+  "src/features/settings/hooks/usePayment.ts",
+  "src/features/settings/hooks/useBilling.ts",
+  "src/features/settings/hooks/useApiKeys.ts",
+  "src/features/settings/components/Settings.tsx",
+  "src/features/settings/components/SettingsTabContent.tsx",
+  "src/features/settings/components/CardIcons.tsx",
+  "src/features/settings/components/CustomizationTab.tsx",
+  "src/features/settings/components/PersonalInfoTab.tsx",
+  "src/features/settings/components/PaymentTab.tsx",
+  "src/features/settings/components/CardInfoFields.tsx",
+  "src/features/settings/components/BillingAddressFields.tsx",
+  "src/features/settings/components/BillingTab.tsx",
+  "src/features/settings/components/ApiKeysTab.tsx",
+  "src/features/settings/components/SubscriptionModal.tsx",
+  "src/features/settings/components/index.ts",
+  "src/features/settings/index.ts"
 ]

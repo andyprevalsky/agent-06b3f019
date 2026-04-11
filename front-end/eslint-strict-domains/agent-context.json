@@ -1,3 +1,15 @@
 [
+  "src/features/agent-context/types.ts",
+  "src/features/agent-context/config.ts",
+  "src/features/agent-context/api.ts",
+  "src/features/agent-context/hooks.ts",
+  "src/features/agent-context/hooks/realtimeHandlers.ts",
+  "src/features/agent-context/hooks/useRealtimeSubscription.ts",
+  "src/features/agent-context/hooks/useVisibilityReconnect.ts",
+  "src/features/agent-context/hooks/useHealthCheck.ts",
+  "src/features/agent-context/hooks/usePopstateSync.ts",
+  "src/features/agent-context/components/AgentContext.tsx",
+  "src/features/agent-context/components/index.ts",
+  "src/features/agent-context/index.ts",
   "src/contexts/AgentContext.tsx"
 ]

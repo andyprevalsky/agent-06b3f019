@@ -1,3 +1,12 @@
 [
-  "src/pages/OnePager.tsx"
+  "src/features/one-pager/types.ts",
+  "src/features/one-pager/config.ts",
+  "src/features/one-pager/api.ts",
+  "src/features/one-pager/hooks.ts",
+  "src/features/one-pager/index.ts",
+  "src/features/one-pager/components/OnePager.tsx",
+  "src/features/one-pager/components/OnePagerHeader.tsx",
+  "src/features/one-pager/components/OnePagerIntro.tsx",
+  "src/features/one-pager/components/OnePagerSections.tsx",
+  "src/features/one-pager/components/index.ts"
 ]
