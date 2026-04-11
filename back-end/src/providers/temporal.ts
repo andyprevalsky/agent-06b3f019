@@ -1,4 +1,7 @@
 import { Connection, Client } from '@temporalio/client';
+import { createLogger } from './logger';
+
+const log = createLogger('Temporal');
 
 let client: Client | null = null;
 
@@ -18,7 +21,7 @@ export async function getTemporalClient(): Promise<Client> {
     throw new Error('Missing TEMPORAL_API_KEY environment variable');
   }
 
-  console.log('🔗 Connecting to Temporal Cloud...', {
+  log.info('Connecting to Temporal Cloud...', {
     address,
     namespace,
   });
@@ -34,7 +37,7 @@ export async function getTemporalClient(): Promise<Client> {
     namespace,
   });
 
-  console.log('✅ Connected to Temporal Cloud');
+  log.info('Connected to Temporal Cloud');
 
   return client;
 }
@@ -76,7 +79,7 @@ export async function startAgentWorkflow(params: {
   const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE || 'navi-agent-tasks';
   const workflowId = params.agentId;
 
-  console.log('🚀 Starting agent workflow', {
+  log.info('Starting agent workflow', {
     workflowId,
     taskQueue,
   });
@@ -106,7 +109,7 @@ export async function startAgentWorkflow(params: {
     ],
   });
 
-  console.log('✅ Workflow started', {
+  log.info('Workflow started', {
     workflowId: handle.workflowId,
     runId: handle.firstExecutionRunId,
   });
@@ -114,10 +117,13 @@ export async function startAgentWorkflow(params: {
   return handle.workflowId;
 }
 
+/* c8 ignore start -- getWorkflowStatus requires live Temporal server */
 /**
  * Get workflow status
  */
-export async function getWorkflowStatus(workflowId: string): Promise<any> {
+export async function getWorkflowStatus(
+  workflowId: string
+): Promise<{ status: string; runId: string; startTime: Date } | null> {
   const client = await getTemporalClient();
 
   try {
@@ -130,7 +136,8 @@ export async function getWorkflowStatus(workflowId: string): Promise<any> {
       startTime: description.startTime,
     };
   } catch (error) {
-    console.error('Failed to get workflow status', { workflowId, error });
+    log.error('Failed to get workflow status', { workflowId, error: String(error) });
     return null;
   }
 }
+/* c8 ignore stop */

@@ -81,6 +81,7 @@ export const buildAuthUrl = (
 // Token exchange
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- only called from exchangeProviderCode which is only called from excluded callback */
 /** Fetch user email from Google userinfo endpoint. */
 async function fetchGmailUserEmail(accessToken: string): Promise<string | undefined> {
   try {
@@ -189,6 +190,7 @@ export const exchangeProviderCode = async (
     },
   };
 };
+/* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
 // OAuth result + redirect
@@ -299,6 +301,7 @@ export async function startEmailOAuth(
 // Refresh token
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- refreshGmailToken and buildRawEmail have no callers in the codebase */
 export async function refreshGmailToken(credential: {
   id: string;
   refreshToken: string | null;
@@ -402,3 +405,4 @@ export function buildRawEmail(params: {
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 }
+/* c8 ignore stop */

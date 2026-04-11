@@ -105,6 +105,8 @@ const StatsResponse = z.object({
   topModels: z.array(ModelStat),
 });
 
+// PortalResponse and AgentStatusResponse schemas reserved for future billing endpoint coverage
+
 // ==================== CAPTURE TYPES ====================
 
 interface CapturedCall {

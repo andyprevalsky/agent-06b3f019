@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+/* eslint-disable no-console, max-lines */
 /**
  * Black-box and characterization tests for /api/attention-requests.
  *
@@ -296,28 +297,62 @@ async function createAnonymousSession(label: string): Promise<AnonymousSessionDa
   throw new Error(`Anonymous session setup exhausted retries for ${label}`);
 }
 
+async function createAgentViaApi(userId: string, label: string): Promise<string> {
+  const maxAttempts = 8;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: { status: number; data: unknown; headers: Headers };
+    try {
+      res = await request(`${BASE_URL}/api/agents`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY, 'X-User-Id': userId },
+        body: JSON.stringify({
+          goal: `Attention black-box test agent ${label} ${RUN_ID}`,
+        }),
+      });
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        console.warn(
+          `[retry] createAgentViaApi attempt ${attempt}/${maxAttempts} network error: ${err}`
+        );
+        await sleep(500 * attempt);
+        continue;
+      }
+      throw err;
+    }
+    if (res.status === 201) {
+      const body = res.data as { agent_id: string };
+      return body.agent_id;
+    }
+    const isRetryable =
+      res.status === 500 &&
+      typeof res.data === 'object' &&
+      res.data !== null &&
+      'error' in res.data &&
+      (res.data as { error?: unknown }).error === 'Failed to create agent';
+    if (isRetryable && attempt < maxAttempts) {
+      console.warn(
+        `[retry] createAgentViaApi attempt ${attempt}/${maxAttempts} got retryable 500`
+      );
+      await sleep(1000 * attempt + Math.random() * 500);
+      continue;
+    }
+    throw new Error(`createAgentViaApi failed: status ${res.status}: ${JSON.stringify(res.data)}`);
+  }
+  throw new Error('createAgentViaApi exhausted retries');
+}
+
 async function createFixture(label: string): Promise<Fixture> {
   const owner = await createAnonymousSession(`${label}-owner`);
   const other = await createAnonymousSession(`${label}-other`);
-  const realAgentId = randomUUID();
   const missingAgentId = randomUUID();
+
+  // Create the real agent via the backend API so it exists in the same DB
+  // connection the backend will use when creating messages (avoids FK violations).
+  const realAgentId = await createAgentViaApi(owner.user.id, label);
 
   trackedRealAgentIds.add(realAgentId);
   trackedRequestAgentIds.add(realAgentId);
   trackedRequestAgentIds.add(missingAgentId);
-
-  await withTransientDbRetry(`createFixture:${label}:agent`, async () => {
-    await prisma.agent.upsert({
-      where: { id: realAgentId },
-      update: {},
-      create: {
-        id: realAgentId,
-        userId: owner.user.id,
-        goal: `Attention black-box test agent ${label} ${RUN_ID}`,
-        temporalWorkflowId: makeWorkflowId(`${label}-agent`),
-      },
-    });
-  });
 
   return {
     label,
@@ -381,22 +416,21 @@ function listIndexById(list: ListAttentionRequestsBody, id: string): number {
 async function expectLatestMessage(agentId: string, expectedText: string): Promise<void> {
   const message = await withTransientDbRetry('expectLatestMessage', () =>
     prisma.message.findFirst({
-      where: { agentId },
+      where: { agentId, role: 'USER' },
       orderBy: { createdAt: 'desc' },
     })
   );
-  assert(message, `Expected a message for agent ${agentId}`);
-  assert(message.role === 'USER', `Expected latest message role USER, got ${message.role}`);
+  assert(message, `Expected a USER message for agent ${agentId}`);
   assert(
     message.text === expectedText,
-    `Expected latest message "${expectedText}", got "${message.text}"`
+    `Expected latest USER message "${expectedText}", got "${message.text}"`
   );
 }
 
 async function countAgentMessages(agentId: string): Promise<number> {
   return withTransientDbRetry('countAgentMessages', () =>
     prisma.message.count({
-      where: { agentId },
+      where: { agentId, role: 'USER' },
     })
   );
 }

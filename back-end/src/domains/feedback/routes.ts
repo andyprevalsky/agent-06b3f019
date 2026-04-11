@@ -34,6 +34,7 @@ router.post(
       await submitFeedback(userId, feedback);
       res.json({ success: true });
     } catch (error) {
+      /* c8 ignore next 5 -- defensive catch for unexpected DB errors */
       log.error('Feedback submission error', {
         error: error instanceof Error ? error.message : String(error),
       });

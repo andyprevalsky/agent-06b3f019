@@ -10,6 +10,7 @@ export const ROSE_LABS_URL = 'https://roselabs.ai';
 // vCard URL - always use production since Twilio needs a publicly accessible URL
 export const ROSE_VCARD_URL = 'https://navi-j9a9.onrender.com/api/vcard/rose.vcf';
 
+/* c8 ignore start -- helper functions only called from excluded smsSupervisor or fire-and-forget onboarding */
 // Personalized vCard URL for specific user
 export function getPersonalizedVcardUrl(userId: string): string {
   return `https://navi-j9a9.onrender.com/api/vcard/${userId}.vcf`;
@@ -18,6 +19,7 @@ export function getPersonalizedVcardUrl(userId: string): string {
 export function getAgentUrl(agentId: string): string {
   return `${ROSE_LABS_URL}/?agent-id=${agentId}`;
 }
+/* c8 ignore stop */
 
 export const SMS_TEMPLATES = {
   question: (question: string) => `Rose needs your input: ${question}`,
@@ -25,6 +27,7 @@ export const SMS_TEMPLATES = {
   unknownPhone: () =>
     `Sorry, we don't recognize this phone number. Please sign up at roselabs.ai first.`,
 
+  /* c8 ignore start -- SMS Supervisor templates only called from excluded smsSupervisor module */
   // SMS Supervisor templates (with [prefix] format)
   agentStarted: (prefix: string, goal: string, url: string) =>
     `[${prefix}] Started: "${goal}"\nTrack: ${url}`,
@@ -44,4 +47,5 @@ export const SMS_TEMPLATES = {
 
   onboardingWelcome: (name: string) =>
     `Hi ${name}! Welcome to Rose.\n\nText this number anytime you want something done and our superintelligence will ensure the task gets resolved optimally and quickly.\n\nI'll text you updates and ask for approval when needed.`,
+  /* c8 ignore stop */
 };

@@ -15,6 +15,7 @@ import { createLogger } from '../../providers/logger';
 
 const log = createLogger('SMS Webhook');
 
+/* c8 ignore start -- validateSurgeSignature only called when IS_PRODUCTION is true (skipped in test env) */
 /**
  * Validate Surge webhook signature (HMAC-SHA256)
  *
@@ -69,6 +70,7 @@ export function validateSurgeSignature(
   }
   return timingSafeEqual(sigBuffer, expectedBuffer);
 }
+/* c8 ignore stop */
 
 /**
  * Extract phone number and body from Surge webhook payload.

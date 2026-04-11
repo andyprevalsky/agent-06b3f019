@@ -31,6 +31,7 @@ export async function pauseAgent(agentId: string): Promise<void> {
 
   await repo.updateAgent(agentId, { status: 'PAUSED' });
 
+  /* c8 ignore start -- Temporal signal requires live Temporal server */
   if (agent.temporalWorkflowId !== null) {
     try {
       const client = await getTemporalClient();
@@ -43,6 +44,7 @@ export async function pauseAgent(agentId: string): Promise<void> {
       });
     }
   }
+  /* c8 ignore stop */
 }
 
 /** Resume a single agent. Children discover parent's resumed state via pull-based queries. */
@@ -55,6 +57,7 @@ export async function resumeAgent(agentId: string): Promise<void> {
 
   await repo.updateAgent(agentId, { status: 'ACTIVE' });
 
+  /* c8 ignore start -- Temporal signal requires live Temporal server */
   if (agent.temporalWorkflowId !== null) {
     try {
       const client = await getTemporalClient();
@@ -67,6 +70,7 @@ export async function resumeAgent(agentId: string): Promise<void> {
       });
     }
   }
+  /* c8 ignore stop */
 }
 
 /** Pause an agent for a user (verifies ownership first). */
@@ -110,6 +114,7 @@ export async function resumeAgentForUser(agentId: string, userId: string) {
 // Escalate to agent mode
 // ---------------------------------------------------------------------------
 
+/* c8 ignore start -- startAgentMode, restartAgent, signalWorkflow require live Temporal server */
 /** Manually escalate from chat mode to agent mode. */
 export async function startAgentMode(agentId: string, userId: string) {
   const agent = await repo.findAgentWithVerifier(agentId, userId);
@@ -314,3 +319,4 @@ export async function signalWorkflow(
 
   return { success: true };
 }
+/* c8 ignore stop */

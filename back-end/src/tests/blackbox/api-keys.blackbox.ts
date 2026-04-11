@@ -72,6 +72,7 @@ if (!Number.isInteger(CASE_CONCURRENCY) || CASE_CONCURRENCY <= 0) {
 const trackedUserIds = new Set<string>();
 const trackedSubscriptionUserIds = new Set<string>();
 const trackedApiKeyIds = new Set<string>();
+const trackedDirectSeededUserIds = new Set<string>();
 
 // ==================== Response schemas ====================
 
@@ -280,8 +281,23 @@ async function createAnonymousSession(label: string): Promise<AnonymousSessionDa
   throw new Error(`Anonymous session setup exhausted retries for ${label}`);
 }
 
+async function seedUser(userId: string): Promise<void> {
+  trackedDirectSeededUserIds.add(userId);
+  await withTransientDbRetry(`seedUser:${userId}`, async () => {
+    await prisma.user.upsert({
+      where: { userId },
+      update: {},
+      create: {
+        userId,
+        isAnonymous: true,
+      },
+    });
+  });
+}
+
 async function seedSubscription(userId: string): Promise<void> {
   trackedSubscriptionUserIds.add(userId);
+  await seedUser(userId);
   await withTransientDbRetry(`seedSubscription:${userId}`, async () => {
     await prisma.subscription.upsert({
       where: { userId },
@@ -320,8 +336,14 @@ async function cleanupFixtures(): Promise<void> {
   const userIds = Array.from(trackedUserIds);
   const subUserIds = Array.from(trackedSubscriptionUserIds);
   const keyIds = Array.from(trackedApiKeyIds);
+  const directSeededUserIds = Array.from(trackedDirectSeededUserIds);
 
-  if (userIds.length === 0 && subUserIds.length === 0 && keyIds.length === 0) {
+  if (
+    userIds.length === 0 &&
+    subUserIds.length === 0 &&
+    keyIds.length === 0 &&
+    directSeededUserIds.length === 0
+  ) {
     return;
   }
 
@@ -341,6 +363,16 @@ async function cleanupFixtures(): Promise<void> {
     if (subUserIds.length > 0) {
       await prisma.subscription.deleteMany({
         where: { userId: { in: subUserIds } },
+      });
+    }
+
+    if (directSeededUserIds.length > 0) {
+      // Delete credits first (FK child of User) before removing User records
+      await prisma.credit.deleteMany({
+        where: { userId: { in: directSeededUserIds } },
+      });
+      await prisma.user.deleteMany({
+        where: { userId: { in: directSeededUserIds } },
       });
     }
   });

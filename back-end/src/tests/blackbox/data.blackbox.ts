@@ -30,6 +30,11 @@
  *   - boundary param: no third-party HTTP calls
  *   - call ordering: no outbound calls
  *
+ * See also:
+ *   data-coverage.blackbox.ts  — person_id, limits, agent network sources, edge cases
+ *   data-grep.blackbox.ts      — deep grep defaults / unicode / person_id resolution
+ *   data-real-user.blackbox.ts — full pipeline with real test user (114K+ messages)
+ *
  * Usage:
  *   npx tsx src/tests/blackbox/data.blackbox.ts
  *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/data.blackbox.ts
@@ -666,7 +671,7 @@ async function runAll() {
     { name: 'GET /data/summary -- happy path (JWT)', fn: testSummary_happyJwt },
     { name: 'GET /data/summary -- happy path (API key)', fn: testSummary_happyApiKey },
     { name: 'GET /data/summary -- fresh user empty', fn: testSummary_freshUserEmpty },
-    // agent network grep
+    // agent_network sources
     {
       name: 'POST /data/grep -- agent_network_user_messages missing agent_id -> 400',
       fn: testGrepAgentNetwork_missingAgentId,
@@ -676,7 +681,7 @@ async function runAll() {
       fn: testGrepAgentNetwork_missingAgentIdToolResults,
     },
     {
-      name: 'POST /data/grep -- agent_network nonexistent agent -> 403',
+      name: 'POST /data/grep -- agent_network_user_messages nonexistent agent -> 403',
       fn: testGrepAgentNetwork_nonexistentAgent,
     },
     {
@@ -688,7 +693,7 @@ async function runAll() {
       fn: testGrepAgentNetwork_happyToolResults,
     },
     {
-      name: 'POST /data/grep -- agent_network sources are valid',
+      name: 'POST /data/grep -- agent_network_* sources are valid (not SOURCE_NOT_FOUND)',
       fn: testGrepAgentNetwork_sourcesInValidList,
     },
     // invariants
