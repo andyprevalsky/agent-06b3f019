@@ -491,15 +491,9 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
             f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}"
         )
         
-        # Use the single fetch_agent_data implementation
-        data = await _fetch_agent_data_impl(agent_id)
-        messages = data.get('messages', [])
-        
-        # Filter for ALL messages after last_checked (not just USER)
-        new_messages = [
-            msg for msg in messages
-            if datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00')) > last_checked
-        ]
+        # Use the single fetch_agent_data implementation with server-side filtering
+        data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
+        new_messages = data.get('messages', [])
         
         if new_messages:
             logger.info(

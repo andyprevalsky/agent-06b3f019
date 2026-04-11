@@ -208,10 +208,14 @@ export async function findAncestors(agentId: string) {
 // Messages
 // ---------------------------------------------------------------------------
 
-/** Fetch all messages for an agent ordered by timestamp ascending. */
-export async function findMessages(agentId: string) {
+/** Fetch messages for an agent ordered by timestamp ascending.
+ *  If `since` is provided, only returns messages with timestamp > since. */
+export async function findMessages(agentId: string, since?: Date) {
   return prisma.message.findMany({
-    where: { agentId },
+    where: {
+      agentId,
+      ...(since ? { timestamp: { gt: since } } : {}),
+    },
     orderBy: { timestamp: 'asc' },
   });
 }

@@ -19,7 +19,7 @@ function getConnectionUrl(): string {
   const url = process.env.DATABASE_URL ?? '';
 
   const params: string[] = [];
-  if (!url.includes('connection_limit')) params.push('connection_limit=10');
+  if (!url.includes('connection_limit')) params.push('connection_limit=250');
   if (!url.includes('pool_timeout')) params.push('pool_timeout=30');
 
   if (params.length === 0) return url;

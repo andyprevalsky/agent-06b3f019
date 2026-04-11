@@ -92,16 +92,16 @@ function computeToolTokens(toolUsages: { totalCostCents: number; usageItems: unk
   return { toolTokensIn, toolTokensOut, totalCostCents };
 }
 
-/** Get agent details with messages and tool usage. */
-export async function getAgentDetail(agentId: string, userId?: string) {
+/** Get agent details with messages and tool usage.
+ *  If `since` is provided, only messages after that timestamp are returned. */
+export async function getAgentDetail(agentId: string, userId?: string, since?: Date) {
   const agent = await repo.findAgentWithRelations(agentId, userId);
 
   if (!agent) {
     return null;
   }
 
-  // Fetch ALL messages (pagination disabled for now)
-  const messages = await repo.findMessages(agentId);
+  const messages = await repo.findMessages(agentId, since);
 
   // Fetch parent goal if this is a sub-agent
   let parentGoal: string | null = null;

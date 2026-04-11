@@ -19,9 +19,31 @@
  * Only intended for isolated blackbox test backends — never in production.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { resolve } from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fastForward as ff, FileSystemCache } from '@with-logic/fast-forward';
+
+/**
+ * AsyncLocalStorage for propagating a capture token from inbound HTTP requests
+ * to outbound fetch calls. This lets tests filter captures to only those
+ * triggered by their own request, avoiding interference from concurrent domains.
+ */
+const captureTokenStore = new AsyncLocalStorage<string>();
+
+/**
+ * Express middleware: reads X-Capture-Token header and runs the request
+ * inside an AsyncLocalStorage context so outbound captures are tagged.
+ * Mount this BEFORE routes when capture is enabled.
+ */
+export function captureTokenMiddleware(req: Request, _res: Response, next: NextFunction): void {
+  const token = req.headers['x-capture-token'] as string | undefined;
+  if (token) {
+    captureTokenStore.run(token, () => next());
+  } else {
+    next();
+  }
+}
 
 export interface CapturedCall {
   id: number;
@@ -35,6 +57,7 @@ export interface CapturedCall {
   durationMs: number;
   error: string | null;
   cached: boolean;
+  captureToken: string | null;
 }
 
 interface SerializedResponse {
@@ -178,6 +201,7 @@ export function installFetchCapture(): Router {
       durationMs: 0,
       error: null,
       cached: false,
+      captureToken: captureTokenStore.getStore() ?? null,
     };
 
     try {
@@ -230,9 +254,14 @@ export function installFetchCapture(): Router {
   let clearedAfterId = 0;
 
   // GET / — return captures (respects soft-clear baseline or explicit cursor)
+  // Optional ?token= filters to only captures tagged with that token (for domain isolation).
   router.get('/', (req: Request, res: Response) => {
     const afterId = req.query.after ? Number(req.query.after) : clearedAfterId;
-    const filtered = afterId > 0 ? captures.filter((c) => c.id > afterId) : captures;
+    const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+    let filtered = afterId > 0 ? captures.filter((c) => c.id > afterId) : captures;
+    if (token) {
+      filtered = filtered.filter((c) => c.captureToken === token);
+    }
     res.json({ captures: filtered, nextId });
   });
 

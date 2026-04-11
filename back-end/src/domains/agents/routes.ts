@@ -93,7 +93,9 @@ router.get(
     try {
       noCacheHeaders(res);
       const userId = req.isInternal === true ? undefined : req.userId;
-      const result = await queryService.getAgentDetail(req.params.id, userId);
+      const rawSince = typeof req.query.since === 'string' ? new Date(req.query.since) : undefined;
+      const since = rawSince && !isNaN(rawSince.getTime()) ? rawSince : undefined;
+      const result = await queryService.getAgentDetail(req.params.id, userId, since);
       if (result === null) {
         res.status(404).json({ error: 'Agent not found' });
         return;

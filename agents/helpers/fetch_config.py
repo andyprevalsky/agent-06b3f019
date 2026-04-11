@@ -7,31 +7,37 @@ Other helpers should import and use _fetch_agent_data_impl directly.
 from temporalio import activity
 import structlog
 import httpx
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+from urllib.parse import quote
 
 from config import load_config
 
 logger = structlog.get_logger()
 
 
-async def _fetch_agent_data_impl(agent_id: str) -> Dict[str, Any]:
+async def _fetch_agent_data_impl(agent_id: str, since: Optional[str] = None) -> Dict[str, Any]:
     """
     Core implementation for fetching agent data.
-    
+
     This is the SINGLE function that calls GET /api/agents/{agent_id}.
     Can be called directly from other activities or via activity wrappers.
-    
+
     Args:
         agent_id: The agent ID
-        
+        since: ISO timestamp — if provided, only messages after this time are returned
+
     Returns:
         Full response dict with 'agent' and 'messages' keys
     """
     config = load_config()
-    
+
+    url = f"{config.backend.api_url}/api/agents/{agent_id}"
+    if since:
+        url += f"?since={quote(since, safe='')}"
+
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"{config.backend.api_url}/api/agents/{agent_id}",
+            url,
             headers={
                 "X-API-Key": config.backend.api_key,
                 "Content-Type": "application/json"
