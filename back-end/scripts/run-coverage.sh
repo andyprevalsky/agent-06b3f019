@@ -77,8 +77,9 @@ echo "Backend ready at $TEST_BASE_URL"
 
 # Run the blackbox test suite (the comprehensive test that exercises business logic)
 echo "Running blackbox tests..."
+TEST_EXIT=0
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
-  bash scripts/run-blackbox-tests.sh || true
+  bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?
 
 # Stop the server so NODE_V8_COVERAGE flushes data
 echo "Stopping backend and collecting coverage data..."
@@ -111,7 +112,15 @@ backend_dir = os.environ.get("COV_BACKEND_DIR", "")
 with open(summary_file) as f:
     data = json.load(f)
 
-threshold = 80
+# Read threshold from .c8rc.json
+c8rc_path = os.path.join(backend_dir, ".c8rc.json")
+threshold = 88  # default
+try:
+    with open(c8rc_path) as f2:
+        c8rc = json.load(f2)
+    threshold = c8rc.get("lines", 88)
+except Exception:
+    pass
 cwd = backend_dir + "/"
 
 # Collect per-file gaps
@@ -156,4 +165,11 @@ print("     Add or expand blackbox tests in  src/tests/blackbox/<domain>.blackbo
 PYEOF
   fi
   exit "$COV_EXIT"
+fi
+
+# If blackbox tests failed, report it even if coverage passed
+if [[ "$TEST_EXIT" -ne 0 ]]; then
+  echo ""
+  echo "⚠️  Blackbox tests failed (exit code $TEST_EXIT). Coverage data may be incomplete."
+  exit "$TEST_EXIT"
 fi

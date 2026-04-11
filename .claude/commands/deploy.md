@@ -217,6 +217,7 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 # 2. ESLint: 0 errors
 # 3. TypeScript: 0 errors
 # 4. Structural tests: 100% pass
+# 4a. Code coverage: meets thresholds in .c8rc.json (if back-end/ changed)
 # 5. Blackbox API tests: 100% pass (ALL domains, not just "your" domains)
 # 6. Smoke benchmarks: 100% pass (all 5)
 #
