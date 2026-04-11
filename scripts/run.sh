@@ -323,7 +323,12 @@ run_service() {
 }
 
 # Launch each service
-run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
+if $BENCHMARK_MODE; then
+    # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
+    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee backend-logs.log' &
+else
+    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
+fi
 PIDS+=($!); NAMES+=("back-end")
 
 if ! $BENCHMARK_MODE; then
