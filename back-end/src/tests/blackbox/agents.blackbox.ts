@@ -1121,23 +1121,8 @@ test('PATCH /:id/status — invalid body → 400', async () => {
 test('PATCH /:id/status — read-after-write: status visible in detail', async () => {
   const session = await createAnonymousSession('upd-status-raw');
 
-  // Create agent directly in DB to avoid chatHandler race overwriting status
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-raw-status-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'RAW status test',
-        status: 'ACTIVE',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
-  });
+  // Create agent via HTTP so it's visible to the server
+  const agentId = await createTestAgent(session.user.id, 'RAW status test');
 
   await request(`${BASE_URL}/api/agents/${agentId}/status`, {
     method: 'PATCH',
@@ -1260,23 +1245,8 @@ test('POST /:id/pause — not found → 404', async () => {
 test('POST /:id/pause — happy path: status changes to PAUSED', async () => {
   const session = await createAnonymousSession('pause-happy');
 
-  // Create agent directly in DB to avoid chatHandler race overwriting status
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-pause-happy-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'Pause test',
-        status: 'ACTIVE',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
-  });
+  // Create agent via HTTP so it's visible to the server
+  const agentId = await createTestAgent(session.user.id, 'Pause test');
 
   const res = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
     method: 'POST',
@@ -1315,22 +1285,18 @@ test('POST /:id/resume — not found → 404', async () => {
 test('POST /:id/resume — happy path: status changes to ACTIVE', async () => {
   const session = await createAnonymousSession('resume-happy');
 
-  // Create agent directly in DB as PAUSED to avoid chatHandler race
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-resume-happy-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'Resume test',
-        status: 'PAUSED',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create agent via HTTP, then set to PAUSED via internal status update
+  const agentId = await createTestAgent(session.user.id, 'Resume test');
+  await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'PAUSED',
+      progress: 0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
 
   // Resume
@@ -1354,42 +1320,60 @@ test('POST /:id/resume — happy path: status changes to ACTIVE', async () => {
 test('POST /:id/resume — child with paused parent → 400', async () => {
   const session = await createAnonymousSession('resume-parent-paused');
 
-  // Create parent directly in DB to avoid chatHandler race
-  const parentId = randomUUID();
-  trackedAgentIds.add(parentId);
-  await withTransientDbRetry('create-parent-resume', async () => {
-    await prisma.agent.create({
-      data: {
-        id: parentId,
-        userId: session.user.id,
-        goal: 'Parent for resume test',
-        status: 'PAUSED',
-        busId: parentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create parent via HTTP then set to PAUSED so both parent and child are server-visible
+  const parentId = await createTestAgent(session.user.id, 'Parent for resume test');
+  await request(`${BASE_URL}/api/agents/${parentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'PAUSED',
+      progress: 0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
 
-  // Create child in DB
-  const childId = randomUUID();
-  trackedAgentIds.add(childId);
-  await withTransientDbRetry('create-child-resume', async () => {
-    await prisma.agent.create({
-      data: {
-        id: childId,
-        userId: session.user.id,
-        goal: 'Child resume test',
-        parentAgentId: parentId,
-        busId: parentId,
-        status: 'PAUSED',
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: childId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create child via HTTP with parent_agent_id — may fail (500) if Temporal not running,
+  // but the agent row is committed to DB before the workflow launch attempt
+  const childCreateRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      goal: 'Child resume test',
+      parent_agent_id: parentId,
+      bus_id: parentId,
+    }),
   });
+
+  let childId: string;
+  if (childCreateRes.status === 201) {
+    childId = (childCreateRes.data as { agent_id: string }).agent_id;
+  } else {
+    // Temporal not running: child was written to DB before workflow launch failed.
+    // Find child by parentAgentId lookup.
+    const child = await withTransientDbRetry('find-child-resume', async () =>
+      prisma.agent.findFirst({
+        where: { parentAgentId: parentId, userId: session.user.id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      })
+    );
+    if (!child) throw new Error('Child agent not found after sub-agent creation attempt');
+    childId = child.id;
+    // Set child to PAUSED so its status matches original test intent
+    await request(`${BASE_URL}/api/agents/${childId}/status`, {
+      method: 'PATCH',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        status: 'PAUSED',
+        progress: 0,
+        tokenCount: 0,
+        contextSize: 0,
+        messageCount: 0,
+      }),
+    });
+  }
+  trackedAgentIds.add(childId);
 
   // Try to resume child while parent is paused → 400
   const res = await request(`${BASE_URL}/api/agents/${childId}/resume`, {
@@ -1398,13 +1382,7 @@ test('POST /:id/resume — child with paused parent → 400', async () => {
   });
   assertStatus(res.status, 400, res.data);
 
-  // Cleanup
-  await withTransientDbRetry('cleanup-resume', async () => {
-    await prisma.agent.updateMany({
-      where: { id: { in: [parentId, childId] } },
-      data: { deletedAt: new Date() },
-    });
-  });
+  await deleteTestAgent(parentId, session.user.id);
 });
 
 // ========================= PATCH /:id (update agent) =======================
@@ -1790,23 +1768,8 @@ test('GET /:id/attachments/:fileId/url — wrong user path → 403', async () =>
 test('state: pause → resume round-trip preserves agent data', async () => {
   const session = await createAnonymousSession('state-round-trip');
 
-  // Create agent directly in DB to avoid chatHandler race overwriting status
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-round-trip-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'State round-trip test',
-        status: 'ACTIVE',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
-  });
+  // Create agent via HTTP so it's visible to the server
+  const agentId = await createTestAgent(session.user.id, 'State round-trip test');
 
   // Get initial state
   const before = await request(`${BASE_URL}/api/agents/${agentId}`, {
@@ -1857,23 +1820,18 @@ test('state: pause → resume round-trip preserves agent data', async () => {
 test('state: pause skips terminal agents', async () => {
   const session = await createAnonymousSession('state-terminal');
 
-  // Create agent directly in DB to avoid chatHandler race overwriting status
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-terminal-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'Terminal pause test',
-        status: 'COMPLETED',
-        progress: 1.0,
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create agent via HTTP, then set to COMPLETED via internal status update
+  const agentId = await createTestAgent(session.user.id, 'Terminal pause test');
+  await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'COMPLETED',
+      progress: 1.0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
 
   // Pause should succeed but not change status (skips terminal)
@@ -1889,9 +1847,7 @@ test('state: pause skips terminal agents', async () => {
   const status = assertSchema(StatusResponse, statusRes.data, 'terminal pause check');
   assert(status.status === 'COMPLETED', `Expected COMPLETED to persist, got ${status.status}`);
 
-  await withTransientDbRetry('cleanup-terminal', async () => {
-    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
-  });
+  await deleteTestAgent(agentId, session.user.id);
 });
 
 // ========================= Read-after-write consistency ====================
@@ -2013,42 +1969,36 @@ test('POST / — sub-agent creation with parent_agent_id', async () => {
 test('DELETE /:id — recursive delete with children', async () => {
   const session = await createAnonymousSession('recursive-del');
 
-  // Create parent directly in DB
-  const parentId = randomUUID();
-  trackedAgentIds.add(parentId);
-  await withTransientDbRetry('create-parent-recursive', async () => {
-    await prisma.agent.create({
-      data: {
-        id: parentId,
-        userId: session.user.id,
-        goal: 'Parent recursive delete test',
-        status: 'ACTIVE',
-        busId: parentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create parent via HTTP so it's visible to the server
+  const parentId = await createTestAgent(session.user.id, 'Parent recursive delete test');
+
+  // Create child via HTTP with parent_agent_id — may fail (500) if Temporal not running,
+  // but the agent row is committed to DB before the workflow launch attempt
+  const childCreateRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      goal: 'Child recursive delete test',
+      parent_agent_id: parentId,
+      bus_id: parentId,
+    }),
   });
 
-  // Create child directly in DB
-  const childId = randomUUID();
+  let childId: string;
+  if (childCreateRes.status === 201) {
+    childId = (childCreateRes.data as { agent_id: string }).agent_id;
+  } else {
+    // Temporal not running: child was written to DB before workflow launch failed.
+    const child = await withTransientDbRetry('find-child-recursive', async () =>
+      prisma.agent.findFirst({
+        where: { parentAgentId: parentId, userId: session.user.id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      })
+    );
+    if (!child) throw new Error('Child agent not found after sub-agent creation attempt');
+    childId = child.id;
+  }
   trackedAgentIds.add(childId);
-  await withTransientDbRetry('create-child-recursive', async () => {
-    await prisma.agent.create({
-      data: {
-        id: childId,
-        userId: session.user.id,
-        goal: 'Child recursive delete test',
-        parentAgentId: parentId,
-        busId: parentId,
-        status: 'ACTIVE',
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: childId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
-  });
 
   // Delete parent — should recursively delete child
   const delRes = await request(`${BASE_URL}/api/agents/${parentId}`, {
@@ -2072,23 +2022,11 @@ test('DELETE /:id — recursive delete with children', async () => {
 test('DELETE /:id — cleans up attention requests', async () => {
   const session = await createAnonymousSession('del-attention');
 
-  // Create agent directly in DB
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-agent-attention', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'Attention request cleanup test',
-        status: 'ACTIVE',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
-    // Create an attention request
+  // Create agent via HTTP so it's visible to the server
+  const agentId = await createTestAgent(session.user.id, 'Attention request cleanup test');
+
+  // Create an attention request via Prisma (no HTTP endpoint for this)
+  await withTransientDbRetry('create-attention-request', async () => {
     await prisma.agentAttentionRequest.create({
       data: {
         userId: session.user.id,
@@ -2142,21 +2080,19 @@ test('DELETE /:id — internal auth delete (no userId)', async () => {
 test('POST /:id/pause — terminal FAILED agent stays FAILED', async () => {
   const session = await createAnonymousSession('pause-failed');
 
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-failed-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'Pause FAILED test',
-        status: 'FAILED',
-        busId: agentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create agent via HTTP, then set to FAILED via internal status update
+  const agentId = await createTestAgent(session.user.id, 'Pause FAILED test');
+  await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'FAILED',
+      statusMessage: 'Test failure',
+      progress: 0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
 
   const pauseRes = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
@@ -2171,9 +2107,7 @@ test('POST /:id/pause — terminal FAILED agent stays FAILED', async () => {
   const status = assertSchema(StatusResponse, statusRes.data, 'pause-failed check');
   assert(status.status === 'FAILED', `Expected FAILED to persist, got ${status.status}`);
 
-  await withTransientDbRetry('cleanup-failed-pause', async () => {
-    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
-  });
+  await deleteTestAgent(agentId, session.user.id);
 });
 
 // ========================= Resume with COST_LIMIT_REACHED parent ===========
@@ -2181,42 +2115,59 @@ test('POST /:id/pause — terminal FAILED agent stays FAILED', async () => {
 test('POST /:id/resume — child with COST_LIMIT_REACHED parent → 400', async () => {
   const session = await createAnonymousSession('resume-cost-limit');
 
-  // Create parent with COST_LIMIT_REACHED status
-  const parentId = randomUUID();
-  trackedAgentIds.add(parentId);
-  await withTransientDbRetry('create-cost-limit-parent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: parentId,
-        userId: session.user.id,
-        goal: 'Cost-limited parent',
-        status: 'COST_LIMIT_REACHED',
-        busId: parentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create parent via HTTP then set to COST_LIMIT_REACHED
+  const parentId = await createTestAgent(session.user.id, 'Cost-limited parent');
+  await request(`${BASE_URL}/api/agents/${parentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'COST_LIMIT_REACHED',
+      progress: 0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
 
-  // Create child PAUSED
-  const childId = randomUUID();
-  trackedAgentIds.add(childId);
-  await withTransientDbRetry('create-cost-limit-child', async () => {
-    await prisma.agent.create({
-      data: {
-        id: childId,
-        userId: session.user.id,
-        goal: 'Child of cost-limited parent',
-        parentAgentId: parentId,
-        busId: parentId,
-        status: 'PAUSED',
-      },
-    });
-    await prisma.verifier.create({
-      data: { agentId: childId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
-    });
+  // Create child via HTTP with parent_agent_id — may fail (500) if Temporal not running,
+  // but the agent row is committed to DB before the workflow launch attempt
+  const childCreateRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      goal: 'Child of cost-limited parent',
+      parent_agent_id: parentId,
+      bus_id: parentId,
+    }),
   });
+
+  let childId: string;
+  if (childCreateRes.status === 201) {
+    childId = (childCreateRes.data as { agent_id: string }).agent_id;
+  } else {
+    // Temporal not running: child was written to DB before workflow launch failed.
+    const child = await withTransientDbRetry('find-child-cost-limit', async () =>
+      prisma.agent.findFirst({
+        where: { parentAgentId: parentId, userId: session.user.id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      })
+    );
+    if (!child) throw new Error('Child agent not found after sub-agent creation attempt');
+    childId = child.id;
+    // Set child to PAUSED
+    await request(`${BASE_URL}/api/agents/${childId}/status`, {
+      method: 'PATCH',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        status: 'PAUSED',
+        progress: 0,
+        tokenCount: 0,
+        contextSize: 0,
+        messageCount: 0,
+      }),
+    });
+  }
+  trackedAgentIds.add(childId);
 
   // Try to resume child — should fail because parent is COST_LIMIT_REACHED
   const res = await request(`${BASE_URL}/api/agents/${childId}/resume`, {
@@ -2227,13 +2178,7 @@ test('POST /:id/resume — child with COST_LIMIT_REACHED parent → 400', async 
   const body = res.data as { error: string };
   assert(body.error.includes('cost-limited'), `Expected cost-limited error, got: ${body.error}`);
 
-  // Cleanup
-  await withTransientDbRetry('cleanup-cost-limit', async () => {
-    await prisma.agent.updateMany({
-      where: { id: { in: [parentId, childId] } },
-      data: { deletedAt: new Date() },
-    });
-  });
+  await deleteTestAgent(parentId, session.user.id);
 });
 
 // ========================= Resume tenant isolation ==========================
