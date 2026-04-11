@@ -33,6 +33,10 @@ else
 fi
 
 echo ""
+echo "=== Structural checks (file/function length) ==="
+npx tsx "$ROOT/scripts/lint-structure.ts" || FAIL=1
+
+echo ""
 echo "=== Python (ruff format + ruff check) ==="
 if $FIX; then
   ruff format .

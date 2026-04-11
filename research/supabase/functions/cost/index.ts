@@ -1,12 +1,33 @@
-import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
+import { serve } from 'https://deno.land/std@0.190.0/http/server.ts';
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+/** Pricing info returned by OpenRouter's /models endpoint. */
+interface OpenRouterPricing {
+  prompt?: string;
+  completion?: string;
+}
+
+/** A single model entry from OpenRouter's /models response. */
+interface OpenRouterModel {
+  id: string;
+  context_length?: number;
+  top_provider?: { context_length?: number };
+  pricing?: OpenRouterPricing;
+}
+
+/** Resolved per-token pricing for a single model. */
+interface ResolvedPricing {
+  prompt: number;
+  completion: number;
+  contextLength: number;
+}
+
+const corsHeaders: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
 // Model pools for Rose variants - sync with research/supabase/functions/completions/index.ts
-const MODEL_POOLS = {
+const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-lite': [
     'google/gemini-3-flash-preview',
     'moonshotai/kimi-k2.5',
@@ -15,172 +36,160 @@ const MODEL_POOLS = {
     // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
     'openai/gpt-5.2',
     'google/gemini-3-pro-preview',
-    'moonshotai/kimi-k2.5'
+    'moonshotai/kimi-k2.5',
   ],
   // Browser automation pool - specialized models for web interaction
   // browser-use has fixed pricing, yutori/n1 uses OpenRouter
   'rose-1-browser-use': [
-    'browser-use',              // Fixed: $0.10 input, $0.40 output per 1M tokens
-    'yutori/n1',                // Via OpenRouter
-    'openai/gpt-5.2',          // Via OpenRouter
-  ]
+    'browser-use', // Fixed: $0.10 input, $0.40 output per 1M tokens
+    'yutori/n1', // Via OpenRouter
+    'openai/gpt-5.2', // Via OpenRouter
+  ],
 };
 
+// Fixed pricing for models not on OpenRouter (per token).
+// browser-use: $0.10 input, $0.40 output per 1M tokens
+const FIXED_PRICING: Record<string, ResolvedPricing> = {
+  'browser-use': {
+    prompt: 0.10 / 1_000_000,
+    completion: 0.40 / 1_000_000,
+    contextLength: 128_000,
+  },
+  'moonshotai/kimi-k2.5': {
+    prompt: 0.60 / 1_000_000,
+    completion: 3.00 / 1_000_000,
+    contextLength: 128_000,
+  },
+};
+
+/** Round a per-token price up to the nearest $0.05 per million tokens. */
+function roundUpToNearestFiveCents(perTokenPrice: number): number {
+  const perMillionPrice = perTokenPrice * 1_000_000;
+  return Math.ceil(perMillionPrice / 0.05) * 0.05;
+}
+
+/** Build a JSON error response with CORS headers. */
+function jsonError(message: string, status: number): Response {
+  return new Response(
+    JSON.stringify({ error: message }),
+    { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status },
+  );
+}
+
+/** Build a JSON success response with CORS headers. */
+function jsonOk(body: Record<string, unknown>): Response {
+  return new Response(
+    JSON.stringify(body),
+    { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 },
+  );
+}
+
+/** Fetch model catalog from OpenRouter. */
+async function fetchOpenRouterModels(): Promise<OpenRouterModel[]> {
+  const response = await fetch('https://openrouter.ai/api/v1/models', {
+    headers: {
+      'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+      'HTTP-Referer': Deno.env.get('SUPABASE_URL') ?? 'https://rose-benchmark.supabase.co',
+      'X-Title': 'Rose Benchmark Suite',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter API returned ${response.status}`);
+  }
+  const data = (await response.json()) as { data?: OpenRouterModel[] };
+  return data.data ?? [];
+}
+
+/** Aggregate pricing across a model pool, blending fixed and OpenRouter prices. */
+function aggregatePricing(
+  pool: string[],
+  catalog: OpenRouterModel[],
+): { avgPrompt: number; avgCompletion: number; minContext: number } | null {
+  let totalPrompt = 0;
+  let totalCompletion = 0;
+  let validModels = 0;
+  let minContext = Infinity;
+
+  for (const modelId of pool) {
+    const fixed = FIXED_PRICING[modelId];
+    if (fixed) {
+      if (fixed.contextLength < minContext) minContext = fixed.contextLength;
+      totalPrompt += fixed.prompt;
+      totalCompletion += fixed.completion;
+      validModels++;
+      continue;
+    }
+
+    const info = catalog.find((m) => m.id === modelId);
+    if (!info) continue;
+
+    const ctx = info.top_provider?.context_length ?? info.context_length;
+    if (ctx !== undefined && ctx < minContext) minContext = ctx;
+
+    if (info.pricing) {
+      totalPrompt += parseFloat(info.pricing.prompt ?? '0');
+      totalCompletion += parseFloat(info.pricing.completion ?? '0');
+      validModels++;
+    }
+  }
+
+  if (validModels === 0) return null;
+
+  return {
+    avgPrompt: totalPrompt / validModels,
+    avgCompletion: totalCompletion / validModels,
+    minContext: minContext === Infinity ? 200_000 : minContext,
+  };
+}
+
+/** Parse and normalize the model name from the request URL. */
+function parseModelName(url: URL): string | null {
+  const raw = url.searchParams.get('model');
+  if (!raw) return null;
+  let name = raw.toLowerCase();
+  if (name.startsWith('rose-labs/')) {
+    name = name.replace('rose-labs/', '');
+  }
+  return name;
+}
+
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
+  if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // Extract model name from query parameter
-    const url = new URL(req.url);
-    let modelName = url.searchParams.get('model');
-    
+    const modelName = parseModelName(new URL(req.url));
     if (!modelName) {
-      return new Response(JSON.stringify({ 
-        error: 'Missing required query parameter: model' 
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      });
+      return jsonError('Missing required query parameter: model', 400);
     }
-    
-    modelName = modelName.toLowerCase();
-    
-    // Normalize: 'rose-labs/rose-1-lite' → 'rose-1-lite'
-    if (modelName.startsWith('rose-labs/')) {
-      modelName = modelName.replace('rose-labs/', '');
-    }
-    
-    const pool = MODEL_POOLS[modelName as keyof typeof MODEL_POOLS];
 
+    const pool = MODEL_POOLS[modelName];
     if (!pool) {
-      return new Response(JSON.stringify({
-        error: `Model not found: ${modelName}`
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 404,
-      });
+      return jsonError(`Model not found: ${modelName}`, 404);
     }
 
-    // Fixed pricing for models not on OpenRouter (per token)
-    // browser-use: $0.10 input, $0.40 output per 1M tokens
-    const FIXED_PRICING: Record<string, { prompt: number; completion: number; contextLength: number }> = {
-      'browser-use': {
-        prompt: 0.10 / 1000000,      // $0.10 per 1M tokens -> per token
-        completion: 0.40 / 1000000,  // $0.40 per 1M tokens -> per token
-        contextLength: 128000,       // 128k context
-      },
-      'moonshotai/kimi-k2.5': {
-        prompt: 0.60 / 1000000,      // $0.60 per 1M tokens -> per token
-        completion: 3.00 / 1000000,  // $3.00 per 1M tokens -> per token
-        contextLength: 128000,       // 128k context
-      },
-    };
-
-    // Fetch all OpenRouter models
-    const response = await fetch('https://openrouter.ai/api/v1/models', {
-      headers: {
-        'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-        'HTTP-Referer': Deno.env.get('SUPABASE_URL') || 'https://rose-benchmark.supabase.co',
-        'X-Title': 'Rose Benchmark Suite'
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenRouter API returned ${response.status}`);
+    const catalog = await fetchOpenRouterModels();
+    const pricing = aggregatePricing(pool, catalog);
+    if (!pricing) {
+      return jsonError('No pricing information available for models in pool', 500);
     }
 
-    const data = await response.json() as any;
-    const allModels = data.data || [];
-
-    // Calculate average pricing and minimum context length
-    let totalPrompt = 0;
-    let totalCompletion = 0;
-    let validModels = 0;
-    let minContextLength = Infinity;
-
-    for (const modelId of pool) {
-      // Check for fixed pricing first (models not on OpenRouter)
-      const fixedPricing = FIXED_PRICING[modelId];
-      if (fixedPricing) {
-        if (fixedPricing.contextLength < minContextLength) {
-          minContextLength = fixedPricing.contextLength;
-        }
-        totalPrompt += fixedPricing.prompt;
-        totalCompletion += fixedPricing.completion;
-        validModels++;
-        continue;
-      }
-
-      // Fall back to OpenRouter pricing
-      const modelInfo = allModels.find((m: any) => m.id === modelId);
-
-      if (modelInfo) {
-        // Track minimum context length for all models
-        const contextLength = modelInfo.top_provider?.context_length || modelInfo.context_length;
-        if (contextLength && contextLength < minContextLength) {
-          minContextLength = contextLength;
-        }
-
-        // Track pricing only for models that have it
-        if (modelInfo.pricing) {
-          // OpenRouter returns price per token, accumulate as-is
-          const promptCost = parseFloat(modelInfo.pricing.prompt || '0');
-          const completionCost = parseFloat(modelInfo.pricing.completion || '0');
-
-          totalPrompt += promptCost;
-          totalCompletion += completionCost;
-          validModels++;
-        }
-      }
-    }
-
-    if (validModels === 0) {
-      return new Response(JSON.stringify({ 
-        error: 'No pricing information available for models in pool' 
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 500,
-      });
-    }
-
-    // Calculate averages (per token)
-    const avgPrompt = totalPrompt / validModels;
-    const avgCompletion = totalCompletion / validModels;
-
-    // Convert to per-million tokens, round up to nearest $0.05, return as number
-    const roundUpToNearestFiveCents = (perTokenPrice: number) => {
-      const perMillionPrice = perTokenPrice * 1000000;
-      const roundedPerMillion = Math.ceil(perMillionPrice / 0.05) * 0.05;
-      return roundedPerMillion; // Return per-million price directly
-    };
-
-    const costPerMillionInputTokens = roundUpToNearestFiveCents(avgPrompt);
-    const costPerMillionOutputTokens = roundUpToNearestFiveCents(avgCompletion);
-
-    return new Response(JSON.stringify({
+    return jsonOk({
       model: modelName,
-      contextLength: minContextLength === Infinity ? 200000 : minContextLength,
+      contextLength: pricing.minContext,
       pricing: {
-        costPerMillionInputTokens,
-        costPerMillionOutputTokens
-      }
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200,
+        costPerMillionInputTokens: roundUpToNearestFiveCents(pricing.avgPrompt),
+        costPerMillionOutputTokens: roundUpToNearestFiveCents(pricing.avgCompletion),
+      },
     });
-
   } catch (error) {
+    // deno-lint-ignore no-console
     console.error('Cost calculation error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({ 
-      error: 'Failed to calculate cost',
-      details: errorMessage 
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 500,
-    });
+    return new Response(
+      JSON.stringify({ error: 'Failed to calculate cost', details: errorMessage }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 },
+    );
   }
 });
-
