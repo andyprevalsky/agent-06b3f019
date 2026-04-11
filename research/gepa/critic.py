@@ -23,6 +23,7 @@ STATE_PATH = DATA_DIR / 'labeler_state.json'
 # A. Serialization
 # ---------------------------------------------------------------------------
 
+
 def serialize_prompt(task_seed: str, agent_context: list[dict]) -> str:
     """Format task context as the 'prompt' for the reward model.
 
@@ -83,6 +84,7 @@ def serialize_candidate(candidate: dict) -> str:
 # B. Data loading
 # ---------------------------------------------------------------------------
 
+
 def _build_task_id_to_filename(tasks_dir: Path) -> dict[str, str]:
     """Load all clarified task JSONs and build task_id → filename map."""
     mapping = {}
@@ -121,10 +123,13 @@ def prepare_reward_pairs(
     if min_confidence > 0:
         before = len(labels)
         labels = [
-            l for l in labels
+            l
+            for l in labels
             if l.get('source') != 'llm_labeled' or l.get('confidence', 0) >= min_confidence
         ]
-        logger.info(f'Confidence filter: {before} → {len(labels)} labels (min_confidence={min_confidence})')
+        logger.info(
+            f'Confidence filter: {before} → {len(labels)} labels (min_confidence={min_confidence})'
+        )
 
     with open(state_path) as f:
         state = json.load(f)
@@ -202,6 +207,7 @@ def prepare_reward_pairs(
 # C. Training (via Modal GPU)
 # ---------------------------------------------------------------------------
 
+
 def train_reward_model(
     rows: dict[str, list],
     base_model: str = 'google/gemma-2-9b-it',
@@ -220,6 +226,7 @@ def train_reward_model(
         dict with 'model_id', 'num_examples', 'train_loss', 'metrics'.
     """
     import modal
+
     train_fn = modal.Function.from_name('gepa-critic', 'train')
     return train_fn.remote(rows, base_model=base_model, model_id=model_id, **kwargs)
 
@@ -227,6 +234,7 @@ def train_reward_model(
 # ---------------------------------------------------------------------------
 # D. Inference (via Modal GPU)
 # ---------------------------------------------------------------------------
+
 
 def score_candidates(
     candidates: list[dict],
@@ -239,15 +247,18 @@ def score_candidates(
     Serializes locally, sends pre-serialized conversations to Modal for inference.
     """
     import modal
-    Scorer = modal.Cls.from_name('gepa-critic', 'Scorer')
-    scorer = Scorer()
+
+    scorer_cls = modal.Cls.from_name('gepa-critic', 'Scorer')
+    scorer = scorer_cls()
 
     prompt_text = serialize_prompt(task_seed, agent_context)
     conversations = []
     for cand in candidates:
-        conversations.append([
-            {'role': 'user', 'content': prompt_text},
-            {'role': 'assistant', 'content': serialize_candidate(cand)},
-        ])
+        conversations.append(
+            [
+                {'role': 'user', 'content': prompt_text},
+                {'role': 'assistant', 'content': serialize_candidate(cand)},
+            ]
+        )
 
     return scorer.score.remote(conversations)

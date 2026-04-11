@@ -14,9 +14,9 @@ Default exponents reflect relative importance:
 import math
 
 # Default exponents — tune on holdout set
-ALPHA = 1.0   # ME: mutual exclusivity
-BETA = 1.5    # CE: collective exhaustiveness (most important)
-GAMMA = 0.5   # CX: complexity invariant (softest signal)
+ALPHA = 1.0  # ME: mutual exclusivity
+BETA = 1.5  # CE: collective exhaustiveness (most important)
+GAMMA = 0.5  # CX: complexity invariant (softest signal)
 
 
 def final_score(
@@ -30,4 +30,4 @@ def final_score(
 ) -> float:
     if math.isinf(critic_score) and critic_score < 0:
         return -math.inf
-    return critic_score * (me_score ** alpha) * (ce_score ** beta) * (cx_score ** gamma)
+    return critic_score * (me_score**alpha) * (ce_score**beta) * (cx_score**gamma)

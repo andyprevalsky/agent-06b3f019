@@ -27,9 +27,8 @@ import math
 import os
 import statistics
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import httpx
 import numpy as np
@@ -39,55 +38,60 @@ from scipy.optimize import minimize
 # Load env before any agents imports
 load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / 'agents' / '.env')
 
-from helpers.llm import prepare_schema_for_openai
-from helpers.prompts import build_planner_system_prompt
-from helpers.tool_schemas import PlannerResponse
-from tools.set_plan import _get_planner_tools_description
+from helpers.llm import prepare_schema_for_openai  # noqa: E402
+from helpers.prompts import build_planner_system_prompt  # noqa: E402
+from helpers.tool_schemas import PlannerResponse  # noqa: E402
+from tools.set_plan import _get_planner_tools_description  # noqa: E402
 
-from ..scoring import hard_gate, final_score
-from ..types import ClarifiedTask, DecompositionCandidate
-from ..validators import validate_decomposition
-from .decomposer import _build_planner_messages
-from .decomposer import decompose_once
+from ..scoring import final_score  # noqa: E402
+from ..types import ClarifiedTask, DecompositionCandidate  # noqa: E402
+from ..validators import validate_decomposition  # noqa: E402
+from .decomposer import _build_planner_messages, decompose_once  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
-TASKS_DIR = DATA_DIR / 'clarified_tasks'       # training tasks (used by labeler + reward model)
-HOLDOUT_DIR = DATA_DIR / 'benchmark_holdout'    # 100 held-out tasks (never labeled, benchmark only)
+TASKS_DIR = DATA_DIR / 'clarified_tasks'  # training tasks (used by labeler + reward model)
+HOLDOUT_DIR = DATA_DIR / 'benchmark_holdout'  # 100 held-out tasks (never labeled, benchmark only)
 
 
 # ---------------------------------------------------------------------------
 # Model configurations
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ModelConfig:
-    name: str                    # Display name for charts
-    model: str                   # OpenRouter model identifier
-    prompt: str                  # 'baseline' or 'gepa'
-    color: str                   # Chart color
+    name: str  # Display name for charts
+    model: str  # OpenRouter model identifier
+    prompt: str  # 'baseline' or 'gepa'
+    color: str  # Chart color
 
 
 # Direct OpenRouter model identifiers (bypass Supabase edge function)
 CONFIGS = [
-    ModelConfig('Opus 4.6',     'anthropic/claude-opus-4-6',       'baseline', '#6366f1'),
-    ModelConfig('Opus 4.6 (GEPA)', 'anthropic/claude-opus-4-6',    'gepa',     '#7c3aed'),
-    ModelConfig('GPT 5.2',      'openai/gpt-5.2',                  'baseline', '#10b981'),
-    ModelConfig('Gemini 3 Pro', 'google/gemini-3-pro-preview',      'baseline', '#f59e0b'),
-    ModelConfig('Kimi 2.5',     'moonshotai/kimi-k2.5',            'baseline', '#ef4444'),
-    ModelConfig('Rose Ultra (GEPA)', 'rose-labs/rose-1-ultra',      'gepa',     '#8b5cf6'),
+    ModelConfig('Opus 4.6', 'anthropic/claude-opus-4-6', 'baseline', '#6366f1'),
+    ModelConfig('Opus 4.6 (GEPA)', 'anthropic/claude-opus-4-6', 'gepa', '#7c3aed'),
+    ModelConfig('GPT 5.2', 'openai/gpt-5.2', 'baseline', '#10b981'),
+    ModelConfig('Gemini 3 Pro', 'google/gemini-3-pro-preview', 'baseline', '#f59e0b'),
+    ModelConfig('Kimi 2.5', 'moonshotai/kimi-k2.5', 'baseline', '#ef4444'),
+    ModelConfig('Rose Ultra (GEPA)', 'rose-labs/rose-1-ultra', 'gepa', '#8b5cf6'),
 ]
 
 OPENROUTER_BASE = 'https://openrouter.ai/api/v1/chat/completions'
 OPENROUTER_TIMEOUT = 300.0  # generous timeout for structured output
 EVAL_MODEL = 'anthropic/claude-sonnet-4.5'
 DECOMPOSE_ATTEMPT_TIMEOUT_S = 120.0  # guard against stuck streaming calls
-CRITIC_ATTEMPT_TIMEOUT_S = 180.0     # guard against stuck Modal critic calls
+CRITIC_ATTEMPT_TIMEOUT_S = 180.0  # guard against stuck Modal critic calls
 
 
-async def _call_openrouter(messages: list, response_model, model: str = EVAL_MODEL,
-                           temperature: float = 0.0, max_tokens: int = 4096):
+async def _call_openrouter(
+    messages: list,
+    response_model,
+    model: str = EVAL_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+):
     """Call OpenRouter directly with response_format: json_schema.
 
     Bypasses the Supabase edge function and instructor to avoid timeout/parsing issues.
@@ -131,16 +135,20 @@ async def _call_openrouter(messages: list, response_model, model: str = EVAL_MOD
 
 
 async def _decompose_openrouter(
-    task: ClarifiedTask, model: str, system_prompt: str, temperature: float = 0.7,
+    task: ClarifiedTask,
+    model: str,
+    system_prompt: str,
+    temperature: float = 0.7,
 ) -> tuple[DecompositionCandidate, dict]:
     """Decompose a task via direct OpenRouter call."""
     base_messages = _build_planner_messages(task)
     if base_messages and base_messages[-1]['role'] != 'user':
         base_messages.append({'role': 'user', 'content': 'Generate the plan now.'})
-    messages = [{'role': 'system', 'content': system_prompt}] + base_messages
+    messages = [{'role': 'system', 'content': system_prompt}, *base_messages]
 
-    pr, usage = await _call_openrouter(messages, PlannerResponse, model=model,
-                                       temperature=temperature, max_tokens=4096)
+    pr, usage = await _call_openrouter(
+        messages, PlannerResponse, model=model, temperature=temperature, max_tokens=4096
+    )
     errors = validate_decomposition(pr)
     return DecompositionCandidate(planner_response=pr, validation_errors=errors), usage
 
@@ -149,41 +157,59 @@ async def _decompose_openrouter(
 # Direct OpenRouter evaluators (bypass edge function + instructor)
 # ---------------------------------------------------------------------------
 
-from ..evaluators.mutual_exclusivity import MEJudgment, ME_PROMPT
-from ..evaluators.mutual_exclusivity import _format_context as _me_fmt
-from ..evaluators.collective_exhaustiveness import CEJudgment, CE_PROMPT
-from ..evaluators.collective_exhaustiveness import _format_context as _ce_fmt
-from ..evaluators.complexity_invariant import CXJudgment, CX_PROMPT
-from ..evaluators.complexity_invariant import _format_context as _cx_fmt
-from ..types import EvalResult
+from ..evaluators.collective_exhaustiveness import CE_PROMPT, CEJudgment  # noqa: E402
+from ..evaluators.collective_exhaustiveness import _format_context as _ce_fmt  # noqa: E402
+from ..evaluators.complexity_invariant import CX_PROMPT, CXJudgment  # noqa: E402
+from ..evaluators.complexity_invariant import _format_context as _cx_fmt  # noqa: E402
+from ..evaluators.mutual_exclusivity import ME_PROMPT, MEJudgment  # noqa: E402
+from ..evaluators.mutual_exclusivity import _format_context as _me_fmt  # noqa: E402
+from ..types import EvalResult  # noqa: E402
 
 
 async def _eval_me(goal: str, pr: PlannerResponse, context: list) -> tuple[EvalResult, dict]:
-    tasks_fmt = '\n'.join(f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
-                          for i, t in enumerate(pr.tasks))
-    prompt = ME_PROMPT.format(goal=goal, tasks_formatted=tasks_fmt, context_formatted=_me_fmt(context or []))
-    messages = [{'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': 'Evaluate mutual exclusivity and return your judgment.'}]
+    tasks_fmt = '\n'.join(
+        f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
+        for i, t in enumerate(pr.tasks)
+    )
+    prompt = ME_PROMPT.format(
+        goal=goal, tasks_formatted=tasks_fmt, context_formatted=_me_fmt(context or [])
+    )
+    messages = [
+        {'role': 'system', 'content': prompt},
+        {'role': 'user', 'content': 'Evaluate mutual exclusivity and return your judgment.'},
+    ]
     result, usage = await _call_openrouter(messages, MEJudgment, max_tokens=1024)
     return EvalResult(passed=result.passed, score=result.score, reasoning=result.reasoning), usage
 
 
 async def _eval_ce(goal: str, pr: PlannerResponse, context: list) -> tuple[EvalResult, dict]:
-    tasks_fmt = '\n'.join(f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
-                          for i, t in enumerate(pr.tasks))
-    prompt = CE_PROMPT.format(goal=goal, tasks_formatted=tasks_fmt, context_formatted=_ce_fmt(context or []))
-    messages = [{'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': 'Evaluate collective exhaustiveness and return your judgment.'}]
+    tasks_fmt = '\n'.join(
+        f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
+        for i, t in enumerate(pr.tasks)
+    )
+    prompt = CE_PROMPT.format(
+        goal=goal, tasks_formatted=tasks_fmt, context_formatted=_ce_fmt(context or [])
+    )
+    messages = [
+        {'role': 'system', 'content': prompt},
+        {'role': 'user', 'content': 'Evaluate collective exhaustiveness and return your judgment.'},
+    ]
     result, usage = await _call_openrouter(messages, CEJudgment, max_tokens=1024)
     return EvalResult(passed=result.passed, score=result.score, reasoning=result.reasoning), usage
 
 
 async def _eval_cx(goal: str, pr: PlannerResponse, context: list) -> tuple[EvalResult, dict]:
-    tasks_fmt = '\n'.join(f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
-                          for i, t in enumerate(pr.tasks))
-    prompt = CX_PROMPT.format(goal=goal, tasks_formatted=tasks_fmt, context_formatted=_cx_fmt(context or []))
-    messages = [{'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': 'Evaluate the complexity invariant and return your judgment.'}]
+    tasks_fmt = '\n'.join(
+        f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
+        for i, t in enumerate(pr.tasks)
+    )
+    prompt = CX_PROMPT.format(
+        goal=goal, tasks_formatted=tasks_fmt, context_formatted=_cx_fmt(context or [])
+    )
+    messages = [
+        {'role': 'system', 'content': prompt},
+        {'role': 'user', 'content': 'Evaluate the complexity invariant and return your judgment.'},
+    ]
     result, usage = await _call_openrouter(messages, CXJudgment, max_tokens=1024)
     return EvalResult(passed=result.passed, score=result.score, reasoning=result.reasoning), usage
 
@@ -191,6 +217,7 @@ async def _eval_cx(goal: str, pr: PlannerResponse, context: list) -> tuple[EvalR
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class EvalScores:
@@ -211,9 +238,9 @@ class TaskResult:
     validation_errors: list[str]
     num_tasks: int
     depth: int
-    evals: Optional[EvalScores]
-    critic_score: Optional[float]
-    final_score: Optional[float]
+    evals: EvalScores | None
+    critic_score: float | None
+    final_score: float | None
     penalty: float
     decomposition_time_s: float
     eval_time_s: float
@@ -258,6 +285,7 @@ class BenchmarkReport:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _compute_depth(pr: PlannerResponse) -> int:
     n = len(pr.tasks)
     if n == 0:
@@ -274,23 +302,25 @@ def _compute_depth(pr: PlannerResponse) -> int:
     return max(dfs(i) for i in range(n))
 
 
-def _load_tasks(directory: Path, limit: Optional[int] = None) -> list[ClarifiedTask]:
+def _load_tasks(directory: Path, limit: int | None = None) -> list[ClarifiedTask]:
     """Load clarified tasks from a directory."""
     tasks = []
     for path in sorted(directory.glob('*.json')):
         data = json.loads(path.read_text())
-        tasks.append(ClarifiedTask(
-            id=data['id'],
-            raw_seed=data['raw_seed'],
-            agent_context=data['agent_context'],
-            set_plan_args=data['set_plan_args'],
-        ))
+        tasks.append(
+            ClarifiedTask(
+                id=data['id'],
+                raw_seed=data['raw_seed'],
+                agent_context=data['agent_context'],
+                set_plan_args=data['set_plan_args'],
+            )
+        )
         if limit and len(tasks) >= limit:
             break
     return tasks
 
 
-def _candidate_to_dict(pr: PlannerResponse, evals: Optional[EvalScores]) -> dict:
+def _candidate_to_dict(pr: PlannerResponse, evals: EvalScores | None) -> dict:
     d = {
         'title': pr.title,
         'content': pr.content,
@@ -415,7 +445,8 @@ def _write_checkpoint(
 # Bradley-Terry ELO from critic pairwise comparisons
 # ---------------------------------------------------------------------------
 
-def fit_bradley_terry(config_critic_scores: dict[str, list[Optional[float]]]) -> dict[str, float]:
+
+def fit_bradley_terry(config_critic_scores: dict[str, list[float | None]]) -> dict[str, float]:
     """Fit Bradley-Terry model from pairwise critic score comparisons.
 
     For each task, the config with the higher critic score "wins" the matchup.
@@ -480,6 +511,7 @@ def fit_bradley_terry(config_critic_scores: dict[str, list[Optional[float]]]) ->
 # Core benchmark logic
 # ---------------------------------------------------------------------------
 
+
 async def benchmark_task(
     task: ClarifiedTask,
     config: ModelConfig,
@@ -487,7 +519,7 @@ async def benchmark_task(
     use_critic: bool = True,
     critic_model_id: str = 'reward_model',
     critic_only: bool = False,
-    critic_semaphore: Optional[asyncio.Semaphore] = None,
+    critic_semaphore: asyncio.Semaphore | None = None,
 ) -> TaskResult:
     """Benchmark a single task with a specific model config."""
     total_cost = 0.0
@@ -513,7 +545,9 @@ async def benchmark_task(
             else:
                 candidate, decomp_usage = await asyncio.wait_for(
                     _decompose_openrouter(
-                        task, model=config.model, system_prompt=system_prompt,
+                        task,
+                        model=config.model,
+                        system_prompt=system_prompt,
                     ),
                     timeout=DECOMPOSE_ATTEMPT_TIMEOUT_S,
                 )
@@ -533,13 +567,23 @@ async def benchmark_task(
     if candidate is None and last_error is not None:
         e = last_error
         decomp_time = time.monotonic() - t0
-        logger.warning(f'Decompose failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}')
+        logger.warning(
+            f'Decompose failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}'
+        )
         return TaskResult(
-            task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-            valid=False, validation_errors=[f'decompose_error: {type(e).__name__}: {e}'],
-            num_tasks=0, depth=0, evals=None,
-            critic_score=None, final_score=None, penalty=0.0,
-            decomposition_time_s=decomp_time, eval_time_s=0.0,
+            task_id=task.id,
+            task_seed=task.raw_seed,
+            config_name=config.name,
+            valid=False,
+            validation_errors=[f'decompose_error: {type(e).__name__}: {e}'],
+            num_tasks=0,
+            depth=0,
+            evals=None,
+            critic_score=None,
+            final_score=None,
+            penalty=0.0,
+            decomposition_time_s=decomp_time,
+            eval_time_s=0.0,
             total_cost_usd=total_cost,
         )
     decomp_time = time.monotonic() - t0
@@ -551,11 +595,19 @@ async def benchmark_task(
 
     if not valid:
         return TaskResult(
-            task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-            valid=False, validation_errors=[f'{e.type}: {e.detail}' for e in errors],
-            num_tasks=len(pr.tasks), depth=0, evals=None,
-            critic_score=None, final_score=None, penalty=0.0,
-            decomposition_time_s=decomp_time, eval_time_s=0.0,
+            task_id=task.id,
+            task_seed=task.raw_seed,
+            config_name=config.name,
+            valid=False,
+            validation_errors=[f'{e.type}: {e.detail}' for e in errors],
+            num_tasks=len(pr.tasks),
+            depth=0,
+            evals=None,
+            critic_score=None,
+            final_score=None,
+            penalty=0.0,
+            decomposition_time_s=decomp_time,
+            eval_time_s=0.0,
             total_cost_usd=total_cost,
         )
 
@@ -572,13 +624,23 @@ async def benchmark_task(
             )
         except Exception as e:
             eval_time = time.monotonic() - t1
-            logger.warning(f'Eval failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}')
+            logger.warning(
+                f'Eval failed [{config.name}] {task.raw_seed[:40]}: {type(e).__name__}: {e}'
+            )
             return TaskResult(
-                task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-                valid=True, validation_errors=[f'eval_error: {type(e).__name__}: {e}'],
-                num_tasks=len(pr.tasks), depth=_compute_depth(pr), evals=None,
-                critic_score=None, final_score=None, penalty=0.0,
-                decomposition_time_s=decomp_time, eval_time_s=eval_time,
+                task_id=task.id,
+                task_seed=task.raw_seed,
+                config_name=config.name,
+                valid=True,
+                validation_errors=[f'eval_error: {type(e).__name__}: {e}'],
+                num_tasks=len(pr.tasks),
+                depth=_compute_depth(pr),
+                evals=None,
+                critic_score=None,
+                final_score=None,
+                penalty=0.0,
+                decomposition_time_s=decomp_time,
+                eval_time_s=eval_time,
                 total_cost_usd=total_cost,
             )
         eval_time = time.monotonic() - t1
@@ -591,9 +653,12 @@ async def benchmark_task(
         total_cost += _sum_usage_cost(cx_usage or {})
 
         evals = EvalScores(
-            me_passed=me_eval.passed, me_score=me_eval.score,
-            ce_passed=ce_eval.passed, ce_score=ce_eval.score,
-            cx_passed=cx_eval.passed, cx_score=cx_eval.score,
+            me_passed=me_eval.passed,
+            me_score=me_eval.score,
+            ce_passed=ce_eval.passed,
+            ce_score=ce_eval.score,
+            cx_passed=cx_eval.passed,
+            cx_score=cx_eval.score,
         )
 
     # 3. Critic + final score
@@ -602,12 +667,15 @@ async def benchmark_task(
     final_val = None
     if use_critic:
         from ..critic import score_candidates
+
         cand_dict = _candidate_to_dict(pr, evals)
 
         async def _score_once():
             return await asyncio.to_thread(
                 score_candidates,
-                [cand_dict], task.raw_seed, task.agent_context,
+                [cand_dict],
+                task.raw_seed,
+                task.agent_context,
                 critic_model_id,
             )
 
@@ -616,9 +684,13 @@ async def benchmark_task(
             try:
                 if critic_semaphore is not None:
                     async with critic_semaphore:
-                        raw_scores = await asyncio.wait_for(_score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S)
+                        raw_scores = await asyncio.wait_for(
+                            _score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S
+                        )
                 else:
-                    raw_scores = await asyncio.wait_for(_score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S)
+                    raw_scores = await asyncio.wait_for(
+                        _score_once(), timeout=CRITIC_ATTEMPT_TIMEOUT_S
+                    )
                 critic_val = 1.0 / (1.0 + math.exp(-raw_scores[0]))
                 me = evals.me_score if evals else 1.0
                 ce = evals.ce_score if evals else 1.0
@@ -641,35 +713,44 @@ async def benchmark_task(
                     )
 
     return TaskResult(
-        task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-        valid=True, validation_errors=[],
-        num_tasks=len(pr.tasks), depth=depth, evals=evals,
-        critic_score=critic_val, final_score=final_val, penalty=0.0,
-        decomposition_time_s=decomp_time, eval_time_s=eval_time,
+        task_id=task.id,
+        task_seed=task.raw_seed,
+        config_name=config.name,
+        valid=True,
+        validation_errors=[],
+        num_tasks=len(pr.tasks),
+        depth=depth,
+        evals=evals,
+        critic_score=critic_val,
+        final_score=final_val,
+        penalty=0.0,
+        decomposition_time_s=decomp_time,
+        eval_time_s=eval_time,
         total_cost_usd=total_cost,
     )
 
 
-def _build_system_prompt(config: ModelConfig, gepa_strategy: Optional[str] = None) -> str:
+def _build_system_prompt(config: ModelConfig, gepa_strategy: str | None = None) -> str:
     """Build the system prompt for a given config."""
     tools_desc = _get_planner_tools_description()
     baseline = build_planner_system_prompt(tools_desc)
     if config.prompt == 'gepa' and gepa_strategy:
-        from .gepa_optimizer import extract_strategy, compose_prompt
+        from .gepa_optimizer import compose_prompt
+
         return compose_prompt(gepa_strategy)
     return baseline
 
 
-async def run_benchmark(
+async def run_benchmark(  # noqa: C901 — orchestration function
     tasks_dir: Path = HOLDOUT_DIR,
-    limit: Optional[int] = None,
-    configs: Optional[list[ModelConfig]] = None,
+    limit: int | None = None,
+    configs: list[ModelConfig] | None = None,
     use_critic: bool = True,
     critic_model_id: str = 'reward_model',
-    gepa_strategy: Optional[str] = None,
+    gepa_strategy: str | None = None,
     concurrency: int = 3,
-    resume_results: Optional[dict[str, dict[str, TaskResult]]] = None,
-    checkpoint_path: Optional[Path] = None,
+    resume_results: dict[str, dict[str, TaskResult]] | None = None,
+    checkpoint_path: Path | None = None,
     critic_only: bool = False,
 ) -> BenchmarkReport:
     """Run the full benchmark across all configs and tasks.
@@ -687,7 +768,9 @@ async def run_benchmark(
     if configs is None:
         configs = CONFIGS
     tasks = _load_tasks(tasks_dir, limit)
-    logger.info(f'Loaded {len(tasks)} tasks from {tasks_dir.name}/, {len(configs)} configs → {len(tasks) * len(configs)} evaluations')
+    logger.info(
+        f'Loaded {len(tasks)} tasks from {tasks_dir.name}/, {len(configs)} configs → {len(tasks) * len(configs)} evaluations'
+    )
 
     # Build system prompts per config
     prompts = {c.name: _build_system_prompt(c, gepa_strategy) for c in configs}
@@ -711,21 +794,40 @@ async def run_benchmark(
     if resumed_count:
         logger.info(f'Resuming with {resumed_count} precomputed task results')
 
-    async def run_one(config: ModelConfig, task: ClarifiedTask, idx: int) -> tuple[str, str, TaskResult]:
+    async def run_one(
+        config: ModelConfig, task: ClarifiedTask, idx: int
+    ) -> tuple[str, str, TaskResult]:
         async with semaphore:
             logger.info(f'  [{config.name}] ({idx + 1}/{len(tasks)}) {task.raw_seed[:50]}')
             try:
                 result = await benchmark_task(
-                    task, config, prompts[config.name], use_critic, critic_model_id, critic_only, critic_semaphore,
+                    task,
+                    config,
+                    prompts[config.name],
+                    use_critic,
+                    critic_model_id,
+                    critic_only,
+                    critic_semaphore,
                 )
             except Exception as e:
-                logger.error(f'  [{config.name}] CRASHED on {task.raw_seed[:40]}: {type(e).__name__}: {e}')
+                logger.error(
+                    f'  [{config.name}] CRASHED on {task.raw_seed[:40]}: {type(e).__name__}: {e}'
+                )
                 result = TaskResult(
-                    task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-                    valid=False, validation_errors=[f'crash: {type(e).__name__}: {e}'],
-                    num_tasks=0, depth=0, evals=None,
-                    critic_score=None, final_score=None, penalty=0.0,
-                    decomposition_time_s=0.0, eval_time_s=0.0, total_cost_usd=0.0,
+                    task_id=task.id,
+                    task_seed=task.raw_seed,
+                    config_name=config.name,
+                    valid=False,
+                    validation_errors=[f'crash: {type(e).__name__}: {e}'],
+                    num_tasks=0,
+                    depth=0,
+                    evals=None,
+                    critic_score=None,
+                    final_score=None,
+                    penalty=0.0,
+                    decomposition_time_s=0.0,
+                    eval_time_s=0.0,
+                    total_cost_usd=0.0,
                 )
             status = 'OK' if result.valid else 'INVALID'
             me = f'{result.evals.me_score:.2f}' if result.evals else '-'
@@ -774,11 +876,20 @@ async def run_benchmark(
             r = task_map.get(task.id)
             if r is None:
                 r = TaskResult(
-                    task_id=task.id, task_seed=task.raw_seed, config_name=config.name,
-                    valid=False, validation_errors=['missing_result_after_run'],
-                    num_tasks=0, depth=0, evals=None,
-                    critic_score=None, final_score=None, penalty=0.0,
-                    decomposition_time_s=0.0, eval_time_s=0.0, total_cost_usd=0.0,
+                    task_id=task.id,
+                    task_seed=task.raw_seed,
+                    config_name=config.name,
+                    valid=False,
+                    validation_errors=['missing_result_after_run'],
+                    num_tasks=0,
+                    depth=0,
+                    evals=None,
+                    critic_score=None,
+                    final_score=None,
+                    penalty=0.0,
+                    decomposition_time_s=0.0,
+                    eval_time_s=0.0,
+                    total_cost_usd=0.0,
                 )
             ordered.append(r)
         all_results[config.name] = ordered
@@ -790,7 +901,7 @@ async def run_benchmark(
 
     # Aggregate per config
     config_reports = []
-    config_critic_scores: dict[str, list[Optional[float]]] = {}
+    config_critic_scores: dict[str, list[float | None]] = {}
 
     for config in configs:
         results = all_results[config.name]
@@ -805,31 +916,39 @@ async def run_benchmark(
         # For BT fitting: one entry per task (None if invalid)
         config_critic_scores[config.name] = [r.critic_score for r in results]
 
-        config_reports.append(ConfigReport(
-            config_name=config.name,
-            num_tasks_evaluated=len(results),
-            num_valid=len(valid),
-            validation_rate=len(valid) / len(results) if results else 0,
-            me_scores=me_scores,
-            ce_scores=ce_scores,
-            cx_scores=cx_scores,
-            me_pass_rate=sum(1 for r in evald if r.evals.me_passed) / len(evald) if evald else 0,
-            me_mean=_safe_mean(me_scores),
-            me_std=_safe_stdev(me_scores),
-            ce_pass_rate=sum(1 for r in evald if r.evals.ce_passed) / len(evald) if evald else 0,
-            ce_mean=_safe_mean(ce_scores),
-            ce_std=_safe_stdev(ce_scores),
-            cx_pass_rate=sum(1 for r in evald if r.evals.cx_passed) / len(evald) if evald else 0,
-            cx_mean=_safe_mean(cx_scores),
-            cx_std=_safe_stdev(cx_scores),
-            critic_scores=critic_scores,
-            critic_mean=_safe_mean(critic_scores),
-            critic_std=_safe_stdev(critic_scores),
-            elo=0.0,  # filled below
-            total_time_s=sum(r.decomposition_time_s + r.eval_time_s for r in results),
-            total_cost_usd=sum(r.total_cost_usd for r in results),
-            task_results=[_result_to_dict(r) for r in results],
-        ))
+        config_reports.append(
+            ConfigReport(
+                config_name=config.name,
+                num_tasks_evaluated=len(results),
+                num_valid=len(valid),
+                validation_rate=len(valid) / len(results) if results else 0,
+                me_scores=me_scores,
+                ce_scores=ce_scores,
+                cx_scores=cx_scores,
+                me_pass_rate=sum(1 for r in evald if r.evals.me_passed) / len(evald)
+                if evald
+                else 0,
+                me_mean=_safe_mean(me_scores),
+                me_std=_safe_stdev(me_scores),
+                ce_pass_rate=sum(1 for r in evald if r.evals.ce_passed) / len(evald)
+                if evald
+                else 0,
+                ce_mean=_safe_mean(ce_scores),
+                ce_std=_safe_stdev(ce_scores),
+                cx_pass_rate=sum(1 for r in evald if r.evals.cx_passed) / len(evald)
+                if evald
+                else 0,
+                cx_mean=_safe_mean(cx_scores),
+                cx_std=_safe_stdev(cx_scores),
+                critic_scores=critic_scores,
+                critic_mean=_safe_mean(critic_scores),
+                critic_std=_safe_stdev(critic_scores),
+                elo=0.0,  # filled below
+                total_time_s=sum(r.decomposition_time_s + r.eval_time_s for r in results),
+                total_cost_usd=sum(r.total_cost_usd for r in results),
+                task_results=[_result_to_dict(r) for r in results],
+            )
+        )
 
     # Fit Bradley-Terry ELO from critic pairwise comparisons
     if use_critic:
@@ -876,6 +995,7 @@ def _result_to_dict(r: TaskResult) -> dict:
 # Chart generation
 # ---------------------------------------------------------------------------
 
+
 def generate_charts(report: BenchmarkReport, output_dir: Path):
     """Generate 4 benchmark charts as PNGs.
 
@@ -885,6 +1005,7 @@ def generate_charts(report: BenchmarkReport, output_dir: Path):
     4. ELO ratings (Bradley-Terry from critic pairwise comparisons)
     """
     import matplotlib
+
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
@@ -909,9 +1030,16 @@ def generate_charts(report: BenchmarkReport, output_dir: Path):
         ax.set_ylim(0, 1.05)
         ax.axhline(y=1.0, color='#d1d5db', linestyle='--', linewidth=0.8)
         # Value labels on bars
-        for bar, mean in zip(bars, means):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                    f'{mean:.3f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        for bar, mean in zip(bars, means, strict=True):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.02,
+                f'{mean:.3f}',
+                ha='center',
+                va='bottom',
+                fontsize=10,
+                fontweight='bold',
+            )
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         plt.tight_layout()
@@ -960,9 +1088,16 @@ def generate_charts(report: BenchmarkReport, output_dir: Path):
     margin = max(50, (elo_max - elo_min) * 0.3)
     ax.set_ylim(elo_min - margin, elo_max + margin)
     ax.axhline(y=1000, color='#d1d5db', linestyle='--', linewidth=0.8, label='Baseline (1000)')
-    for bar, elo in zip(bars, elos):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + margin * 0.05,
-                f'{elo:.0f}', ha='center', va='bottom', fontsize=11, fontweight='bold')
+    for bar, elo in zip(bars, elos, strict=True):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + margin * 0.05,
+            f'{elo:.0f}',
+            ha='center',
+            va='bottom',
+            fontsize=11,
+            fontweight='bold',
+        )
     ax.legend(loc='upper right', fontsize=9)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -976,16 +1111,19 @@ def generate_charts(report: BenchmarkReport, output_dir: Path):
 # Console output
 # ---------------------------------------------------------------------------
 
+
 def print_report(report: BenchmarkReport):
-    print('\n' + '=' * 78)
-    print('  GEPA BENCHMARK — Model Comparison')
-    print('=' * 78)
-    print(f'\n  Total time: {report.total_time_s:.1f}s  |  Total cost: ${report.total_cost_usd:.2f}')
+    print('\n' + '=' * 78)  # noqa: T201
+    print('  GEPA BENCHMARK — Model Comparison')  # noqa: T201
+    print('=' * 78)  # noqa: T201
+    print(  # noqa: T201
+        f'\n  Total time: {report.total_time_s:.1f}s  |  Total cost: ${report.total_cost_usd:.2f}'
+    )
 
     # Summary table
     header = f'  {"Config":<18} {"Valid":>6} {"ME":>8} {"CE":>8} {"CX":>8} {"Critic":>8} {"ELO":>7}'
-    print(f'\n{header}')
-    print(f'  {"-" * 18} {"-" * 6} {"-" * 8} {"-" * 8} {"-" * 8} {"-" * 8} {"-" * 7}')
+    print(f'\n{header}')  # noqa: T201
+    print(f'  {"-" * 18} {"-" * 6} {"-" * 8} {"-" * 8} {"-" * 8} {"-" * 8} {"-" * 7}')  # noqa: T201
     for cr in report.configs:
         name = cr.config_name.replace('\n', ' ')
         valid = f'{cr.validation_rate:.0%}'
@@ -994,42 +1132,73 @@ def print_report(report: BenchmarkReport):
         cx = f'{cr.cx_mean:.3f}'
         critic = f'{cr.critic_mean:.3f}' if cr.critic_mean else 'N/A'
         elo = f'{cr.elo:.0f}' if cr.elo else 'N/A'
-        print(f'  {name:<18} {valid:>6} {me:>8} {ce:>8} {cx:>8} {critic:>8} {elo:>7}')
+        print(f'  {name:<18} {valid:>6} {me:>8} {ce:>8} {cx:>8} {critic:>8} {elo:>7}')  # noqa: T201
 
     # Pass rates
-    print(f'\n  {"Config":<18} {"ME pass":>8} {"CE pass":>8} {"CX pass":>8}')
-    print(f'  {"-" * 18} {"-" * 8} {"-" * 8} {"-" * 8}')
+    print(f'\n  {"Config":<18} {"ME pass":>8} {"CE pass":>8} {"CX pass":>8}')  # noqa: T201
+    print(f'  {"-" * 18} {"-" * 8} {"-" * 8} {"-" * 8}')  # noqa: T201
     for cr in report.configs:
         name = cr.config_name.replace('\n', ' ')
-        print(f'  {name:<18} {cr.me_pass_rate:>7.0%} {cr.ce_pass_rate:>7.0%} {cr.cx_pass_rate:>7.0%}')
+        print(  # noqa: T201
+            f'  {name:<18} {cr.me_pass_rate:>7.0%} {cr.ce_pass_rate:>7.0%} {cr.cx_pass_rate:>7.0%}'
+        )
 
-    print('\n' + '=' * 78)
+    print('\n' + '=' * 78)  # noqa: T201
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description='Benchmark planner decomposition across models')
-    parser.add_argument('--tasks', type=int, default=None, help='Limit number of tasks (default: all)')
+    parser.add_argument(
+        '--tasks', type=int, default=None, help='Limit number of tasks (default: all)'
+    )
     parser.add_argument('--output', type=str, default=None, help='Write JSON results to file')
     parser.add_argument('--charts', type=str, default=None, help='Output directory for PNG charts')
     parser.add_argument('--no-critic', action='store_true', help='Skip critic reward model scoring')
-    parser.add_argument('--critic-model', type=str, default='reward_model', help='Critic model ID on Modal')
+    parser.add_argument(
+        '--critic-model', type=str, default='reward_model', help='Critic model ID on Modal'
+    )
     parser.add_argument('--concurrency', type=int, default=3, help='Max concurrent evaluations')
-    parser.add_argument('--tasks-dir', type=str, default=None,
-                        help='Path to tasks directory (default: data/benchmark_holdout/)')
-    parser.add_argument('--gepa-strategy', type=str, default=None,
-                        help='Path to file containing optimized GEPA strategy text')
-    parser.add_argument('--configs', type=str, nargs='+', default=None,
-                        help='Subset of configs to run (e.g. "Opus 4.6" "GPT 5.2")')
-    parser.add_argument('--resume-from', type=str, default=None,
-                        help='Path to prior output/checkpoint JSON to reuse completed task results')
-    parser.add_argument('--checkpoint-output', type=str, default=None,
-                        help='Path to rolling checkpoint JSON written during execution')
-    parser.add_argument('--critic-only', action='store_true',
-                        help='Skip ME/CE/CX judges and run decomposition + critic only')
+    parser.add_argument(
+        '--tasks-dir',
+        type=str,
+        default=None,
+        help='Path to tasks directory (default: data/benchmark_holdout/)',
+    )
+    parser.add_argument(
+        '--gepa-strategy',
+        type=str,
+        default=None,
+        help='Path to file containing optimized GEPA strategy text',
+    )
+    parser.add_argument(
+        '--configs',
+        type=str,
+        nargs='+',
+        default=None,
+        help='Subset of configs to run (e.g. "Opus 4.6" "GPT 5.2")',
+    )
+    parser.add_argument(
+        '--resume-from',
+        type=str,
+        default=None,
+        help='Path to prior output/checkpoint JSON to reuse completed task results',
+    )
+    parser.add_argument(
+        '--checkpoint-output',
+        type=str,
+        default=None,
+        help='Path to rolling checkpoint JSON written during execution',
+    )
+    parser.add_argument(
+        '--critic-only',
+        action='store_true',
+        help='Skip ME/CE/CX judges and run decomposition + critic only',
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1066,18 +1235,20 @@ def main():
     elif args.resume_from:
         checkpoint_path = Path(args.resume_from)
 
-    report = asyncio.run(run_benchmark(
-        tasks_dir=tasks_dir,
-        limit=args.tasks,
-        configs=configs,
-        use_critic=not args.no_critic,
-        critic_model_id=args.critic_model,
-        gepa_strategy=gepa_strategy,
-        concurrency=args.concurrency,
-        resume_results=resume_results,
-        checkpoint_path=checkpoint_path,
-        critic_only=args.critic_only,
-    ))
+    report = asyncio.run(
+        run_benchmark(
+            tasks_dir=tasks_dir,
+            limit=args.tasks,
+            configs=configs,
+            use_critic=not args.no_critic,
+            critic_model_id=args.critic_model,
+            gepa_strategy=gepa_strategy,
+            concurrency=args.concurrency,
+            resume_results=resume_results,
+            checkpoint_path=checkpoint_path,
+            critic_only=args.critic_only,
+        )
+    )
 
     print_report(report)
 
@@ -1092,27 +1263,29 @@ def main():
             'configs': [],
         }
         for cr in report.configs:
-            report_dict['configs'].append({
-                'config_name': cr.config_name,
-                'num_tasks_evaluated': cr.num_tasks_evaluated,
-                'num_valid': cr.num_valid,
-                'validation_rate': cr.validation_rate,
-                'me_pass_rate': cr.me_pass_rate,
-                'me_mean': cr.me_mean,
-                'me_std': cr.me_std,
-                'ce_pass_rate': cr.ce_pass_rate,
-                'ce_mean': cr.ce_mean,
-                'ce_std': cr.ce_std,
-                'cx_pass_rate': cr.cx_pass_rate,
-                'cx_mean': cr.cx_mean,
-                'cx_std': cr.cx_std,
-                'critic_mean': cr.critic_mean,
-                'critic_std': cr.critic_std,
-                'elo': cr.elo,
-                'total_time_s': round(cr.total_time_s, 1),
-                'total_cost_usd': round(cr.total_cost_usd, 2),
-                'task_results': cr.task_results,
-            })
+            report_dict['configs'].append(
+                {
+                    'config_name': cr.config_name,
+                    'num_tasks_evaluated': cr.num_tasks_evaluated,
+                    'num_valid': cr.num_valid,
+                    'validation_rate': cr.validation_rate,
+                    'me_pass_rate': cr.me_pass_rate,
+                    'me_mean': cr.me_mean,
+                    'me_std': cr.me_std,
+                    'ce_pass_rate': cr.ce_pass_rate,
+                    'ce_mean': cr.ce_mean,
+                    'ce_std': cr.ce_std,
+                    'cx_pass_rate': cr.cx_pass_rate,
+                    'cx_mean': cr.cx_mean,
+                    'cx_std': cr.cx_std,
+                    'critic_mean': cr.critic_mean,
+                    'critic_std': cr.critic_std,
+                    'elo': cr.elo,
+                    'total_time_s': round(cr.total_time_s, 1),
+                    'total_cost_usd': round(cr.total_cost_usd, 2),
+                    'task_results': cr.task_results,
+                }
+            )
         out_path.write_text(json.dumps(report_dict, indent=2))
         logger.info(f'Results written to {out_path}')
 

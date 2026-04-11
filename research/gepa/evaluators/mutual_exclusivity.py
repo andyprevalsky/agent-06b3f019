@@ -22,7 +22,9 @@ MODEL_SEED = 0  # Opus 4.6 in ultra pool
 class MEJudgment(BaseModel):
     passed: bool = Field(description='True if tasks are mutually exclusive')
     score: float = Field(description='0.0-1.0, 1.0 = perfectly non-overlapping')
-    reasoning: str = Field(description='2-3 concise bullet points (• prefix) about overlap analysis')
+    reasoning: str = Field(
+        description='2-3 concise bullet points (• prefix) about overlap analysis'
+    )
 
 
 ME_PROMPT = """You are evaluating whether a task decomposition satisfies MUTUAL EXCLUSIVITY.
@@ -59,14 +61,20 @@ def _format_context(agent_context: list) -> str:
     return '\n'.join(lines)
 
 
-async def evaluate_me(goal: str, planner_response: PlannerResponse, agent_context: list = None) -> EvalResult:
+async def evaluate_me(
+    goal: str, planner_response: PlannerResponse, agent_context: list | None = None
+) -> EvalResult:
     """Evaluate mutual exclusivity of a decomposition using Opus 4.6."""
     tasks_formatted = '\n'.join(
         f'  Task {i}: [{t.tool_name}] {t.goal} (depends_on: {t.depends_on})'
         for i, t in enumerate(planner_response.tasks)
     )
 
-    prompt = ME_PROMPT.format(goal=goal, tasks_formatted=tasks_formatted, context_formatted=_format_context(agent_context or []))
+    prompt = ME_PROMPT.format(
+        goal=goal,
+        tasks_formatted=tasks_formatted,
+        context_formatted=_format_context(agent_context or []),
+    )
 
     messages = [
         {'role': 'system', 'content': prompt},
@@ -88,11 +96,19 @@ async def evaluate_me(goal: str, planner_response: PlannerResponse, agent_contex
                 on_chunk=noop,
                 model_seed=MODEL_SEED,
             )
-            return EvalResult(passed=result.passed, score=result.score, reasoning=result.reasoning), usage
+            return EvalResult(
+                passed=result.passed, score=result.score, reasoning=result.reasoning
+            ), usage
         except Exception as e:
             last_err = e
-            logger.warning(f'ME evaluation attempt {attempt + 1}/3 failed ({type(e).__name__}): {e}')
+            logger.warning(
+                f'ME evaluation attempt {attempt + 1}/3 failed ({type(e).__name__}): {e}'
+            )
             if attempt < 2:
                 await asyncio.sleep(2)
     logger.error(f'ME evaluation failed after 3 attempts ({type(last_err).__name__}): {last_err}')
-    return EvalResult(passed=False, score=0.0, reasoning=f'Evaluation error ({type(last_err).__name__}): {last_err}'), {}
+    return EvalResult(
+        passed=False,
+        score=0.0,
+        reasoning=f'Evaluation error ({type(last_err).__name__}): {last_err}',
+    ), {}
