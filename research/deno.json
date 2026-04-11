@@ -39,6 +39,9 @@
         "eqeqeq",
         "guard-for-in",
         "no-self-compare"
+      ],
+      "exclude": [
+        "no-explicit-any"
       ]
     }
   }

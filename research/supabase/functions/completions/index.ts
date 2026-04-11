@@ -1,13 +1,18 @@
-import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
-import { createClient } from "npm:@supabase/supabase-js@~2.39.3";
+import { serve } from 'https://deno.land/std@0.190.0/http/server.ts';
+import { createClient } from 'npm:@supabase/supabase-js@~2.39.3';
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key, x-request-id, x-agent-id, x-call-site",
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type, x-api-key, x-request-id, x-agent-id, x-call-site',
 };
 
 // Structured logging helper
-function slog(level: 'info' | 'warn' | 'error', message: string, extra: Record<string, unknown> = {}) {
+function slog(
+  level: 'info' | 'warn' | 'error',
+  message: string,
+  extra: Record<string, unknown> = {},
+) {
   const entry = {
     timestamp: new Date().toISOString(),
     level,
@@ -32,11 +37,11 @@ interface RoseCompletionChunk {
   choices: Array<{
     index: number;
     delta: {
-      content?: string;    // Text or JSON tokens
-      reasoning?: string;  // Thinking/reasoning from reasoning-capable models
-      role?: string;       // Only on first chunk (OpenRouter includes this)
+      content?: string; // Text or JSON tokens
+      reasoning?: string; // Thinking/reasoning from reasoning-capable models
+      role?: string; // Only on first chunk (OpenRouter includes this)
     };
-    finish_reason?: string | null;  // 'stop' on final content chunk
+    finish_reason?: string | null; // 'stop' on final content chunk
   }>;
   // Rose metadata — always present on every chunk
   requested_model: string;
@@ -59,16 +64,16 @@ interface RoseCompletionChunk {
 // ============================================
 // LATENCY RACING CONFIGURATION
 // ============================================
-const MAX_LATENCY_CAP_MS = 3000;    // Models with TTFT > 3s excluded entirely
-const MAX_DELAY_CAP_MS = 1000;      // Max delay to equalize latencies (faster models excluded if need more delay)
+const MAX_LATENCY_CAP_MS = 3000; // Models with TTFT > 3s excluded entirely
+const MAX_DELAY_CAP_MS = 1000; // Max delay to equalize latencies (faster models excluded if need more delay)
 const LATENCY_CACHE_TTL_MS = 60000; // 1 minute cache TTL
-const TRIO_SIZE = 3;                // Race 3 models per request
+const TRIO_SIZE = 3; // Race 3 models per request
 
 // Browser-use completion racing (higher caps since these are full responses, not TTFT)
-const BU_MAX_LATENCY_CAP_MS = 30000;   // 30s hard cap (browser-use models take 2-15s)
-const BU_MAX_DELAY_CAP_MS = 5000;      // 5s max delay between fastest/slowest
-const BU_DEFAULT_LATENCY_MS = 5000;    // Default when no cache
-const BU_RACE_TIMEOUT_MS = 45000;      // 45s overall race timeout
+const BU_MAX_LATENCY_CAP_MS = 30000; // 30s hard cap (browser-use models take 2-15s)
+const BU_MAX_DELAY_CAP_MS = 5000; // 5s max delay between fastest/slowest
+const BU_DEFAULT_LATENCY_MS = 5000; // Default when no cache
+const BU_RACE_TIMEOUT_MS = 45000; // 45s overall race timeout
 
 // Model pools for Rose variants - sync with backend/src/routes/rose.ts
 const MODEL_POOLS: Record<string, string[]> = {
@@ -82,18 +87,18 @@ const MODEL_POOLS: Record<string, string[]> = {
   ],
   // Browser automation pool - completion-based trio racing
   'rose-1-browser-use': [
-    'browser-use',                   // Index 0 - bu-1-0 (their hosted LLM)
-    'yutori/n1',                     // Index 1 - Vision-only, coordinate output
-    'openai/gpt-5.2',               // Index 2 - DOM-only (via OpenRouter)
+    'browser-use', // Index 0 - bu-1-0 (their hosted LLM)
+    'yutori/n1', // Index 1 - Vision-only, coordinate output
+    'openai/gpt-5.2', // Index 2 - DOM-only (via OpenRouter)
     // 'anthropic/claude-opus-4.6',    // Index 3 - DOM-only (direct Anthropic API) — Disabled: Anthropic API credits depleted
-  ]
+  ],
 };
 
 // Pools that use waterfall routing (sequential fallback) instead of trio racing
 const WATERFALL_POOLS = new Set(['rose-1-lite', 'rose-1-ultra']);
 
 // Waterfall config
-const WATERFALL_TIMEOUT_MS = 60000;  // 60s per-model timeout
+const WATERFALL_TIMEOUT_MS = 60000; // 60s per-model timeout
 
 // ============================================
 // FILE SIZE CAPABILITY FILTERING
@@ -146,16 +151,21 @@ function filterPoolByFileSize(pool: string[], maxFileSizeBytes: number): string[
   if (maxFileSizeBytes === 0) return pool; // No files, all models eligible
 
   // Any file -> exclude models without vision
-  let filtered = pool.filter(m => !NO_VISION_MODELS.has(m));
+  let filtered = pool.filter((m) => !NO_VISION_MODELS.has(m));
 
   if (maxFileSizeBytes > FIVE_MB) {
     // Large files -> also exclude Anthropic (5MB limit)
-    filtered = filtered.filter(m => !MAX_5MB_MODELS.has(m));
+    filtered = filtered.filter((m) => !MAX_5MB_MODELS.has(m));
   }
 
-  const excluded = pool.filter(m => !filtered.includes(m));
+  const excluded = pool.filter((m) => !filtered.includes(m));
   if (excluded.length > 0) {
-    slog('info', `File size ${(maxFileSizeBytes / 1024 / 1024).toFixed(2)}MB, excluded models: ${excluded.join(', ')}`);
+    slog(
+      'info',
+      `File size ${(maxFileSizeBytes / 1024 / 1024).toFixed(2)}MB, excluded models: ${
+        excluded.join(', ')
+      }`,
+    );
   }
 
   return filtered;
@@ -177,20 +187,28 @@ function truncateForLogging(obj: any, maxBase64Length = 100): any {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'string') {
     // Check if it's a base64 data URI or long base64 string
-    if (obj.startsWith('data:image/') || (obj.length > 500 && /^[A-Za-z0-9+/=]+$/.test(obj.slice(0, 100)))) {
+    if (
+      obj.startsWith('data:image/') ||
+      (obj.length > 500 && /^[A-Za-z0-9+/=]+$/.test(obj.slice(0, 100)))
+    ) {
       return `[BASE64_TRUNCATED:${obj.length} chars]`;
     }
     return obj;
   }
   if (Array.isArray(obj)) {
-    return obj.map(item => truncateForLogging(item, maxBase64Length));
+    return obj.map((item) => truncateForLogging(item, maxBase64Length));
   }
   if (typeof obj === 'object') {
     const result: any = {};
     for (const [key, value] of Object.entries(obj)) {
       // Special handling for known screenshot fields
-      if ((key === 'screenshot' || key === 'url' || key === 'image_url') && typeof value === 'string') {
-        if (value.startsWith('data:image/') || (value.length > 500 && /^[A-Za-z0-9+/=]+$/.test(value.slice(0, 100)))) {
+      if (
+        (key === 'screenshot' || key === 'url' || key === 'image_url') && typeof value === 'string'
+      ) {
+        if (
+          value.startsWith('data:image/') ||
+          (value.length > 500 && /^[A-Za-z0-9+/=]+$/.test(value.slice(0, 100)))
+        ) {
           result[key] = `[BASE64_TRUNCATED:${value.length} chars]`;
           continue;
         }
@@ -201,7 +219,6 @@ function truncateForLogging(obj: any, maxBase64Length = 100): any {
   }
   return obj;
 }
-
 
 function escapeForJsonString(content: string): string {
   return content
@@ -216,7 +233,7 @@ function escapeForJsonString(content: string): string {
 // - true: stream appears to be JSON (raw or fenced)
 // - false: definitely plain text
 // - null: undecided, need more bytes
-function detectJsonTextStart(content: string): boolean | null {
+function _detectJsonTextStart(content: string): boolean | null {
   if (!content) return null;
 
   const trimmed = content.trimStart();
@@ -242,45 +259,45 @@ function detectJsonTextStart(content: string): boolean | null {
 // Handles: raw JSON, ```json ... ```, ``` ... ```, or JSON embedded in text
 function extractJSON(content: string): any {
   if (!content || typeof content !== 'string') return null;
-  
+
   const trimmed = content.trim();
-  
+
   // 1. Try direct parse first
   try {
     return JSON.parse(trimmed);
-  } catch {}
-  
+  } catch { /* parse attempt failed */ }
+
   // 2. Try extracting from markdown code blocks
   // Match ```json ... ``` or ``` ... ```
   const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (codeBlockMatch) {
     try {
       return JSON.parse(codeBlockMatch[1].trim());
-    } catch {}
+    } catch { /* parse attempt failed */ }
   }
-  
+
   // 3. Try finding JSON object anywhere in the string
   // Look for outermost { ... }
   const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
       return JSON.parse(jsonMatch[0]);
-    } catch {}
+    } catch { /* parse attempt failed */ }
   }
-  
+
   // 4. Try finding JSON array anywhere in the string
   const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
   if (arrayMatch) {
     try {
       return JSON.parse(arrayMatch[0]);
-    } catch {}
+    } catch { /* parse attempt failed */ }
   }
-  
+
   return null;
 }
 
 // Shuffle array helper (Fisher-Yates)
-function shuffleArray<T>(array: T[]): T[] {
+function _shuffleArray<T>(array: T[]): T[] {
   const shuffled = [...array];
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -293,9 +310,9 @@ function shuffleArray<T>(array: T[]): T[] {
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     promise,
-    new Promise<T>((_, reject) => 
+    new Promise<T>((_, reject) =>
       setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    )
+    ),
   ]);
 }
 
@@ -307,10 +324,10 @@ interface BrowserState {
   url: string;
   title?: string;
   dom_tree: string;
-  screenshot?: string;  // base64
+  screenshot?: string; // base64
   viewport: { width: number; height: number };
-  scroll_position: { 
-    x: number; 
+  scroll_position: {
+    x: number;
     y: number;
     pages_above?: number;
     pages_below?: number;
@@ -336,9 +353,9 @@ interface ActionHistoryEntry {
   index?: number;
   coordinates?: { x: number; y: number };
   element_description?: string;
-  params?: Record<string, any>;  // Action-specific parameters (text, url, key, etc.)
+  params?: Record<string, any>; // Action-specific parameters (text, url, key, etc.)
   result: { success: boolean; error?: string; error_type?: string };
-  screenshot?: string;  // base64, for vision providers
+  screenshot?: string; // base64, for vision providers
 }
 
 interface BrowserUseRequest {
@@ -349,8 +366,8 @@ interface BrowserUseRequest {
   available_actions: string[];
   model_seed?: number;
   mode?: 'default' | 'claude';
-  user_id?: string;  // Real user ID for claude-mode credential lookup (API key may map to a shared worker user)
-  oauth_token?: string;  // Claude OAuth token provided by caller (agent worker)
+  user_id?: string; // Real user ID for claude-mode credential lookup (API key may map to a shared worker user)
+  oauth_token?: string; // Claude OAuth token provided by caller (agent worker)
 }
 
 interface UnifiedAction {
@@ -373,162 +390,197 @@ function isBrowserUseRequest(body: any): body is BrowserUseRequest {
 
 // Browser tool definitions - using Python agent naming conventions
 // Each tool has: name, description, params with types and descriptions
-const BROWSER_USE_TOOLS: Record<string, { description: string; params: Record<string, { type: string; description: string; required?: boolean }> }> = {
+const BROWSER_USE_TOOLS: Record<
+  string,
+  {
+    description: string;
+    params: Record<string, { type: string; description: string; required?: boolean }>;
+  }
+> = {
   // === NAVIGATION ===
   goto: {
     description: 'Navigate to a URL',
     params: {
-      url: { type: 'string', description: 'URL to navigate to', required: true }
-    }
+      url: { type: 'string', description: 'URL to navigate to', required: true },
+    },
   },
   navback: {
     description: 'Go back to the previous page in browser history',
-    params: {}
+    params: {},
   },
-  
+
   // === WAITING ===
   wait: {
     description: 'Wait for x seconds (capped at 30s)',
     params: {
-      seconds: { type: 'integer', description: 'Seconds to wait (default: 3)' }
-    }
+      seconds: { type: 'integer', description: 'Seconds to wait (default: 3)' },
+    },
   },
-  
+
   // === CLICKING ===
   click: {
     description: 'Click element by index',
     params: {
-      index: { type: 'integer', description: 'Element index from browser_state', required: true }
-    }
+      index: { type: 'integer', description: 'Element index from browser_state', required: true },
+    },
   },
   // Coordinate-based clicking (for vision models)
   click_coordinates: {
     description: 'Click at specific coordinates (for vision models when index unavailable)',
     params: {
       x: { type: 'integer', description: 'X coordinate', required: true },
-      y: { type: 'integer', description: 'Y coordinate', required: true }
-    }
+      y: { type: 'integer', description: 'Y coordinate', required: true },
+    },
   },
-  
+
   // === TEXT INPUT ===
   input_text: {
     description: 'Input text into element by index',
     params: {
       index: { type: 'integer', description: 'Element index from browser_state', required: true },
       text: { type: 'string', description: 'Text to input', required: true },
-      clear: { type: 'boolean', description: 'Clear field before typing (default: true)' }
-    }
+      clear: { type: 'boolean', description: 'Clear field before typing (default: true)' },
+    },
   },
-  
+
   // === KEYBOARD ===
   press_key: {
     description: 'Send keyboard keys or shortcuts',
     params: {
-      keys: { type: 'string', description: 'Keys (Escape, Enter, PageDown) or shortcuts (Control+o)', required: true }
-    }
+      keys: {
+        type: 'string',
+        description: 'Keys (Escape, Enter, PageDown) or shortcuts (Control+o)',
+        required: true,
+      },
+    },
   },
-  
+
   // === SCROLLING ===
   scroll: {
-    description: 'Scroll by pages. Use down=True for scroll down, down=False for scroll up. Use index for scroll containers.',
+    description:
+      'Scroll by pages. Use down=True for scroll down, down=False for scroll up. Use index for scroll containers.',
     params: {
-      down: { type: 'boolean', description: 'True=scroll down, False=scroll up (default: true)', required: true },
-      pages: { type: 'number', description: '0.5=half page, 1=full page, 10=to bottom/top (default: 1.0)' },
-      index: { type: 'integer', description: 'Optional element index to scroll within specific container' }
-    }
+      down: {
+        type: 'boolean',
+        description: 'True=scroll down, False=scroll up (default: true)',
+        required: true,
+      },
+      pages: {
+        type: 'number',
+        description: '0.5=half page, 1=full page, 10=to bottom/top (default: 1.0)',
+      },
+      index: {
+        type: 'integer',
+        description: 'Optional element index to scroll within specific container',
+      },
+    },
   },
   find_text: {
     description: 'Scroll to specific text on the page',
     params: {
-      text: { type: 'string', description: 'Text to find and scroll to', required: true }
-    }
+      text: { type: 'string', description: 'Text to find and scroll to', required: true },
+    },
   },
-  
+
   // === EXTRACTION ===
   extract: {
-    description: 'LLM extracts structured data from page markdown. Use when on right page and know what to extract.',
+    description:
+      'LLM extracts structured data from page markdown. Use when on right page and know what to extract.',
     params: {
       query: { type: 'string', description: 'What to extract from the page', required: true },
-      extract_links: { type: 'boolean', description: 'Set True to extract URLs (default: false)' }
-    }
+      extract_links: { type: 'boolean', description: 'Set True to extract URLs (default: false)' },
+    },
   },
   // === DROPDOWNS ===
   dropdown_options: {
     description: 'Get all options from a native dropdown or ARIA menu',
     params: {
-      index: { type: 'integer', description: 'Element index of the dropdown', required: true }
-    }
+      index: { type: 'integer', description: 'Element index of the dropdown', required: true },
+    },
   },
   select_dropdown: {
     description: 'Set the option of a <select> element',
     params: {
       index: { type: 'integer', description: 'Element index of the dropdown', required: true },
-      text: { type: 'string', description: 'Exact text of the option to select', required: true }
-    }
+      text: { type: 'string', description: 'Exact text of the option to select', required: true },
+    },
   },
-  
+
   // === JAVASCRIPT ===
   evaluate: {
-    description: 'Execute browser JavaScript. Wrap in IIFE with try-catch. Use for hover, drag, custom selectors, shadow DOM.',
+    description:
+      'Execute browser JavaScript. Wrap in IIFE with try-catch. Use for hover, drag, custom selectors, shadow DOM.',
     params: {
-      code: { type: 'string', description: 'JavaScript code to execute', required: true }
-    }
+      code: { type: 'string', description: 'JavaScript code to execute', required: true },
+    },
   },
-  
+
   // === TAB MANAGEMENT ===
   switch_tab: {
-    description: 'Switch to another open tab by tab_id (last 4 chars of target_id shown in browser state)',
+    description:
+      'Switch to another open tab by tab_id (last 4 chars of target_id shown in browser state)',
     params: {
-      tab_id: { type: 'string', description: '4-char tab ID', required: true }
-    }
+      tab_id: { type: 'string', description: '4-char tab ID', required: true },
+    },
   },
   close_tab: {
     description: 'Close a tab by tab_id. Closes current tab if omitted.',
     params: {
-      tab_id: { type: 'string', description: '4-char tab ID (optional, closes current if omitted)' }
-    }
+      tab_id: {
+        type: 'string',
+        description: '4-char tab ID (optional, closes current if omitted)',
+      },
+    },
   },
   open_new_tab: {
     description: 'Open a new browser tab, optionally navigating to a URL',
     params: {
-      url: { type: 'string', description: 'URL to open in new tab (defaults to about:blank)' }
-    }
+      url: { type: 'string', description: 'URL to open in new tab (defaults to about:blank)' },
+    },
   },
-  
+
   // === COMPLETION ===
   done: {
     description: 'Complete the task and provide final result',
     params: {
-      text: { type: 'string', description: 'Final result message in the format user requested', required: true },
-      success: { type: 'boolean', description: 'True if task completed successfully (default: true)' }
-    }
+      text: {
+        type: 'string',
+        description: 'Final result message in the format user requested',
+        required: true,
+      },
+      success: {
+        type: 'boolean',
+        description: 'True if task completed successfully (default: true)',
+      },
+    },
   },
   attempt_completion: {
     description: 'Attempt to complete the task with a result message',
     params: {
-      result: { type: 'string', description: 'The result/answer for the user', required: true }
-    }
+      result: { type: 'string', description: 'The result/answer for the user', required: true },
+    },
   },
   send_message_to_user: {
     description: 'Send a message to the user (for updates or asking for help)',
     params: {
-      message: { type: 'string', description: 'Message content', required: true }
-    }
+      message: { type: 'string', description: 'Message content', required: true },
+    },
   },
   screenshot: {
-    description: 'Take a full-page screenshot of the current page (captures entire page, not just viewport). The screenshot is saved and returned to the orchestrating agent. Only call once per page — one call captures everything.',
-    params: {}
-  }
+    description:
+      'Take a full-page screenshot of the current page (captures entire page, not just viewport). The screenshot is saved and returned to the orchestrating agent. Only call once per page — one call captures everything.',
+    params: {},
+  },
 };
 
 // Generate tool description string filtered by available_actions
 function generateToolDescriptions(availableActions: string[]): string {
   const descriptions: string[] = [];
-  
+
   for (const actionName of availableActions) {
     const tool = BROWSER_USE_TOOLS[actionName];
     if (!tool) continue;
-    
+
     // Build params string like: (param1=type (desc), param2=type)
     const paramParts: string[] = [];
     for (const [paramName, paramInfo] of Object.entries(tool.params)) {
@@ -538,22 +590,22 @@ function generateToolDescriptions(availableActions: string[]): string {
       }
       paramParts.push(part);
     }
-    
+
     const paramsStr = paramParts.length > 0 ? ` (${paramParts.join(', ')})` : '';
     descriptions.push(`- ${actionName}: ${tool.description}${paramsStr}`);
   }
-  
+
   return descriptions.join('\n');
 }
 
 // Generate JSON action format examples for available actions
-function generateActionExamples(availableActions: string[]): string {
+function _generateActionExamples(availableActions: string[]): string {
   const examples: string[] = [];
-  
+
   for (const actionName of availableActions) {
     const tool = BROWSER_USE_TOOLS[actionName];
     if (!tool) continue;
-    
+
     // Build example params
     const exampleParams: Record<string, string> = {};
     for (const [paramName, paramInfo] of Object.entries(tool.params)) {
@@ -569,21 +621,21 @@ function generateActionExamples(availableActions: string[]): string {
         }
       }
     }
-    
-    const paramsStr = Object.keys(exampleParams).length > 0 
-      ? JSON.stringify(exampleParams).replace(/"/g, '') 
+
+    const paramsStr = Object.keys(exampleParams).length > 0
+      ? JSON.stringify(exampleParams).replace(/"/g, '')
       : '';
-    
+
     examples.push(`{"${actionName}": {${paramsStr.slice(1, -1)}}}`);
   }
-  
+
   return examples.join('\n');
 }
 
 // Full browser-use system prompt (based on their system_prompt_browser_use.md)
 function buildBrowserUseSystemPrompt(availableActions: string[]): string {
   const toolDescriptions = generateToolDescriptions(availableActions);
-  
+
   return `You are a browser-use agent operating in thinking mode. You automate browser tasks by outputting structured JSON actions.
 
 <intro>
@@ -629,7 +681,8 @@ Action list should NEVER be empty.
 }
 
 // Anthropic CUA system prompt (minimal, role-setting)
-const ANTHROPIC_CUA_SYSTEM_PROMPT = `You are a computer use assistant that helps automate browser tasks. You have access to a computer tool that allows you to interact with a desktop browser environment.
+const ANTHROPIC_CUA_SYSTEM_PROMPT =
+  `You are a computer use assistant that helps automate browser tasks. You have access to a computer tool that allows you to interact with a desktop browser environment.
 
 When given a task:
 1. Analyze the current screenshot to understand the page state
@@ -640,19 +693,22 @@ When given a task:
 Be precise with your actions. Click accurately on the intended elements. Type text carefully. Scroll when needed to find content.`;
 
 // Models that require vision (coordinate-based or multimodal)
-const VISION_MODELS = ['yutori/n1', 'anthropic/claude-cua', 'browser-use'];
+const _VISION_MODELS = ['yutori/n1', 'anthropic/claude-cua', 'browser-use'];
 // Models that use DOM indices only (no vision needed - reduces tokens and latency)
 const DOM_ONLY_MODELS = ['openai/gpt-5.2', 'anthropic/claude-opus-4.6'];
 
 // Build browser-use format messages (used for browser-use LLM and generic LLMs)
 // Supports vision by including screenshot in multimodal user message
 // Set includeScreenshot=false for DOM-only models to reduce tokens and latency
-function transformToBrowserUseFormat(req: BrowserUseRequest, options?: { includeScreenshot?: boolean }): {
+function transformToBrowserUseFormat(
+  req: BrowserUseRequest,
+  options?: { includeScreenshot?: boolean },
+): {
   messages: any[];
 } {
   const includeScreenshot = options?.includeScreenshot ?? true;
   const bs = req.browser_state;
-  
+
   // Build page stats summary (like browser-use's AgentMessagePrompt)
   let statsText = '';
   if (bs.page_stats) {
@@ -662,13 +718,14 @@ function transformToBrowserUseFormat(req: BrowserUseRequest, options?: { include
     if (ps.images > 0) statsText += `, ${ps.images} images`;
     statsText += `, ${ps.total_elements} total elements</page_stats>\n`;
   }
-  
+
   // Build scroll context
   let scrollText = `Scroll: (${bs.scroll_position.x}, ${bs.scroll_position.y})`;
   if (bs.scroll_position.pages_above !== undefined) {
-    scrollText += ` | ${bs.scroll_position.pages_above} pages above, ${bs.scroll_position.pages_below} pages below`;
+    scrollText +=
+      ` | ${bs.scroll_position.pages_above} pages above, ${bs.scroll_position.pages_below} pages below`;
   }
-  
+
   // Build tabs info
   let tabsText = '';
   if (bs.tabs && bs.tabs.length > 0) {
@@ -677,13 +734,13 @@ function transformToBrowserUseFormat(req: BrowserUseRequest, options?: { include
       tabsText += `  Tab ${tab.id}: ${tab.url} - ${tab.title}\n`;
     }
   }
-  
+
   // Build recent events
   let eventsText = '';
   if (bs.recent_events && bs.recent_events.length > 0) {
     eventsText = `\nRecent Events: ${bs.recent_events.join(', ')}\n`;
   }
-  
+
   // Build closed popups
   let popupsText = '';
   if (bs.closed_popups && bs.closed_popups.length > 0) {
@@ -692,7 +749,7 @@ function transformToBrowserUseFormat(req: BrowserUseRequest, options?: { include
       popupsText += `  - ${popup}\n`;
     }
   }
-  
+
   // Build action history description
   let historyDesc = '';
   if (req.action_history.length > 0) {
@@ -724,13 +781,13 @@ ${bs.dom_tree}${historyDesc}`;
   let userContent: any;
   if (bs.screenshot && includeScreenshot) {
     // Multimodal message with text + image
-    const imageUrl = bs.screenshot.startsWith('http') 
-      ? bs.screenshot 
+    const imageUrl = bs.screenshot.startsWith('http')
+      ? bs.screenshot
       : `data:image/png;base64,${bs.screenshot}`;
-    
+
     userContent = [
       { type: 'text', text: textContent },
-      { type: 'image_url', image_url: { url: imageUrl } }
+      { type: 'image_url', image_url: { url: imageUrl } },
     ];
   } else {
     // Text-only message (for DOM-only models or when no screenshot)
@@ -743,12 +800,12 @@ ${bs.dom_tree}${historyDesc}`;
   const messages = [
     {
       role: 'system',
-      content: systemPrompt
+      content: systemPrompt,
     },
     {
       role: 'user',
-      content: userContent
-    }
+      content: userContent,
+    },
   ];
 
   return { messages };
@@ -758,14 +815,20 @@ ${bs.dom_tree}${historyDesc}`;
 async function callBrowserUseLLM(
   req: BrowserUseRequest,
   apiKey: string,
-  signal?: AbortSignal
-): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+  signal?: AbortSignal,
+): Promise<
+  {
+    response: any;
+    ttftMs: number;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  }
+> {
   const { messages } = transformToBrowserUseFormat(req);
-  
+
   slog('info', 'browser-use request messages:', { data: JSON.stringify(messages, null, 2) });
-  
+
   const startTime = Date.now();
-  
+
   // Don't pass output_format - let browser-use API use its internal format
   const requestBody = {
     model: 'bu-1-0',
@@ -773,9 +836,11 @@ async function callBrowserUseLLM(
     request_type: 'browser_agent',
     fast: false,
   };
-  
-  slog('info', 'browser-use full request:', { data: JSON.stringify(truncateForLogging(requestBody), null, 2) });
-  
+
+  slog('info', 'browser-use full request:', {
+    data: JSON.stringify(truncateForLogging(requestBody), null, 2),
+  });
+
   const response = await fetch(BROWSER_USE_API_URL, {
     method: 'POST',
     headers: {
@@ -783,7 +848,7 @@ async function callBrowserUseLLM(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(requestBody),
-    signal
+    signal,
   });
 
   const ttftMs = Date.now() - startTime;
@@ -793,15 +858,17 @@ async function callBrowserUseLLM(
     slog('error', 'browser-use API error:', { data: [response.status, errorText] });
     throw new Error(`browser-use API error: ${response.status} - ${errorText}`);
   }
-  
+
   const data = await response.json();
   slog('info', 'browser-use raw response:', { data: JSON.stringify(data, null, 2) });
   // Extract usage if available (browser-use API uses OpenAI format)
-  const usage = data.usage ? {
-    prompt_tokens: data.usage.prompt_tokens || 0,
-    completion_tokens: data.usage.completion_tokens || 0,
-    total_tokens: data.usage.total_tokens || 0
-  } : undefined;
+  const usage = data.usage
+    ? {
+      prompt_tokens: data.usage.prompt_tokens || 0,
+      completion_tokens: data.usage.completion_tokens || 0,
+      total_tokens: data.usage.total_tokens || 0,
+    }
+    : undefined;
   return { response: data, ttftMs, usage };
 }
 
@@ -831,7 +898,7 @@ function mapToYutoriN1ToolName(action: string): string {
 // Build structured tool_call arguments from an ActionHistoryEntry
 function buildYutoriToolArgs(
   entry: ActionHistoryEntry,
-  viewport: { width: number; height: number }
+  viewport: { width: number; height: number },
 ): Record<string, any> {
   const args: Record<string, any> = {};
   const toolName = mapToYutoriN1ToolName(entry.action);
@@ -840,20 +907,26 @@ function buildYutoriToolArgs(
   if (entry.coordinates) {
     args.coordinates = [
       Math.round((entry.coordinates.x / viewport.width) * 1000),
-      Math.round((entry.coordinates.y / viewport.height) * 1000)
+      Math.round((entry.coordinates.y / viewport.height) * 1000),
     ];
-    slog('info', '[YUTORI] Coordinate transform', { data: {
-      original: `${entry.coordinates.x},${entry.coordinates.y}`,
-      normalized: `${args.coordinates[0]},${args.coordinates[1]}`,
-      viewport: `${viewport.width}x${viewport.height}`
-    } });
+    slog('info', '[YUTORI] Coordinate transform', {
+      data: {
+        original: `${entry.coordinates.x},${entry.coordinates.y}`,
+        normalized: `${args.coordinates[0]},${args.coordinates[1]}`,
+        viewport: `${viewport.width}x${viewport.height}`,
+      },
+    });
   }
 
   // Tool-specific arguments
   if (toolName === 'type') {
     if (entry.params?.text) args.text = entry.params.text;
-    if (entry.params?.press_enter_after !== undefined) args.press_enter_after = entry.params.press_enter_after;
-    if (entry.params?.clear_before_typing !== undefined) args.clear_before_typing = entry.params.clear_before_typing;
+    if (entry.params?.press_enter_after !== undefined) {
+      args.press_enter_after = entry.params.press_enter_after;
+    }
+    if (entry.params?.clear_before_typing !== undefined) {
+      args.clear_before_typing = entry.params.clear_before_typing;
+    }
   }
   if (toolName === 'key_press' && entry.params?.key) {
     args.key_comb = entry.params.key;
@@ -869,7 +942,7 @@ function buildYutoriToolArgs(
     if (entry.coordinates) {
       args.coordinates = [
         Math.round((entry.coordinates.x / viewport.width) * 1000),
-        Math.round((entry.coordinates.y / viewport.height) * 1000)
+        Math.round((entry.coordinates.y / viewport.height) * 1000),
       ];
     }
   }
@@ -898,7 +971,7 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
 
   // Build user message: task text + initial screenshot
   const userContent: any[] = [
-    { type: 'text', text: `Task: ${req.task}` }
+    { type: 'text', text: `Task: ${req.task}` },
   ];
 
   // Add URL context in the user message
@@ -942,9 +1015,9 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
         type: 'function',
         function: {
           name: toolName,
-          arguments: JSON.stringify(toolArgs)
-        }
-      }]
+          arguments: JSON.stringify(toolArgs),
+        },
+      }],
     });
 
     // Tool message with result screenshot
@@ -972,16 +1045,18 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
     messages.push({
       role: 'tool',
       tool_call_id: toolCallId,
-      content: toolContent
+      content: toolContent,
     });
   }
 
   // Tracing: log Yutori messages summary
-  slog('info', '[TRACE] Yutori n1-latest messages:', { data: {
-    total: messages.length,
-    assistantCount: messages.filter((m: any) => m.role === 'assistant').length,
-    toolCount: messages.filter((m: any) => m.role === 'tool').length
-  } });
+  slog('info', '[TRACE] Yutori n1-latest messages:', {
+    data: {
+      total: messages.length,
+      assistantCount: messages.filter((m: any) => m.role === 'assistant').length,
+      toolCount: messages.filter((m: any) => m.role === 'tool').length,
+    },
+  });
 
   return { messages };
 }
@@ -990,23 +1065,31 @@ function transformToYutoriFormat(req: BrowserUseRequest): {
 async function callYutoriLLM(
   req: BrowserUseRequest,
   apiKey: string,
-  signal?: AbortSignal
-): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+  signal?: AbortSignal,
+): Promise<
+  {
+    response: any;
+    ttftMs: number;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  }
+> {
   const { messages } = transformToYutoriFormat(req);
-  
+
   slog('info', 'Yutori request messages count:', { data: messages.length });
   slog('info', 'Yutori request messages:', { data: JSON.stringify(messages, null, 2) });
-  
+
   const requestBody = {
     model: YUTORI_MODEL,
     messages,
-    temperature: 0.3
+    temperature: 0.3,
   };
-  
-  slog('info', 'Yutori full request body:', { data: JSON.stringify(truncateForLogging(requestBody), null, 2) });
-  
+
+  slog('info', 'Yutori full request body:', {
+    data: JSON.stringify(truncateForLogging(requestBody), null, 2),
+  });
+
   const startTime = Date.now();
-  
+
   const response = await fetch(YUTORI_API_URL, {
     method: 'POST',
     headers: {
@@ -1014,7 +1097,7 @@ async function callYutoriLLM(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(requestBody),
-    signal
+    signal,
   });
 
   const ttftMs = Date.now() - startTime;
@@ -1024,7 +1107,7 @@ async function callYutoriLLM(
     slog('error', 'Yutori API error:', { data: [response.status, errorText] });
     throw new Error(`Yutori API error: ${response.status} - ${errorText}`);
   }
-  
+
   const data = await response.json();
   slog('info', 'Yutori raw response:', { data: JSON.stringify(data, null, 2) });
 
@@ -1037,18 +1120,23 @@ async function callYutoriLLM(
   }
 
   // Extract usage if available (Yutori API uses OpenAI format)
-  const usage = data.usage ? {
-    prompt_tokens: data.usage.prompt_tokens || 0,
-    completion_tokens: data.usage.completion_tokens || 0,
-    total_tokens: data.usage.total_tokens || 0
-  } : undefined;
+  const usage = data.usage
+    ? {
+      prompt_tokens: data.usage.prompt_tokens || 0,
+      completion_tokens: data.usage.completion_tokens || 0,
+      total_tokens: data.usage.total_tokens || 0,
+    }
+    : undefined;
   return { response: data, ttftMs, usage };
 }
 
 // Normalize Yutori n1-latest response to unified action format
 // n1-latest returns actions as native tool_calls, reasoning in content
 // Coordinates still in 1000x1000 normalized space
-function normalizeYutoriResponse(response: any, viewport: { width: number; height: number }): UnifiedAction {
+function normalizeYutoriResponse(
+  response: any,
+  viewport: { width: number; height: number },
+): UnifiedAction {
   slog('info', 'Normalizing Yutori n1-latest response');
 
   const message = response.choices?.[0]?.message;
@@ -1063,7 +1151,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   if (!toolCalls || toolCalls.length === 0) {
     return {
       action: 'done',
-      thinking: thinking || 'Task complete'
+      thinking: thinking || 'Task complete',
     };
   }
 
@@ -1074,9 +1162,15 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
 
   try {
     toolArgs = JSON.parse(firstToolCall.function?.arguments || '{}');
-  } catch (e) {
-    slog('error', 'Failed to parse tool_call arguments:', { data: firstToolCall.function?.arguments });
-    throw new Error(`normalizeYutoriResponse: Failed to parse tool_call arguments: ${firstToolCall.function?.arguments?.slice(0, 200)}`);
+  } catch (_e) {
+    slog('error', 'Failed to parse tool_call arguments:', {
+      data: firstToolCall.function?.arguments,
+    });
+    throw new Error(
+      `normalizeYutoriResponse: Failed to parse tool_call arguments: ${
+        firstToolCall.function?.arguments?.slice(0, 200)
+      }`,
+    );
   }
 
   // Convert 1000x1000 coordinates to viewport coordinates
@@ -1085,7 +1179,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     const [normX, normY] = toolArgs.coordinates;
     coordinates = {
       x: Math.round((normX / 1000) * viewport.width),
-      y: Math.round((normY / 1000) * viewport.height)
+      y: Math.round((normY / 1000) * viewport.height),
     };
   }
 
@@ -1108,9 +1202,23 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
   // Validate action is one we support
   // NOTE: upload_file is NOT included because yutori is a vision model that doesn't understand DOM indices.
   // When yutori tries to return upload_file, we reject it and fall back to browser-use.
-  const validYutoriActions = ['click', 'scroll', 'input_text', 'press_key', 'navback', 'goto', 'wait', 'attempt_completion', 'done', 'hover', 'refresh'];
+  const validYutoriActions = [
+    'click',
+    'scroll',
+    'input_text',
+    'press_key',
+    'navback',
+    'goto',
+    'wait',
+    'attempt_completion',
+    'done',
+    'hover',
+    'refresh',
+  ];
   if (!validYutoriActions.includes(normalizedAction)) {
-    throw new Error(`normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw tool: "${toolName}") - add to yutoriActionMap or validYutoriActions`);
+    throw new Error(
+      `normalizeYutoriResponse: Unknown action "${normalizedAction}" (raw tool: "${toolName}") - add to yutoriActionMap or validYutoriActions`,
+    );
   }
 
   // Normalize tool arguments to our internal param format
@@ -1132,7 +1240,10 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     const percentAmount = toolArgs.amount || 50;
     normalizedParams.amount = Math.round((percentAmount / 100) * viewport.height);
     normalizedParams.amount = Math.min(Math.max(normalizedParams.amount, 100), 2000);
-    slog('info', `Yutori n1-latest scroll: ${percentAmount}% of ${viewport.height}px → ${normalizedParams.amount}px (direction=${normalizedParams.direction})`);
+    slog(
+      'info',
+      `Yutori n1-latest scroll: ${percentAmount}% of ${viewport.height}px → ${normalizedParams.amount}px (direction=${normalizedParams.direction})`,
+    );
   }
 
   // Wait
@@ -1149,7 +1260,7 @@ function normalizeYutoriResponse(response: any, viewport: { width: number; heigh
     action: normalizedAction,
     thinking,
     coordinates,
-    params: normalizedParams
+    params: normalizedParams,
   };
 }
 
@@ -1163,12 +1274,12 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
   tools: any[];
 } {
   const messages: any[] = [];
-  
+
   // Build initial user message with task and current screenshot
   const userContent: any[] = [
-    { type: 'text', text: `Task: ${req.task}` }
+    { type: 'text', text: `Task: ${req.task}` },
   ];
-  
+
   // Add current screenshot if available (base64 only - CUA requires base64)
   if (req.browser_state.screenshot && !req.browser_state.screenshot.startsWith('http')) {
     userContent.push({
@@ -1176,34 +1287,34 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
       source: {
         type: 'base64',
         media_type: 'image/png',
-        data: req.browser_state.screenshot
-      }
+        data: req.browser_state.screenshot,
+      },
     });
   }
-  
+
   messages.push({ role: 'user', content: userContent });
-  
+
   // Add action history as assistant/user pairs
   for (let i = 0; i < req.action_history.length; i++) {
     const entry = req.action_history[i];
-    
+
     // Map our action names to CUA action names
     const cuaAction = mapToCUAAction(entry.action, entry.params, entry.coordinates);
-    
+
     // Handle actions that don't map to CUA tool calls (like goto/navback)
     if (cuaAction === null) {
       // Add as text-only context (no tool_use)
-      const contextText = entry.action === 'goto' 
+      const contextText = entry.action === 'goto'
         ? `[Navigated to: ${entry.params?.url || 'unknown URL'}]`
         : entry.action === 'navback'
         ? `[Navigated back to previous page]`
         : `[${entry.action}: ${JSON.stringify(entry.params || {})}]`;
-      
+
       messages.push({
         role: 'assistant',
-        content: [{ type: 'text', text: `${entry.thinking || ''}\n\n${contextText}` }]
+        content: [{ type: 'text', text: `${entry.thinking || ''}\n\n${contextText}` }],
       });
-      
+
       // Add observation as user message if screenshot available
       if (entry.screenshot && !entry.screenshot.startsWith('http')) {
         messages.push({
@@ -1213,14 +1324,14 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
             source: {
               type: 'base64',
               media_type: 'image/png',
-              data: entry.screenshot
-            }
-          }]
+              data: entry.screenshot,
+            },
+          }],
         });
       }
       continue; // Skip the tool_use/tool_result pair
     }
-    
+
     // Assistant message with tool use
     messages.push({
       role: 'assistant',
@@ -1230,11 +1341,11 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
           type: 'tool_use',
           id: `tool_${i}`,
           name: 'computer',
-          input: cuaAction
-        }
-      ]
+          input: cuaAction,
+        },
+      ],
     });
-    
+
     // User message with tool result
     const toolResultContent: any[] = [];
     if (entry.screenshot) {
@@ -1246,55 +1357,71 @@ function transformToAnthropicCUAFormat(req: BrowserUseRequest): {
           source: {
             type: 'base64',
             media_type: 'image/png',
-            data: entry.screenshot
-          }
+            data: entry.screenshot,
+          },
         });
       }
     } else {
-      toolResultContent.push({ 
-        type: 'text', 
-        text: entry.result.success ? 'Action completed successfully' : `Error: ${entry.result.error}` 
+      toolResultContent.push({
+        type: 'text',
+        text: entry.result.success
+          ? 'Action completed successfully'
+          : `Error: ${entry.result.error}`,
       });
     }
-    
+
     messages.push({
       role: 'user',
       content: [{
         type: 'tool_result',
         tool_use_id: `tool_${i}`,
-        content: toolResultContent
-      }]
+        content: toolResultContent,
+      }],
     });
   }
-  
+
   // CUA computer tool definition
   const tools = [{
     type: 'computer_20251124',
     name: 'computer',
     display_width_px: req.browser_state.viewport.width,
     display_height_px: req.browser_state.viewport.height,
-    display_number: 1
+    display_number: 1,
   }];
-  
+
   return { messages, tools };
 }
 
 // Map our action names to Anthropic CUA action format
-function mapToCUAAction(action: string, params?: Record<string, any>, coordinates?: { x: number; y: number }): any {
+function mapToCUAAction(
+  action: string,
+  params?: Record<string, any>,
+  coordinates?: { x: number; y: number },
+): any {
   switch (action) {
     case 'click':
       return {
         action: 'left_click',
-        coordinate: coordinates ? [coordinates.x, coordinates.y] : [0, 0]
+        coordinate: coordinates ? [coordinates.x, coordinates.y] : [0, 0],
       };
     case 'type':
     case 'input_text':
       return { action: 'type', text: params?.text || '' };
     case 'scroll':
     case 'scroll_down':
-      return { action: 'scroll', coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400], direction: params?.direction || 'down', amount: params?.amount || 300 };
+      return {
+        action: 'scroll',
+        coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400],
+        direction: params?.direction || 'down',
+        amount: params?.amount || 300,
+      };
     case 'scroll_up':
-      return { action: 'scroll', coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400], direction: 'up', amount: params?.amount || 300 };
+      return {
+        action: 'scroll',
+        coordinate: coordinates ? [coordinates.x, coordinates.y] : [640, 400],
+        direction: 'up',
+        amount: params?.amount || 300,
+      };
     case 'press_key':
       return { action: 'key', key: params?.key || 'Enter' };
     case 'goto':
@@ -1315,24 +1442,32 @@ function mapToCUAAction(action: string, params?: Record<string, any>, coordinate
 // Call Anthropic CUA API
 async function callAnthropicCUA(
   req: BrowserUseRequest,
-  apiKey: string
-): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+  apiKey: string,
+): Promise<
+  {
+    response: any;
+    ttftMs: number;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  }
+> {
   const { messages, tools } = transformToAnthropicCUAFormat(req);
-  
+
   slog('info', 'Anthropic CUA request messages count:', { data: messages.length });
-  
+
   const requestBody = {
     model: ANTHROPIC_CUA_MODEL,
     max_tokens: 1024,
     system: ANTHROPIC_CUA_SYSTEM_PROMPT,
     tools,
-    messages
+    messages,
   };
-  
-  slog('info', 'Anthropic CUA request:', { data: JSON.stringify(requestBody, null, 2).slice(0, 1000) });
-  
+
+  slog('info', 'Anthropic CUA request:', {
+    data: JSON.stringify(requestBody, null, 2).slice(0, 1000),
+  });
+
   const startTime = Date.now();
-  
+
   const response = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
     headers: {
@@ -1341,51 +1476,53 @@ async function callAnthropicCUA(
       'anthropic-beta': ANTHROPIC_CUA_BETA,
       'content-type': 'application/json',
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(requestBody),
   });
-  
+
   const ttftMs = Date.now() - startTime;
-  
+
   if (!response.ok) {
     const errorText = await response.text();
     slog('error', 'Anthropic CUA API error:', { data: [response.status, errorText] });
     throw new Error(`Anthropic CUA API error: ${response.status} - ${errorText}`);
   }
-  
+
   const data = await response.json();
   slog('info', 'Anthropic CUA raw response:', { data: JSON.stringify(data, null, 2) });
   // Extract usage from Anthropic response (uses input_tokens/output_tokens)
-  const usage = data.usage ? {
-    prompt_tokens: data.usage.input_tokens || 0,
-    completion_tokens: data.usage.output_tokens || 0,
-    total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
-  } : undefined;
+  const usage = data.usage
+    ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
+    }
+    : undefined;
   return { response: data, ttftMs, usage };
 }
 
 // Normalize Anthropic CUA response to unified action format
 function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
   slog('info', 'Normalizing Anthropic CUA response');
-  
+
   const content = response.content || [];
-  
+
   // Find text and tool_use in content
   const textPart = content.find((c: any) => c.type === 'text');
   const toolUse = content.find((c: any) => c.type === 'tool_use');
-  
+
   if (!toolUse) {
     return {
       action: 'done',
-      thinking: textPart?.text || 'No action returned'
+      thinking: textPart?.text || 'No action returned',
     };
   }
-  
+
   // Map CUA action back to Python agent expected names
   const cuaAction = toolUse.input?.action || 'unknown';
   let action: string;
   let coordinates: { x: number; y: number } | undefined;
   const normalizedParams: Record<string, any> = {};
-  
+
   switch (cuaAction) {
     case 'left_click':
     case 'right_click':
@@ -1396,11 +1533,11 @@ function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
       }
       break;
     case 'type':
-      action = 'input_text';  // Map to Python expected name
+      action = 'input_text'; // Map to Python expected name
       if (toolUse.input?.text) normalizedParams.text = toolUse.input.text;
       break;
     case 'scroll':
-      action = 'scroll';  // Use unified 'scroll' action
+      action = 'scroll'; // Use unified 'scroll' action
       if (toolUse.input?.direction) {
         normalizedParams.direction = toolUse.input.direction;
         normalizedParams.amount = 300; // Default scroll amount
@@ -1410,7 +1547,7 @@ function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
       }
       break;
     case 'key':
-      action = 'press_key';  // Map to Python expected name
+      action = 'press_key'; // Map to Python expected name
       if (toolUse.input?.key) normalizedParams.key = toolUse.input.key;
       break;
     case 'wait':
@@ -1423,14 +1560,16 @@ function normalizeAnthropicCUAResponse(response: any): UnifiedAction {
       action = 'screenshot';
       break;
     default:
-      throw new Error(`normalizeAnthropicCUAResponse: Unmapped CUA action "${cuaAction}" - add to switch statement`);
+      throw new Error(
+        `normalizeAnthropicCUAResponse: Unmapped CUA action "${cuaAction}" - add to switch statement`,
+      );
   }
-  
+
   return {
     action,
     thinking: textPart?.text,
     coordinates,
-    params: normalizedParams
+    params: normalizedParams,
   };
 }
 
@@ -1444,8 +1583,14 @@ async function callGenericLLM(
   model: string,
   openRouterKey: string,
   supabaseUrl: string,
-  signal?: AbortSignal
-): Promise<{ response: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+  signal?: AbortSignal,
+): Promise<
+  {
+    response: any;
+    ttftMs: number;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  }
+> {
   // Check if this is a DOM-only model (no vision needed)
   const isDomOnly = DOM_ONLY_MODELS.includes(model);
 
@@ -1464,16 +1609,16 @@ async function callGenericLLM(
       'Authorization': `Bearer ${openRouterKey}`,
       'Content-Type': 'application/json',
       'HTTP-Referer': supabaseUrl,
-      'X-Title': 'Rose Browser Use'
+      'X-Title': 'Rose Browser Use',
     },
     body: JSON.stringify({
       model,
       messages,
       temperature: 0.3,
       max_tokens: 1024,
-      response_format: { type: 'json_object' }
+      response_format: { type: 'json_object' },
     }),
-    signal
+    signal,
   });
 
   const ttftMs = Date.now() - startTime;
@@ -1483,13 +1628,13 @@ async function callGenericLLM(
     slog('error', 'OpenRouter API error:', { data: [response.status, errorText] });
     throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
   }
-  
+
   const data = await response.json();
-  
+
   // Extract the content from OpenRouter response format
   const content = data.choices?.[0]?.message?.content;
   slog('info', 'Generic LLM raw content:', { data: content });
-  
+
   // Parse JSON content and return in browser-use compatible format
   let completion: any;
   try {
@@ -1499,27 +1644,29 @@ async function callGenericLLM(
   }
 
   // Extract usage from OpenRouter response
-  const usage = data.usage ? {
-    prompt_tokens: data.usage.prompt_tokens || 0,
-    completion_tokens: data.usage.completion_tokens || 0,
-    total_tokens: data.usage.total_tokens || 0
-  } : undefined;
+  const usage = data.usage
+    ? {
+      prompt_tokens: data.usage.prompt_tokens || 0,
+      completion_tokens: data.usage.completion_tokens || 0,
+      total_tokens: data.usage.total_tokens || 0,
+    }
+    : undefined;
 
   return {
     response: { completion },
     ttftMs,
-    usage
+    usage,
   };
 }
 
 // Normalize browser-use response to unified action format
 function normalizeBrowserUseResponse(response: any): UnifiedAction {
   slog('info', 'Normalizing response:', { data: JSON.stringify(response, null, 2) });
-  
+
   // browser-use returns { completion: { thinking, action: [...], ... }, usage }
   // or sometimes just the completion directly
   const completion = response.completion || response;
-  
+
   // Check if completion is a string (raw LLM response)
   if (typeof completion === 'string') {
     // Try to extract JSON (handles markdown-wrapped JSON)
@@ -1528,29 +1675,33 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
       return normalizeBrowserUseResponse({ completion: parsed });
     }
     slog('info', 'Could not extract JSON from completion:', { data: completion.slice(0, 300) });
-    throw new Error(`normalizeBrowserUseResponse: Could not extract JSON from completion: ${completion.slice(0, 200)}`);
+    throw new Error(
+      `normalizeBrowserUseResponse: Could not extract JSON from completion: ${
+        completion.slice(0, 200)
+      }`,
+    );
   }
-  
+
   // Extract action array - it could be in different places
-  let actions = completion.action;
+  const actions = completion.action;
   if (!actions || actions.length === 0) {
     // Model returned no actions - throw error to trigger provider failover
     slog('info', 'No actions in completion, triggering failover to next provider');
     throw new Error('normalizeBrowserUseResponse: No actions returned in completion');
   }
-  
+
   const firstAction = actions[0];
   slog('info', 'First action:', { data: JSON.stringify(firstAction, null, 2) });
-  
+
   // Action can be in different formats:
   // 1. { action_name: "click", index: 5 } - flat format
   // 2. { click: { index: 5 } } - nested format (browser-use native)
   // 3. { action_name: { ...params } } - semi-nested
-  
+
   let actionName: string;
   let params: Record<string, any> = {};
   let index: number | undefined;
-  
+
   if (firstAction.action_name) {
     // Format 1 or 3: has explicit action_name field
     actionName = firstAction.action_name;
@@ -1564,7 +1715,7 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
     params = firstAction[actionName] || {};
     index = params.index;
   }
-  
+
   // Map action names to Python agent expected names
   // Browser-use native actions: search, navigate, go_back, wait, click, input, upload_file,
   // switch, close, extract, scroll, send_keys, find_text, screenshot, dropdown_options, select_dropdown, evaluate, done
@@ -1577,41 +1728,66 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
     'close': 'close_tab',
     'done': 'attempt_completion',
   };
-  
+
   const normalizedAction = actionNameMap[actionName] || actionName;
-  
+
   // Validate action is one we support
   const validActions = [
-    'click', 'click_coordinates', 'scroll', 'wait', 'extract', 'evaluate', 
-    'dropdown_options', 'select_dropdown', 'screenshot', 
-    'find_text', 'upload_file', 'search',
-    'goto', 'navback', 'input_text', 'press_key', 
-    'switch_tab', 'close_tab', 'open_new_tab', 'attempt_completion'
+    'click',
+    'click_coordinates',
+    'scroll',
+    'wait',
+    'extract',
+    'evaluate',
+    'dropdown_options',
+    'select_dropdown',
+    'screenshot',
+    'find_text',
+    'upload_file',
+    'search',
+    'goto',
+    'navback',
+    'input_text',
+    'press_key',
+    'switch_tab',
+    'close_tab',
+    'open_new_tab',
+    'attempt_completion',
   ];
   if (!validActions.includes(normalizedAction)) {
-    throw new Error(`normalizeBrowserUseResponse: Unknown action "${normalizedAction}" (raw: "${actionName}") - add to actionNameMap or validActions`);
+    throw new Error(
+      `normalizeBrowserUseResponse: Unknown action "${normalizedAction}" (raw: "${actionName}") - add to actionNameMap or validActions`,
+    );
   }
-  
+
   // Convert click_coordinates to click with coordinates
   if (normalizedAction === 'click_coordinates') {
     const x = params.x ?? params.coordinate_x;
     const y = params.y ?? params.coordinate_y;
     if (x === undefined || y === undefined) {
-      throw new Error(`normalizeBrowserUseResponse: click_coordinates requires x and y, got: ${JSON.stringify(params)}`);
+      throw new Error(
+        `normalizeBrowserUseResponse: click_coordinates requires x and y, got: ${
+          JSON.stringify(params)
+        }`,
+      );
     }
     return {
       action: 'click',
       thinking: completion.next_goal || completion.thinking,
       coordinates: { x, y },
-      params: {}
+      params: {},
     };
   }
-  
+
   // Validate click action has required index (DOM-based models must return index)
   if (normalizedAction === 'click' && index === undefined) {
-    throw new Error(`normalizeBrowserUseResponse: click action requires element index, got none. Raw action: ${JSON.stringify(firstAction)}`);
+    throw new Error(
+      `normalizeBrowserUseResponse: click action requires element index, got none. Raw action: ${
+        JSON.stringify(firstAction)
+      }`,
+    );
   }
-  
+
   // Normalize params to Python agent expected format
   const normalizedParams: Record<string, any> = {};
 
@@ -1629,14 +1805,14 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   // press_key: map 'keys' to 'key'
   if (params.key) normalizedParams.key = params.key;
   if (params.keys) normalizedParams.key = params.keys;
-  
+
   // extract: map 'query' to 'instruction'
   if (params.instruction) normalizedParams.instruction = params.instruction;
   if (params.query) normalizedParams.instruction = params.query;
   if (params.extract_links !== undefined) normalizedParams.extract_links = params.extract_links;
-  
+
   if (params.code) normalizedParams.code = params.code;
-  
+
   // select_dropdown: map 'text' to 'value' (but text is also used for input_text)
   // Only map to 'value' for select_dropdown action
   if (normalizedAction === 'select_dropdown' && params.text) {
@@ -1644,12 +1820,12 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   } else if (params.value) {
     normalizedParams.value = params.value;
   }
-  
+
   if (params.tab_id) normalizedParams.tab_id = params.tab_id;
   if (params.message) normalizedParams.message = params.message;
   if (params.reasoning) normalizedParams.reasoning = params.reasoning;
   if (params.reason) normalizedParams.reason = params.reason;
-  
+
   // wait: convert 'seconds' to 'time_ms'
   if (params.seconds !== undefined) {
     normalizedParams.time_ms = params.seconds * 1000;
@@ -1660,7 +1836,7 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
   if (params.time_ms !== undefined) {
     normalizedParams.time_ms = params.time_ms;
   }
-  
+
   // scroll: convert 'down'/'pages' to 'direction'/'amount'
   if (actionName === 'scroll_up') {
     normalizedParams.direction = 'up';
@@ -1677,22 +1853,24 @@ function normalizeBrowserUseResponse(response: any): UnifiedAction {
     normalizedParams.direction = params.direction;
     normalizedParams.amount = params.amount || 300;
   }
-  
+
   // Copy index to params if present
   if (index !== undefined) {
     normalizedParams.index = index;
   }
-  
+
   return {
     action: normalizedAction,
     thinking: completion.next_goal || completion.thinking,
     index: index,
-    coordinates: params.coordinate_x !== undefined ? {
-      x: params.coordinate_x,
-      y: params.coordinate_y
-    } : undefined,
+    coordinates: params.coordinate_x !== undefined
+      ? {
+        x: params.coordinate_x,
+        y: params.coordinate_y,
+      }
+      : undefined,
     element_description: params.element_description,
-    params: normalizedParams
+    params: normalizedParams,
   };
 }
 
@@ -1702,7 +1880,7 @@ type ModelPreference = 'SMART' | 'FAST' | 'CHEAP';
 const MODEL_PREFERENCES: Record<ModelPreference, { model: string; isCerebras: boolean }> = {
   'SMART': { model: 'openai/gpt-5.2', isCerebras: false },
   'FAST': { model: 'qwen-3-235b-a22b-instruct-2507', isCerebras: true },
-  'CHEAP': { model: 'google/gemini-2.5-flash', isCerebras: false }
+  'CHEAP': { model: 'google/gemini-2.5-flash', isCerebras: false },
 };
 
 // Cerebras API base URL (OpenAI-compatible)
@@ -1763,42 +1941,45 @@ function hasScreenshotMarkers(messages: any[]): boolean {
 // a user message with the image right after the tool message
 function transformMessagesForVision(messages: any[]): any[] {
   const transformed: any[] = [];
-  
+
   for (const msg of messages) {
-    if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.includes('__screenshot_base64__')) {
+    if (
+      msg.role === 'tool' && typeof msg.content === 'string' &&
+      msg.content.includes('__screenshot_base64__')
+    ) {
       try {
         const parsed = JSON.parse(msg.content);
         const base64Data = parsed.__screenshot_base64__;
-        
+
         if (base64Data) {
           // Remove base64 from JSON, add flag
           const toolContent = { ...parsed };
           delete toolContent.__screenshot_base64__;
           toolContent.screenshot_attached = true;
-          
+
           // Keep tool message with cleaned content
           transformed.push({
             ...msg,
-            content: JSON.stringify(toolContent)
+            content: JSON.stringify(toolContent),
           });
-          
+
           // Inject user message with the image right after
           transformed.push({
             role: 'user',
             content: [
               { type: 'text', text: '[Screenshot from browser]' },
-              { 
-                type: 'image_url', 
-                image_url: { 
-                  url: `data:image/png;base64,${base64Data}` 
-                } 
-              }
-            ]
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:image/png;base64,${base64Data}`,
+                },
+              },
+            ],
           });
         } else {
           transformed.push(msg);
         }
-      } catch (e) {
+      } catch (_e) {
         // If JSON parsing fails, keep original message
         transformed.push(msg);
       }
@@ -1806,7 +1987,7 @@ function transformMessagesForVision(messages: any[]): any[] {
       transformed.push(msg);
     }
   }
-  
+
   return transformed;
 }
 
@@ -1825,7 +2006,7 @@ function getMessagesForModel(messages: any[], model: string): any[] {
 
 // Standard test prompt for latency probes - minimal tokens, consistent across all models
 const LATENCY_PROBE_MESSAGES = [
-  { role: "user", content: "Reply with just 'ok'" }
+  { role: 'user', content: "Reply with just 'ok'" },
 ];
 const LATENCY_PROBE_MAX_TOKENS = 16;
 
@@ -1845,27 +2026,27 @@ async function getCachedLatencies(supabase: any, pool: string, poolModels: strin
 }> {
   const cutoff = new Date(Date.now() - LATENCY_CACHE_TTL_MS).toISOString();
   slog('info', `Fetching cached latencies for ${pool} (cutoff: ${cutoff})`);
-  
+
   const { data, error } = await supabase
     .from('RoseModelLatency')
     .select('model, latencyMs, measuredAt')
     .eq('pool', pool)
     .gt('measuredAt', cutoff);
-  
+
   const latencies = new Map<string, number>();
   if (error) {
     slog('error', 'Error fetching latency cache:', { data: error });
     return { latencies, needsRefresh: true, missingModels: poolModels };
   }
-  
+
   for (const entry of data || []) {
     latencies.set(entry.model, entry.latencyMs);
   }
-  
+
   // Check which models are missing from cache
-  const missingModels = poolModels.filter(model => !latencies.has(model));
+  const missingModels = poolModels.filter((model) => !latencies.has(model));
   const needsRefresh = missingModels.length > 0;
-  
+
   if (latencies.size === 0) {
     slog('info', `No cached latencies for ${pool} (cache empty or expired)`);
   } else {
@@ -1874,7 +2055,7 @@ async function getCachedLatencies(supabase: any, pool: string, poolModels: strin
       slog('info', `Missing from cache: ${missingModels.join(', ')}`);
     }
   }
-  
+
   return { latencies, needsRefresh, missingModels };
 }
 
@@ -1884,17 +2065,17 @@ async function fireLatencyProbes(
   pool: string,
   openRouterKey: string,
   supabaseUrl: string,
-  supabase: any
+  supabase: any,
 ): Promise<void> {
   slog('info', `Firing latency probes for ${models.length} models: ${models.join(', ')}`);
-  
+
   const probePromises = models.map(async (model) => {
     const startTime = Date.now();
     const controller = new AbortController(); // To kill the request immediately
-    
+
     try {
       let response: globalThis.Response;
-      
+
       // Call Anthropic directly for Claude models (same as race)
       if (isAnthropicModel(model)) {
         const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
@@ -1902,22 +2083,22 @@ async function fireLatencyProbes(
           slog('error', `Probe skipped for ${model}: no ANTHROPIC_API_KEY`);
           return;
         }
-        
+
         const anthropicModel = getAnthropicModelName(model);
         response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
             'x-api-key': anthropicKey,
             'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
+            'content-type': 'application/json',
           },
           body: JSON.stringify({
             model: anthropicModel,
             messages: [{ role: 'user', content: "Reply with just 'ok'" }],
             max_tokens: LATENCY_PROBE_MAX_TOKENS,
-            stream: true
+            stream: true,
           }),
-          signal: controller.signal
+          signal: controller.signal,
         });
       } else {
         // OpenRouter for other models
@@ -1927,50 +2108,50 @@ async function fireLatencyProbes(
             'Authorization': `Bearer ${openRouterKey}`,
             'Content-Type': 'application/json',
             'HTTP-Referer': supabaseUrl,
-            'X-Title': 'Rose AI - Latency Probe'
+            'X-Title': 'Rose AI - Latency Probe',
           },
           body: JSON.stringify({
             model,
             messages: LATENCY_PROBE_MESSAGES,
             max_tokens: LATENCY_PROBE_MAX_TOKENS,
-            stream: true
+            stream: true,
           }),
-          signal: controller.signal  // Enable abort
+          signal: controller.signal, // Enable abort
         });
       }
-      
+
       if (!response.ok) {
         slog('error', `Probe failed for ${model}: ${response.status}`);
         return;
       }
-      
+
       const reader = response.body?.getReader();
       if (!reader) {
         slog('error', `Probe no body for ${model}`);
         return;
       }
-      
+
       const decoder = new TextDecoder();
       let buffer = '';
-      
+
       // Read chunks until we get first contentful token
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        
+
         // Check each line for contentful data
         for (const line of lines) {
           if (!line.startsWith('data:') || line.includes('[DONE]')) continue;
-          
+
           try {
             const jsonStr = line.slice(5).trim();
             if (!jsonStr) continue;
-            
+
             const parsed = JSON.parse(jsonStr);
-            
+
             // Handle both OpenRouter and Anthropic streaming formats
             let hasContent = false;
             if (parsed.choices?.[0]?.delta) {
@@ -1981,36 +2162,35 @@ async function fireLatencyProbes(
               // Anthropic format
               hasContent = true;
             }
-            
+
             if (hasContent) {
               const ttftMs = Date.now() - startTime;
               slog('info', `Probe result: ${model} = ${ttftMs}ms (first contentful token)`);
-              
+
               // IMMEDIATELY kill the entire HTTP connection
               controller.abort();
-              
+
               // Fire-and-forget cache update
               updateLatencyCache(supabase, model, pool, ttftMs).catch(() => {});
               return;
             }
-          } catch (e) {
+          } catch (_e) {
             // Skip unparseable lines
           }
         }
-        
+
         // Keep only the last incomplete line in buffer
         buffer = lines[lines.length - 1] || '';
       }
-      
+
       slog('error', `Probe no contentful data for ${model}`);
-      
     } catch (error) {
       // Ignore abort errors (expected when we kill the request)
       if (error instanceof DOMException && error.name === 'AbortError') return;
       slog('error', `Probe error for ${model}:`, { data: error });
     }
   });
-  
+
   // Wait for all probes to complete
   await Promise.allSettled(probePromises);
   slog('info', `All latency probes completed for ${pool}`);
@@ -2018,17 +2198,25 @@ async function fireLatencyProbes(
 
 // Update latency cache for a model (upsert)
 // Ignores outlier latencies (> 10s) which are likely timeouts or errors
-async function updateLatencyCache(supabase: any, model: string, pool: string, latencyMs: number): Promise<void> {
+async function updateLatencyCache(
+  supabase: any,
+  model: string,
+  pool: string,
+  latencyMs: number,
+): Promise<void> {
   // Pool-aware outlier threshold (browser-use completions take 2-15s normally)
   const MAX_VALID_LATENCY_MS = pool === 'rose-1-browser-use' ? 60000 : 10000;
   if (latencyMs > MAX_VALID_LATENCY_MS) {
-    slog('warn', `Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`);
+    slog(
+      'warn',
+      `Ignoring outlier latency for ${model}: ${latencyMs}ms > ${MAX_VALID_LATENCY_MS}ms`,
+    );
     return;
   }
-  
+
   // Generate a UUID for the id field
   const id = crypto.randomUUID();
-  
+
   const { error } = await supabase
     .from('RoseModelLatency')
     .upsert({
@@ -2036,11 +2224,11 @@ async function updateLatencyCache(supabase: any, model: string, pool: string, la
       model,
       pool,
       latencyMs,
-      measuredAt: new Date().toISOString()
+      measuredAt: new Date().toISOString(),
     }, {
-      onConflict: 'model,pool'
+      onConflict: 'model,pool',
     });
-  
+
   if (error) {
     slog('error', `Error updating latency cache for ${model}:`, { data: error });
   } else {
@@ -2058,13 +2246,15 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
   const { error } = await supabase.rpc('increment_loser_latency', {
     p_model: model,
     p_pool: pool,
-    p_increment: LOSER_LATENCY_INCREMENT_MS
+    p_increment: LOSER_LATENCY_INCREMENT_MS,
   });
-  
+
   if (error) {
     // Fallback: if RPC doesn't exist, do manual increment (less atomic but works)
-    slog('warn', `RPC increment failed for ${model}, trying manual update:`, { data: error.message });
-    
+    slog('warn', `RPC increment failed for ${model}, trying manual update:`, {
+      data: error.message,
+    });
+
     // Fetch current value
     const { data } = await supabase
       .from('RoseModelLatency')
@@ -2072,7 +2262,7 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
       .eq('model', model)
       .eq('pool', pool)
       .single();
-    
+
     if (data) {
       const newLatency = data.latencyMs + LOSER_LATENCY_INCREMENT_MS;
       await supabase
@@ -2080,7 +2270,10 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
         .update({ latencyMs: newLatency, measuredAt: new Date().toISOString() })
         .eq('model', model)
         .eq('pool', pool);
-      slog('info', `Loser ${model}: latency incremented ${data.latencyMs} → ${newLatency}ms (less sandbagging)`);
+      slog(
+        'info',
+        `Loser ${model}: latency incremented ${data.latencyMs} → ${newLatency}ms (less sandbagging)`,
+      );
     }
   } else {
     slog('info', `Loser ${model}: latency incremented by ${LOSER_LATENCY_INCREMENT_MS}ms (atomic)`);
@@ -2094,34 +2287,39 @@ async function incrementLoserLatency(supabase: any, model: string, pool: string)
 // Get existing model selection for a conversation
 async function getConversationModel(supabase: any, conversationId: string): Promise<string | null> {
   slog('info', `Looking up model for conversation: ${conversationId}`);
-  
+
   const { data, error } = await supabase
     .from('RoseConversationModel')
     .select('model')
     .eq('conversationId', conversationId)
-    .maybeSingle();  // Use maybeSingle to avoid error when no rows found
-  
+    .maybeSingle(); // Use maybeSingle to avoid error when no rows found
+
   if (error) {
     slog('error', `Error looking up conversation model:`, { data: error });
     return null;
   }
-  
+
   if (!data) {
     slog('info', `No existing model for conversation ${conversationId}`);
     return null;
   }
-  
+
   slog('info', `Found existing model for conversation ${conversationId}: ${data.model}`);
   return data.model;
 }
 
 // Save model selection for a conversation
-async function saveConversationModel(supabase: any, conversationId: string, model: string, pool: string): Promise<void> {
+async function saveConversationModel(
+  supabase: any,
+  conversationId: string,
+  model: string,
+  pool: string,
+): Promise<void> {
   slog('info', `Saving model ${model} for conversation ${conversationId}`);
-  
+
   // Generate a UUID for the id field
   const id = crypto.randomUUID();
-  
+
   const { error } = await supabase
     .from('RoseConversationModel')
     .upsert({
@@ -2129,11 +2327,11 @@ async function saveConversationModel(supabase: any, conversationId: string, mode
       conversationId,
       model,
       pool,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     }, {
-      onConflict: 'conversationId'
+      onConflict: 'conversationId',
     });
-  
+
   if (error) {
     slog('error', `Error saving conversation model:`, { data: error });
   } else {
@@ -2202,14 +2400,16 @@ async function waterfallStream(
           openRouterKey,
           supabaseUrl,
           requestedModel,
-          false,  // isCerebras
+          false, // isCerebras
           poolName,
           poolSize,
-          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          undefined,
+          undefined,
+          undefined, // claudeAuth, skipCache, stallConfig
           claudeTokenError,
         ),
         WATERFALL_TIMEOUT_MS,
-        `waterfall-${model}`
+        `waterfall-${model}`,
       );
 
       // handleStreaming returns a Response — check if it's an error status
@@ -2242,13 +2442,16 @@ async function waterfallStream(
 
   // All models failed
   slog('error', `Waterfall: all ${pool.length} models failed`, { data: errors });
-  return new Response(JSON.stringify({
-    error: 'All waterfall models failed',
-    details: errors,
-  }), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    status: 500,
-  });
+  return new Response(
+    JSON.stringify({
+      error: 'All waterfall models failed',
+      details: errors,
+    }),
+    {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 500,
+    },
+  );
 }
 
 // Select a random trio from the pool, calculate delays based on cached latencies
@@ -2261,7 +2464,7 @@ async function waterfallStream(
 function selectRacingTrio(
   pool: string[],
   cachedLatencies: Map<string, number>,
-  config?: Partial<RacingConfig>
+  config?: Partial<RacingConfig>,
 ): RacingModel[] {
   const maxLatencyCapMs = config?.maxLatencyCapMs ?? MAX_LATENCY_CAP_MS;
   const maxDelayCapMs = config?.maxDelayCapMs ?? MAX_DELAY_CAP_MS;
@@ -2269,24 +2472,30 @@ function selectRacingTrio(
   const trioSize = config?.trioSize ?? TRIO_SIZE;
 
   // Get all models with their latencies
-  const modelsWithLatency = pool.map(model => ({
+  const modelsWithLatency = pool.map((model) => ({
     model,
-    latencyMs: cachedLatencies.get(model) || defaultLatencyMs
+    latencyMs: cachedLatencies.get(model) || defaultLatencyMs,
   }));
 
   // Filter out models exceeding hard latency cap
-  const underHardCap = modelsWithLatency.filter(m => {
+  const underHardCap = modelsWithLatency.filter((m) => {
     if (m.latencyMs > maxLatencyCapMs) {
-      slog('warn', `Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${maxLatencyCapMs}ms cap`);
+      slog(
+        'warn',
+        `Excluding ${m.model} - latency ${m.latencyMs}ms exceeds ${maxLatencyCapMs}ms cap`,
+      );
       return false;
     }
     return true;
   });
 
   if (underHardCap.length === 0) {
-    slog('warn', `No eligible models after ${maxLatencyCapMs}ms cap, using full pool with fastest models`);
+    slog(
+      'warn',
+      `No eligible models after ${maxLatencyCapMs}ms cap, using full pool with fastest models`,
+    );
     const sorted = modelsWithLatency.sort((a, b) => a.latencyMs - b.latencyMs);
-    return sorted.slice(0, trioSize).map(m => ({ ...m, delayMs: 0 }));
+    return sorted.slice(0, trioSize).map((m) => ({ ...m, delayMs: 0 }));
   }
 
   // Sort by latency (fastest first)
@@ -2294,42 +2503,54 @@ function selectRacingTrio(
 
   // Find models within delay cap of the fastest model
   const fastestLatency = underHardCap[0].latencyMs;
-  const withinDelayCap = underHardCap.filter(m =>
+  const withinDelayCap = underHardCap.filter((m) =>
     (m.latencyMs - fastestLatency) <= maxDelayCapMs
   );
 
   // Log what we excluded due to delay cap
-  const excludedByDelay = underHardCap.filter(m =>
+  const excludedByDelay = underHardCap.filter((m) =>
     (m.latencyMs - fastestLatency) > maxDelayCapMs
   );
   for (const m of excludedByDelay) {
-    slog('warn', `Excluding ${m.model} - latency ${m.latencyMs}ms is ${m.latencyMs - fastestLatency}ms slower than fastest (${fastestLatency}ms), exceeds ${maxDelayCapMs}ms delay cap`);
+    slog(
+      'warn',
+      `Excluding ${m.model} - latency ${m.latencyMs}ms is ${
+        m.latencyMs - fastestLatency
+      }ms slower than fastest (${fastestLatency}ms), exceeds ${maxDelayCapMs}ms delay cap`,
+    );
   }
 
   // ALWAYS include the fastest model, then randomly select the rest
-  const fastestModel = withinDelayCap[0];  // Already sorted, index 0 is fastest
+  const fastestModel = withinDelayCap[0]; // Already sorted, index 0 is fastest
   const otherModels = withinDelayCap.slice(1);
 
   // Shuffle the rest and pick trioSize - 1
   const shuffledOthers = [...otherModels].sort(() => Math.random() - 0.5);
   const randomOthers = shuffledOthers.slice(0, Math.min(trioSize - 1, shuffledOthers.length));
-  
+
   // Combine: fastest + random others
   const selectedModels = [fastestModel, ...randomOthers];
-  slog('info', `Trio: fastest=${fastestModel.model}, others=[${randomOthers.map(m => m.model).join(', ')}]`);
-  
+  slog(
+    'info',
+    `Trio: fastest=${fastestModel.model}, others=[${randomOthers.map((m) => m.model).join(', ')}]`,
+  );
+
   // Find the slowest model in the selected trio
-  const slowestInTrio = Math.max(...selectedModels.map(m => m.latencyMs));
-  
+  const slowestInTrio = Math.max(...selectedModels.map((m) => m.latencyMs));
+
   // Calculate delays: fast models wait so all finish ~simultaneously
-  const racingModels: RacingModel[] = selectedModels.map(m => ({
+  const racingModels: RacingModel[] = selectedModels.map((m) => ({
     model: m.model,
     latencyMs: m.latencyMs,
-    delayMs: slowestInTrio - m.latencyMs
+    delayMs: slowestInTrio - m.latencyMs,
   }));
-  
-  slog('info', `Racing trio (target finish ~${slowestInTrio}ms):`, { data: racingModels.map(m => `${m.model} (${m.latencyMs}ms + ${m.delayMs}ms delay = ${m.latencyMs + m.delayMs}ms)`) });
-  
+
+  slog('info', `Racing trio (target finish ~${slowestInTrio}ms):`, {
+    data: racingModels.map((m) =>
+      `${m.model} (${m.latencyMs}ms + ${m.delayMs}ms delay = ${m.latencyMs + m.delayMs}ms)`
+    ),
+  });
+
   return racingModels;
 }
 
@@ -2349,311 +2570,371 @@ async function raceModels(
   supabaseUrl: string,
   supabase: any,
   pool: string,
-  timings: { [key: string]: number }  // Track timing breakdown
-): Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; firstData: string }> {
-  
-  slog('info', `Starting race with ${racingModels.length} models:`, { data: racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`) });
+  timings: { [key: string]: number }, // Track timing breakdown
+): Promise<
+  {
+    model: string;
+    reader: ReadableStreamDefaultReader<Uint8Array>;
+    ttftMs: number;
+    firstData: string;
+  }
+> {
+  slog('info', `Starting race with ${racingModels.length} models:`, {
+    data: racingModels.map((m) => `${m.model} (delay: ${m.delayMs}ms)`),
+  });
   const raceInternalStart = Date.now();
   timings.race_internal_start = 0;
-  
+
   // Create AbortController for each model to cancel losers
   const controllers = racingModels.map(() => new AbortController());
   let winnerIndex = -1;
-  
+
   // Create race promises that resolve on success and never reject (errors become null)
-  const racePromises = racingModels.map(async ({ model, delayMs }, index): Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; index: number; firstData: string } | null> => {
-    const modelKey = model.split('/').pop() || model;
-    try {
-      // Apply delay to equalize finish times
-      if (delayMs > 0) {
-        slog('info', `${model} waiting ${delayMs}ms before firing...`);
-        timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
-        await new Promise((resolve, reject) => {
-          const timeoutId = setTimeout(resolve, delayMs);
-          // If aborted during delay, reject immediately
-          controllers[index].signal.addEventListener('abort', () => {
-            clearTimeout(timeoutId);
-            reject(new DOMException('Aborted during delay', 'AbortError'));
+  const racePromises = racingModels.map(
+    async (
+      { model, delayMs },
+      index,
+    ): Promise<
+      {
+        model: string;
+        reader: ReadableStreamDefaultReader<Uint8Array>;
+        ttftMs: number;
+        index: number;
+        firstData: string;
+      } | null
+    > => {
+      const modelKey = model.split('/').pop() || model;
+      try {
+        // Apply delay to equalize finish times
+        if (delayMs > 0) {
+          slog('info', `${model} waiting ${delayMs}ms before firing...`);
+          timings[`${modelKey}_delay_start`] = Date.now() - raceInternalStart;
+          await new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(resolve, delayMs);
+            // If aborted during delay, reject immediately
+            controllers[index].signal.addEventListener('abort', () => {
+              clearTimeout(timeoutId);
+              reject(new DOMException('Aborted during delay', 'AbortError'));
+            });
           });
-        });
-        timings[`${modelKey}_delay_end`] = Date.now() - raceInternalStart;
-      }
-      
-      // Check if already aborted before firing
-      if (controllers[index].signal.aborted) {
-        slog('info', `${model} aborted before firing`);
-        return null;
-      }
-      
-      const startTime = Date.now();
-      timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
-      slog('info', `${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
-      
-      // Get model-specific messages (transforms screenshots for vision models)
-      const modelMessages = getMessagesForModel(messages, model);
-      
-      let response: globalThis.Response;
-
-      // Build fetch params (hoisted so 429 retry can re-use them)
-      let fetchUrl: string;
-      let fetchHeaders: Record<string, string>;
-      let fetchBody: string;
-
-      // Call Anthropic directly for Claude models (structured outputs require beta header)
-      if (isAnthropicModel(model)) {
-        const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
-        if (!anthropicKey) {
-          slog('error', `${model} requires ANTHROPIC_API_KEY`);
-          return null;
+          timings[`${modelKey}_delay_end`] = Date.now() - raceInternalStart;
         }
 
-        const anthropicModel = getAnthropicModelName(model);
-        const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
-
-        const anthropicBody: any = {
-          model: anthropicModel,
-          messages: anthropicMessages,
-          max_tokens: maxTokens || 4096,
-          stream: true
-        };
-
-        if (system) {
-          // Array format with cache_control for prompt caching (stable across racing retries)
-          anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
-        }
-        if (temperature !== undefined) {
-          anthropicBody.temperature = temperature;
-        }
-
-        // Transform response_format to Anthropic's output_format
-        if (responseFormat?.json_schema?.schema) {
-          const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
-          anthropicBody.output_format = {
-            type: 'json_schema',
-            schema: transformedSchema
-          };
-        }
-
-        slog('info', `Calling Anthropic directly for ${anthropicModel}`);
-        slog('info', `[Anthropic Race] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
-        fetchUrl = ANTHROPIC_API_URL;
-        fetchHeaders = {
-          'x-api-key': anthropicKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': ANTHROPIC_BETA_HEADER,
-          'content-type': 'application/json'
-        };
-        fetchBody = JSON.stringify(anthropicBody);
-      } else {
-        // Call OpenRouter for other models
-        const body: any = {
-          model,
-          messages: modelMessages,  // Use model-specific messages (vision transform)
-          temperature,
-          max_tokens: maxTokens,
-          seed,
-          tools,
-          tool_choice: toolChoice,
-          stream: true
-        };
-
-        if (responseFormat) {
-          body.response_format = responseFormat;
-        }
-        if (reasoning) {
-          body.reasoning = reasoning;
-        }
-
-        slog('info', `[OpenRouter Race] Request to ${model}:`, { data: JSON.stringify(truncateForLogging(body), null, 2) });
-        fetchUrl = 'https://openrouter.ai/api/v1/chat/completions';
-        fetchHeaders = {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose AI - Trio Racing'
-        };
-        fetchBody = JSON.stringify(body);
-      }
-
-      response = await fetch(fetchUrl, {
-        method: 'POST',
-        headers: fetchHeaders,
-        body: fetchBody,
-        signal: controllers[index].signal
-      });
-
-      const headersTime = Date.now() - startTime;
-      timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
-      slog('info', `${model} headers in ${headersTime}ms at t=${timings[`${modelKey}_headers`]}ms (status: ${response.status})`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        slog('error', `${model} failed: ${response.status} - ${errorText}`);
-
-        // Retry once on 429 (rate limit) — common under batch concurrency
-        if (response.status === 429 && !controllers[index].signal.aborted) {
-          const retryAfterRaw = response.headers.get('retry-after');
-          const retryAfterSeconds = (() => {
-            if (!retryAfterRaw) return 2;
-            const deltaSeconds = Number(retryAfterRaw);
-            if (Number.isFinite(deltaSeconds)) return deltaSeconds;
-            const retryAtMs = Date.parse(retryAfterRaw);
-            if (Number.isFinite(retryAtMs)) {
-              return Math.ceil((retryAtMs - Date.now()) / 1000);
-            }
-            return 2;
-          })();
-          const delayS = Math.min(Math.max(Math.ceil(retryAfterSeconds), 1), 5);
-          slog('info', `${model} 429 — retrying in ${delayS}s`);
-          await new Promise(r => setTimeout(r, delayS * 1000));
-          if (controllers[index].signal.aborted) {
-            slog('info', `${model} aborted during 429 retry delay`);
-            return null;
-          }
-          response = await fetch(fetchUrl, {
-            method: 'POST',
-            headers: fetchHeaders,
-            body: fetchBody,
-            signal: controllers[index].signal
-          });
-          slog('info', `${model} 429 retry → status ${response.status}`);
-          if (!response.ok) {
-            const retryErrorText = await response.text();
-            slog('error', `${model} 429 retry failed: ${response.status} - ${retryErrorText}`);
-            return null;
-          }
-        } else {
-          return null;
-        }
-      }
-      
-      // CRITICAL: Wait for FIRST ACTUAL DATA, not just headers!
-      // This prevents slow models from winning just because their headers arrive first
-      const reader = response.body?.getReader();
-      if (!reader) {
-        slog('error', `${model} no response body`);
-        return null;
-      }
-      
-      const decoder = new TextDecoder();
-      let buffer = '';  // For parsing - holds incomplete line
-      let allData = ''; // Accumulate ALL data for firstData (needed for Anthropic message_start)
-
-      // Read until we get a real data line (not just ": OPENROUTER PROCESSING")
-      while (true) {
-        // Check if aborted while waiting for content
+        // Check if already aborted before firing
         if (controllers[index].signal.aborted) {
-          slog('info', `${model} aborted while waiting for content`);
-          reader.cancel();
+          slog('info', `${model} aborted before firing`);
           return null;
         }
 
-        const { done, value } = await reader.read();
-        if (done) {
-          slog('error', `${model} stream ended before data`);
-          return null;
+        const startTime = Date.now();
+        timings[`${modelKey}_fire`] = Date.now() - raceInternalStart;
+        slog('info', `${model} firing request at t=${timings[`${modelKey}_fire`]}ms...`);
+
+        // Get model-specific messages (transforms screenshots for vision models)
+        const modelMessages = getMessagesForModel(messages, model);
+
+        let response: globalThis.Response;
+
+        // Build fetch params (hoisted so 429 retry can re-use them)
+        let fetchUrl: string;
+        let fetchHeaders: Record<string, string>;
+        let fetchBody: string;
+
+        // Call Anthropic directly for Claude models (structured outputs require beta header)
+        if (isAnthropicModel(model)) {
+          const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+          if (!anthropicKey) {
+            slog('error', `${model} requires ANTHROPIC_API_KEY`);
+            return null;
+          }
+
+          const anthropicModel = getAnthropicModelName(model);
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(
+            modelMessages,
+          );
+
+          const anthropicBody: any = {
+            model: anthropicModel,
+            messages: anthropicMessages,
+            max_tokens: maxTokens || 4096,
+            stream: true,
+          };
+
+          if (system) {
+            // Array format with cache_control for prompt caching (stable across racing retries)
+            anthropicBody.system = [{
+              type: 'text',
+              text: system,
+              cache_control: { type: 'ephemeral' },
+            }];
+          }
+          if (temperature !== undefined) {
+            anthropicBody.temperature = temperature;
+          }
+
+          // Transform response_format to Anthropic's output_format
+          if (responseFormat?.json_schema?.schema) {
+            const transformedSchema = transformSchemaForAnthropic(
+              responseFormat.json_schema.schema,
+            );
+            anthropicBody.output_format = {
+              type: 'json_schema',
+              schema: transformedSchema,
+            };
+          }
+
+          slog('info', `Calling Anthropic directly for ${anthropicModel}`);
+          slog('info', `[Anthropic Race] Request to ${anthropicModel}:`, {
+            data: JSON.stringify(truncateForLogging(anthropicBody), null, 2),
+          });
+          fetchUrl = ANTHROPIC_API_URL;
+          fetchHeaders = {
+            'x-api-key': anthropicKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': ANTHROPIC_BETA_HEADER,
+            'content-type': 'application/json',
+          };
+          fetchBody = JSON.stringify(anthropicBody);
+        } else {
+          // Call OpenRouter for other models
+          const body: any = {
+            model,
+            messages: modelMessages, // Use model-specific messages (vision transform)
+            temperature,
+            max_tokens: maxTokens,
+            seed,
+            tools,
+            tool_choice: toolChoice,
+            stream: true,
+          };
+
+          if (responseFormat) {
+            body.response_format = responseFormat;
+          }
+          if (reasoning) {
+            body.reasoning = reasoning;
+          }
+
+          slog('info', `[OpenRouter Race] Request to ${model}:`, {
+            data: JSON.stringify(truncateForLogging(body), null, 2),
+          });
+          fetchUrl = 'https://openrouter.ai/api/v1/chat/completions';
+          fetchHeaders = {
+            'Authorization': `Bearer ${openRouterKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': supabaseUrl,
+            'X-Title': 'Rose AI - Trio Racing',
+          };
+          fetchBody = JSON.stringify(body);
         }
 
-        const chunk = decoder.decode(value, { stream: true });
-        allData += chunk;  // Accumulate everything for firstData
-        buffer += chunk;
-        const lines = buffer.split('\n');
+        response = await fetch(fetchUrl, {
+          method: 'POST',
+          headers: fetchHeaders,
+          body: fetchBody,
+          signal: controllers[index].signal,
+        });
 
-        for (const line of lines) {
-          // Look for actual data line with CONTENTFUL tokens (not just heartbeats)
-          if (line.startsWith('data:') && !line.includes('[DONE]')) {
-            try {
-              const jsonStr = line.slice(5).trim(); // Remove "data:" prefix
-              if (jsonStr) {
-                const parsed = JSON.parse(jsonStr);
+        const headersTime = Date.now() - startTime;
+        timings[`${modelKey}_headers`] = Date.now() - raceInternalStart;
+        slog(
+          'info',
+          `${model} headers in ${headersTime}ms at t=${
+            timings[`${modelKey}_headers`]
+          }ms (status: ${response.status})`,
+        );
 
-                // Handle both OpenRouter/OpenAI format and Anthropic format
-                let hasContent = false;
-                if (parsed.choices?.[0]?.delta) {
-                  // OpenRouter/OpenAI format
-                  const delta = parsed.choices[0].delta;
-                  hasContent = delta.content || delta.reasoning;
-                } else if (parsed.type === 'content_block_delta' && (parsed.delta?.text || parsed.delta?.partial_json)) {
-                  // Anthropic streaming format (text or structured output)
-                  hasContent = true;
-                }
+        if (!response.ok) {
+          const errorText = await response.text();
+          slog('error', `${model} failed: ${response.status} - ${errorText}`);
 
-                if (hasContent) {
-                  const ttftMs = Date.now() - startTime;
-                  timings[`${modelKey}_ttft`] = ttftMs;
-                  timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
-                  slog('info', `${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${timings[`${modelKey}_first_data`]}ms`);
-
-                  // IMMEDIATELY abort all other racing models to save API costs
-                  // Don't wait for promise resolution - kill them NOW
-                  controllers.forEach((controller, i) => {
-                    if (i !== index) {
-                      slog('info', `Immediately aborting loser: ${racingModels[i].model}`);
-                      controller.abort();
-                    }
-                  });
-
-                  // Return the reader (not response) since we've already started reading
-                  // Return allData (includes all events like message_start) not just buffer
-                  return { model, reader, ttftMs, index, firstData: allData };
-                }
+          // Retry once on 429 (rate limit) — common under batch concurrency
+          if (response.status === 429 && !controllers[index].signal.aborted) {
+            const retryAfterRaw = response.headers.get('retry-after');
+            const retryAfterSeconds = (() => {
+              if (!retryAfterRaw) return 2;
+              const deltaSeconds = Number(retryAfterRaw);
+              if (Number.isFinite(deltaSeconds)) return deltaSeconds;
+              const retryAtMs = Date.parse(retryAfterRaw);
+              if (Number.isFinite(retryAtMs)) {
+                return Math.ceil((retryAtMs - Date.now()) / 1000);
               }
-            } catch (e) {
-              // Skip unparseable lines
+              return 2;
+            })();
+            const delayS = Math.min(Math.max(Math.ceil(retryAfterSeconds), 1), 5);
+            slog('info', `${model} 429 — retrying in ${delayS}s`);
+            await new Promise((r) => setTimeout(r, delayS * 1000));
+            if (controllers[index].signal.aborted) {
+              slog('info', `${model} aborted during 429 retry delay`);
+              return null;
             }
+            response = await fetch(fetchUrl, {
+              method: 'POST',
+              headers: fetchHeaders,
+              body: fetchBody,
+              signal: controllers[index].signal,
+            });
+            slog('info', `${model} 429 retry → status ${response.status}`);
+            if (!response.ok) {
+              const retryErrorText = await response.text();
+              slog('error', `${model} 429 retry failed: ${response.status} - ${retryErrorText}`);
+              return null;
+            }
+          } else {
+            return null;
           }
         }
 
-        // Keep incomplete line in buffer for next iteration
-        buffer = lines[lines.length - 1] || '';
-      }
-    } catch (error) {
-      // Don't log abort errors - they're expected for losers
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        slog('info', `${model} aborted (race lost)`);
+        // CRITICAL: Wait for FIRST ACTUAL DATA, not just headers!
+        // This prevents slow models from winning just because their headers arrive first
+        const reader = response.body?.getReader();
+        if (!reader) {
+          slog('error', `${model} no response body`);
+          return null;
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = ''; // For parsing - holds incomplete line
+        let allData = ''; // Accumulate ALL data for firstData (needed for Anthropic message_start)
+
+        // Read until we get a real data line (not just ": OPENROUTER PROCESSING")
+        while (true) {
+          // Check if aborted while waiting for content
+          if (controllers[index].signal.aborted) {
+            slog('info', `${model} aborted while waiting for content`);
+            reader.cancel();
+            return null;
+          }
+
+          const { done, value } = await reader.read();
+          if (done) {
+            slog('error', `${model} stream ended before data`);
+            return null;
+          }
+
+          const chunk = decoder.decode(value, { stream: true });
+          allData += chunk; // Accumulate everything for firstData
+          buffer += chunk;
+          const lines = buffer.split('\n');
+
+          for (const line of lines) {
+            // Look for actual data line with CONTENTFUL tokens (not just heartbeats)
+            if (line.startsWith('data:') && !line.includes('[DONE]')) {
+              try {
+                const jsonStr = line.slice(5).trim(); // Remove "data:" prefix
+                if (jsonStr) {
+                  const parsed = JSON.parse(jsonStr);
+
+                  // Handle both OpenRouter/OpenAI format and Anthropic format
+                  let hasContent = false;
+                  if (parsed.choices?.[0]?.delta) {
+                    // OpenRouter/OpenAI format
+                    const delta = parsed.choices[0].delta;
+                    hasContent = delta.content || delta.reasoning;
+                  } else if (
+                    parsed.type === 'content_block_delta' &&
+                    (parsed.delta?.text || parsed.delta?.partial_json)
+                  ) {
+                    // Anthropic streaming format (text or structured output)
+                    hasContent = true;
+                  }
+
+                  if (hasContent) {
+                    const ttftMs = Date.now() - startTime;
+                    timings[`${modelKey}_ttft`] = ttftMs;
+                    timings[`${modelKey}_first_data`] = Date.now() - raceInternalStart;
+                    slog(
+                      'info',
+                      `${model} FIRST CONTENTFUL TOKEN in ${ttftMs}ms at t=${
+                        timings[`${modelKey}_first_data`]
+                      }ms`,
+                    );
+
+                    // IMMEDIATELY abort all other racing models to save API costs
+                    // Don't wait for promise resolution - kill them NOW
+                    controllers.forEach((controller, i) => {
+                      if (i !== index) {
+                        slog('info', `Immediately aborting loser: ${racingModels[i].model}`);
+                        controller.abort();
+                      }
+                    });
+
+                    // Return the reader (not response) since we've already started reading
+                    // Return allData (includes all events like message_start) not just buffer
+                    return { model, reader, ttftMs, index, firstData: allData };
+                  }
+                }
+              } catch (_e) {
+                // Skip unparseable lines
+              }
+            }
+          }
+
+          // Keep incomplete line in buffer for next iteration
+          buffer = lines[lines.length - 1] || '';
+        }
+      } catch (error) {
+        // Don't log abort errors - they're expected for losers
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          slog('info', `${model} aborted (race lost)`);
+          return null;
+        }
+        slog('error', `${model} error:`, { data: error });
         return null;
       }
-      slog('error', `${model} error:`, { data: error });
-      return null;
-    }
-  });
-  
+    },
+  );
+
   // Use Promise.race with a filter for successful responses
   // We need custom logic since Promise.race doesn't skip null values
-  const winner = await new Promise<{ model: string; reader: ReadableStreamDefaultReader<Uint8Array>; ttftMs: number; firstData: string }>((resolve, reject) => {
+  const winner = await new Promise<
+    {
+      model: string;
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      ttftMs: number;
+      firstData: string;
+    }
+  >((resolve, reject) => {
     let resolved = false;
     let completed = 0;
-    
+
     racePromises.forEach(async (promise) => {
       try {
         const result = await promise;
         completed++;
-        
+
         if (result && !resolved) {
           resolved = true;
           winnerIndex = result.index;
           slog('info', `Winner: ${result.model} (TTFT: ${result.ttftMs}ms)`);
-          
+
           // Losers already aborted inline when winner found contentful token
           // Just update loser latencies (fire-and-forget)
-          controllers.forEach((controller, i) => {
+          controllers.forEach((_controller, i) => {
             if (i !== winnerIndex) {
               // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
               incrementLoserLatency(supabase, racingModels[i].model, pool)
-                .catch(e => slog('error', `Failed to increment loser latency:`, { data: e }));
+                .catch((e) => slog('error', `Failed to increment loser latency:`, { data: e }));
             }
           });
 
           // Update cache for winning model with actual race TTFT (keeps cache fresh)
           updateLatencyCache(supabase, result.model, pool, result.ttftMs)
-            .then(() => slog('info', `Cache updated for winner: ${result.model} = ${result.ttftMs}ms`))
-            .catch(e => slog('error', `Failed to update winner cache:`, { data: e }));
-          
-          resolve({ model: result.model, reader: result.reader, ttftMs: result.ttftMs, firstData: result.firstData });
+            .then(() =>
+              slog('info', `Cache updated for winner: ${result.model} = ${result.ttftMs}ms`)
+            )
+            .catch((e) => slog('error', `Failed to update winner cache:`, { data: e }));
+
+          resolve({
+            model: result.model,
+            reader: result.reader,
+            ttftMs: result.ttftMs,
+            firstData: result.firstData,
+          });
         } else if (completed === racePromises.length && !resolved) {
           reject(new Error('All models failed'));
         }
-      } catch (e) {
+      } catch (_e) {
         completed++;
         if (completed === racePromises.length && !resolved) {
           reject(new Error('All models failed'));
@@ -2661,7 +2942,7 @@ async function raceModels(
       }
     });
   });
-  
+
   return winner;
 }
 
@@ -2682,8 +2963,8 @@ async function raceBrowserUseModels(
   browserPool: string[],
   supabase: any,
   pool: string,
-  requestId: string,
-  timings: Record<string, number>
+  _requestId: string,
+  timings: Record<string, number>,
 ): Promise<{
   action: UnifiedAction;
   ttftMs: number;
@@ -2692,8 +2973,9 @@ async function raceBrowserUseModels(
   modelsRaced: number;
   racingModels: RacingModel[];
 }> {
-
-  slog('info', `Starting completion race with ${racingModels.length} models:`, { data: racingModels.map(m => `${m.model} (delay: ${m.delayMs}ms)`) });
+  slog('info', `Starting completion race with ${racingModels.length} models:`, {
+    data: racingModels.map((m) => `${m.model} (delay: ${m.delayMs}ms)`),
+  });
   const raceInternalStart = Date.now();
   timings.race_internal_start = 0;
 
@@ -2702,14 +2984,16 @@ async function raceBrowserUseModels(
   let winnerIndex = -1;
 
   // Create race promises that resolve on success and never reject (errors become null)
-  const racePromises = racingModels.map(async ({ model, delayMs }, index): Promise<{
-    action: UnifiedAction;
-    ttftMs: number;
-    actualModel: string;
-    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-    index: number;
-    completionMs: number;
-  } | null> => {
+  const racePromises = racingModels.map(async ({ model, delayMs }, index): Promise<
+    {
+      action: UnifiedAction;
+      ttftMs: number;
+      actualModel: string;
+      usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      index: number;
+      completionMs: number;
+    } | null
+  > => {
     const modelKey = model.split('/').pop() || model;
     try {
       // Apply delay to equalize finish times
@@ -2743,7 +3027,10 @@ async function raceBrowserUseModels(
       const completionMs = Date.now() - startTime;
       timings[`${modelKey}_complete`] = Date.now() - raceInternalStart;
       timings[`${modelKey}_latency`] = completionMs;
-      slog('info', `${model} COMPLETED in ${completionMs}ms at t=${timings[`${modelKey}_complete`]}ms`);
+      slog(
+        'info',
+        `${model} COMPLETED in ${completionMs}ms at t=${timings[`${modelKey}_complete`]}ms`,
+      );
 
       // IMMEDIATELY abort all other racing models to save API costs
       // Don't wait for promise resolution - kill them NOW
@@ -2791,24 +3078,29 @@ async function raceBrowserUseModels(
 
           // Losers already aborted inline when winner completed
           // Just update loser latencies (fire-and-forget)
-          controllers.forEach((controller, i) => {
+          controllers.forEach((_controller, i) => {
             if (i !== winnerIndex) {
               // Increment loser's latency by 10ms (reduces sandbagging, gives them better chance next race)
               incrementLoserLatency(supabase, racingModels[i].model, pool)
-                .catch(e => slog('error', `Failed to increment loser latency:`, { data: e }));
+                .catch((e) => slog('error', `Failed to increment loser latency:`, { data: e }));
             }
           });
 
           // Update cache for winning model with actual completion time (keeps cache fresh)
           updateLatencyCache(supabase, result.actualModel, pool, result.completionMs)
-            .then(() => slog('info', `Cache updated for winner: ${result.actualModel} = ${result.completionMs}ms`))
-            .catch(e => slog('error', `Failed to update winner cache:`, { data: e }));
+            .then(() =>
+              slog(
+                'info',
+                `Cache updated for winner: ${result.actualModel} = ${result.completionMs}ms`,
+              )
+            )
+            .catch((e) => slog('error', `Failed to update winner cache:`, { data: e }));
 
           resolve(result);
         } else if (completed === racePromises.length && !resolved) {
           reject(new Error('All models failed'));
         }
-      } catch (e) {
+      } catch (_e) {
         completed++;
         if (completed === racePromises.length && !resolved) {
           reject(new Error('All models failed'));
@@ -2823,7 +3115,7 @@ async function raceBrowserUseModels(
     actualModel: winner.actualModel,
     usage: winner.usage,
     modelsRaced: racingModels.length,
-    racingModels
+    racingModels,
   };
 }
 
@@ -2840,12 +3132,12 @@ function transformSchemaForCerebras(schema: any): any {
   // If it's an object type with properties, add additionalProperties: false
   if (transformed.type === 'object' && transformed.properties) {
     transformed.additionalProperties = false;
-    
+
     // Cerebras requires all properties to be in required array
     if (!transformed.required) {
       transformed.required = Object.keys(transformed.properties);
     }
-    
+
     // Recursively transform nested properties
     for (const key of Object.keys(transformed.properties)) {
       transformed.properties[key] = transformSchemaForCerebras(transformed.properties[key]);
@@ -2867,7 +3159,9 @@ function transformSchemaForCerebras(schema: any): any {
   // Handle anyOf/oneOf/allOf
   for (const keyword of ['anyOf', 'oneOf', 'allOf']) {
     if (transformed[keyword] && Array.isArray(transformed[keyword])) {
-      transformed[keyword] = transformed[keyword].map((item: any) => transformSchemaForCerebras(item));
+      transformed[keyword] = transformed[keyword].map((item: any) =>
+        transformSchemaForCerebras(item)
+      );
     }
   }
 
@@ -2888,15 +3182,15 @@ function isAnthropicModel(model: string): boolean {
 // Our schema has tool_calls.items.anyOf = [tool1, tool2, ...] OR uses $defs with anyOf $refs
 function countToolTypes(responseFormat: any): number {
   if (!responseFormat?.json_schema?.schema) return 0;
-  
+
   const schema = responseFormat.json_schema.schema;
-  
+
   // Check tool_calls.items.anyOf directly
   const toolCallsItems = schema.properties?.tool_calls?.items;
   if (toolCallsItems?.anyOf) {
     return toolCallsItems.anyOf.length;
   }
-  
+
   // Check $defs for tool definitions (our schema uses $defs)
   if (schema.$defs) {
     // Count definitions that look like tool schemas (have 'tool' property with const)
@@ -2908,7 +3202,7 @@ function countToolTypes(responseFormat: any): number {
     }
     if (toolCount > 0) return toolCount;
   }
-  
+
   return 0;
 }
 
@@ -2930,8 +3224,8 @@ function transformContentBlockForAnthropic(block: any): any {
           source: {
             type: 'base64',
             media_type: mediaType,
-            data: data
-          }
+            data: data,
+          },
         };
       }
     }
@@ -2940,8 +3234,8 @@ function transformContentBlockForAnthropic(block: any): any {
       type: 'image',
       source: {
         type: 'url',
-        url: url
-      }
+        url: url,
+      },
     };
   }
 
@@ -2957,8 +3251,8 @@ function transformContentBlockForAnthropic(block: any): any {
           source: {
             type: 'base64',
             media_type: mediaType,
-            data: data
-          }
+            data: data,
+          },
         };
       }
     }
@@ -3004,10 +3298,14 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
         const rawArgs = tc?.function?.arguments;
 
         if (typeof toolCallId !== 'string' || toolCallId.length === 0) {
-          throw new Error(`transformMessagesForAnthropic: assistant tool_call missing id (message_index=${idx}, tool_index=${toolIdx})`);
+          throw new Error(
+            `transformMessagesForAnthropic: assistant tool_call missing id (message_index=${idx}, tool_index=${toolIdx})`,
+          );
         }
         if (typeof toolName !== 'string' || toolName.length === 0) {
-          throw new Error(`transformMessagesForAnthropic: assistant tool_call missing function.name (message_index=${idx}, tool_index=${toolIdx})`);
+          throw new Error(
+            `transformMessagesForAnthropic: assistant tool_call missing function.name (message_index=${idx}, tool_index=${toolIdx})`,
+          );
         }
 
         let parsedArgs: any = {};
@@ -3020,7 +3318,7 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
             const preview = rawArgs.slice(0, 200);
             throw new Error(
               `transformMessagesForAnthropic: invalid tool_call arguments JSON ` +
-              `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, preview=${preview})`
+                `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, preview=${preview})`,
             );
           }
         } else if (typeof rawArgs === 'object') {
@@ -3028,14 +3326,14 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
         } else {
           throw new Error(
             `transformMessagesForAnthropic: unsupported tool_call arguments type ` +
-            `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, type=${typeof rawArgs})`
+              `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName}, type=${typeof rawArgs})`,
           );
         }
 
         if (parsedArgs === null || Array.isArray(parsedArgs) || typeof parsedArgs !== 'object') {
           throw new Error(
             `transformMessagesForAnthropic: tool_call arguments must decode to an object ` +
-            `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName})`
+              `(message_index=${idx}, tool_index=${toolIdx}, tool_name=${toolName})`,
           );
         }
 
@@ -3058,7 +3356,9 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
     if (msg.role === 'tool') {
       const toolCallId = msg.tool_call_id;
       if (typeof toolCallId !== 'string' || toolCallId.length === 0) {
-        throw new Error(`transformMessagesForAnthropic: tool message missing tool_call_id (message_index=${idx})`);
+        throw new Error(
+          `transformMessagesForAnthropic: tool message missing tool_call_id (message_index=${idx})`,
+        );
       }
 
       let toolResultContent: any;
@@ -3098,14 +3398,14 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
   const bundled: any[] = [];
   for (const msg of anthropicMessages) {
     const prev = bundled[bundled.length - 1];
-    const prevIsToolResult = prev?.role === 'user'
-      && Array.isArray(prev.content)
-      && prev.content.length > 0
-      && prev.content.every((b: any) => b.type === 'tool_result');
-    const currIsToolResult = msg.role === 'user'
-      && Array.isArray(msg.content)
-      && msg.content.length > 0
-      && msg.content.every((b: any) => b.type === 'tool_result');
+    const prevIsToolResult = prev?.role === 'user' &&
+      Array.isArray(prev.content) &&
+      prev.content.length > 0 &&
+      prev.content.every((b: any) => b.type === 'tool_result');
+    const currIsToolResult = msg.role === 'user' &&
+      Array.isArray(msg.content) &&
+      msg.content.length > 0 &&
+      msg.content.every((b: any) => b.type === 'tool_result');
 
     if (prevIsToolResult && currIsToolResult) {
       prev.content.push(...msg.content);
@@ -3121,7 +3421,7 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
 
   return {
     system: systemParts.join('\n\n'),
-    messages: bundled
+    messages: bundled,
   };
 }
 
@@ -3129,21 +3429,32 @@ function transformMessagesForAnthropic(messages: any[]): { system: string; messa
 // Anthropic doesn't support: minimum, maximum, minLength, maxLength, etc.
 function transformSchemaForAnthropic(schema: any): any {
   if (!schema || typeof schema !== 'object') return schema;
-  
+
   const transformed = { ...schema };
-  
+
   // Remove unsupported constraints
-  const unsupported = ['minimum', 'maximum', 'minLength', 'maxLength', 'multipleOf', 'minItems', 'maxItems'];
+  const unsupported = [
+    'minimum',
+    'maximum',
+    'minLength',
+    'maxLength',
+    'multipleOf',
+    'minItems',
+    'maxItems',
+  ];
   for (const key of unsupported) {
     delete transformed[key];
   }
 
   // Anthropic doesn't support additionalProperties as a schema object (e.g. Dict[str, str]).
   // Convert to additionalProperties: false so the request doesn't get rejected.
-  if (transformed.type === 'object' && typeof transformed.additionalProperties === 'object' && transformed.additionalProperties !== null) {
+  if (
+    transformed.type === 'object' && typeof transformed.additionalProperties === 'object' &&
+    transformed.additionalProperties !== null
+  ) {
     transformed.additionalProperties = false;
   }
-  
+
   // Recurse into properties
   if (transformed.properties) {
     transformed.properties = { ...transformed.properties };
@@ -3151,12 +3462,12 @@ function transformSchemaForAnthropic(schema: any): any {
       transformed.properties[key] = transformSchemaForAnthropic(transformed.properties[key]);
     }
   }
-  
+
   // Recurse into array items
   if (transformed.items) {
     transformed.items = transformSchemaForAnthropic(transformed.items);
   }
-  
+
   // Recurse into $defs
   if (transformed.$defs) {
     transformed.$defs = { ...transformed.$defs };
@@ -3164,14 +3475,16 @@ function transformSchemaForAnthropic(schema: any): any {
       transformed.$defs[key] = transformSchemaForAnthropic(transformed.$defs[key]);
     }
   }
-  
+
   // Recurse into anyOf/oneOf/allOf
   for (const keyword of ['anyOf', 'oneOf', 'allOf']) {
     if (transformed[keyword] && Array.isArray(transformed[keyword])) {
-      transformed[keyword] = transformed[keyword].map((item: any) => transformSchemaForAnthropic(item));
+      transformed[keyword] = transformed[keyword].map((item: any) =>
+        transformSchemaForAnthropic(item)
+      );
     }
   }
-  
+
   return transformed;
 }
 
@@ -3182,7 +3495,7 @@ function transformSchemaForAnthropic(schema: any): any {
  *
  * Returns null if the schema doesn't match the expected pattern.
  */
-function extractToolsFromResponseFormat(responseFormat: any): {
+function _extractToolsFromResponseFormat(responseFormat: any): {
   tools: Array<{ name: string; description: string; input_schema: any }>;
   responseFieldSchema: any;
 } | null {
@@ -3236,8 +3549,11 @@ function extractToolsFromResponseFormat(responseFormat: any): {
  *
  * Agent expects: {"reasoning": "", "response": "<text>", "tool_calls": [{"tool": "<name>", ...params}]}
  */
-function reconstructAgentResponse(textContent: string, toolUseBlocks: Array<{ name: string; input: any }>): string {
-  const toolCalls = toolUseBlocks.map(t => ({
+function reconstructAgentResponse(
+  textContent: string,
+  toolUseBlocks: Array<{ name: string; input: any }>,
+): string {
+  const toolCalls = toolUseBlocks.map((t) => ({
     tool: t.name,
     ...t.input,
   }));
@@ -3257,7 +3573,7 @@ function applyAnthropicToolConfig(
   responseFormat: any,
   isClaudeAuth: boolean,
   explicitTools?: any[],
-  explicitToolChoice?: any
+  explicitToolChoice?: any,
 ): boolean {
   if (explicitTools?.length) {
     anthropicBody.tools = explicitTools.map((t: any) => ({
@@ -3267,8 +3583,11 @@ function applyAnthropicToolConfig(
     }));
     if (explicitToolChoice) {
       if (explicitToolChoice === 'auto') anthropicBody.tool_choice = { type: 'auto' };
-      else if (explicitToolChoice === 'required' || explicitToolChoice === 'any') anthropicBody.tool_choice = { type: 'any' };
-      else if (explicitToolChoice?.function?.name) anthropicBody.tool_choice = { type: 'tool', name: explicitToolChoice.function.name };
+      else if (explicitToolChoice === 'required' || explicitToolChoice === 'any') {
+        anthropicBody.tool_choice = { type: 'any' };
+      } else if (explicitToolChoice?.function?.name) {
+        anthropicBody.tool_choice = { type: 'tool', name: explicitToolChoice.function.name };
+      }
     }
     return false;
   }
@@ -3277,12 +3596,12 @@ function applyAnthropicToolConfig(
     const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
     if (isClaudeAuth) {
       anthropicBody.output_config = {
-        format: { type: 'json_schema', schema: transformedSchema }
+        format: { type: 'json_schema', schema: transformedSchema },
       };
     } else {
       anthropicBody.output_format = {
         type: 'json_schema',
-        schema: transformedSchema
+        schema: transformedSchema,
       };
     }
   }
@@ -3306,41 +3625,60 @@ function getAnthropicModelName(openRouterModel: string): string {
 // Select a model from the pool (by preference, seed index, or random)
 // Priority: modelPreference > modelSeed > random
 function selectModel(
-  requestedModel: string, 
+  requestedModel: string,
   modelSeed?: number,
-  modelPreference?: ModelPreference
+  modelPreference?: ModelPreference,
 ): { model: string; isCerebras: boolean; poolName: string; poolSize: number } {
   let normalized = requestedModel.toLowerCase();
   if (normalized.startsWith('rose-labs/')) {
     normalized = normalized.replace('rose-labs/', '');
   }
-  
+
   const pool = MODEL_POOLS[normalized as keyof typeof MODEL_POOLS];
-  
+
   if (!pool) {
-    throw new Error(`Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'`);
+    throw new Error(
+      `Unknown model: ${requestedModel}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'`,
+    );
   }
-  
+
   // If model_preference is provided, use hardcoded mapping (highest priority)
   if (modelPreference) {
     const preference = MODEL_PREFERENCES[modelPreference];
     if (!preference) {
-      throw new Error(`Invalid model_preference: ${modelPreference}. Use 'SMART', 'FAST', or 'CHEAP'`);
+      throw new Error(
+        `Invalid model_preference: ${modelPreference}. Use 'SMART', 'FAST', or 'CHEAP'`,
+      );
     }
-    slog('info', `Model selection (preference=${modelPreference}): ${requestedModel} → ${preference.model} (Cerebras: ${preference.isCerebras})`);
-    return { model: preference.model, isCerebras: preference.isCerebras, poolName: normalized, poolSize: pool.length };
+    slog(
+      'info',
+      `Model selection (preference=${modelPreference}): ${requestedModel} → ${preference.model} (Cerebras: ${preference.isCerebras})`,
+    );
+    return {
+      model: preference.model,
+      isCerebras: preference.isCerebras,
+      poolName: normalized,
+      poolSize: pool.length,
+    };
   }
-  
+
   // If model_seed is provided, use it to select a specific model
   if (modelSeed !== undefined) {
     if (modelSeed < 0 || modelSeed >= pool.length) {
-      throw new Error(`model_seed ${modelSeed} out of range. Pool '${normalized}' has ${pool.length} models (valid range: 0-${pool.length - 1})`);
+      throw new Error(
+        `model_seed ${modelSeed} out of range. Pool '${normalized}' has ${pool.length} models (valid range: 0-${
+          pool.length - 1
+        })`,
+      );
     }
     const selectedModel = pool[modelSeed];
-    slog('info', `Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: false)`);
+    slog(
+      'info',
+      `Model selection (seed=${modelSeed}): ${requestedModel} → ${selectedModel} (Cerebras: false)`,
+    );
     return { model: selectedModel, isCerebras: false, poolName: normalized, poolSize: pool.length };
   }
-  
+
   // Random selection from pool
   const selectedModel = pool[Math.floor(Math.random() * pool.length)];
   slog('info', `Model selection: ${requestedModel} → ${selectedModel} (Cerebras: false)`);
@@ -3348,27 +3686,35 @@ function selectModel(
 }
 
 // Validate API key and return user info
-async function validateApiKey(apiKey: string, supabase: any): Promise<{ apiKeyId: string, userId: string } | null> {
+async function validateApiKey(
+  apiKey: string,
+  supabase: any,
+): Promise<{ apiKeyId: string; userId: string } | null> {
   slog('info', 'Validating API key:', { data: apiKey.substring(0, 8) + '...' });
-  
+
   const { data, error } = await supabase
     .from('RoseApiKey')
     .select('id, userId')
     .eq('apiKey', apiKey)
     .single();
-  
+
   if (error || !data) {
     slog('error', 'API key validation failed:', { data: error?.message || 'No data found' });
     slog('error', '   Error details:', { data: error });
     return null;
   }
-  
+
   slog('info', 'API key validated for userId:', { data: data.userId });
   return { apiKeyId: data.id, userId: data.userId };
 }
 
 // Calculate cost based on token usage
-function calculateCost(promptTokens: number, completionTokens: number, model: string, mode?: string): number {
+function calculateCost(
+  promptTokens: number,
+  completionTokens: number,
+  _model: string,
+  mode?: string,
+): number {
   // Claude-mode uses user's Claude Code subscription — no Rose API cost
   if (mode === 'claude') return 0;
 
@@ -3383,7 +3729,15 @@ function calculateCost(promptTokens: number, completionTokens: number, model: st
 }
 
 // Log usage to database
-async function logUsage(supabase: any, apiKeyId: string, userId: string, input: any, output: any, costCents: number, cotSteps: number) {
+async function logUsage(
+  supabase: any,
+  apiKeyId: string,
+  userId: string,
+  input: any,
+  output: any,
+  costCents: number,
+  cotSteps: number,
+) {
   const { error } = await supabase
     .from('RoseApiKeyLog')
     .insert({
@@ -3393,9 +3747,9 @@ async function logUsage(supabase: any, apiKeyId: string, userId: string, input: 
       input,
       output,
       costCents,
-      cotSteps
+      cotSteps,
     });
-  
+
   if (error) {
     slog('error', 'Failed to log usage:', { data: error });
   }
@@ -3410,27 +3764,27 @@ async function handleStreaming(
   seed: number | undefined,
   tools: any[] | undefined,
   toolChoice: any,
-  responseFormat: any,  // Added: response_format for structured outputs
-  reasoning: { max_tokens?: number } | undefined,  // Added: reasoning config for OpenRouter
+  responseFormat: any, // Added: response_format for structured outputs
+  reasoning: { max_tokens?: number } | undefined, // Added: reasoning config for OpenRouter
   openRouterKey: string,
   supabaseUrl: string,
   requestedModel: string,
   isCerebras: boolean,
-  poolName: string,     // Added: for debugging
-  poolSize: number,     // Added: for debugging
-  claudeAuth?: { token: string },  // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
-  skipCache?: boolean,  // Optional: skip cache_control breakpoints (for single-use calls like param populator)
+  poolName: string, // Added: for debugging
+  poolSize: number, // Added: for debugging
+  claudeAuth?: { token: string }, // Optional: user's Claude OAuth token (uses Bearer auth + Claude Code headers)
+  skipCache?: boolean, // Optional: skip cache_control breakpoints (for single-use calls like param populator)
   stallConfig?: {
-    timeoutMs: number,  // Max ms between content deltas before triggering fallback
+    timeoutMs: number; // Max ms between content deltas before triggering fallback
     onFallback: () => Promise<{
-      reader: ReadableStreamDefaultReader<Uint8Array>,
-      firstData: string,
-      actualModel: string,
-      poolName: string,
-      poolSize: number,
-    }>
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      firstData: string;
+      actualModel: string;
+      poolName: string;
+      poolSize: number;
+    }>;
   },
-  claudeTokenError?: string,  // Set when this streaming call is a fallback from a failed claude_token attempt
+  claudeTokenError?: string, // Set when this streaming call is a fallback from a failed claude_token attempt
 ) {
   // Get model-specific messages (transforms screenshots for vision models)
   const modelMessages = getMessagesForModel(messages, actualModel);
@@ -3448,10 +3802,10 @@ async function handleStreaming(
     // Build Cerebras streaming request - supports tools with gpt-oss-120b
     const cerebrasStreamBody: any = {
       model: actualModel,
-      messages: modelMessages,  // Use transformed messages
+      messages: modelMessages, // Use transformed messages
       temperature,
       max_tokens: maxTokens,
-      stream: true
+      stream: true,
     };
 
     // Add tools for streaming (gpt-oss-120b supports this)
@@ -3471,8 +3825,8 @@ async function handleStreaming(
           json_schema: {
             name: responseFormat.json_schema.name || 'response',
             strict: true,
-            schema: transformedSchema
-          }
+            schema: transformedSchema,
+          },
         };
       } else {
         cerebrasStreamBody.response_format = responseFormat;
@@ -3485,19 +3839,21 @@ async function handleStreaming(
         'Authorization': `Bearer ${cerebrasKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(cerebrasStreamBody)
+      body: JSON.stringify(cerebrasStreamBody),
     });
   } else if (isAnthropicModel(actualModel) || claudeAuth) {
     // Call Anthropic API directly for Claude models (structured outputs require beta header)
     // When claudeAuth is set, actualModel is e.g. "claude-opus-4-6-claude" or "claude-sonnet-4-6-claude" — strip "-claude" suffix for API
-    const anthropicModel = claudeAuth ? actualModel.replace('-claude', '') : getAnthropicModelName(actualModel);
+    const anthropicModel = claudeAuth
+      ? actualModel.replace('-claude', '')
+      : getAnthropicModelName(actualModel);
     const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
 
     const anthropicBody: any = {
       model: anthropicModel,
       messages: anthropicMessages,
       max_tokens: maxTokens || 4096,
-      stream: true
+      stream: true,
     };
 
     if (system) {
@@ -3506,7 +3862,11 @@ async function handleStreaming(
       } else {
         // Array format with cache_control for prompt caching.
         // System prompt is identical across agent iterations — caching avoids re-processing.
-        anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+        anthropicBody.system = [{
+          type: 'text',
+          text: system,
+          cache_control: { type: 'ephemeral' },
+        }];
       }
     }
 
@@ -3514,8 +3874,15 @@ async function handleStreaming(
     // identity string. Without this, the API returns generic "invalid_request_error: Error" for
     // Claude 4 models. Additional system blocks after the identity are allowed.
     if (claudeAuth) {
-      const identityBlock = { type: 'text', text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
-      const disclaimerBlock = { type: 'text', text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
+      const identityBlock = {
+        type: 'text',
+        text: "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+      };
+      const disclaimerBlock = {
+        type: 'text',
+        text:
+          'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.',
+      };
       if (anthropicBody.system) {
         anthropicBody.system.unshift(identityBlock, disclaimerBlock);
       } else {
@@ -3539,7 +3906,11 @@ async function handleStreaming(
       const INTERVAL = 20;
       let placed = 0;
       // Walk backwards, place breakpoints at intervals from the end
-      for (let i = anthropicBody.messages.length - 1; i >= 0 && placed < MAX_MSG_BREAKPOINTS; i -= INTERVAL) {
+      for (
+        let i = anthropicBody.messages.length - 1;
+        i >= 0 && placed < MAX_MSG_BREAKPOINTS;
+        i -= INTERVAL
+      ) {
         const msg = anthropicBody.messages[i];
         if (typeof msg.content === 'string') {
           // Convert string content to array format so we can attach cache_control
@@ -3550,11 +3921,21 @@ async function handleStreaming(
         placed++;
       }
       if (placed > 0) {
-        slog('info', `Placed ${placed} message cache breakpoints across ${anthropicBody.messages.length} messages`);
+        slog(
+          'info',
+          `Placed ${placed} message cache breakpoints across ${anthropicBody.messages.length} messages`,
+        );
       }
     }
 
-    slog('info', `Streaming from Anthropic API with model: ${anthropicModel}${claudeAuth ? ' (claude token)' : ''}${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}${skipCache ? ' (skip_cache)' : ''}`);
+    slog(
+      'info',
+      `Streaming from Anthropic API with model: ${anthropicModel}${
+        claudeAuth ? ' (claude token)' : ''
+      }${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}${
+        skipCache ? ' (skip_cache)' : ''
+      }`,
+    );
 
     // Use Claude OAuth token (user's subscription) or Rose's API key
     const anthropicHeaders: Record<string, string> = {
@@ -3563,7 +3944,8 @@ async function handleStreaming(
     };
     if (claudeAuth) {
       anthropicHeaders['Authorization'] = `Bearer ${claudeAuth.token}`;
-      anthropicHeaders['anthropic-beta'] = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24';
+      anthropicHeaders['anthropic-beta'] =
+        'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24';
       anthropicHeaders['x-app'] = 'cli';
       anthropicHeaders['User-Agent'] = 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)';
     } else {
@@ -3575,13 +3957,15 @@ async function handleStreaming(
       anthropicHeaders['anthropic-beta'] = ANTHROPIC_BETA_HEADER;
     }
 
-    slog('info', `[Anthropic Stream] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
+    slog('info', `[Anthropic Stream] Request to ${anthropicModel}:`, {
+      data: JSON.stringify(truncateForLogging(anthropicBody), null, 2),
+    });
 
     const anthropicFetchBody = JSON.stringify(anthropicBody);
     fetchResponse = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: anthropicHeaders,
-      body: anthropicFetchBody
+      body: anthropicFetchBody,
     });
 
     // Retry on transient errors (429, 5xx) before starting the stream reader
@@ -3591,24 +3975,24 @@ async function handleStreaming(
         ? Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000)
         : 2000;
       slog('warn', `[Anthropic Stream] ${fetchResponse.status}, retrying in ${delayMs}ms`);
-      await new Promise(r => setTimeout(r, delayMs));
+      await new Promise((r) => setTimeout(r, delayMs));
       fetchResponse = await fetch(ANTHROPIC_API_URL, {
         method: 'POST',
         headers: anthropicHeaders,
-        body: anthropicFetchBody
+        body: anthropicFetchBody,
       });
     }
   } else {
     // Call OpenRouter API for other Rose models
     const openRouterBody: any = {
       model: actualModel,
-      messages: modelMessages,  // Use transformed messages
+      messages: modelMessages, // Use transformed messages
       temperature,
       max_tokens: maxTokens,
       seed,
       tools,
       tool_choice: toolChoice,
-      stream: true
+      stream: true,
     };
 
     // Add response_format for structured outputs
@@ -3622,7 +4006,9 @@ async function handleStreaming(
       slog('info', `Streaming with reasoning config:`, { data: reasoning });
     }
 
-    slog('info', `[OpenRouter Stream] Request to ${actualModel}:`, { data: JSON.stringify(truncateForLogging(openRouterBody), null, 2) });
+    slog('info', `[OpenRouter Stream] Request to ${actualModel}:`, {
+      data: JSON.stringify(truncateForLogging(openRouterBody), null, 2),
+    });
 
     fetchResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -3630,14 +4016,18 @@ async function handleStreaming(
         'Authorization': `Bearer ${openRouterKey}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': supabaseUrl,
-        'X-Title': 'Rose Benchmark Suite'
+        'X-Title': 'Rose Benchmark Suite',
       },
-      body: JSON.stringify(openRouterBody)
+      body: JSON.stringify(openRouterBody),
     });
   }
 
   if (!fetchResponse.ok) {
-    const provider = isCerebras ? 'Cerebras' : (isAnthropicModel(actualModel) || claudeAuth) ? 'Anthropic' : 'OpenRouter';
+    const provider = isCerebras
+      ? 'Cerebras'
+      : (isAnthropicModel(actualModel) || claudeAuth)
+      ? 'Anthropic'
+      : 'OpenRouter';
     const errorText = await fetchResponse.text();
     slog('error', `${provider} streaming error:`, { data: [fetchResponse.status, errorText] });
     throw new Error(`${provider} API error: ${fetchResponse.status} - ${errorText.slice(0, 200)}`);
@@ -3663,7 +4053,7 @@ async function handleStreaming(
         let currentStallConfig = stallConfig;
         let hasReceivedContent = false;
         let lastContentTime = Date.now();
-        let currentClaudeTokenError = claudeTokenError;  // Mutable: set to 'stall' on stall fallback
+        let currentClaudeTokenError = claudeTokenError; // Mutable: set to 'stall' on stall fallback
 
         // Anthropic usage tracking - capture from message_start and message_delta
         let anthropicInputTokens = 0;
@@ -3680,7 +4070,7 @@ async function handleStreaming(
         let ntCurrentToolName = '';
         let ntToolInputStarted = false;
         let ntToolCount = 0;
-        let stdCurrentBlock: 'text' | 'thinking' | null = null;  // Standard mode: track block type for thinking support
+        let _stdCurrentBlock: 'text' | 'thinking' | null = null; // Standard mode: track block type for thinking support
 
         const emitDelta = (content: string) => {
           if (!content) return;
@@ -3712,12 +4102,12 @@ async function handleStreaming(
               done = result.done;
               value = result.value;
             }
-          } catch (timeoutError) {
+          } catch (_timeoutError) {
             if (!hasReceivedContent && currentStallConfig?.onFallback) {
               // Never got content - seamlessly switch to racing
               slog('warn', '[Stall] No content from Claude in 60s, switching to racing');
               currentReader.cancel();
-              if (claudeAuth) currentClaudeTokenError = 'stall';  // Signal transient failure to agent
+              if (claudeAuth) currentClaudeTokenError = 'stall'; // Signal transient failure to agent
               try {
                 const fallback = await currentStallConfig.onFallback();
                 currentReader = fallback.reader;
@@ -3725,12 +4115,22 @@ async function handleStreaming(
                 currentPoolName = fallback.poolName;
                 currentPoolSize = fallback.poolSize;
                 if (fallback.firstData) buffer += fallback.firstData;
-                currentStallConfig = undefined;  // disable timeout for racing reader
+                currentStallConfig = undefined; // disable timeout for racing reader
                 lastContentTime = Date.now();
                 continue;
               } catch (fallbackError) {
-                slog('error', '[Stall] Fallback racing also failed, closing stream:', { data: fallbackError });
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: 'All model providers failed', type: 'server_error' } })}\n\n`));
+                slog('error', '[Stall] Fallback racing also failed, closing stream:', {
+                  data: fallbackError,
+                });
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${
+                      JSON.stringify({
+                        error: { message: 'All model providers failed', type: 'server_error' },
+                      })
+                    }\n\n`,
+                  ),
+                );
                 controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                 controller.close();
                 break;
@@ -3754,16 +4154,22 @@ async function handleStreaming(
               } else if (ntState === 'in_tool_calls') {
                 emitDelta(']}');
               }
-              slog('info', `Native tool mode complete: ${ntToolCount} tool(s), final state: ${ntState}`);
+              slog(
+                'info',
+                `Native tool mode complete: ${ntToolCount} tool(s), final state: ${ntState}`,
+              );
             }
 
             // For Anthropic models, emit final usage chunk before [DONE]
-            if (isAnthropicModel(currentModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
+            if (
+              isAnthropicModel(currentModel) &&
+              (anthropicInputTokens > 0 || anthropicOutputTokens > 0)
+            ) {
               const usageChunk: RoseCompletionChunk = {
                 choices: [{
                   index: 0,
                   delta: {},
-                  finish_reason: 'stop'
+                  finish_reason: 'stop',
                 }],
                 usage: {
                   prompt_tokens: anthropicInputTokens,
@@ -3780,8 +4186,18 @@ async function handleStreaming(
               };
               const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
               controller.enqueue(encoder.encode(payload));
-              const cacheHitPct = anthropicInputTokens > 0 ? Math.round(anthropicCacheReadTokens / (anthropicInputTokens + anthropicCacheCreationTokens + anthropicCacheReadTokens) * 100) : 0;
-              slog('info', `Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}, cache_hit=${cacheHitPct}%`);
+              const cacheHitPct = anthropicInputTokens > 0
+                ? Math.round(
+                  anthropicCacheReadTokens /
+                    (anthropicInputTokens + anthropicCacheCreationTokens +
+                      anthropicCacheReadTokens) *
+                    100,
+                )
+                : 0;
+              slog(
+                'info',
+                `Anthropic usage emitted: input=${anthropicInputTokens}, output=${anthropicOutputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}, cache_hit=${cacheHitPct}%`,
+              );
             }
             const donePayload = 'data: [DONE]\n\n';
             controller.enqueue(encoder.encode(donePayload));
@@ -3811,7 +4227,10 @@ async function handleStreaming(
                     anthropicInputTokens = msgUsage.input_tokens || 0;
                     anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
                     anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
-                    slog('info', `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
+                    slog(
+                      'info',
+                      `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`,
+                    );
                     continue;
                   }
 
@@ -3889,15 +4308,15 @@ async function handleStreaming(
                   // Track current block type for thinking support
                   if (parsed.type === 'content_block_start') {
                     if (parsed.content_block?.type === 'thinking') {
-                      stdCurrentBlock = 'thinking';
+                      _stdCurrentBlock = 'thinking';
                     } else if (parsed.content_block?.type === 'text') {
-                      stdCurrentBlock = 'text';
+                      _stdCurrentBlock = 'text';
                     }
                     continue;
                   }
 
                   if (parsed.type === 'content_block_stop') {
-                    stdCurrentBlock = null;
+                    _stdCurrentBlock = null;
                     continue;
                   }
 
@@ -3918,7 +4337,9 @@ async function handleStreaming(
                       pool_name: currentPoolName,
                       pool_size: currentPoolSize,
                     };
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(reasoningChunk)}\n\n`));
+                    controller.enqueue(
+                      encoder.encode(`data: ${JSON.stringify(reasoningChunk)}\n\n`),
+                    );
                     continue;
                   }
 
@@ -3940,7 +4361,10 @@ async function handleStreaming(
                     const cacheWriteTokens = details.cache_write_tokens || 0;
                     parsed.usage.cache_read_input_tokens = cachedTokens;
                     parsed.usage.cache_creation_input_tokens = cacheWriteTokens;
-                    parsed.usage.prompt_tokens = Math.max(0, parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens);
+                    parsed.usage.prompt_tokens = Math.max(
+                      0,
+                      parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens,
+                    );
                   }
 
                   parsed.requested_model = requestedModel;
@@ -3964,7 +4388,7 @@ async function handleStreaming(
         slog('error', 'Streaming error:', { data: error });
         controller.error(error);
       }
-    }
+    },
   });
 
   return new Response(stream, {
@@ -3979,7 +4403,7 @@ async function handleStreaming(
 
 // Main handler
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
+  if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
@@ -3993,9 +4417,13 @@ serve(async (req) => {
     // Extract API key from header
     const apiKey = req.headers.get('x-api-key');
     if (!apiKey) {
-      slog('info', `[${requestId}] Missing x-api-key header`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog('info', `[${requestId}] Missing x-api-key header`, {
+        request_id: requestId,
+        agent_id: agentId,
+        call_site: callSite,
+      });
       return new Response(JSON.stringify({ error: 'Missing x-api-key header' }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 401,
       });
     }
@@ -4003,21 +4431,35 @@ serve(async (req) => {
     // Initialize Supabase client
     // Use PROD_ prefixed vars if available, otherwise hardcoded production values for local dev
     // (Supabase CLI overrides SUPABASE_URL to local instance, so we need explicit prod values)
-    const supabaseUrl = Deno.env.get('PROD_SUPABASE_URL') || 'https://kzlurqihzaolhzsbkctf.supabase.co';
-    const supabaseServiceKey = Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTg4OTMzNiwiZXhwIjoyMDc1NDY1MzM2fQ.Iff9HtO2szAAKIpOmzGacxMgMZeeqXQfLzQTxrakF9g';
+    const supabaseUrl = Deno.env.get('PROD_SUPABASE_URL') ||
+      'https://kzlurqihzaolhzsbkctf.supabase.co';
+    const supabaseServiceKey = Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') ||
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTg4OTMzNiwiZXhwIjoyMDc1NDY1MzM2fQ.Iff9HtO2szAAKIpOmzGacxMgMZeeqXQfLzQTxrakF9g';
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Validate API key
-    slog('info', `[${requestId}] Validating API key...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog('info', `[${requestId}] Validating API key...`, {
+      request_id: requestId,
+      agent_id: agentId,
+      call_site: callSite,
+    });
     const authInfo = await validateApiKey(apiKey, supabase);
     if (!authInfo) {
-      slog('info', `[${requestId}] Invalid API key`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog('info', `[${requestId}] Invalid API key`, {
+        request_id: requestId,
+        agent_id: agentId,
+        call_site: callSite,
+      });
       return new Response(JSON.stringify({ error: 'Invalid API key' }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 401,
       });
     }
-    slog('info', `[${requestId}] API key validated for userId: ${authInfo.userId}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog('info', `[${requestId}] API key validated for userId: ${authInfo.userId}`, {
+      request_id: requestId,
+      agent_id: agentId,
+      call_site: callSite,
+    });
 
     // Parse request body (raw first for browser-use detection)
     const rawBody = await req.json();
@@ -4027,61 +4469,111 @@ serve(async (req) => {
     // Browser-use has different format: task + browser_state instead of messages
     // ============================================
     if (isBrowserUseRequest(rawBody)) {
-      slog('info', `[${requestId}] Browser-use request detected for model: ${rawBody.model}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog('info', `[${requestId}] Browser-use request detected for model: ${rawBody.model}`, {
+        request_id: requestId,
+        agent_id: agentId,
+        call_site: callSite,
+      });
       const browserUseReq = rawBody as BrowserUseRequest;
 
       // Tracing: log action_history details
-      slog('info', `[${requestId}] action_history count: ${browserUseReq.action_history.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog('info', `[${requestId}] action_history count: ${browserUseReq.action_history.length}`, {
+        request_id: requestId,
+        agent_id: agentId,
+        call_site: callSite,
+      });
       if (browserUseReq.action_history.length > 0) {
         const lastAction = browserUseReq.action_history[browserUseReq.action_history.length - 1];
-        slog('info', `[${requestId}] Last action:`, { data: {
-          action: lastAction.action,
-          hasThinking: !!lastAction.thinking,
-          hasScreenshot: !!lastAction.screenshot,
-          thinkingPreview: lastAction.thinking?.slice(0, 100)
-        } , request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] Last action:`, {
+          data: {
+            action: lastAction.action,
+            hasThinking: !!lastAction.thinking,
+            hasScreenshot: !!lastAction.screenshot,
+            thinkingPreview: lastAction.thinking?.slice(0, 100),
+          },
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
       }
 
       // Tracing: log screenshot metadata
       if (browserUseReq.browser_state.screenshot) {
-        slog('info', `[${requestId}] Screenshot received:`, { data: {
-          viewport: `${browserUseReq.browser_state.viewport.width}x${browserUseReq.browser_state.viewport.height}`,
-          screenshotChars: browserUseReq.browser_state.screenshot.length,
-          isBase64: !browserUseReq.browser_state.screenshot.startsWith('http')
-        } , request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] Screenshot received:`, {
+          data: {
+            viewport:
+              `${browserUseReq.browser_state.viewport.width}x${browserUseReq.browser_state.viewport.height}`,
+            screenshotChars: browserUseReq.browser_state.screenshot.length,
+            isBase64: !browserUseReq.browser_state.screenshot.startsWith('http'),
+          },
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
       }
 
       // Get the browser-use pool
       const browserPool = MODEL_POOLS['rose-1-browser-use'];
       if (!browserPool) {
-        slog('info', `[${requestId}] Browser-use pool not configured`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        return new Response(JSON.stringify({
-          error: 'Browser-use pool not configured'
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 500,
+        slog('info', `[${requestId}] Browser-use pool not configured`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
         });
+        return new Response(
+          JSON.stringify({
+            error: 'Browser-use pool not configured',
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+          },
+        );
       }
 
       // Helper to call a specific provider with full request/response logging
-      async function callProvider(
+      const callProvider = async (
         provider: string,
         providerIndex: number,
-        signal?: AbortSignal
-      ): Promise<{ action: UnifiedAction; ttftMs: number; actualModel: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+        signal?: AbortSignal,
+      ): Promise<
+        {
+          action: UnifiedAction;
+          ttftMs: number;
+          actualModel: string;
+          usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+        }
+      > => {
         // Log the full request (with truncated screenshots)
-        slog('info', `📤 [${requestId}] [${provider}] FULL REQUEST:`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        slog('info', `[${requestId}] [${provider}] FULL REQUEST body`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(truncateForLogging({
-          requestId,
-          provider,
-          providerIndex,
-          task: browserUseReq.task,
-          browser_state: browserUseReq.browser_state,
-          action_history: browserUseReq.action_history,
-          model_seed: browserUseReq.model_seed,
-        }), null, 2) });
+        slog('info', `📤 [${requestId}] [${provider}] FULL REQUEST:`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
+        slog('info', `[${requestId}] [${provider}] FULL REQUEST body`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+          data: JSON.stringify(
+            truncateForLogging({
+              requestId,
+              provider,
+              providerIndex,
+              task: browserUseReq.task,
+              browser_state: browserUseReq.browser_state,
+              action_history: browserUseReq.action_history,
+              model_seed: browserUseReq.model_seed,
+            }),
+            null,
+            2,
+          ),
+        });
 
-        let result: { response?: any; ttftMs: number; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } };
+        let result: {
+          response?: any;
+          ttftMs: number;
+          usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+        };
         let normalizedAction: UnifiedAction;
         let actualModel: string;
 
@@ -4089,11 +4581,14 @@ serve(async (req) => {
           const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
           if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
 
-          slog('info', `[${requestId}] [${provider}] Calling browser-use API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] [${provider}] Calling browser-use API...`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
           result = await callBrowserUseLLM(browserUseReq, browserUseApiKey, signal);
           normalizedAction = normalizeBrowserUseResponse(result.response);
           actualModel = 'browser-use/bu-1-0';
-
         } else if (provider === 'yutori/n1') {
           const yutoriApiKey = Deno.env.get('YUTORI_API_KEY');
           if (!yutoriApiKey) throw new Error('YUTORI_API_KEY not configured');
@@ -4101,11 +4596,17 @@ serve(async (req) => {
             throw new Error('Yutori requires screenshot');
           }
 
-          slog('info', `[${requestId}] [${provider}] Calling Yutori API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] [${provider}] Calling Yutori API...`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
           result = await callYutoriLLM(browserUseReq, yutoriApiKey, signal);
-          normalizedAction = normalizeYutoriResponse(result.response, browserUseReq.browser_state.viewport);
+          normalizedAction = normalizeYutoriResponse(
+            result.response,
+            browserUseReq.browser_state.viewport,
+          );
           actualModel = 'yutori/n1';
-
         } else if (provider === 'anthropic/claude-cua') {
           const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
           if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY not configured');
@@ -4113,22 +4614,31 @@ serve(async (req) => {
             throw new Error('Anthropic CUA requires base64 screenshot');
           }
 
-          slog('info', `[${requestId}] [${provider}] Calling Anthropic CUA API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] [${provider}] Calling Anthropic CUA API...`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
           result = await callAnthropicCUA(browserUseReq, anthropicApiKey);
           normalizedAction = normalizeAnthropicCUAResponse(result.response);
           actualModel = 'anthropic/claude-sonnet-4-cua';
-
         } else if (isAnthropicModel(provider)) {
           // Direct Anthropic API call (matching streaming race pattern)
           const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
           if (!anthropicKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
           const isDomOnly = DOM_ONLY_MODELS.includes(provider);
-          const { messages } = transformToBrowserUseFormat(browserUseReq, { includeScreenshot: !isDomOnly });
+          const { messages } = transformToBrowserUseFormat(browserUseReq, {
+            includeScreenshot: !isDomOnly,
+          });
           const { system, messages: anthropicMessages } = transformMessagesForAnthropic(messages);
           const anthropicModel = getAnthropicModelName(provider);
 
-          slog('info', `[${requestId}] [${provider}] Calling Anthropic API directly (model: ${anthropicModel})...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog(
+            'info',
+            `[${requestId}] [${provider}] Calling Anthropic API directly (model: ${anthropicModel})...`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
 
           const anthropicBody: any = {
             model: anthropicModel,
@@ -4140,7 +4650,9 @@ serve(async (req) => {
           // No output_format — system prompt instructs JSON format,
           // same approach as browser-use and yutori providers
 
-          slog('info', `[Anthropic BU] Request to ${anthropicModel}:`, { data: JSON.stringify(truncateForLogging(anthropicBody), null, 2) });
+          slog('info', `[Anthropic BU] Request to ${anthropicModel}:`, {
+            data: JSON.stringify(truncateForLogging(anthropicBody), null, 2),
+          });
 
           const startTime = Date.now();
           const response = await fetch(ANTHROPIC_API_URL, {
@@ -4148,10 +4660,10 @@ serve(async (req) => {
             headers: {
               'x-api-key': anthropicKey,
               'anthropic-version': '2023-06-01',
-              'content-type': 'application/json'
+              'content-type': 'application/json',
             },
             body: JSON.stringify(anthropicBody),
-            signal
+            signal,
           });
 
           const ttftMs = Date.now() - startTime;
@@ -4163,7 +4675,9 @@ serve(async (req) => {
           }
 
           const data = await response.json();
-          slog('info', 'Anthropic BU raw response:', { data: JSON.stringify(truncateForLogging(data), null, 2) });
+          slog('info', 'Anthropic BU raw response:', {
+            data: JSON.stringify(truncateForLogging(data), null, 2),
+          });
 
           // Extract text content from Anthropic response format
           const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
@@ -4179,30 +4693,54 @@ serve(async (req) => {
           const usage = {
             prompt_tokens: data.usage?.input_tokens || 0,
             completion_tokens: data.usage?.output_tokens || 0,
-            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0)
+            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
           };
 
           result = { response: { completion }, ttftMs, usage };
           normalizedAction = normalizeBrowserUseResponse(result.response);
           actualModel = provider;
-
         } else {
           // Generic LLM via OpenRouter (e.g. openai/gpt-5.2)
           const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
           if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
 
-          slog('info', `[${requestId}] [${provider}] Calling OpenRouter API...`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-          result = await callGenericLLM(browserUseReq, provider, openRouterKey, supabaseUrl, signal);
+          slog('info', `[${requestId}] [${provider}] Calling OpenRouter API...`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
+          result = await callGenericLLM(
+            browserUseReq,
+            provider,
+            openRouterKey,
+            supabaseUrl,
+            signal,
+          );
           normalizedAction = normalizeBrowserUseResponse(result.response);
           actualModel = provider;
         }
 
-        slog('info', `[${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms)`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(truncateForLogging(result.response), null, 2) });
-        slog('info', `[${requestId}] [${provider}] NORMALIZED ACTION`, { request_id: requestId, agent_id: agentId, call_site: callSite, data: JSON.stringify(normalizedAction, null, 2) });
+        slog('info', `[${requestId}] [${provider}] FULL RESPONSE (ttft=${result.ttftMs}ms)`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+          data: JSON.stringify(truncateForLogging(result.response), null, 2),
+        });
+        slog('info', `[${requestId}] [${provider}] NORMALIZED ACTION`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+          data: JSON.stringify(normalizedAction, null, 2),
+        });
 
-        return { action: normalizedAction, ttftMs: result.ttftMs, actualModel, usage: result.usage };
-      }
-      
+        return {
+          action: normalizedAction,
+          ttftMs: result.ttftMs,
+          actualModel,
+          usage: result.usage,
+        };
+      };
+
       // ============================================
       // CLAUDE MODE: Direct Anthropic call with Claude Code credentials + prompt caching
       // ============================================
@@ -4215,279 +4753,378 @@ serve(async (req) => {
         //   // Fall through to model_seed handler below
         // } else
         {
-        // For claude-mode, use user_id from request body if provided (the API key may map to a shared
-        // worker user, but the real user who owns the agent/credentials is passed via user_id)
-        const claudeUserId = browserUseReq.user_id || authInfo.userId;
-        slog('info', `[${requestId}] Claude mode: direct Opus 4.6 with cache controls (userId: ${claudeUserId})`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          // For claude-mode, use user_id from request body if provided (the API key may map to a shared
+          // worker user, but the real user who owns the agent/credentials is passed via user_id)
+          const claudeUserId = browserUseReq.user_id || authInfo.userId;
+          slog(
+            'info',
+            `[${requestId}] Claude mode: direct Opus 4.6 with cache controls (userId: ${claudeUserId})`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
 
-        // Fetch Claude Code OAuth token from backend
-        const backendUrl = Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
-        const backendApiKey = Deno.env.get('BACKEND_API_KEY');
-        if (!backendApiKey) {
-          return new Response(JSON.stringify({ error: 'BACKEND_API_KEY not configured for claude mode' }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
-          });
-        }
-
-        let oauthToken: string;
-        if (browserUseReq.oauth_token) {
-          // Token provided by caller (agent worker handles token management)
-          oauthToken = browserUseReq.oauth_token;
-          slog('info', `[${requestId}] Using caller-provided OAuth token`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        } else {
-          // Fallback: fetch from backend (backwards compat)
-          try {
-            const tokenResp = await fetch(`${backendUrl}/api/integrations/claude-code/credentials/token`, {
-              headers: {
-                'X-API-Key': backendApiKey,
-                'X-User-Id': claudeUserId,
+          // Fetch Claude Code OAuth token from backend
+          const backendUrl = Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
+          const backendApiKey = Deno.env.get('BACKEND_API_KEY');
+          if (!backendApiKey) {
+            return new Response(
+              JSON.stringify({ error: 'BACKEND_API_KEY not configured for claude mode' }),
+              {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: 500,
               },
+            );
+          }
+
+          let oauthToken: string;
+          if (browserUseReq.oauth_token) {
+            // Token provided by caller (agent worker handles token management)
+            oauthToken = browserUseReq.oauth_token;
+            slog('info', `[${requestId}] Using caller-provided OAuth token`, {
+              request_id: requestId,
+              agent_id: agentId,
+              call_site: callSite,
             });
-            if (!tokenResp.ok) {
-              const errData = await tokenResp.json().catch(() => null);
-              const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
-              slog('error', `[${requestId}] Claude Code token fetch failed:`, { data: errMsg , request_id: requestId, agent_id: agentId, call_site: callSite });
-              return new Response(JSON.stringify({
-                error: errMsg,
+          } else {
+            // Fallback: fetch from backend (backwards compat)
+            try {
+              const tokenResp = await fetch(
+                `${backendUrl}/api/integrations/claude-code/credentials/token`,
+                {
+                  headers: {
+                    'X-API-Key': backendApiKey,
+                    'X-User-Id': claudeUserId,
+                  },
+                },
+              );
+              if (!tokenResp.ok) {
+                const errData = await tokenResp.json().catch(() => null);
+                const errMsg = errData?.error || `Backend token fetch failed: ${tokenResp.status}`;
+                slog('error', `[${requestId}] Claude Code token fetch failed:`, {
+                  data: errMsg,
+                  request_id: requestId,
+                  agent_id: agentId,
+                  call_site: callSite,
+                });
+                return new Response(
+                  JSON.stringify({
+                    error: errMsg,
+                    request_id: requestId,
+                  }),
+                  {
+                    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                    status: tokenResp.status === 404 ? 400 : 500,
+                  },
+                );
+              }
+              const tokenData = await tokenResp.json();
+              oauthToken = tokenData.accessToken;
+            } catch (tokenErr) {
+              slog('error', `[${requestId}] Failed to fetch Claude Code token:`, {
+                data: tokenErr,
                 request_id: requestId,
-              }), {
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
-                status: tokenResp.status === 404 ? 400 : 500,
+                agent_id: agentId,
+                call_site: callSite,
+              });
+              return new Response(
+                JSON.stringify({
+                  error: 'Failed to fetch Claude Code credentials',
+                  details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
+                  request_id: requestId,
+                }),
+                {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                  status: 500,
+                },
+              );
+            }
+          }
+
+          // Build messages with screenshots ON (including history screenshots)
+          const { messages } = transformToBrowserUseFormat(browserUseReq, {
+            includeScreenshot: true,
+          });
+
+          // Build history screenshot blocks for the user message
+          // Each action_history entry with a screenshot gets an image block
+          const historyImageBlocks: any[] = [];
+          for (const entry of browserUseReq.action_history) {
+            if (entry.screenshot) {
+              const imageUrl = entry.screenshot.startsWith('http')
+                ? entry.screenshot
+                : `data:image/png;base64,${entry.screenshot}`;
+              historyImageBlocks.push({
+                type: 'text',
+                text: `Step ${entry.step}: ${entry.action}${
+                  entry.index !== undefined ? ` (index: ${entry.index})` : ''
+                } ${entry.result.success ? '✓' : '✗'}`,
+              });
+              historyImageBlocks.push({
+                type: 'image_url',
+                image_url: { url: imageUrl },
               });
             }
-            const tokenData = await tokenResp.json();
-            oauthToken = tokenData.accessToken;
-          } catch (tokenErr) {
-            slog('error', `[${requestId}] Failed to fetch Claude Code token:`, { data: tokenErr , request_id: requestId, agent_id: agentId, call_site: callSite });
-            return new Response(JSON.stringify({
-              error: 'Failed to fetch Claude Code credentials',
-              details: tokenErr instanceof Error ? tokenErr.message : 'Unknown error',
-              request_id: requestId,
-            }), {
-              headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500,
-            });
           }
-        }
 
-        // Build messages with screenshots ON (including history screenshots)
-        const { messages } = transformToBrowserUseFormat(browserUseReq, { includeScreenshot: true });
-
-        // Build history screenshot blocks for the user message
-        // Each action_history entry with a screenshot gets an image block
-        const historyImageBlocks: any[] = [];
-        for (const entry of browserUseReq.action_history) {
-          if (entry.screenshot) {
-            const imageUrl = entry.screenshot.startsWith('http')
-              ? entry.screenshot
-              : `data:image/png;base64,${entry.screenshot}`;
-            historyImageBlocks.push({
-              type: 'text',
-              text: `Step ${entry.step}: ${entry.action}${entry.index !== undefined ? ` (index: ${entry.index})` : ''} ${entry.result.success ? '✓' : '✗'}`,
-            });
-            historyImageBlocks.push({
-              type: 'image_url',
-              image_url: { url: imageUrl },
-            });
-          }
-        }
-
-        // Inject history screenshots into user message content
-        if (historyImageBlocks.length > 0) {
-          const userMsg = messages.find((m: any) => m.role === 'user');
-          if (userMsg) {
-            // Ensure content is an array
-            if (!Array.isArray(userMsg.content)) {
-              userMsg.content = [{ type: 'text', text: userMsg.content }];
+          // Inject history screenshots into user message content
+          if (historyImageBlocks.length > 0) {
+            const userMsg = messages.find((m: any) => m.role === 'user');
+            if (userMsg) {
+              // Ensure content is an array
+              if (!Array.isArray(userMsg.content)) {
+                userMsg.content = [{ type: 'text', text: userMsg.content }];
+              }
+              // Insert history screenshots before the last content block
+              userMsg.content = [
+                ...userMsg.content,
+                { type: 'text', text: '\n--- Action History Screenshots ---' },
+                ...historyImageBlocks,
+              ];
             }
-            // Insert history screenshots before the last content block
-            userMsg.content = [
-              ...userMsg.content,
-              { type: 'text', text: '\n--- Action History Screenshots ---' },
-              ...historyImageBlocks,
-            ];
           }
-        }
 
-        // Transform to Anthropic format — system as array with cache_control
-        const systemParts: string[] = [];
-        const anthropicMessages: any[] = [];
+          // Transform to Anthropic format — system as array with cache_control
+          const systemParts: string[] = [];
+          const anthropicMessages: any[] = [];
 
-        for (const msg of messages) {
-          if (msg.role === 'system') {
-            systemParts.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
-          } else {
-            if (Array.isArray(msg.content)) {
-              const transformedContent = msg.content.map(transformContentBlockForAnthropic);
-              anthropicMessages.push({ ...msg, content: transformedContent });
+          for (const msg of messages) {
+            if (msg.role === 'system') {
+              systemParts.push(
+                typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+              );
             } else {
-              anthropicMessages.push(msg);
+              if (Array.isArray(msg.content)) {
+                const transformedContent = msg.content.map(transformContentBlockForAnthropic);
+                anthropicMessages.push({ ...msg, content: transformedContent });
+              } else {
+                anthropicMessages.push(msg);
+              }
             }
           }
-        }
 
-        // Add cache_control breakpoint only to the last user message's last content block
-        for (let i = anthropicMessages.length - 1; i >= 0; i--) {
-          if (anthropicMessages[i].role === 'user' && Array.isArray(anthropicMessages[i].content) && anthropicMessages[i].content.length > 0) {
-            anthropicMessages[i].content[anthropicMessages[i].content.length - 1].cache_control = { type: 'ephemeral' };
-            break;
-          }
-        }
-
-        // Build system as array of blocks with cache_control (required for prompt caching)
-        const systemBlocks = systemParts.map((text, i) => ({
-          type: 'text' as const,
-          text,
-          ...(i === systemParts.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
-        }));
-
-        const identityBlock = { type: 'text' as const, text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
-        const disclaimerBlock = { type: 'text' as const, text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
-        const anthropicBody: any = {
-          model: 'claude-opus-4-6',
-          system: [identityBlock, disclaimerBlock, ...systemBlocks],
-          messages: anthropicMessages,
-          max_tokens: 16000,
-          temperature: 0.3,
-          thinking: { type: 'enabled', budget_tokens: 10000 },
-        };
-
-        slog('info', `[${requestId}] Claude mode: calling Anthropic with cache controls`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        slog('info', `[Claude Mode] System blocks: ${anthropicBody.system.length}, Messages: ${anthropicMessages.length}`);
-
-        const startTime = Date.now();
-        const response = await fetch(ANTHROPIC_API_URL, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${oauthToken}`,
-            'anthropic-version': '2023-06-01',
-            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
-            'x-app': 'cli',
-            'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(anthropicBody),
-        });
-
-        const ttftMs = Date.now() - startTime;
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          slog('error', `[${requestId}] Claude mode API error:`, { data: [response.status, errorText] , request_id: requestId, agent_id: agentId, call_site: callSite });
-
-          // Rate limited — signal caller to fall back to racing
-          if (response.status === 429) {
-            const parseEpochHeader = (raw: string | null): number | null => {
-              if (!raw) return null;
-              const num = Number(raw);
-              if (!Number.isFinite(num) || num <= 0) return null;
-              return Math.floor(num);
-            };
-            const parseRetryAfter = (raw: string | null): number | null => {
-              if (!raw) return null;
-              const seconds = Number(raw);
-              if (!Number.isFinite(seconds) || seconds <= 0) return null;
-              return Math.floor(seconds);
-            };
-
-            const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-            const unifiedReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-reset'));
-            const unified5hReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-5h-reset'));
-            const unified7dReset = parseEpochHeader(response.headers.get('anthropic-ratelimit-unified-7d-reset'));
-            const chosenResetEpoch = unifiedReset ?? unified5hReset ?? unified7dReset ??
-              (retryAfter ? Math.floor(Date.now() / 1000) + retryAfter : null);
-            const rateLimitedUntil = chosenResetEpoch
-              ? new Date(chosenResetEpoch * 1000).toISOString()
-              : null;
-
-            let rateLimitMessage = '';
-            try {
-              const parsed = JSON.parse(errorText);
-              rateLimitMessage = parsed?.error?.message || parsed?.message || '';
-            } catch {
-              rateLimitMessage = errorText.slice(0, 300);
+          // Add cache_control breakpoint only to the last user message's last content block
+          for (let i = anthropicMessages.length - 1; i >= 0; i--) {
+            if (
+              anthropicMessages[i].role === 'user' && Array.isArray(anthropicMessages[i].content) &&
+              anthropicMessages[i].content.length > 0
+            ) {
+              anthropicMessages[i].content[anthropicMessages[i].content.length - 1].cache_control =
+                { type: 'ephemeral' };
+              break;
             }
-
-            slog('warn', `[${requestId}] Claude mode rate limited, signaling fallback to racing`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-            return new Response(JSON.stringify({
-              error: 'CLAUDE_RATE_LIMITED',
-              fallback: 'racing',
-              rateLimitedUntil,
-              rateLimitHeaders: {
-                retryAfter: response.headers.get('retry-after'),
-                unifiedStatus: response.headers.get('anthropic-ratelimit-unified-status'),
-                unifiedReset: response.headers.get('anthropic-ratelimit-unified-reset'),
-                representativeClaim: response.headers.get('anthropic-ratelimit-unified-representative-claim'),
-                overageDisabledReason: response.headers.get('anthropic-ratelimit-unified-overage-disabled-reason'),
-              },
-              message: rateLimitMessage || 'Claude account is rate limited',
-              request_id: requestId,
-            }), {
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-              status: 200,
-            });
           }
 
-          return new Response(JSON.stringify({
-            error: `Anthropic API error: ${response.status}`,
-            details: errorText,
+          // Build system as array of blocks with cache_control (required for prompt caching)
+          const systemBlocks = systemParts.map((text, i) => ({
+            type: 'text' as const,
+            text,
+            ...(i === systemParts.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
+          }));
+
+          const identityBlock = {
+            type: 'text' as const,
+            text: "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+          };
+          const disclaimerBlock = {
+            type: 'text' as const,
+            text:
+              'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.',
+          };
+          const anthropicBody: any = {
+            model: 'claude-opus-4-6',
+            system: [identityBlock, disclaimerBlock, ...systemBlocks],
+            messages: anthropicMessages,
+            max_tokens: 16000,
+            temperature: 0.3,
+            thinking: { type: 'enabled', budget_tokens: 10000 },
+          };
+
+          slog('info', `[${requestId}] Claude mode: calling Anthropic with cache controls`, {
             request_id: requestId,
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: response.status === 401 ? 401 : 500,
+            agent_id: agentId,
+            call_site: callSite,
           });
-        }
+          slog(
+            'info',
+            `[Claude Mode] System blocks: ${anthropicBody.system.length}, Messages: ${anthropicMessages.length}`,
+          );
 
-        const data = await response.json();
-        slog('info', 'Claude mode raw response:', { data: JSON.stringify(truncateForLogging(data), null, 2) });
+          const startTime = Date.now();
+          const response = await fetch(ANTHROPIC_API_URL, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${oauthToken}`,
+              'anthropic-version': '2023-06-01',
+              'anthropic-beta':
+                'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
+              'x-app': 'cli',
+              'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify(anthropicBody),
+          });
 
-        // Extract text content from Anthropic response
-        const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
-        let completion: any;
-        try {
-          completion = typeof textContent === 'string' ? JSON.parse(textContent) : textContent;
-        } catch {
-          const extracted = extractJSON(textContent);
-          completion = extracted || { action: [], thinking: textContent };
-        }
+          const ttftMs = Date.now() - startTime;
 
-        const usage = {
-          prompt_tokens: data.usage?.input_tokens || 0,
-          completion_tokens: data.usage?.output_tokens || 0,
-          total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
-          cache_creation_input_tokens: data.usage?.cache_creation_input_tokens || 0,
-          cache_read_input_tokens: data.usage?.cache_read_input_tokens || 0,
-        };
+          if (!response.ok) {
+            const errorText = await response.text();
+            slog('error', `[${requestId}] Claude mode API error:`, {
+              data: [response.status, errorText],
+              request_id: requestId,
+              agent_id: agentId,
+              call_site: callSite,
+            });
 
-        const normalizedAction = normalizeBrowserUseResponse({ completion });
-        slog('info', `[${requestId}] Claude mode: action=${normalizedAction.action}, ttft=${ttftMs}ms, cache_read=${usage.cache_read_input_tokens}, cache_write=${usage.cache_creation_input_tokens}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+            // Rate limited — signal caller to fall back to racing
+            if (response.status === 429) {
+              const parseEpochHeader = (raw: string | null): number | null => {
+                if (!raw) return null;
+                const num = Number(raw);
+                if (!Number.isFinite(num) || num <= 0) return null;
+                return Math.floor(num);
+              };
+              const parseRetryAfter = (raw: string | null): number | null => {
+                if (!raw) return null;
+                const seconds = Number(raw);
+                if (!Number.isFinite(seconds) || seconds <= 0) return null;
+                return Math.floor(seconds);
+              };
 
-        // Log usage with $0 cost (billed to user's Claude subscription)
-        const claudeModeResponse = {
-          action: normalizedAction,
-          actual_model: 'anthropic/claude-opus-4.6',
-          mode: 'claude',
-          usage,
-          ttft_ms: ttftMs,
-        };
-        await logUsage(supabase, authInfo.apiKeyId, authInfo.userId, {
-          model: browserUseReq.model,
-          mode: 'claude',
-          task: browserUseReq.task,
-        }, claudeModeResponse, 0, 0);
+              const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+              const unifiedReset = parseEpochHeader(
+                response.headers.get('anthropic-ratelimit-unified-reset'),
+              );
+              const unified5hReset = parseEpochHeader(
+                response.headers.get('anthropic-ratelimit-unified-5h-reset'),
+              );
+              const unified7dReset = parseEpochHeader(
+                response.headers.get('anthropic-ratelimit-unified-7d-reset'),
+              );
+              const chosenResetEpoch = unifiedReset ?? unified5hReset ?? unified7dReset ??
+                (retryAfter ? Math.floor(Date.now() / 1000) + retryAfter : null);
+              const rateLimitedUntil = chosenResetEpoch
+                ? new Date(chosenResetEpoch * 1000).toISOString()
+                : null;
 
-        return new Response(JSON.stringify({
-          action: normalizedAction,
-          requested_model: browserUseReq.model,
-          actual_model: 'anthropic/claude-opus-4.6',
-          mode: 'claude',
-          pool_name: 'rose-1-browser-use',
-          ttft_ms: ttftMs,
-          usage,
-          request_id: requestId,
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 200,
-        });
+              let rateLimitMessage = '';
+              try {
+                const parsed = JSON.parse(errorText);
+                rateLimitMessage = parsed?.error?.message || parsed?.message || '';
+              } catch {
+                rateLimitMessage = errorText.slice(0, 300);
+              }
+
+              slog(
+                'warn',
+                `[${requestId}] Claude mode rate limited, signaling fallback to racing`,
+                { request_id: requestId, agent_id: agentId, call_site: callSite },
+              );
+              return new Response(
+                JSON.stringify({
+                  error: 'CLAUDE_RATE_LIMITED',
+                  fallback: 'racing',
+                  rateLimitedUntil,
+                  rateLimitHeaders: {
+                    retryAfter: response.headers.get('retry-after'),
+                    unifiedStatus: response.headers.get('anthropic-ratelimit-unified-status'),
+                    unifiedReset: response.headers.get('anthropic-ratelimit-unified-reset'),
+                    representativeClaim: response.headers.get(
+                      'anthropic-ratelimit-unified-representative-claim',
+                    ),
+                    overageDisabledReason: response.headers.get(
+                      'anthropic-ratelimit-unified-overage-disabled-reason',
+                    ),
+                  },
+                  message: rateLimitMessage || 'Claude account is rate limited',
+                  request_id: requestId,
+                }),
+                {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                  status: 200,
+                },
+              );
+            }
+
+            return new Response(
+              JSON.stringify({
+                error: `Anthropic API error: ${response.status}`,
+                details: errorText,
+                request_id: requestId,
+              }),
+              {
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+                status: response.status === 401 ? 401 : 500,
+              },
+            );
+          }
+
+          const data = await response.json();
+          slog('info', 'Claude mode raw response:', {
+            data: JSON.stringify(truncateForLogging(data), null, 2),
+          });
+
+          // Extract text content from Anthropic response
+          const textContent = data.content?.find((c: any) => c.type === 'text')?.text || '';
+          let completion: any;
+          try {
+            completion = typeof textContent === 'string' ? JSON.parse(textContent) : textContent;
+          } catch {
+            const extracted = extractJSON(textContent);
+            completion = extracted || { action: [], thinking: textContent };
+          }
+
+          const usage = {
+            prompt_tokens: data.usage?.input_tokens || 0,
+            completion_tokens: data.usage?.output_tokens || 0,
+            total_tokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
+            cache_creation_input_tokens: data.usage?.cache_creation_input_tokens || 0,
+            cache_read_input_tokens: data.usage?.cache_read_input_tokens || 0,
+          };
+
+          const normalizedAction = normalizeBrowserUseResponse({ completion });
+          slog(
+            'info',
+            `[${requestId}] Claude mode: action=${normalizedAction.action}, ttft=${ttftMs}ms, cache_read=${usage.cache_read_input_tokens}, cache_write=${usage.cache_creation_input_tokens}`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
+
+          // Log usage with $0 cost (billed to user's Claude subscription)
+          const claudeModeResponse = {
+            action: normalizedAction,
+            actual_model: 'anthropic/claude-opus-4.6',
+            mode: 'claude',
+            usage,
+            ttft_ms: ttftMs,
+          };
+          await logUsage(
+            supabase,
+            authInfo.apiKeyId,
+            authInfo.userId,
+            {
+              model: browserUseReq.model,
+              mode: 'claude',
+              task: browserUseReq.task,
+            },
+            claudeModeResponse,
+            0,
+            0,
+          );
+
+          return new Response(
+            JSON.stringify({
+              action: normalizedAction,
+              requested_model: browserUseReq.model,
+              actual_model: 'anthropic/claude-opus-4.6',
+              mode: 'claude',
+              pool_name: 'rose-1-browser-use',
+              ttft_ms: ttftMs,
+              usage,
+              request_id: requestId,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 200,
+            },
+          );
         } // end else (non-Yutori claude mode)
       }
 
@@ -4498,50 +5135,86 @@ serve(async (req) => {
         const providerIndex = browserUseReq.model_seed;
 
         if (providerIndex < 0 || providerIndex >= browserPool.length) {
-          slog('info', `[${requestId}] model_seed ${providerIndex} out of range`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-          return new Response(JSON.stringify({
-            error: `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${browserPool.length - 1})`
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: 400,
+          slog('info', `[${requestId}] model_seed ${providerIndex} out of range`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
           });
+          return new Response(
+            JSON.stringify({
+              error:
+                `model_seed ${providerIndex} out of range. Pool has ${browserPool.length} providers (0-${
+                  browserPool.length - 1
+                })`,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 400,
+            },
+          );
         }
 
         const selectedProvider = browserPool[providerIndex];
-        slog('info', `[${requestId}] Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog(
+          'info',
+          `[${requestId}] Browser-use provider (seeded): ${selectedProvider} (index: ${providerIndex})`,
+          { request_id: requestId, agent_id: agentId, call_site: callSite },
+        );
 
         try {
           const result = await callProvider(selectedProvider, providerIndex);
 
-          slog('info', `[${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-          slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-
-          return new Response(JSON.stringify({
-            action: result.action,
-            requested_model: browserUseReq.model,
-            actual_model: result.actualModel,
-            pool_name: 'rose-1-browser-use',
-            pool_size: browserPool.length,
-            provider_index: providerIndex,
-            ttft_ms: result.ttftMs,
-            usage: result.usage,
+          slog(
+            'info',
+            `[${requestId}] Browser-use response: action=${result.action.action}, index=${result.action.index}`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
+          slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, {
             request_id: requestId,
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: 200,
+            agent_id: agentId,
+            call_site: callSite,
           });
 
+          return new Response(
+            JSON.stringify({
+              action: result.action,
+              requested_model: browserUseReq.model,
+              actual_model: result.actualModel,
+              pool_name: 'rose-1-browser-use',
+              pool_size: browserPool.length,
+              provider_index: providerIndex,
+              ttft_ms: result.ttftMs,
+              usage: result.usage,
+              request_id: requestId,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 200,
+            },
+          );
         } catch (error) {
-          slog('error', `[${requestId}] Browser-use (seeded) failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
-          slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-          return new Response(JSON.stringify({
-            error: 'Browser-use request failed',
-            details: error instanceof Error ? error.message : 'Unknown error',
+          slog('error', `[${requestId}] Browser-use (seeded) failed:`, {
+            data: error,
             request_id: requestId,
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: 500,
+            agent_id: agentId,
+            call_site: callSite,
           });
+          slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
+          return new Response(
+            JSON.stringify({
+              error: 'Browser-use request failed',
+              details: error instanceof Error ? error.message : 'Unknown error',
+              request_id: requestId,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 500,
+            },
+          );
         }
       }
 
@@ -4557,25 +5230,42 @@ serve(async (req) => {
       const VISION_REQUIRED = new Set(['yutori/n1']);
       const eligiblePool = hasScreenshot
         ? [...browserPool]
-        : browserPool.filter(m => !VISION_REQUIRED.has(m));
+        : browserPool.filter((m) => !VISION_REQUIRED.has(m));
 
-      slog('info', `[${requestId}] Eligible pool (${eligiblePool.length}/${browserPool.length}): ${eligiblePool.join(', ')}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog(
+        'info',
+        `[${requestId}] Eligible pool (${eligiblePool.length}/${browserPool.length}): ${
+          eligiblePool.join(', ')
+        }`,
+        { request_id: requestId, agent_id: agentId, call_site: callSite },
+      );
       if (!hasScreenshot && eligiblePool.length < browserPool.length) {
-        slog('info', `[${requestId}] No screenshot - filtered out vision-only models`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-      }
-
-      if (eligiblePool.length === 0) {
-        return new Response(JSON.stringify({
-          error: 'No eligible browser-use models',
+        slog('info', `[${requestId}] No screenshot - filtered out vision-only models`, {
           request_id: requestId,
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 500,
+          agent_id: agentId,
+          call_site: callSite,
         });
       }
 
+      if (eligiblePool.length === 0) {
+        return new Response(
+          JSON.stringify({
+            error: 'No eligible browser-use models',
+            request_id: requestId,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+          },
+        );
+      }
+
       // Step 2: Get cached latencies (no probing for browser-use - too expensive)
-      const { latencies: buCachedLatencies } = await getCachedLatencies(supabase, buPoolName, eligiblePool);
+      const { latencies: buCachedLatencies } = await getCachedLatencies(
+        supabase,
+        buPoolName,
+        eligiblePool,
+      );
       buTimings.cache_lookup_ms = Date.now() - raceStartTime;
 
       // Step 3: Select racing trio with browser-use config
@@ -4588,55 +5278,81 @@ serve(async (req) => {
       buTimings.trio_select_ms = Date.now() - raceStartTime;
 
       if (racingTrio.length === 0) {
-        return new Response(JSON.stringify({
-          error: 'No eligible models after latency filtering',
-          request_id: requestId,
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 500,
-        });
+        return new Response(
+          JSON.stringify({
+            error: 'No eligible models after latency filtering',
+            request_id: requestId,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+          },
+        );
       }
 
       // Step 4: Single model → direct call, skip racing overhead
       if (racingTrio.length === 1) {
         const singleModel = racingTrio[0].model;
         const poolIndex = browserPool.indexOf(singleModel);
-        slog('info', `[${requestId}] Single model eligible, direct call: ${singleModel}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog('info', `[${requestId}] Single model eligible, direct call: ${singleModel}`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
 
         try {
           const result = await withTimeout(
             callProvider(singleModel, poolIndex),
             BU_RACE_TIMEOUT_MS,
-            singleModel
+            singleModel,
           );
 
-          slog('info', `[${requestId}] Browser-use response: action=${result.action.action}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-          slog('info', `[${requestId}] ========== REQUEST END (success, single) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog('info', `[${requestId}] Browser-use response: action=${result.action.action}`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
+          slog('info', `[${requestId}] ========== REQUEST END (success, single) ==========\n`, {
+            request_id: requestId,
+            agent_id: agentId,
+            call_site: callSite,
+          });
 
-          return new Response(JSON.stringify({
-            action: result.action,
-            requested_model: browserUseReq.model,
-            actual_model: result.actualModel,
-            pool_name: buPoolName,
-            pool_size: browserPool.length,
-            ttft_ms: result.ttftMs,
-            usage: result.usage,
-            request_id: requestId,
-            racing: { models_raced: 1, racing_type: 'single' }
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({
+              action: result.action,
+              requested_model: browserUseReq.model,
+              actual_model: result.actualModel,
+              pool_name: buPoolName,
+              pool_size: browserPool.length,
+              ttft_ms: result.ttftMs,
+              usage: result.usage,
+              request_id: requestId,
+              racing: { models_raced: 1, racing_type: 'single' },
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 200,
+            },
+          );
         } catch (error) {
-          slog('error', `[${requestId}] Single model failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
-          return new Response(JSON.stringify({
-            error: 'Browser-use request failed',
-            details: error instanceof Error ? error.message : 'Unknown error',
+          slog('error', `[${requestId}] Single model failed:`, {
+            data: error,
             request_id: requestId,
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: 500,
+            agent_id: agentId,
+            call_site: callSite,
           });
+          return new Response(
+            JSON.stringify({
+              error: 'Browser-use request failed',
+              details: error instanceof Error ? error.message : 'Unknown error',
+              request_id: requestId,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: 500,
+            },
+          );
         }
       }
 
@@ -4650,15 +5366,23 @@ serve(async (req) => {
             supabase,
             buPoolName,
             requestId,
-            buTimings
+            buTimings,
           ),
           BU_RACE_TIMEOUT_MS,
-          'browser-use-race'
+          'browser-use-race',
         );
 
         buTimings.race_total_ms = Date.now() - raceStartTime;
-        slog('info', `[${requestId}] Race complete: winner=${raceResult.actualModel}, time=${raceResult.ttftMs}ms`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-        slog('info', `[${requestId}] ========== REQUEST END (success, race) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog(
+          'info',
+          `[${requestId}] Race complete: winner=${raceResult.actualModel}, time=${raceResult.ttftMs}ms`,
+          { request_id: requestId, agent_id: agentId, call_site: callSite },
+        );
+        slog('info', `[${requestId}] ========== REQUEST END (success, race) ==========\n`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
 
         // Adjust usage for racing cost (all models consumed input tokens)
         let adjustedUsage = raceResult.usage;
@@ -4666,49 +5390,64 @@ serve(async (req) => {
           adjustedUsage = {
             prompt_tokens: adjustedUsage.prompt_tokens * raceResult.modelsRaced,
             completion_tokens: adjustedUsage.completion_tokens || 0,
-            total_tokens: (adjustedUsage.prompt_tokens * raceResult.modelsRaced) + (adjustedUsage.completion_tokens || 0)
+            total_tokens: (adjustedUsage.prompt_tokens * raceResult.modelsRaced) +
+              (adjustedUsage.completion_tokens || 0),
           };
         }
 
-        return new Response(JSON.stringify({
-          action: raceResult.action,
-          requested_model: browserUseReq.model,
-          actual_model: raceResult.actualModel,
-          pool_name: buPoolName,
-          pool_size: browserPool.length,
-          ttft_ms: raceResult.ttftMs,
-          usage: adjustedUsage,
-          request_id: requestId,
-          racing: {
-            models_raced: raceResult.modelsRaced,
-            racing_type: 'completion_trio',
-            trio: raceResult.racingModels.map(m => ({
-              model: m.model,
-              latency_ms: m.latencyMs,
-              delay_ms: m.delayMs
-            })),
-            timings: buTimings
-          }
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 200,
-        });
-
+        return new Response(
+          JSON.stringify({
+            action: raceResult.action,
+            requested_model: browserUseReq.model,
+            actual_model: raceResult.actualModel,
+            pool_name: buPoolName,
+            pool_size: browserPool.length,
+            ttft_ms: raceResult.ttftMs,
+            usage: adjustedUsage,
+            request_id: requestId,
+            racing: {
+              models_raced: raceResult.modelsRaced,
+              racing_type: 'completion_trio',
+              trio: raceResult.racingModels.map((m) => ({
+                model: m.model,
+                latency_ms: m.latencyMs,
+                delay_ms: m.delayMs,
+              })),
+              timings: buTimings,
+            },
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 200,
+          },
+        );
       } catch (error) {
-        slog('error', `[${requestId}] Browser-use race failed:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
-        slog('info', `[${requestId}] ========== REQUEST END (race failed) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-
-        return new Response(JSON.stringify({
-          error: 'Browser-use race failed',
-          details: error instanceof Error ? error.message : 'Unknown error',
+        slog('error', `[${requestId}] Browser-use race failed:`, {
+          data: error,
           request_id: requestId,
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 500,
+          agent_id: agentId,
+          call_site: callSite,
         });
+        slog('info', `[${requestId}] ========== REQUEST END (race failed) ==========\n`, {
+          request_id: requestId,
+          agent_id: agentId,
+          call_site: callSite,
+        });
+
+        return new Response(
+          JSON.stringify({
+            error: 'Browser-use race failed',
+            details: error instanceof Error ? error.message : 'Unknown error',
+            request_id: requestId,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+          },
+        );
       }
     }
-    
+
     // ============================================
     // STANDARD CHAT COMPLETION FORMAT
     // ============================================
@@ -4723,22 +5462,33 @@ serve(async (req) => {
       tool_choice,
       cot_steps,
       response_format,
-      reasoning,  // OpenRouter reasoning config: { max_tokens: number }
-      model_seed,  // Optional: index into model pool for testing
-      model_preference,  // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
-      conversation_id,  // Optional: ensures same model used for entire conversation
-      claude_token,  // Optional: user's Claude OAuth token for direct Anthropic call (skips racing, $0 cost)
-      skip_cache,    // Optional: disable prompt caching (saves 1.25x write cost for single-use calls)
+      reasoning, // OpenRouter reasoning config: { max_tokens: number }
+      model_seed, // Optional: index into model pool for testing
+      model_preference, // Optional: 'SMART' | 'FAST' | 'CHEAP' for hardcoded model selection
+      conversation_id, // Optional: ensures same model used for entire conversation
+      claude_token, // Optional: user's Claude OAuth token for direct Anthropic call (skips racing, $0 cost)
+      skip_cache, // Optional: disable prompt caching (saves 1.25x write cost for single-use calls)
       ...otherParams
     } = rawBody;
 
     const cotSteps = cot_steps || 1;
     const maxTokens = max_tokens;
-    let messages = originalMessages;
+    const messages = originalMessages;
 
     // Log incoming messages for debugging
-    slog('info', `[${requestId}] Chat completion request for model: ${model}${skip_cache ? ' (skip_cache)' : ''}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-    slog('info', `[${requestId}] Received ${messages?.length || 0} messages:`, { data: JSON.stringify(truncateForLogging(messages), null, 2) , request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog(
+      'info',
+      `[${requestId}] Chat completion request for model: ${model}${
+        skip_cache ? ' (skip_cache)' : ''
+      }`,
+      { request_id: requestId, agent_id: agentId, call_site: callSite },
+    );
+    slog('info', `[${requestId}] Received ${messages?.length || 0} messages:`, {
+      data: JSON.stringify(truncateForLogging(messages), null, 2),
+      request_id: requestId,
+      agent_id: agentId,
+      call_site: callSite,
+    });
 
     // Default reasoning tokens to 256 if reasoning is enabled but no max_tokens specified
     const DEFAULT_REASONING_TOKENS = 256;
@@ -4750,15 +5500,18 @@ serve(async (req) => {
 
     if (!model) {
       return new Response(JSON.stringify({ error: 'Missing required field: model' }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 400,
       });
     }
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return new Response(JSON.stringify({ error: 'Missing or invalid required field: messages' }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      });
+      return new Response(
+        JSON.stringify({ error: 'Missing or invalid required field: messages' }),
+        {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 400,
+        },
+      );
     }
 
     // Normalize pool name
@@ -4771,19 +5524,24 @@ serve(async (req) => {
     // CLAUDE TOKEN PASSTHROUGH: Direct Anthropic call using user's Claude subscription ($0 cost)
     // If it fails, fall through to normal racing.
     // ============================================
-    let claudeTokenError: string | undefined;  // Set when claude_token call fails, threaded to racing response
-    const isClaudeTokenPool = poolName === 'rose-1-ultra' || poolName === 'rose-ultra' || poolName === 'rose-1-lite' || poolName === 'rose-lite';
+    let claudeTokenError: string | undefined; // Set when claude_token call fails, threaded to racing response
+    const isClaudeTokenPool = poolName === 'rose-1-ultra' || poolName === 'rose-ultra' ||
+      poolName === 'rose-1-lite' || poolName === 'rose-lite';
     if (claude_token && isClaudeTokenPool) {
       const claudeActualModel = 'claude-sonnet-4-6-claude';
       const claudeApiModel = 'claude-sonnet-4-6';
       const claudePassthroughModel = 'anthropic/claude-sonnet-4.6';
-      slog('info', `[${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+      slog(
+        'info',
+        `[${requestId}] Claude token present, attempting direct Anthropic call with ${claudeApiModel} (skipping racing)`,
+        { request_id: requestId, agent_id: agentId, call_site: callSite },
+      );
       // Resolve pool for stall fallback (racing needs the model pool)
       const fallbackPool = MODEL_POOLS[poolName] || MODEL_POOLS['rose-1-lite'];
       try {
         if (stream) {
           return await handleStreaming(
-            claudeActualModel,  // actual_model reported in SSE — maps to $0 pricing
+            claudeActualModel, // actual_model reported in SSE — maps to $0 pricing
             messages,
             temperature,
             maxTokens,
@@ -4795,33 +5553,60 @@ serve(async (req) => {
             '', // openRouterKey not needed
             supabaseUrl,
             model,
-            false,  // isCerebras
+            false, // isCerebras
             'claude-token',
             1,
-            { token: claude_token },  // claudeAuth
-            !!skip_cache,  // skipCache
+            { token: claude_token }, // claudeAuth
+            !!skip_cache, // skipCache
             {
               timeoutMs: 60000,
               onFallback: async () => {
-                slog('info', `[${requestId}] Stall fallback: starting model racing`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+                slog('info', `[${requestId}] Stall fallback: starting model racing`, {
+                  request_id: requestId,
+                  agent_id: agentId,
+                  call_site: callSite,
+                });
                 const openRouterKey = Deno.env.get('OPENROUTER_API_KEY')!;
                 const { latencies } = await getCachedLatencies(supabase, poolName, fallbackPool);
                 const racingTrio = selectRacingTrio(fallbackPool, latencies);
                 const timings: Record<string, number> = {};
                 const { model: winningModel, reader, firstData } = await raceModels(
-                  racingTrio, messages, temperature, maxTokens, seed,
-                  tools, tool_choice, response_format, cappedReasoning,
-                  openRouterKey, supabaseUrl, supabase, poolName, timings
+                  racingTrio,
+                  messages,
+                  temperature,
+                  maxTokens,
+                  seed,
+                  tools,
+                  tool_choice,
+                  response_format,
+                  cappedReasoning,
+                  openRouterKey,
+                  supabaseUrl,
+                  supabase,
+                  poolName,
+                  timings,
                 );
-                slog('info', `[${requestId}] Stall fallback: racing winner is ${winningModel}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-                return { reader, firstData, actualModel: winningModel, poolName, poolSize: fallbackPool.length };
-              }
-            }
+                slog('info', `[${requestId}] Stall fallback: racing winner is ${winningModel}`, {
+                  request_id: requestId,
+                  agent_id: agentId,
+                  call_site: callSite,
+                });
+                return {
+                  reader,
+                  firstData,
+                  actualModel: winningModel,
+                  poolName,
+                  poolSize: fallbackPool.length,
+                };
+              },
+            },
           );
         } else {
           // Non-streaming claude token path
           const modelMessages = getMessagesForModel(messages, claudePassthroughModel);
-          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(modelMessages);
+          const { system, messages: anthropicMessages } = transformMessagesForAnthropic(
+            modelMessages,
+          );
 
           const anthropicBody: any = {
             model: claudeApiModel,
@@ -4832,12 +5617,23 @@ serve(async (req) => {
             if (skip_cache) {
               anthropicBody.system = [{ type: 'text', text: system }];
             } else {
-              anthropicBody.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+              anthropicBody.system = [{
+                type: 'text',
+                text: system,
+                cache_control: { type: 'ephemeral' },
+              }];
             }
           }
           // Claude OAuth tokens require the first system block to be a recognized identity string
-          const identityBlock = { type: 'text', text: "You are a Claude agent, built on Anthropic's Claude Agent SDK." };
-          const disclaimerBlock = { type: 'text', text: 'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.' };
+          const identityBlock = {
+            type: 'text',
+            text: "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+          };
+          const disclaimerBlock = {
+            type: 'text',
+            text:
+              'Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.',
+          };
           if (anthropicBody.system) {
             anthropicBody.system.unshift(identityBlock, disclaimerBlock);
           } else {
@@ -4846,14 +5642,27 @@ serve(async (req) => {
           if (temperature !== undefined) anthropicBody.temperature = temperature;
           anthropicBody.thinking = { type: 'adaptive' };
 
-          const nativeToolMode = applyAnthropicToolConfig(anthropicBody, response_format, true, tools, tool_choice);
+          const nativeToolMode = applyAnthropicToolConfig(
+            anthropicBody,
+            response_format,
+            true,
+            tools,
+            tool_choice,
+          );
 
-          slog('info', `[${requestId}] Non-streaming claude token${nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog(
+            'info',
+            `[${requestId}] Non-streaming claude token${
+              nativeToolMode ? ` (native tools: ${anthropicBody.tools.length})` : ''
+            }`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
 
           const nsHeaders = {
             'Authorization': `Bearer ${claude_token}`,
             'anthropic-version': '2023-06-01',
-            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
+            'anthropic-beta':
+              'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24',
             'x-app': 'cli',
             'User-Agent': 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)',
             'content-type': 'application/json',
@@ -4864,30 +5673,51 @@ serve(async (req) => {
           let lastNsError: Error | null = null;
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
-              response = await fetch(ANTHROPIC_API_URL, { method: 'POST', headers: nsHeaders, body: nsBody });
+              response = await fetch(ANTHROPIC_API_URL, {
+                method: 'POST',
+                headers: nsHeaders,
+                body: nsBody,
+              });
               if (response.ok) break;
               if (response.status === 429) {
                 const retryAfterRaw = response.headers.get('retry-after');
                 const delayMs = Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000);
-                slog('warn', `[${requestId}] Non-streaming 429, retrying in ${delayMs}ms (attempt ${attempt + 1}/3)`);
-                await new Promise(r => setTimeout(r, delayMs));
+                slog(
+                  'warn',
+                  `[${requestId}] Non-streaming 429, retrying in ${delayMs}ms (attempt ${
+                    attempt + 1
+                  }/3)`,
+                );
+                await new Promise((r) => setTimeout(r, delayMs));
                 continue;
               }
               if (response.status >= 500) {
                 const delayMs = Math.min(2 ** attempt * 1000, 5000);
-                slog('warn', `[${requestId}] Non-streaming ${response.status}, retrying in ${delayMs}ms (attempt ${attempt + 1}/3)`);
-                await new Promise(r => setTimeout(r, delayMs));
+                slog(
+                  'warn',
+                  `[${requestId}] Non-streaming ${response.status}, retrying in ${delayMs}ms (attempt ${
+                    attempt + 1
+                  }/3)`,
+                );
+                await new Promise((r) => setTimeout(r, delayMs));
                 continue;
               }
               // 4xx (non-429) = don't retry
               const errorText = await response.text();
-              throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+              throw new Error(
+                `Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`,
+              );
             } catch (e: any) {
               lastNsError = e;
               if (attempt < 2 && !e.message?.startsWith('Anthropic API error:')) {
                 const delayMs = Math.min(2 ** attempt * 1000, 5000);
-                slog('warn', `[${requestId}] Non-streaming fetch error, retrying in ${delayMs}ms (attempt ${attempt + 1}/3): ${e.message}`);
-                await new Promise(r => setTimeout(r, delayMs));
+                slog(
+                  'warn',
+                  `[${requestId}] Non-streaming fetch error, retrying in ${delayMs}ms (attempt ${
+                    attempt + 1
+                  }/3): ${e.message}`,
+                );
+                await new Promise((r) => setTimeout(r, delayMs));
                 continue;
               }
               throw e;
@@ -4896,7 +5726,9 @@ serve(async (req) => {
           if (!response || !response.ok) {
             if (response) {
               const errorText = await response.text();
-              throw new Error(`Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`);
+              throw new Error(
+                `Anthropic API error: ${response.status} - ${errorText.slice(0, 200)}`,
+              );
             }
             throw lastNsError || new Error('Anthropic API request failed after retries');
           }
@@ -4923,20 +5755,32 @@ serve(async (req) => {
               if (parsed && typeof parsed === 'object' && 'response' in parsed) {
                 // Model output JSON as text — pass through, merge native tools if any
                 if (toolUseBlocks.length > 0) {
-                  const nativeTools = toolUseBlocks.map(t => ({ tool: t.name, ...t.input }));
+                  const nativeTools = toolUseBlocks.map((t) => ({ tool: t.name, ...t.input }));
                   parsed.tool_calls = [...(parsed.tool_calls || []), ...nativeTools];
                   reconstructedJson = JSON.stringify(parsed);
                 } else {
                   reconstructedJson = textContent;
                 }
-                slog('info', `[${requestId}] Native tool JSON passthrough: ${toolUseBlocks.length} native tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+                slog(
+                  'info',
+                  `[${requestId}] Native tool JSON passthrough: ${toolUseBlocks.length} native tool(s), response length: ${textContent.length}`,
+                  { request_id: requestId, agent_id: agentId, call_site: callSite },
+                );
               } else {
                 reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
-                slog('info', `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+                slog(
+                  'info',
+                  `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`,
+                  { request_id: requestId, agent_id: agentId, call_site: callSite },
+                );
               }
             } catch {
               reconstructedJson = reconstructAgentResponse(textContent, toolUseBlocks);
-              slog('info', `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+              slog(
+                'info',
+                `[${requestId}] Native tool response reconstructed: ${toolUseBlocks.length} tool(s), response length: ${textContent.length}`,
+                { request_id: requestId, agent_id: agentId, call_site: callSite },
+              );
             }
 
             const finalResponse = {
@@ -4954,10 +5798,16 @@ serve(async (req) => {
               pool_size: 1,
             };
 
-            slog('info', `[${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+            slog(
+              'info',
+              `[${requestId}] Non-streaming cache metrics: cache_read=${
+                apiUsage.cache_read_input_tokens || 0
+              }, cache_write=${apiUsage.cache_creation_input_tokens || 0}`,
+              { request_id: requestId, agent_id: agentId, call_site: callSite },
+            );
 
             return new Response(JSON.stringify(finalResponse), {
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
               status: 200,
             });
           }
@@ -4993,10 +5843,16 @@ serve(async (req) => {
             pool_size: 1,
           };
 
-          slog('info', `[${requestId}] Non-streaming cache metrics: cache_read=${apiUsage.cache_read_input_tokens || 0}, cache_write=${apiUsage.cache_creation_input_tokens || 0}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+          slog(
+            'info',
+            `[${requestId}] Non-streaming cache metrics: cache_read=${
+              apiUsage.cache_read_input_tokens || 0
+            }, cache_write=${apiUsage.cache_creation_input_tokens || 0}`,
+            { request_id: requestId, agent_id: agentId, call_site: callSite },
+          );
 
           return new Response(JSON.stringify(finalResponse), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             status: 200,
           });
         }
@@ -5015,25 +5871,43 @@ serve(async (req) => {
         } else {
           claudeTokenError = 'server_error';
         }
-        slog('warn', `[${requestId}] Claude token call failed (${claudeTokenError}), falling back to racing: ${error}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+        slog(
+          'warn',
+          `[${requestId}] Claude token call failed (${claudeTokenError}), falling back to racing: ${error}`,
+          { request_id: requestId, agent_id: agentId, call_site: callSite },
+        );
         // Fall through to normal racing path
       }
     }
 
     // Check if it's a direct model passthrough (for testing)
-    const DIRECT_MODEL_PREFIXES = ['openai/', 'google/', 'anthropic/', 'deepseek/', 'qwen/', 'x-ai/', 'meta/', 'moonshotai/'];
-    const isDirectModel = DIRECT_MODEL_PREFIXES.some(prefix => model.toLowerCase().startsWith(prefix));
-    
+    const DIRECT_MODEL_PREFIXES = [
+      'openai/',
+      'google/',
+      'anthropic/',
+      'deepseek/',
+      'qwen/',
+      'x-ai/',
+      'meta/',
+      'moonshotai/',
+    ];
+    const isDirectModel = DIRECT_MODEL_PREFIXES.some((prefix) =>
+      model.toLowerCase().startsWith(prefix)
+    );
+
     const pool = MODEL_POOLS[poolName];
     if (!pool && !isDirectModel) {
-      return new Response(JSON.stringify({ 
-        error: `Unknown model: ${model}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'` 
-      }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      });
+      return new Response(
+        JSON.stringify({
+          error: `Unknown model: ${model}. Use 'rose-labs/rose-1-lite' or 'rose-labs/rose-1-ultra'`,
+        }),
+        {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 400,
+        },
+      );
     }
-    
+
     // Handle direct model passthrough (bypass racing)
     if (isDirectModel) {
       slog('info', `Direct model passthrough: ${model}`);
@@ -5051,15 +5925,15 @@ serve(async (req) => {
           Deno.env.get('OPENROUTER_API_KEY')!,
           supabaseUrl,
           model,
-          false,  // isCerebras
+          false, // isCerebras
           'direct',
-          1
+          1,
         );
       }
       // Non-streaming direct passthrough - handle here instead of falling through
       // Transform messages for vision models
       const modelMessages = getMessagesForModel(messages, model);
-      
+
       const requestBody: any = {
         model,
         messages: modelMessages,
@@ -5069,43 +5943,46 @@ serve(async (req) => {
         tools,
         tool_choice,
       };
-      
+
       if (response_format) {
         requestBody.response_format = response_format;
       }
-      
+
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': supabaseUrl,
-          'X-Title': 'Rose Direct Passthrough'
+          'X-Title': 'Rose Direct Passthrough',
         },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify(requestBody),
       });
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         slog('error', 'OpenRouter API error:', { data: [response.status, errorText] });
-        return new Response(JSON.stringify({ 
-          error: 'OpenRouter API error',
-          status: response.status,
-          details: errorText 
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: response.status,
-        });
+        return new Response(
+          JSON.stringify({
+            error: 'OpenRouter API error',
+            status: response.status,
+            details: errorText,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: response.status,
+          },
+        );
       }
-      
+
       const finalResponse = await response.json();
       finalResponse.requested_model = model;
       finalResponse.actual_model = model;
       finalResponse.pool_name = 'direct';
       finalResponse.pool_size = 1;
-      
+
       return new Response(JSON.stringify(finalResponse), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 200,
       });
     }
@@ -5121,12 +5998,15 @@ serve(async (req) => {
       try {
         selection = selectModel(model, model_seed, model_preference as ModelPreference | undefined);
       } catch (error) {
-        return new Response(JSON.stringify({ 
-          error: error instanceof Error ? error.message : 'Invalid model' 
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 400,
-        });
+        return new Response(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : 'Invalid model',
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 400,
+          },
+        );
       }
 
       if (stream) {
@@ -5146,11 +6026,13 @@ serve(async (req) => {
           selection.isCerebras,
           selection.poolName,
           selection.poolSize,
-          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          undefined,
+          undefined,
+          undefined, // claudeAuth, skipCache, stallConfig
           claudeTokenError,
         );
       }
-      
+
       // Non-streaming with legacy selection
       selectedModel = selection.model;
       selectedIsCerebras = selection.isCerebras;
@@ -5159,14 +6041,14 @@ serve(async (req) => {
     // ============================================
     // TRIO RACING MODE (default for streaming)
     // ============================================
-    
+
     // Check if conversation already has a model selected
     let shouldRepinConversationModel = false;
     if (conversation_id && !selectedModel) {
       const existingModel = await getConversationModel(supabase, conversation_id);
       if (existingModel && pool.includes(existingModel)) {
         slog('info', `Using existing model for conversation: ${existingModel}`);
-        
+
         if (stream) {
           return await handleStreaming(
             existingModel,
@@ -5184,11 +6066,13 @@ serve(async (req) => {
             false, // Not Cerebras
             poolName,
             pool.length,
-            undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+            undefined,
+            undefined,
+            undefined, // claudeAuth, skipCache, stallConfig
             claudeTokenError,
           );
         }
-        
+
         selectedModel = existingModel;
         selectedIsCerebras = false;
       } else if (existingModel) {
@@ -5209,10 +6093,15 @@ serve(async (req) => {
       if (response_format) {
         const toolCount = countToolTypes(response_format);
         if (toolCount >= ANTHROPIC_MAX_ANYOF_BRANCHES + 1) {
-          const anthropicModels = pool.filter(m => isAnthropicModel(m));
+          const anthropicModels = pool.filter((m) => isAnthropicModel(m));
           if (anthropicModels.length > 0) {
-            slog('info', `Schema has ${toolCount} tool types (limit: ${ANTHROPIC_MAX_ANYOF_BRANCHES}), excluding Anthropic models: ${anthropicModels.join(', ')}`);
-            effectivePool = pool.filter(m => !isAnthropicModel(m));
+            slog(
+              'info',
+              `Schema has ${toolCount} tool types (limit: ${ANTHROPIC_MAX_ANYOF_BRANCHES}), excluding Anthropic models: ${
+                anthropicModels.join(', ')
+              }`,
+            );
+            effectivePool = pool.filter((m) => !isAnthropicModel(m));
           }
         }
       }
@@ -5224,10 +6113,13 @@ serve(async (req) => {
       }
 
       if (effectivePool.length === 0) {
-        return new Response(JSON.stringify({ error: 'No eligible models in pool after filtering' }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: 500,
-        });
+        return new Response(
+          JSON.stringify({ error: 'No eligible models in pool after filtering' }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: 500,
+          },
+        );
       }
 
       // ===== WATERFALL MODE =====
@@ -5265,17 +6157,30 @@ serve(async (req) => {
 
       // Get cached latencies for this pool
       const cacheStartTime = Date.now();
-      const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(supabase, poolName, pool);
+      const { latencies: cachedLatencies, needsRefresh, missingModels } = await getCachedLatencies(
+        supabase,
+        poolName,
+        pool,
+      );
       timings.cache_lookup_ms = Date.now() - cacheStartTime;
       slog('info', `TIMING: cache_lookup=${timings.cache_lookup_ms}ms`);
 
       // If cache is stale/missing, fire latency probes in PARALLEL with the race
       // Probes use a standard test prompt, not the user's messages
-      let probePromise: Promise<void> | null = null;
+      let _probePromise: Promise<void> | null = null;
       if (needsRefresh && missingModels.length > 0) {
-        slog('info', `Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`);
+        slog(
+          'info',
+          `Cache needs refresh, firing probes in parallel for: ${missingModels.join(', ')}`,
+        );
         // Fire probes in background - don't await, let them run alongside the race
-        probePromise = fireLatencyProbes(missingModels, poolName, openRouterKey, supabaseUrl, supabase);
+        _probePromise = fireLatencyProbes(
+          missingModels,
+          poolName,
+          openRouterKey,
+          supabaseUrl,
+          supabase,
+        );
         timings.probes_fired = missingModels.length;
       } else {
         timings.probes_fired = 0;
@@ -5286,23 +6191,23 @@ serve(async (req) => {
       const racingTrio = selectRacingTrio(effectivePool, cachedLatencies);
       timings.trio_select_ms = Date.now() - trioSelectStart;
       slog('info', `TIMING: trio_select=${timings.trio_select_ms}ms`);
-      
+
       if (racingTrio.length === 0) {
         return new Response(JSON.stringify({ error: 'No eligible models in pool' }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           status: 500,
         });
       }
-      
+
       // If only one model eligible, skip racing
       if (racingTrio.length === 1) {
         const singleModel = racingTrio[0].model;
         slog('info', `Single model eligible, skipping race: ${singleModel}`);
-        
+
         if (conversation_id) {
           await saveConversationModel(supabase, conversation_id, singleModel, poolName);
         }
-        
+
         return await handleStreaming(
           singleModel,
           messages,
@@ -5319,17 +6224,22 @@ serve(async (req) => {
           false,
           poolName,
           pool.length,
-          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          undefined,
+          undefined,
+          undefined, // claudeAuth, skipCache, stallConfig
           claudeTokenError,
         );
       }
-      
+
       // Race the trio!
       try {
         const raceCallStart = Date.now();
         timings.race_call_start_ms = raceCallStart - raceStartTime;
-        slog('info', `TIMING: race_call_start=${timings.race_call_start_ms}ms (time before raceModels)`);
-        
+        slog(
+          'info',
+          `TIMING: race_call_start=${timings.race_call_start_ms}ms (time before raceModels)`,
+        );
+
         const { model: winningModel, reader: winningReader, ttftMs, firstData } = await raceModels(
           racingTrio,
           messages,
@@ -5344,25 +6254,28 @@ serve(async (req) => {
           supabaseUrl,
           supabase,
           poolName,
-          timings
+          timings,
         );
-        
+
         timings.race_complete_ms = Date.now() - raceStartTime;
         timings.race_duration_ms = Date.now() - raceCallStart;
-        slog('info', `TIMING: race_complete=${timings.race_complete_ms}ms, race_duration=${timings.race_duration_ms}ms`);
-        
+        slog(
+          'info',
+          `TIMING: race_complete=${timings.race_complete_ms}ms, race_duration=${timings.race_duration_ms}ms`,
+        );
+
         // Save winning model for conversation
         if (conversation_id) {
           await saveConversationModel(supabase, conversation_id, winningModel, poolName);
         }
-        
+
         // Stream the winning response to client
         const encoder = new TextEncoder();
         const modelsRaced = racingTrio.length;
         const streamStartTime = Date.now();
         timings.stream_start_ms = streamStartTime - raceStartTime;
         slog('info', `TIMING: stream_start=${timings.stream_start_ms}ms`);
-        
+
         const stream = new ReadableStream({
           async start(controller) {
             try {
@@ -5411,7 +6324,10 @@ serve(async (req) => {
                           anthropicInputTokens = msgUsage.input_tokens || 0;
                           anthropicCacheCreationTokens = msgUsage.cache_creation_input_tokens || 0;
                           anthropicCacheReadTokens = msgUsage.cache_read_input_tokens || 0;
-                          slog('info', `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`);
+                          slog(
+                            'info',
+                            `Anthropic input_tokens=${anthropicInputTokens}, cache_read=${anthropicCacheReadTokens}, cache_write=${anthropicCacheCreationTokens}`,
+                          );
                         }
                         return;
                       }
@@ -5433,8 +6349,8 @@ serve(async (req) => {
                         choices: [{
                           index: 0,
                           delta: {
-                            content: parsed.delta?.text || parsed.delta?.partial_json || ''
-                          }
+                            content: parsed.delta?.text || parsed.delta?.partial_json || '',
+                          },
                         }],
                         requested_model: model,
                         actual_model: winningModel,
@@ -5491,9 +6407,15 @@ serve(async (req) => {
 
                       // Adjust prompt_tokens to Anthropic semantics (exclude cached tokens)
                       // OpenRouter prompt_tokens is total (incl cached); Anthropic is non-cached only
-                      parsed.usage.prompt_tokens = Math.max(0, parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens);
+                      parsed.usage.prompt_tokens = Math.max(
+                        0,
+                        parsed.usage.prompt_tokens - cachedTokens - cacheWriteTokens,
+                      );
 
-                      slog('info', `Cache translated: read=${cachedTokens}, write=${cacheWriteTokens}, uncached=${parsed.usage.prompt_tokens}`);
+                      slog(
+                        'info',
+                        `Cache translated: read=${cachedTokens}, write=${cacheWriteTokens}, uncached=${parsed.usage.prompt_tokens}`,
+                      );
                     }
 
                     // Adjust usage to reflect TRUE cost (all racing models consumed input tokens)
@@ -5501,15 +6423,19 @@ serve(async (req) => {
                       const winnerPromptTokens = parsed.usage.prompt_tokens;
                       const winnerCompletionTokens = parsed.usage.completion_tokens || 0;
                       parsed.usage.prompt_tokens = winnerPromptTokens * modelsRaced;
-                      parsed.usage.total_tokens = parsed.usage.prompt_tokens + winnerCompletionTokens;
+                      parsed.usage.total_tokens = parsed.usage.prompt_tokens +
+                        winnerCompletionTokens;
                       // Preserve cache fields (NOT multiplied — only winner had cache hits)
                       // cache_read_input_tokens and cache_creation_input_tokens stay as-is
-                      slog('info', `Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`);
+                      slog(
+                        'info',
+                        `Usage adjusted: ${winnerPromptTokens} input × ${modelsRaced} models = ${parsed.usage.prompt_tokens} total input tokens`,
+                      );
                     }
 
                     const payload = `data: ${JSON.stringify(parsed)}\n\n`;
                     controller.enqueue(encoder.encode(payload));
-                  } catch (e) {
+                  } catch (_e) {
                     controller.enqueue(encoder.encode(`${line}\n`));
                   }
                 }
@@ -5527,14 +6453,17 @@ serve(async (req) => {
 
                 if (done) {
                   // For Anthropic models, emit final usage chunk before [DONE]
-                  if (isAnthropicModel(winningModel) && (anthropicInputTokens > 0 || anthropicOutputTokens > 0)) {
+                  if (
+                    isAnthropicModel(winningModel) &&
+                    (anthropicInputTokens > 0 || anthropicOutputTokens > 0)
+                  ) {
                     // Adjust for racing - all models consumed input tokens
                     const adjustedInputTokens = anthropicInputTokens * modelsRaced;
                     const usageChunk = {
                       choices: [{
                         index: 0,
                         delta: {},
-                        finish_reason: 'stop'
+                        finish_reason: 'stop',
                       }],
                       usage: {
                         prompt_tokens: adjustedInputTokens,
@@ -5554,7 +6483,10 @@ serve(async (req) => {
                     };
                     const payload = `data: ${JSON.stringify(usageChunk)}\n\n`;
                     controller.enqueue(encoder.encode(payload));
-                    slog('info', `Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`);
+                    slog(
+                      'info',
+                      `Anthropic usage adjusted: ${anthropicInputTokens} input × ${modelsRaced} models = ${adjustedInputTokens} total input tokens`,
+                    );
                   }
                   const donePayload = 'data: [DONE]\n\n';
                   controller.enqueue(encoder.encode(donePayload));
@@ -5573,7 +6505,7 @@ serve(async (req) => {
               slog('error', 'Streaming race winner error:', { data: error });
               controller.error(error);
             }
-          }
+          },
         });
 
         return new Response(stream, {
@@ -5584,14 +6516,13 @@ serve(async (req) => {
             'Connection': 'keep-alive',
           },
         });
-        
       } catch (error) {
         slog('error', 'Trio racing failed:', { data: error });
-        
+
         // Fallback to random model
         const fallbackModel = pool[Math.floor(Math.random() * pool.length)];
         slog('info', `Falling back to random model: ${fallbackModel}`);
-        
+
         return await handleStreaming(
           fallbackModel,
           messages,
@@ -5608,12 +6539,14 @@ serve(async (req) => {
           false,
           poolName,
           pool.length,
-          undefined, undefined, undefined,  // claudeAuth, skipCache, stallConfig
+          undefined,
+          undefined,
+          undefined, // claudeAuth, skipCache, stallConfig
           claudeTokenError,
         );
       }
     }
-    
+
     // For non-streaming, use selected model or pick random from pool
     const actualModel = selectedModel || pool[Math.floor(Math.random() * pool.length)];
     const isCerebras = selectedIsCerebras;
@@ -5629,10 +6562,10 @@ serve(async (req) => {
     let totalCompletionTokens = 0;
 
     // Helper function to make API call to appropriate provider
-    async function makeApiCall(body: any): Promise<globalThis.Response> {
+    const makeApiCall = async (body: any): Promise<globalThis.Response> => {
       if (isCerebras) {
         slog('info', `Calling Cerebras API with model: ${actualModel}`);
-        
+
         // Build Cerebras request body - Cerebras is OpenAI-compatible but doesn't support some params
         // See: https://inference-docs.cerebras.ai/resources/openai
         const cerebrasBody: any = {
@@ -5642,7 +6575,7 @@ serve(async (req) => {
           max_tokens: body.max_tokens,
           seed: body.seed,
         };
-        
+
         // Add tools if provided - Cerebras supports tool calling
         // See: https://inference-docs.cerebras.ai/capabilities/tool-use
         if (body.tools && body.tools.length > 0) {
@@ -5652,36 +6585,42 @@ serve(async (req) => {
         if (body.tool_choice) {
           cerebrasBody.tool_choice = body.tool_choice;
         }
-        
+
         // Add response_format if provided - Cerebras supports structured outputs
         // See: https://inference-docs.cerebras.ai/capabilities/structured-outputs
         // Important: Cerebras requires additionalProperties: false for all objects with required
         if (body.response_format) {
           // Transform schema to be Cerebras-compatible
-          if (body.response_format.type === 'json_schema' && body.response_format.json_schema?.schema) {
-            const transformedSchema = transformSchemaForCerebras(body.response_format.json_schema.schema);
+          if (
+            body.response_format.type === 'json_schema' && body.response_format.json_schema?.schema
+          ) {
+            const transformedSchema = transformSchemaForCerebras(
+              body.response_format.json_schema.schema,
+            );
             cerebrasBody.response_format = {
               type: 'json_schema',
               json_schema: {
                 name: body.response_format.json_schema.name || 'response',
                 strict: true,
-                schema: transformedSchema
-              }
+                schema: transformedSchema,
+              },
             };
           } else {
             cerebrasBody.response_format = body.response_format;
           }
         }
-        
-        slog('info', `Cerebras request body:`, { data: JSON.stringify(truncateForLogging(cerebrasBody), null, 2) });
-        
+
+        slog('info', `Cerebras request body:`, {
+          data: JSON.stringify(truncateForLogging(cerebrasBody), null, 2),
+        });
+
         return await fetch(CEREBRAS_API_URL, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${Deno.env.get('CEREBRAS_API_KEY')}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(cerebrasBody)
+          body: JSON.stringify(cerebrasBody),
         });
       } else {
         return await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -5690,18 +6629,18 @@ serve(async (req) => {
             'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
             'Content-Type': 'application/json',
             'HTTP-Referer': supabaseUrl,
-            'X-Title': 'Rose Benchmark Suite'
+            'X-Title': 'Rose Benchmark Suite',
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
         });
       }
-    }
+    };
 
     if (cotSteps === 1) {
       // Direct answer (no CoT)
       // Transform messages for vision models (handles __screenshot_base64__)
       const modelMessages = getMessagesForModel(messages, actualModel);
-      
+
       const requestBody: any = {
         model: actualModel,
         messages: modelMessages,
@@ -5711,12 +6650,12 @@ serve(async (req) => {
         tools,
         tool_choice,
       };
-      
+
       // Add response_format if provided
       if (response_format) {
         requestBody.response_format = response_format;
       }
-      
+
       // Add other params only for non-Cerebras (some params like parallel_tool_calls cause 400 on Cerebras)
       if (!isCerebras) {
         Object.assign(requestBody, otherParams);
@@ -5729,31 +6668,33 @@ serve(async (req) => {
         const provider = isCerebras ? 'Cerebras' : 'OpenRouter';
         slog('error', `${provider} API error:`, { data: [apiResponse.status, errorText] });
         slog('error', `Request body was:`, { data: JSON.stringify(requestBody, null, 2) });
-        
+
         // Try to parse error for more details
         let errorDetails = errorText;
         try {
           const errorJson = JSON.parse(errorText);
           errorDetails = JSON.stringify(errorJson, null, 2);
           slog('error', `${provider} error details:`, { data: errorJson });
-        } catch (e) {
+        } catch (_e) {
           // errorText is not JSON, keep as-is
         }
-        
-        return new Response(JSON.stringify({ 
-          error: `${provider} API error`,
-          status: apiResponse.status,
-          details: errorDetails 
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: apiResponse.status,
-        });
+
+        return new Response(
+          JSON.stringify({
+            error: `${provider} API error`,
+            status: apiResponse.status,
+            details: errorDetails,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: apiResponse.status,
+          },
+        );
       }
 
       finalResponse = await apiResponse.json();
       totalPromptTokens = finalResponse.usage?.prompt_tokens || 0;
       totalCompletionTokens = finalResponse.usage?.completion_tokens || 0;
-
     } else {
       // Multi-step CoT (tool calls not supported with CoT currently)
       // Transform messages for vision models (handles __screenshot_base64__)
@@ -5765,8 +6706,12 @@ serve(async (req) => {
       // Thinking steps (N-1 steps)
       for (let i = 0; i < cotSteps - 1; i++) {
         const thinkingPrompt = {
-          role: "system",
-          content: `Think step by step. You have ${cotSteps - 1} thinking steps before giving your final answer. This is thinking step ${i + 1}. Show your reasoning.`
+          role: 'system',
+          content: `Think step by step. You have ${
+            cotSteps - 1
+          } thinking steps before giving your final answer. This is thinking step ${
+            i + 1
+          }. Show your reasoning.`,
         };
 
         const stepMessages = [...thinkingMessages, thinkingPrompt];
@@ -5781,19 +6726,24 @@ serve(async (req) => {
 
         if (!stepResponse.ok) {
           const errorText = await stepResponse.text();
-          slog('error', `${provider} API error in CoT step:`, { data: [stepResponse.status, errorText] });
-          return new Response(JSON.stringify({ 
-            error: `${provider} API error in CoT step`,
-            details: errorText 
-          }), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-            status: stepResponse.status,
+          slog('error', `${provider} API error in CoT step:`, {
+            data: [stepResponse.status, errorText],
           });
+          return new Response(
+            JSON.stringify({
+              error: `${provider} API error in CoT step`,
+              details: errorText,
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              status: stepResponse.status,
+            },
+          );
         }
 
         const stepData = await stepResponse.json();
         intermediateResponses.push(stepData);
-        
+
         // Add assistant's thinking to context
         if (stepData.choices?.[0]?.message) {
           thinkingMessages.push(stepData.choices[0].message);
@@ -5805,8 +6755,8 @@ serve(async (req) => {
 
       // Final answer step
       const finalPrompt = {
-        role: "system",
-        content: "Based on your thinking above, now provide your final answer."
+        role: 'system',
+        content: 'Based on your thinking above, now provide your final answer.',
       };
       const finalMessages = [...thinkingMessages, finalPrompt];
 
@@ -5820,14 +6770,19 @@ serve(async (req) => {
 
       if (!finalApiResponse.ok) {
         const errorText = await finalApiResponse.text();
-        slog('error', `${provider} API error in final step:`, { data: [finalApiResponse.status, errorText] });
-        return new Response(JSON.stringify({ 
-          error: `${provider} API error in final step`,
-          details: errorText 
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-          status: finalApiResponse.status,
+        slog('error', `${provider} API error in final step:`, {
+          data: [finalApiResponse.status, errorText],
         });
+        return new Response(
+          JSON.stringify({
+            error: `${provider} API error in final step`,
+            details: errorText,
+          }),
+          {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            status: finalApiResponse.status,
+          },
+        );
       }
 
       finalResponse = await finalApiResponse.json();
@@ -5848,36 +6803,65 @@ serve(async (req) => {
     const costCents = calculateCost(totalPromptTokens, totalCompletionTokens, actualModel);
 
     // Log usage
-    await logUsage(supabase, authInfo.apiKeyId, authInfo.userId, {
-      model,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      seed,
-      tools,
-      tool_choice,
-      cot_steps: cotSteps
-    }, finalResponse, costCents, cotSteps);
+    await logUsage(
+      supabase,
+      authInfo.apiKeyId,
+      authInfo.userId,
+      {
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens,
+        seed,
+        tools,
+        tool_choice,
+        cot_steps: cotSteps,
+      },
+      finalResponse,
+      costCents,
+      cotSteps,
+    );
 
     // Return response
-    slog('info', `[${requestId}] Chat completion success: model=${actualModel}, tokens=${totalPromptTokens + totalCompletionTokens}`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-    slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
+    slog(
+      'info',
+      `[${requestId}] Chat completion success: model=${actualModel}, tokens=${
+        totalPromptTokens + totalCompletionTokens
+      }`,
+      { request_id: requestId, agent_id: agentId, call_site: callSite },
+    );
+    slog('info', `[${requestId}] ========== REQUEST END (success) ==========\n`, {
+      request_id: requestId,
+      agent_id: agentId,
+      call_site: callSite,
+    });
     return new Response(JSON.stringify(finalResponse), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
     });
-
   } catch (error) {
-    slog('error', `[${requestId}] Rose completions endpoint error:`, { data: error , request_id: requestId, agent_id: agentId, call_site: callSite });
-    slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, { request_id: requestId, agent_id: agentId, call_site: callSite });
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({
-      error: 'Internal server error',
-      details: errorMessage,
+    slog('error', `[${requestId}] Rose completions endpoint error:`, {
+      data: error,
       request_id: requestId,
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 500,
+      agent_id: agentId,
+      call_site: callSite,
     });
+    slog('info', `[${requestId}] ========== REQUEST END (error) ==========\n`, {
+      request_id: requestId,
+      agent_id: agentId,
+      call_site: callSite,
+    });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return new Response(
+      JSON.stringify({
+        error: 'Internal server error',
+        details: errorMessage,
+        request_id: requestId,
+      }),
+      {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 500,
+      },
+    );
   }
 });
