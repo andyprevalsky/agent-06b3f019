@@ -14,19 +14,89 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
-export BACKEND_PORT=$CONDUCTOR_PORT
-export FRONTEND_PORT=$(($BACKEND_PORT + 1))
-export HEALTH_PORT=$(($BACKEND_PORT + 2))
-export RESEARCH_PORT=$(($BACKEND_PORT + 3))
-export SDK_METRICS_PORT=$(($BACKEND_PORT + 5))
-export BACKEND_API_URL=http://localhost:$BACKEND_PORT
-export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
-export BACKEND_URL=http://localhost:$BACKEND_PORT
-export MAC_APP_PORT=$(($BACKEND_PORT + 4))
-export ALLOWED_ORIGINS=http://localhost:$FRONTEND_PORT,http://localhost:$MAC_APP_PORT
-export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
+# Assign ports from a base port. Uses offsets 0-5 and +10 (11 ports total in range base..base+10).
+assign_ports() {
+    local base=$1
+    export BACKEND_PORT=$base
+    export FRONTEND_PORT=$((base + 1))
+    export HEALTH_PORT=$((base + 2))
+    export RESEARCH_PORT=$((base + 3))
+    export MAC_APP_PORT=$((base + 4))
+    export SDK_METRICS_PORT=$((base + 5))
+    export LOCAL_DB_PORT=$((base + 10))
+    export BACKEND_API_URL=http://localhost:$BACKEND_PORT
+    export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
+    export BACKEND_URL=http://localhost:$BACKEND_PORT
+    export ALLOWED_ORIGINS=http://localhost:$FRONTEND_PORT,http://localhost:$MAC_APP_PORT
+}
 
-export LOCAL_DB_PORT=$(($BACKEND_PORT + 10))
+# Check if a port is held by a process from a DIFFERENT worktree (not stale from ours).
+port_held_by_other_worktree() {
+    local port=$1
+    local pids
+    pids=$(lsof -ti :"$port" 2>/dev/null) || true
+    for pid in $pids; do
+        local cmd
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+        # Docker daemon is a single process for all containers — check containers separately below
+        echo "$cmd" | grep -qi docker && continue
+        # Check if it belongs to a different worktree
+        if echo "$cmd" | grep -q "conductor/workspaces" && ! echo "$cmd" | grep -q "$PWD"; then
+            return 0  # yes, foreign process
+        fi
+    done
+    # Check if a Docker container from a DIFFERENT workspace maps to this port
+    local foreign_container
+    foreign_container=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+        | grep ":${port}->" \
+        | grep -v "${CONDUCTOR_WORKSPACE_NAME}" \
+        | head -1 | cut -f1)
+    if [ -n "$foreign_container" ]; then
+        return 0  # foreign Docker container on our port
+    fi
+    return 1  # no foreign process
+}
+
+# Try the Conductor-assigned port first
+assign_ports "$CONDUCTOR_PORT"
+
+# If any port in our range is held by another worktree, find a safe range
+COLLISION=false
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
+    if port_held_by_other_worktree "$port"; then
+        COLLISION=true
+        break
+    fi
+done
+
+if $COLLISION; then
+    echo "⚠️  Port range $CONDUCTOR_PORT collides with another workspace — scanning for free range..."
+    # Scan upward in steps of 20 from the assigned port
+    CANDIDATE=$((CONDUCTOR_PORT + 20))
+    FOUND=false
+    while [ $CANDIDATE -lt 65500 ]; do
+        RANGE_FREE=true
+        for offset in 0 1 2 3 4 5 10; do
+            if lsof -ti :$((CANDIDATE + offset)) >/dev/null 2>&1; then
+                RANGE_FREE=false
+                break
+            fi
+        done
+        if $RANGE_FREE; then
+            FOUND=true
+            break
+        fi
+        CANDIDATE=$((CANDIDATE + 20))
+    done
+    if ! $FOUND; then
+        echo "❌ Could not find a free port range. All ranges 55000-65500 occupied."
+        exit 1
+    fi
+    assign_ports "$CANDIDATE"
+    echo "✅ Reassigned to port range $CANDIDATE"
+fi
+
+export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT research=$RESEARCH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE"
 
 # ── Pre-flight: ensure Docker is running ──
@@ -57,13 +127,9 @@ LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
 export DATABASE_URL="$LOCAL_DB_URL"
 export DIRECT_URL="$LOCAL_DB_URL"
 
-if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    echo "🐘 Local Postgres already running ($DB_CONTAINER)"
-elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    echo "🐘 Starting stopped Postgres container..."
-    docker start "$DB_CONTAINER" >/dev/null
-else
-    echo "🐘 Creating local Postgres container..."
+# Helper: create (or recreate) the Postgres container with the correct port
+create_db_container() {
+    docker rm -f "$DB_CONTAINER" 2>/dev/null || true
     docker run -d \
         --name "$DB_CONTAINER" \
         -e POSTGRES_PASSWORD=postgres \
@@ -71,6 +137,30 @@ else
         -p "$LOCAL_DB_PORT:5432" \
         -v "$DB_VOLUME:/var/lib/postgresql/data" \
         postgres:16-alpine >/dev/null
+}
+
+if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+    # Running — check if port mapping matches
+    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | grep -o '[0-9]*$' || true)
+    if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
+        echo "🐘 Local Postgres already running ($DB_CONTAINER on port $LOCAL_DB_PORT)"
+    else
+        echo "🐘 Postgres container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
+        create_db_container
+    fi
+elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+    # Stopped — check if port mapping matches before starting
+    ACTUAL_PORT=$(docker inspect "$DB_CONTAINER" --format='{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}' 2>/dev/null || true)
+    if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
+        echo "🐘 Starting stopped Postgres container..."
+        docker start "$DB_CONTAINER" >/dev/null
+    else
+        echo "🐘 Stopped container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
+        create_db_container
+    fi
+else
+    echo "🐘 Creating local Postgres container..."
+    create_db_container
 fi
 
 # Wait for Postgres to accept connections
@@ -134,25 +224,60 @@ if [ -f research/supabase/config.toml ] && command -v supabase &>/dev/null && do
     (cd research/supabase && supabase stop 2>/dev/null) || true
 fi
 
-# Pre-flight: kill anything holding our ports from a previous run (skip Docker processes)
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
-    pids=$(lsof -ti :"$port" 2>/dev/null) || true
-    if [ -n "$pids" ]; then
-        # Filter out Docker processes to avoid killing the Docker engine
-        safe_pids=""
-        for pid in $pids; do
-            cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-            if ! echo "$cmd" | grep -qi docker; then
-                safe_pids="$safe_pids $pid"
+# Pre-flight: handle processes on our ports from this worktree.
+# - Healthy instance (has a live run.sh ancestor) → bail, already running
+# - Orphan (parent dead / reparented to PID 1) → kill it, it's leftover from a crash
+# - Unknown process (not from any worktree) → error out
+KILLED_ANY=false
+has_live_runsh_ancestor() {
+    local pid=$1
+    while true; do
+        local ppid
+        ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        local pcmd
+        pcmd=$(ps -p "$ppid" -o command= 2>/dev/null) || return 1
+        echo "$pcmd" | grep -q "scripts/run.sh" && return 0
+        pid=$ppid
+    done
+}
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT; do
+    for pid in $(lsof -ti :"$port" 2>/dev/null); do
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+        echo "$cmd" | grep -qi docker && continue
+        if echo "$cmd" | grep -q "$PWD"; then
+            if has_live_runsh_ancestor "$pid"; then
+                echo "✅ Services already running for this worktree (PID $pid on port $port). Exiting."
+                exit 0
             fi
-        done
-        if [ -n "$safe_pids" ]; then
-            echo "⚠️  Port $port in use — killing stale processes"
-            echo "$safe_pids" | xargs kill -9 2>/dev/null || true
+            echo "⚠️  Killing orphaned process on port $port (PID $pid)"
+            kill -9 "$pid" 2>/dev/null || true
+            KILLED_ANY=true
+            continue
         fi
-    fi
+        echo "❌ Port $port in use by unknown process (PID $pid). Kill it manually or choose a different port range."
+        exit 1
+    done
 done
-pkill -f "$PWD/mac-app/node_modules" 2>/dev/null || true
+# Also kill orphaned processes from this worktree on ANY port (covers port-reassignment case)
+for pattern in \
+    "$PWD/back-end/src/server.ts" \
+    "$PWD/front-end.*vite" \
+    "$PWD/mac-app/node_modules" \
+    "$PWD/agents/scripts/run_local_worker" \
+    "$PWD/research/run-local.sh"; do
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        has_live_runsh_ancestor "$pid" && continue
+        echo "⚠️  Killing orphaned process (PID $pid)"
+        kill -9 "$pid" 2>/dev/null || true
+        KILLED_ANY=true
+    done
+done
+if $KILLED_ANY; then
+    echo -n "   Waiting for ports to free..."
+    sleep 2
+    echo " done"
+fi
 
 PIDS=()
 NAMES=()
@@ -170,25 +295,15 @@ cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
     echo "🛑 Stopping all services..."
-    # Kill tracked PID trees first
+    # Kill only the process trees we spawned
     for pid in "${PIDS[@]}"; do
         kill_tree "$pid"
     done
-    # Stop local Postgres container (data persists in named volume)
+    # Stop containers we manage (data persists in named volumes)
     docker stop "$DB_CONTAINER" 2>/dev/null || true
-    # Stop Supabase containers gracefully
     if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
         (cd research/supabase && supabase stop 2>/dev/null) || true
     fi
-    # Kill anything still holding our ports (skip Docker processes)
-    for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT; do
-        for pid in $(lsof -ti :"$port" 2>/dev/null); do
-            cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
-            echo "$cmd" | grep -qi docker || kill "$pid" 2>/dev/null || true
-        done
-    done
-    # Electron spawns GPU/renderer helpers that don't bind tracked ports
-    pkill -f "$PWD/mac-app/node_modules" 2>/dev/null || true
     wait 2>/dev/null
 }
 trap cleanup EXIT

@@ -111,6 +111,29 @@ should_run() {
   [ -z "$REPO" ] || [ "$REPO" = "$1" ]
 }
 
+# ── Build checks (run in parallel with blackbox tests) ──
+BUILD_PIDS=()
+BUILD_NAMES=()
+BUILD_LOGS=()
+
+if should_run "front-end"; then
+  FE_BUILD_LOG="$TMPDIR_BASE/fe_build.log"
+  bash -c "cd front-end && npx vite build" > "$FE_BUILD_LOG" 2>&1 &
+  BUILD_PIDS+=($!)
+  BUILD_NAMES+=("Frontend Build")
+  BUILD_LOGS+=("$FE_BUILD_LOG")
+fi
+
+if should_run "mac-app"; then
+  MAC_BUILD_LOG="$TMPDIR_BASE/mac_build.log"
+  bash -c "cd mac-app && npx vite build && npx tsc -p tsconfig.main.json" > "$MAC_BUILD_LOG" 2>&1 &
+  BUILD_PIDS+=($!)
+  BUILD_NAMES+=("Mac App Build")
+  BUILD_LOGS+=("$MAC_BUILD_LOG")
+fi
+
+# ── Blackbox tests (sequential) ──
+
 if should_run "agents"; then
   if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
     run_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
@@ -141,6 +164,19 @@ fi
 if $SMOKE; then
   run_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
 fi
+
+# ── Collect build results (waited until blackbox tests finish) ──
+for i in "${!BUILD_PIDS[@]}"; do
+  if wait "${BUILD_PIDS[$i]}"; then
+    SUITE_NAMES+=("${BUILD_NAMES[$i]}")
+    SUITE_STATUSES+=("pass")
+    SUITE_LOGS+=("${BUILD_LOGS[$i]}")
+  else
+    SUITE_NAMES+=("${BUILD_NAMES[$i]}")
+    SUITE_STATUSES+=("fail")
+    SUITE_LOGS+=("${BUILD_LOGS[$i]}")
+  fi
+done
 
 # ── Report card ──
 echo ""

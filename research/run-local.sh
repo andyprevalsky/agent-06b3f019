@@ -112,10 +112,22 @@ echo "Checking if Supabase is running..."
 cd supabase
 if ! supabase status &> /dev/null; then
     echo -e "${YELLOW}⚠️  Local Supabase is not running. Starting it...${NC}\n"
-    supabase start
-    echo ""
-    echo -e "${GREEN}✅ Supabase started${NC}"
-    echo ""
+    MAX_RETRIES=3
+    for attempt in $(seq 1 $MAX_RETRIES); do
+        if supabase start; then
+            echo ""
+            echo -e "${GREEN}✅ Supabase started${NC}"
+            echo ""
+            break
+        fi
+        if [ "$attempt" -eq "$MAX_RETRIES" ]; then
+            echo -e "${RED}❌ supabase start failed after $MAX_RETRIES attempts${NC}"
+            exit 1
+        fi
+        echo -e "${YELLOW}⚠️  supabase start failed (attempt $attempt/$MAX_RETRIES) — retrying in 5s...${NC}"
+        supabase stop 2>/dev/null || true
+        sleep 5
+    done
 else
     echo -e "${GREEN}✅ Supabase is already running${NC}\n"
 fi
