@@ -74,7 +74,7 @@ config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
-const API_KEY = process.env.BACKEND_API_KEY || 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
+const API_KEY = process.env.BACKEND_API_KEY || '';
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -2992,7 +2992,7 @@ async function testEmailSend_noGmail() {
       to: 'test@example.com',
       subject: 'Test',
       body: 'Test body',
-      fromEmail: 'nonexistent@gmail.com',
+      from_email: 'nonexistent@gmail.com',
     }),
   });
   if (res.status !== 400 && res.status !== 404) {

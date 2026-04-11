@@ -442,16 +442,16 @@ async function testGrep_explicitMessagesSource() {
   }
 }
 
-// --- grep: undefined person_id should be ignored ---
+// --- grep: omitted person_id should be ignored ---
 
-async function testGrep_undefinedPersonId() {
+async function testGrep_omittedPersonId() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', person_id: undefined }),
+    body: JSON.stringify({ pattern: 'test' }),
   });
   assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (undefined person_id)');
+  assertSchema(GrepResponse, res.data, 'POST /grep (omitted person_id)');
 }
 
 // --- grep: pattern with special characters ---
@@ -565,7 +565,7 @@ async function runAll() {
       name: "POST /data/grep -- source='messages' explicit echoed in response",
       fn: testGrep_explicitMessagesSource,
     },
-    { name: 'POST /data/grep -- undefined person_id ignored', fn: testGrep_undefinedPersonId },
+    { name: 'POST /data/grep -- omitted person_id ignored', fn: testGrep_omittedPersonId },
     {
       name: "POST /data/grep -- special-char pattern (what's up?)",
       fn: testGrep_specialCharPattern,

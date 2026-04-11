@@ -102,8 +102,7 @@ const AgentNetworkGrepResponse = z.object({
       message_id: z.string(),
       role: z.string(),
       text: z.string(),
-      timestamp: z.string(),
-      pointer: z.string(),
+      created_at: z.string().optional(),
     })
   ),
   total_matches: z.number(),
@@ -457,10 +456,15 @@ async function testGrepAgentNetwork_realUserAgent() {
     });
     assertStatus(toolRes.status, 200, toolRes.data);
   } finally {
-    await request(`${BASE_URL}/api/agents/${agentId}`, {
+    const deleteRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
       method: 'DELETE',
       headers: testUserHeaders(),
     });
+    if (deleteRes.status !== 200 && deleteRes.status !== 204) {
+      throw new Error(
+        `Agent cleanup failed: status ${deleteRes.status}: ${JSON.stringify(deleteRes.data).substring(0, 200)}`
+      );
+    }
   }
 }
 

@@ -274,7 +274,7 @@ The new step should:
 
 Example addition (adapt step numbering to fit):
 
-```markdown
+````markdown
 ## Step N: Code coverage check (skip if no $ARGUMENTS/ changes)
 
 ```bash
@@ -282,7 +282,7 @@ cd $ARGUMENTS && npm run test:coverage
 ```
 
 Coverage must meet the configured thresholds. If it fails, add tests to cover the gap before proceeding.
-```
+````
 
 **Important**: Do NOT renumber existing steps — insert the new step with a letter suffix (e.g., Step 4a) or as the next available number if it goes at the end of Phase 1.
 
@@ -294,13 +294,13 @@ Read `.claude/commands/push.md`. Add a coverage check to **Step 1** (local tests
 
 Example addition:
 
-```markdown
+````markdown
 ### 1f. Code coverage (skip if no $ARGUMENTS/ changes)
 
 ```bash
 cd $ARGUMENTS && npm run test:coverage
 ```
-```
+````
 
 ---
 
