@@ -151,14 +151,15 @@ export async function broadcastMessageInsert(
     text: string;
     role: string;
     metadata?: Record<string, unknown>;
+    filePointer?: object | null;
   }
 ): Promise<void> {
   log.info('[Broadcast] INSERT', {
     agentId,
     messageId: message.id,
     role: message.role,
-    text: message.text,
-    metadata: message.metadata,
+    textLength: message.text.length,
+    hasMetadata: Boolean(message.metadata),
   });
   await broadcast({
     topic: `agent:${agentId}`,
@@ -170,6 +171,7 @@ export async function broadcastMessageInsert(
       text: message.text,
       role: message.role,
       metadata: message.metadata || null,
+      filePointer: message.filePointer || null,
     },
   });
 }
