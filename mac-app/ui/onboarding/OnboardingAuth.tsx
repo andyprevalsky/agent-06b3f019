@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { sendOTP, verifyOTP } from '@/lib/supabase';
+import { sendOTP, verifyOTP } from '@/features/auth/api';
 import { ArrowRight } from 'lucide-react';
 
 type AuthStep = 'signup' | 'otp';

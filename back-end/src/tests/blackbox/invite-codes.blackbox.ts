@@ -186,6 +186,7 @@ const INFRA_URL_PATTERNS = [
   'verify.twilio.com',
   'e2b.app',
   'stripe.com',
+  'parallel.ai',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));

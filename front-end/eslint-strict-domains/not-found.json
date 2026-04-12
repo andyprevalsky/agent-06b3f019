@@ -1,3 +1,9 @@
 [
-  "src/pages/NotFound.tsx"
+  "src/features/not-found/types.ts",
+  "src/features/not-found/config.ts",
+  "src/features/not-found/api.ts",
+  "src/features/not-found/hooks.ts",
+  "src/features/not-found/components/NotFound.tsx",
+  "src/features/not-found/components/index.ts",
+  "src/features/not-found/index.ts"
 ]

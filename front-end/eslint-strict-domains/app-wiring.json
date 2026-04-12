@@ -1,4 +1,11 @@
 [
   "src/App.tsx",
-  "src/main.tsx"
+  "src/main.tsx",
+  "src/features/app-wiring/types.ts",
+  "src/features/app-wiring/config.ts",
+  "src/features/app-wiring/api.ts",
+  "src/features/app-wiring/hooks.ts",
+  "src/features/app-wiring/components/AppShell.tsx",
+  "src/features/app-wiring/components/index.ts",
+  "src/features/app-wiring/index.ts"
 ]

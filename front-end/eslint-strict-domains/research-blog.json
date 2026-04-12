@@ -1,3 +1,10 @@
 [
+  "src/features/research-blog/types.ts",
+  "src/features/research-blog/config.ts",
+  "src/features/research-blog/api.ts",
+  "src/features/research-blog/hooks.ts",
+  "src/features/research-blog/components/ResearchBlog.tsx",
+  "src/features/research-blog/components/index.ts",
+  "src/features/research-blog/index.ts",
   "src/pages/ResearchBlog.tsx"
 ]

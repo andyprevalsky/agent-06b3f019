@@ -1,3 +1,9 @@
 [
-  "src/pages/Terms.tsx"
+  "src/features/terms/types.ts",
+  "src/features/terms/config.ts",
+  "src/features/terms/api.ts",
+  "src/features/terms/hooks.ts",
+  "src/features/terms/components/Terms.tsx",
+  "src/features/terms/components/index.ts",
+  "src/features/terms/index.ts"
 ]

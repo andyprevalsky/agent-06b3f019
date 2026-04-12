@@ -330,9 +330,7 @@ async function createAgentViaApi(userId: string, label: string): Promise<string>
       'error' in res.data &&
       (res.data as { error?: unknown }).error === 'Failed to create agent';
     if (isRetryable && attempt < maxAttempts) {
-      console.warn(
-        `[retry] createAgentViaApi attempt ${attempt}/${maxAttempts} got retryable 500`
-      );
+      console.warn(`[retry] createAgentViaApi attempt ${attempt}/${maxAttempts} got retryable 500`);
       await sleep(1000 * attempt + Math.random() * 500);
       continue;
     }

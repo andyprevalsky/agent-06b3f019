@@ -1,8 +1,14 @@
 [
-  "src/components/blog/BlogBreadcrumb.tsx",
-  "src/components/blog/BlogContent.tsx",
-  "src/components/blog/BlogHeader.tsx",
-  "src/components/blog/BlogPostCard.tsx",
-  "src/components/blog/BlogSidebar.tsx",
-  "src/components/blog/BlogTableOfContents.tsx"
+  "src/features/blog/types.ts",
+  "src/features/blog/config.ts",
+  "src/features/blog/api.ts",
+  "src/features/blog/hooks.ts",
+  "src/features/blog/index.ts",
+  "src/features/blog/components/index.ts",
+  "src/features/blog/components/BlogBreadcrumb.tsx",
+  "src/features/blog/components/BlogContent.tsx",
+  "src/features/blog/components/BlogHeader.tsx",
+  "src/features/blog/components/BlogPostCard.tsx",
+  "src/features/blog/components/BlogSidebar.tsx",
+  "src/features/blog/components/BlogTableOfContents.tsx"
 ]

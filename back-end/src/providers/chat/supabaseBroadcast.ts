@@ -4,6 +4,9 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { createLogger } from '../logger';
+
+const log = createLogger('Broadcast');
 
 // Use SUPABASE_URL env var, fallback to production URL (matches agent worker behavior)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
@@ -26,7 +29,7 @@ export async function broadcastAssistantStream(
   sequence: number = 0,
   isClaude: boolean = false
 ): Promise<void> {
-  console.log('[Broadcast] ASSISTANT_STREAM', {
+  log.info('[Broadcast] ASSISTANT_STREAM', {
     agentId,
     streamId,
     delta: delta.substring(0, 100),
@@ -67,7 +70,7 @@ export async function broadcastToolEvent(
   status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR',
   title: string
 ): Promise<void> {
-  console.log('[Broadcast] TOOL_STREAM', {
+  log.info('[Broadcast] TOOL_STREAM', {
     agentId,
     streamId,
     toolCallId,
@@ -93,7 +96,7 @@ export async function broadcastToolEvent(
  * Broadcast when chat escalates to agent mode
  */
 export async function broadcastAgentModeStarted(agentId: string): Promise<void> {
-  console.log('[Broadcast] AGENT_MODE_STARTED', { agentId });
+  log.info('[Broadcast] AGENT_MODE_STARTED', { agentId });
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'AGENT_MODE_STARTED',
@@ -122,7 +125,7 @@ export async function broadcastAgentUpdate(
     messageCount?: number;
   }
 ): Promise<void> {
-  console.log('[Broadcast] UPDATE', { agentId, ...updates });
+  log.info('[Broadcast] UPDATE', { agentId, ...updates });
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'UPDATE',
@@ -147,15 +150,16 @@ export async function broadcastMessageInsert(
     timestamp: Date;
     text: string;
     role: string;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
+    filePointer?: object | null;
   }
 ): Promise<void> {
-  console.log('[Broadcast] INSERT', {
+  log.info('[Broadcast] INSERT', {
     agentId,
     messageId: message.id,
     role: message.role,
-    text: message.text,
-    metadata: message.metadata,
+    textLength: message.text.length,
+    hasMetadata: Boolean(message.metadata),
   });
   await broadcast({
     topic: `agent:${agentId}`,
@@ -167,6 +171,7 @@ export async function broadcastMessageInsert(
       text: message.text,
       role: message.role,
       metadata: message.metadata || null,
+      filePointer: message.filePointer || null,
     },
   });
 }
@@ -181,9 +186,9 @@ export function generateStreamId(): string {
 /**
  * Core broadcast function - sends to Supabase Realtime
  */
-async function broadcast(params: { topic: string; event: string; payload: any }): Promise<void> {
+async function broadcast(params: { topic: string; event: string; payload: Record<string, unknown> }): Promise<void> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.warn('[Broadcast] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+    log.warn('[Broadcast] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     return;
   }
 
@@ -203,16 +208,16 @@ async function broadcast(params: { topic: string; event: string; payload: any })
             topic: params.topic,
             event: params.event,
             payload: { record: params.payload },
-            private: true,
+            private: process.env.NODE_ENV === 'production',
           },
         ],
       }),
     });
 
     if (!response.ok) {
-      console.error('[Broadcast] Failed:', response.status, await response.text());
+      log.error('Failed', { status: response.status, body: await response.text() });
     }
-  } catch (error) {
-    console.error('[Broadcast] Error:', error);
+  } catch (error: unknown) {
+    log.error('Error', { err: error instanceof Error ? error.message : String(error) });
   }
 }

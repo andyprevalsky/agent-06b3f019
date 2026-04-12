@@ -1,3 +1,10 @@
 [
-  "src/pages/Privacy.tsx"
+  "src/pages/Privacy.tsx",
+  "src/features/privacy/types.ts",
+  "src/features/privacy/config.ts",
+  "src/features/privacy/api.ts",
+  "src/features/privacy/hooks.ts",
+  "src/features/privacy/components/Privacy.tsx",
+  "src/features/privacy/components/index.ts",
+  "src/features/privacy/index.ts"
 ]

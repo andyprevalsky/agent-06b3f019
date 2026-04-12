@@ -6,6 +6,7 @@ Uses _fetch_agent_data_impl from fetch_config.py (single source for GET /api/age
 from temporalio import activity
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import os
 import structlog
 import httpx
 
@@ -13,6 +14,9 @@ from config import load_config
 from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
+
+# In dev (non-production), use public channels since agents live in a local DB
+_is_production = os.environ.get("FLY_APP_NAME") is not None
 
 # Module-level HTTP client for streaming broadcasts (connection reuse)
 _broadcast_client: Optional[httpx.AsyncClient] = None
@@ -80,7 +84,7 @@ async def stream_assistant_chunk(
                 "payload": {
                     "record": record
                 },
-                "private": True  # Required for broadcasting to private channels
+                "private": _is_production  # Required for broadcasting to private channels
             }]
         }
         
@@ -148,7 +152,7 @@ async def stream_plan_event(
                         "char_count": char_count,
                     }
                 },
-                "private": True
+                "private": _is_production
             }]
         }
         
@@ -215,7 +219,7 @@ async def stream_tool_event(
                         "title": title,
                     }
                 },
-                "private": True
+                "private": _is_production
             }]
         }
         
@@ -285,7 +289,7 @@ async def stream_attention_event(
                         "sequence": sequence,
                     }
                 },
-                "private": True
+                "private": _is_production
             }]
         }
         
@@ -339,7 +343,7 @@ async def broadcast_to_bus(bus_id: str, payload: Dict[str, Any]) -> None:
                 "topic": f"bus:{bus_id}",
                 "event": "AGENT_STATE_CHANGED",
                 "payload": {"record": payload},
-                "private": True
+                "private": _is_production
             }]
         }
 
@@ -410,7 +414,7 @@ async def update_agent_tree_state(
                             "event": "AGENT_STATE_CHANGED",
                             "payload": {"record": broadcast_payload},
                             # Private channel - matches agent: channel pattern
-                            "private": True
+                            "private": _is_production
                         }]
                     },
                     headers={

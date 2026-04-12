@@ -237,79 +237,8 @@ export async function createAnonymousSession(): Promise<{ user: User; session: S
 // =============================================================================
 // Phone Auth (via Backend)
 // =============================================================================
-
-/**
- * Send OTP to phone number.
- */
-export async function sendOTP(phone: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phone }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || 'Failed to send OTP');
-  }
-}
-
-/**
- * Verify OTP and get session.
- * If anonymousUserId is provided, the backend will merge their agents to the new account.
- */
-export async function verifyOTP(
-  phone: string,
-  token: string,
-  anonymousUserId?: string,
-  userInfo?: { firstName?: string; lastName?: string },
-): Promise<{ user: User; session: Session }> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      phone,
-      token,
-      anonymousUserId,
-      firstName: userInfo?.firstName,
-      lastName: userInfo?.lastName,
-    }),
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || 'Invalid OTP');
-  }
-
-  // Build session object
-  const session: Session = {
-    access_token: data.session.access_token,
-    refresh_token: data.session.refresh_token,
-    expires_in: data.session.expires_in,
-    expires_at: data.session.expires_at,
-    token_type: data.session.token_type || 'bearer',
-    user: {
-      id: data.user.id,
-      phone: data.user.phone || phone,
-      is_anonymous: false,
-      aud: 'authenticated',
-      role: 'authenticated',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      app_metadata: { provider: 'phone', providers: ['phone'] },
-      user_metadata: {},
-    } as User,
-  };
-
-  // Store the session
-  storeSession(session);
-
-  console.log('[Supabase] Phone verification complete', { userId: data.user.id });
-
-  return { user: session.user, session };
-}
+// NOTE: sendOTP and verifyOTP have been moved to features/auth/api.ts.
+// Mac-app imports them directly from '@/features/auth/api'.
 
 /**
  * Sign out - just clears the session.

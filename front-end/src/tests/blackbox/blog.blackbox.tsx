@@ -2,20 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
-import BlogPostCard from '@/components/blog/BlogPostCard';
-import BlogHeader from '@/components/blog/BlogHeader';
-import BlogContent from '@/components/blog/BlogContent';
-import BlogTableOfContents from '@/components/blog/BlogTableOfContents';
-import BlogSidebar from '@/components/blog/BlogSidebar';
-import BlogBreadcrumb from '@/components/blog/BlogBreadcrumb';
 import {
+  BlogPostCard,
+  BlogHeader,
+  BlogContent,
+  BlogTableOfContents,
+  BlogSidebar,
+  BlogBreadcrumb,
   blogPosts,
   getBlogPost,
   getBlogPostsByCategory,
   formatDate,
   type BlogPost,
   type BlogSection,
-} from '@/data/blogPosts';
+} from '@/features/blog';
 
 // ---------------------------------------------------------------------------
 // Test fixtures

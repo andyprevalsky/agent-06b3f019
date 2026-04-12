@@ -3,8 +3,12 @@
  * Both worker (via API) and chat handler use the same path for message creation.
  */
 
-import { Prisma } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { prisma } from './database';
+import { broadcastMessageInsert } from './chat/supabaseBroadcast';
+import { createLogger } from './logger';
+
+const log = createLogger('Messages');
 
 export interface CreateMessageParams {
   agentId: string;
@@ -20,7 +24,7 @@ export interface CreateMessageParams {
  * - POST /api/agents/:id/messages (worker and user messages)
  * - Chat handler (ASSISTANT responses)
  *
- * The Supabase DB trigger will broadcast INSERT event to frontend.
+ * Broadcasts INSERT event to frontend via Supabase Realtime.
  */
 export async function createMessage(params: CreateMessageParams) {
   const message = await prisma.message.create({
@@ -28,11 +32,21 @@ export async function createMessage(params: CreateMessageParams) {
       agentId: params.agentId,
       text: params.text,
       role: params.role,
-      metadata: (params.metadata as Prisma.InputJsonValue) || undefined,
-      filePointer: params.filePointer || undefined,
+      metadata: (params.metadata as Prisma.InputJsonValue) ?? undefined,
+      filePointer: params.filePointer ?? undefined,
       timestamp: new Date(),
     },
   });
+
+  // Broadcast INSERT event to frontend (replaces Supabase DB trigger)
+  broadcastMessageInsert(params.agentId, {
+    id: message.id,
+    timestamp: message.timestamp,
+    text: message.text,
+    role: message.role,
+    metadata: params.metadata as Record<string, unknown> | undefined,
+    filePointer: params.filePointer,
+  }).catch((err: unknown) => log.error('broadcast failed', { err: err instanceof Error ? err.message : String(err) }));
 
   return message;
 }

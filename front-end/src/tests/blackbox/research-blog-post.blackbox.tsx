@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './test-wrapper';
 import ResearchBlogPost from '@/pages/ResearchBlogPost';
-import { blogPosts, formatDate } from '@/data/blogPosts';
+import { blogPosts, formatDate } from '@/features/blog';
 
 const validPost = blogPosts[0]; // task-decomposer
 

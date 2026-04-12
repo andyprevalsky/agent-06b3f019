@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { renderWithProviders } from './test-wrapper';
-import NotFound from '@/pages/NotFound';
+import NotFound from '@/features/not-found';
 
 describe('NotFound page', () => {
   // ── Rendering ──────────────────────────────────────────────────────

@@ -145,7 +145,31 @@ export function useAuth() {
 
       const existingSession = getSession();
 
-      if (existingSession) {
+      if (existingSession && !existingSession.user?.is_anonymous) {
+        log('Found non-anonymous session', {
+          userId: existingSession.user?.id,
+        });
+        await applySession('init', existingSession);
+      } else if (import.meta.env.DEV) {
+        // Dev mode: auto-login with test credentials
+        log('Dev mode: auto-logging in with test credentials...');
+        try {
+          const { sendOTP, verifyOTP } = await import('@/features/auth/api');
+          const phone = '+19729777432';
+          await sendOTP(phone);
+          const { session: devSession } = await verifyOTP(phone, '181818');
+          await applySession('dev-auto-login', devSession);
+          log('Dev auto-login complete', { userId: devSession.user.id });
+        } catch (error) {
+          console.error('[Auth] Dev auto-login failed, falling back to anonymous:', error);
+          try {
+            const { session: anonSession } = await createAnonymousSession();
+            await applySession('init-anonymous', anonSession);
+          } catch (anonError) {
+            console.error('[Auth] Failed to create anonymous session:', anonError);
+          }
+        }
+      } else if (existingSession) {
         log('Found session', {
           userId: existingSession.user?.id,
           isAnonymous: existingSession.user?.is_anonymous,
