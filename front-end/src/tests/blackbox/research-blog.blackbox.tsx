@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import ResearchBlog from '@/pages/ResearchBlog';
-import { blogPosts, getBlogPostsByCategory, formatDate } from '@/data/blogPosts';
+import { blogPosts, getBlogPostsByCategory, formatDate } from '@/features/blog';
 
 const researchPosts = getBlogPostsByCategory('research');
 

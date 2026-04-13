@@ -23,6 +23,9 @@ import {
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
+import { createLogger } from '../logger';
+
+const log = createLogger('ChatHandler');
 
 // ============================================
 // Types
@@ -33,12 +36,11 @@ export interface ChatResult {
 }
 
 // ChatMessage type - compatible with routerLlm and generatorLlm
-// Uses 'any' for filePointer since it comes from DB as JSON
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
-  filePointer?: any; // FilePointer for file attachment messages (from DB JSON)
-  metadata?: Record<string, any>;
+  filePointer?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 // ============================================
@@ -49,7 +51,7 @@ export async function handleChatMessage(config: {
   userId: string;
   model: string;
 }): Promise<ChatResult> {
-  console.log('[ChatHandler] Processing message', {
+  log.info('[ChatHandler] Processing message', {
     agentId: config.agentId,
     model: config.model,
   });
@@ -63,8 +65,8 @@ export async function handleChatMessage(config: {
   const messages: ChatMessage[] = dbMessages.map((m) => ({
     role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
     text: m.text,
-    filePointer: m.filePointer as Record<string, any> | undefined,
-    metadata: m.metadata as Record<string, any> | undefined,
+    filePointer: m.filePointer as Record<string, unknown> | undefined,
+    metadata: m.metadata as Record<string, unknown> | undefined,
   }));
 
   // ============================================
@@ -79,7 +81,7 @@ export async function handleChatMessage(config: {
 
   const { decision, webSearchToolCallId } = routerResponse;
 
-  console.log('[ChatHandler] Router decision', {
+  log.info('[ChatHandler] Router decision', {
     agentId: config.agentId,
     action: decision.action,
     reasoning: decision.reasoning.substring(0, 100),
@@ -90,7 +92,7 @@ export async function handleChatMessage(config: {
   // BRANCH: start_superintelligence → Escalate to autonomous agent
   // ============================================
   if (decision.action === 'start_superintelligence') {
-    console.log('[ChatHandler] Escalating to superintelligence', {
+    log.info('[ChatHandler] Escalating to superintelligence', {
       agentId: config.agentId,
       goal: decision.goal,
       mode: decision.mode,
@@ -124,7 +126,7 @@ export async function handleChatMessage(config: {
     const streamId = generateStreamId();
     const toolCallId = webSearchToolCallId || uuidv4();
 
-    console.log('[ChatHandler] Executing web search', {
+    log.info('[ChatHandler] Executing web search', {
       agentId: config.agentId,
       query: decision.query,
       toolCallId,
@@ -152,7 +154,7 @@ export async function handleChatMessage(config: {
     }
 
     // Create IN_PROGRESS message in DB (matches worker behavior)
-    // Supabase DB trigger will broadcast INSERT event to frontend
+    // createMessage() auto-broadcasts INSERT event to frontend
     await createMessage({
       agentId: config.agentId,
       role: 'TOOL',
@@ -169,7 +171,7 @@ export async function handleChatMessage(config: {
     const searchResult = await executeWebSearch(decision.query);
 
     // Save tool result as TOOL message using shared helper
-    // Supabase DB trigger will broadcast INSERT event to frontend
+    // createMessage() auto-broadcasts INSERT event to frontend
     await createMessage({
       agentId: config.agentId,
       role: 'TOOL',
@@ -190,7 +192,7 @@ export async function handleChatMessage(config: {
   // Streams reasoning as thinking, returns response for true message
   // (Called for both direct_answer and web_search)
   // ============================================
-  console.log('[ChatHandler] Generating response', { agentId: config.agentId });
+  log.info('[ChatHandler] Generating response', { agentId: config.agentId });
 
   // Re-fetch messages to include any new TOOL message
   const updatedDbMessages = await prisma.message.findMany({
@@ -201,7 +203,7 @@ export async function handleChatMessage(config: {
   const updatedMessages: ChatMessage[] = updatedDbMessages.map((m) => ({
     role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
     text: m.text,
-    filePointer: m.filePointer as Record<string, any> | undefined,
+    filePointer: m.filePointer as Record<string, unknown> | undefined,
   }));
 
   const generatorResponse = await callGeneratorLlm({
@@ -218,7 +220,7 @@ export async function handleChatMessage(config: {
   });
 
   // 2. Save response as TOOL message with send_message_to_user metadata - matches worker behavior
-  // Supabase DB trigger will broadcast INSERT event to frontend
+  // createMessage() auto-broadcasts INSERT event to frontend
   const toolCallId = uuidv4();
   await createMessage({
     agentId: config.agentId,
@@ -246,7 +248,7 @@ export async function handleChatMessage(config: {
     data: { messageCount },
   });
 
-  console.log('[ChatHandler] Response complete', {
+  log.info('[ChatHandler] Response complete', {
     agentId: config.agentId,
     reasoningLength: generatorResponse.reasoning.length,
     responseLength: generatorResponse.response.length,
@@ -283,9 +285,9 @@ async function startTemporalWorkflowForChat(
   // - Execute mode: fire-and-forget here (no set_plan phase to generate it)
   // - Plan mode: schema is generated during set_plan tool execution (in parallel with planner)
   if (startPhase === 'execute') {
-    console.log('🎯 Starting async response schema generation for execute mode', { agentId });
+    log.info('🎯 Starting async response schema generation for execute mode', { agentId });
     setResponseSchema(agentId).catch((err) => {
-      console.error('❌ Failed to set response schema (background)', {
+      log.error('❌ Failed to set response schema (background)', {
         agentId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -316,7 +318,7 @@ async function startTemporalWorkflowForChat(
   // Broadcast that agent mode started (FE can show different UI)
   await broadcastAgentModeStarted(agentId);
 
-  console.log('[ChatHandler] Escalated to agent mode', {
+  log.info('[ChatHandler] Escalated to agent mode', {
     agentId,
     workflowId,
     goal: goal.substring(0, 100),

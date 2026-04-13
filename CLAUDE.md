@@ -162,7 +162,7 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 
 - **ORM:** Prisma
 - **RLS:** Enabled on all tables - users only see their own data
-- **Realtime:** Supabase DB triggers automatically broadcast INSERT/UPDATE events for `Message` and `Agent` tables to the frontend via Supabase Realtime channels. Manual broadcasting is not needed for DB mutations.
+- **Realtime:** All realtime events use explicit HTTP broadcasts to Supabase Realtime (`POST /realtime/v1/api/broadcast`). `createMessage()` auto-broadcasts INSERT events; `updateAgentStatus()` auto-broadcasts UPDATE events. No DB triggers are involved.
 - Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
 - **Query DB:** `npx tsx back-end/scripts/query-db.ts` (modify script as needed)
 

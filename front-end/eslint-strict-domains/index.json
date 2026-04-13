@@ -1,3 +1,20 @@
 [
-  "src/pages/Index.tsx"
+  "src/pages/Index.tsx",
+  "src/features/index/types.ts",
+  "src/features/index/config.ts",
+  "src/features/index/api.ts",
+  "src/features/index/hooks.ts",
+  "src/features/index/components/IndexPage.tsx",
+  "src/features/index/components/HeroSection.tsx",
+  "src/features/index/components/PoweredByTicker.tsx",
+  "src/features/index/components/FeaturesSection.tsx",
+  "src/features/index/components/WaitlistSection.tsx",
+  "src/features/index/components/PreOrderSection.tsx",
+  "src/features/index/components/ProgressiveImage.tsx",
+  "src/features/index/components/VideoPlayer.tsx",
+  "src/features/index/components/VideoLoadingAnimation.tsx",
+  "src/features/index/components/FeatureVideoStage.tsx",
+  "src/features/index/components/WaitlistForm.tsx",
+  "src/features/index/components/index.ts",
+  "src/features/index/index.ts"
 ]

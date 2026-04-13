@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { screen } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
-import Terms from '@/pages/Terms';
+import Terms from '@/features/terms';
 
 describe('Terms page', () => {
   // --- Rendering ---

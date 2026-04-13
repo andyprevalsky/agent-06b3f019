@@ -45,7 +45,6 @@
  */
 
 import { config } from 'dotenv';
-import { randomUUID } from 'crypto';
 import { z } from 'zod';
 config();
 
@@ -157,20 +156,29 @@ function assert(condition: boolean, message: string): void {
 
 // ==================== CAPTURE HELPERS ====================
 
-async function clearCaptures(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/test/captures`, {
-    method: 'DELETE',
-  });
+/** Get the current capture cursor (nextId - 1) for snapshot-based reads. */
+async function getCaptureCursor(): Promise<number> {
+  const res = await request(`${BASE_URL}/api/test/captures`);
   assertStatus(res.status, 200, res.data);
+  return (res.data as { nextId: number }).nextId - 1;
 }
 
-async function readCaptures(token?: string): Promise<CapturedCall[]> {
-  const url = token
-    ? `${BASE_URL}/api/test/captures?token=${encodeURIComponent(token)}`
-    : `${BASE_URL}/api/test/captures`;
-  const res = await request(url);
+/** Read only captures recorded after the given cursor (concurrent-safe). */
+async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
+}
+
+/** Filter Surge calls and match on a specific body substring to isolate from concurrent tests. */
+function filterSurgeCalls(calls: CapturedCall[], bodySubstring?: string): CapturedCall[] {
+  return calls.filter((c) => {
+    if (!c.url.includes('surge.app')) return false;
+    if (bodySubstring && c.requestBody) {
+      return c.requestBody.includes(bodySubstring);
+    }
+    return bodySubstring === undefined;
+  });
 }
 
 async function checkCaptureAvailable(): Promise<boolean> {
@@ -649,11 +657,10 @@ async function testReproducibility_sameInputSameOutput() {
  *   Body:    { to: string, body: string }
  */
 async function testBoundary_sendCallsSurgeApi() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   const res = await request(`${BASE_URL}/api/send-sms`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       phone_number: TEST_PHONE,
       message: 'boundary test send',
@@ -666,8 +673,8 @@ async function testBoundary_sendCallsSurgeApi() {
       return;
     }
   }
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, 'boundary test send');
   assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
   const call = surgeCalls[0];
   assert(
@@ -697,11 +704,10 @@ async function testBoundary_sendCallsSurgeApi() {
  * via sendSms() helper. Body: { to: user's phone, body: message }.
  */
 async function testBoundary_directCallsSurgeApi() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   const res = await request(`${BASE_URL}/api/send-sms/direct`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       user_id: TEST_USER_ID,
       message: 'boundary test direct',
@@ -718,8 +724,8 @@ async function testBoundary_directCallsSurgeApi() {
     console.log('    [skipped] Internal error -- cannot test boundary');
     return;
   }
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, 'boundary test direct');
   if (surgeCalls.length === 0) {
     console.log('    [skipped] No Surge calls -- Surge may not be configured');
     return;
@@ -750,11 +756,10 @@ async function testBoundary_directCallsSurgeApi() {
  * API via notifyCompletion() -> sendSms() chain.
  */
 async function testBoundary_notifyCompletionCallsSurgeApi() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   const res = await request(`${BASE_URL}/api/send-sms/notify`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       user_id: TEST_USER_ID,
       event_type: 'completion',
@@ -763,9 +768,8 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
     }),
   });
   assertStatus(res.status, 200, res.data);
-  await new Promise((r) => setTimeout(r, 500));
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, 'boundary test completed');
   if (surgeCalls.length === 0) {
     console.log('    [skipped] No Surge calls -- Surge may not be configured');
     return;
@@ -793,11 +797,10 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
  * POST /api/send-sms/notify with agent_started event calls Surge API.
  */
 async function testBoundary_notifyAgentStartedCallsSurgeApi() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   const res = await request(`${BASE_URL}/api/send-sms/notify`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       user_id: TEST_USER_ID,
       event_type: 'agent_started',
@@ -806,9 +809,8 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
     }),
   });
   assertStatus(res.status, 200, res.data);
-  await new Promise((r) => setTimeout(r, 500));
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, 'boundary test goal');
   if (surgeCalls.length === 0) {
     console.log('    [skipped] No Surge calls -- Surge may not be configured');
     return;
@@ -827,15 +829,15 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
 
 /** POST /api/send-sms validation failure -> 0 outbound calls. */
 async function testBoundary_sendValidationNoOutbound() {
-  const token = randomUUID();
-  await clearCaptures();
+  const marker = 'send-sms-bb-no-phone';
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/send-sms`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
-    body: JSON.stringify({ message: 'no phone' }),
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ message: marker }),
   });
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, marker);
   assert(
     surgeCalls.length === 0,
     `Expected 0 Surge calls for validation failure, got ` + `${surgeCalls.length}`
@@ -844,15 +846,18 @@ async function testBoundary_sendValidationNoOutbound() {
 
 /** POST /api/send-sms/direct missing fields -> 0 outbound calls. */
 async function testBoundary_directValidationNoOutbound() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/send-sms/direct`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({}),
   });
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  // No message was sent, so no Surge call can contain our marker.
+  // Filter to our test phone to exclude concurrent domains' calls.
+  const surgeCalls = calls.filter(
+    (c) => c.url.includes('surge.app') && c.requestBody?.includes(TEST_PHONE)
+  );
   assert(
     surgeCalls.length === 0,
     `Expected 0 Surge calls for validation failure, got ` + `${surgeCalls.length}`
@@ -861,19 +866,22 @@ async function testBoundary_directValidationNoOutbound() {
 
 /** POST /api/send-sms/notify invalid event -> 0 outbound calls. */
 async function testBoundary_notifyValidationNoOutbound() {
-  const token = randomUUID();
-  await clearCaptures();
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/send-sms/notify`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       user_id: 'x',
       event_type: 'bad_type',
       agent_id: 'x',
     }),
   });
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  // Invalid event type is rejected before any SMS send. Filter to our
+  // test phone to exclude concurrent domains' Surge calls.
+  const surgeCalls = calls.filter(
+    (c) => c.url.includes('surge.app') && c.requestBody?.includes(TEST_PHONE)
+  );
   assert(
     surgeCalls.length === 0,
     `Expected 0 Surge calls for validation failure, got ` + `${surgeCalls.length}`
@@ -882,18 +890,18 @@ async function testBoundary_notifyValidationNoOutbound() {
 
 /** POST /api/send-sms/direct unknown user (no phone) -> 0 calls. */
 async function testBoundary_directUnknownUserNoOutbound() {
-  const token = randomUUID();
-  await clearCaptures();
+  const marker = 'send-sms-bb-unknown-user';
+  const cursor = await getCaptureCursor();
   await request(`${BASE_URL}/api/send-sms/direct`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+    headers: apiKeyHeaders(),
     body: JSON.stringify({
       user_id: '00000000-0000-0000-0000-000000000000',
-      message: 'test',
+      message: marker,
     }),
   });
-  const calls = await readCaptures(token);
-  const surgeCalls = calls.filter((c) => c.url.includes('surge.app'));
+  const calls = await readCapturesAfter(cursor);
+  const surgeCalls = filterSurgeCalls(calls, marker);
   assert(
     surgeCalls.length === 0,
     `Expected 0 Surge calls for unknown user, got ` + `${surgeCalls.length}`

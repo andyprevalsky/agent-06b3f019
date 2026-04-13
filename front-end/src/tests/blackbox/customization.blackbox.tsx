@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
-import SystemCustomization from '@/components/customization/SystemCustomization';
+import { SystemCustomization } from '@/features/customization';
 
 describe('SystemCustomization component', () => {
   const defaultProps = {

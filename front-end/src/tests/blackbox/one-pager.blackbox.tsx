@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
-import OnePager from '@/pages/OnePager';
+import OnePager from '@/features/one-pager';
 
 describe('OnePager page', () => {
   // ---------------------------------------------------------------------------
