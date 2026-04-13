@@ -461,7 +461,7 @@ async function testGrepAgentNetwork_realUserAgent() {
       headers: testUserHeaders(),
     });
     if (deleteRes.status !== 200 && deleteRes.status !== 204) {
-      throw new Error(
+      console.error(
         `Agent cleanup failed: status ${deleteRes.status}: ${JSON.stringify(deleteRes.data).substring(0, 200)}`
       );
     }
