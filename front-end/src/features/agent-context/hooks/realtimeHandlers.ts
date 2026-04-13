@@ -89,7 +89,10 @@ export function handleInsertMessage(
     });
   }
 
-  setters.setMessages((prev) => [...prev, message]);
+  setters.setMessages((prev) => {
+    if (prev.some((m) => m.message_id === message.message_id)) return prev;
+    return [...prev, message];
+  });
   setters.dispatchMessage(message);
 }
 
