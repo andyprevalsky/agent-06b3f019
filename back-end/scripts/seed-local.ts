@@ -102,8 +102,26 @@ async function sync() {
 
   // ── Integrations ──
   await syncTable('Integrations', async () => {
-    const integrations = await remote.integration.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.integration, integrations);
+    // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
+    const userIntegrations = await remote.integration.findMany({ where: { userId: DEV_USER_ID } });
+    const poolIntegrations = await remote.integration.findMany({
+      where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
+    });
+    const all = [...userIntegrations, ...poolIntegrations];
+    // Pool tokens reference foreign users — ensure those User records exist locally
+    const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
+    for (const uid of poolUserIds) {
+      const user = await remote.user.findUnique({ where: { userId: uid } });
+      if (user) {
+        const { id, ...rest } = user;
+        await local.user.upsert({
+          where: { userId: uid },
+          create: user as any,
+          update: rest as any,
+        });
+      }
+    }
+    return upsertById(local.integration, all);
   });
 
   // ── Email Integration Credentials ──
