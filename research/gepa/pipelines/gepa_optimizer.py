@@ -36,9 +36,14 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 TASKS_DIR = DATA_DIR / 'clarified_tasks'
 
-# Markers for the evolvable strategy section in the planner prompt
-STRATEGY_START = 'TWO-AXIS PLANNING FRAMEWORK'
-STRATEGY_END = 'SPAWN_SUB_AGENT TOOL'
+# Markers for the evolvable strategy section in the planner prompt.
+# The planner prompt may have the original markers or an overridden strategy
+# (via planner_strategy_override_v3.txt). We try each in order.
+STRATEGY_STARTS = ['TWO-AXIS PLANNING FRAMEWORK', 'PLANNING INSTRUCTION']
+STRATEGY_ENDS = ['SPAWN_SUB_AGENT TOOL', 'SELF-CONTAINED GOALS (CRITICAL)']
+# Legacy aliases for backwards compatibility with tests
+STRATEGY_START = STRATEGY_STARTS[0]
+STRATEGY_END = STRATEGY_ENDS[0]
 
 # Default critic model ID on Modal
 DEFAULT_CRITIC_MODEL_ID = 'reward_model'
@@ -52,11 +57,25 @@ DEFAULT_CRITIC_MODEL_ID = 'reward_model'
 def extract_strategy(full_prompt: str) -> str:
     """Extract the evolvable strategy section from the full planner prompt.
 
-    Returns the text from TWO-AXIS PLANNING FRAMEWORK through TASK COUNT LIMITS,
-    stopping before SPAWN_SUB_AGENT TOOL.
+    Handles both original markers (TWO-AXIS PLANNING FRAMEWORK ... SPAWN_SUB_AGENT TOOL)
+    and overridden markers (PLANNING INSTRUCTION ... SELF-CONTAINED GOALS).
     """
-    start = full_prompt.index(STRATEGY_START)
-    end = full_prompt.index(STRATEGY_END)
+    start = -1
+    for marker in STRATEGY_STARTS:
+        start = full_prompt.find(marker)
+        if start >= 0:
+            break
+    if start < 0:
+        raise ValueError(f'Strategy start marker not found. Tried: {STRATEGY_STARTS}')
+
+    end = -1
+    for marker in STRATEGY_ENDS:
+        end = full_prompt.find(marker, start + 1)
+        if end >= 0:
+            break
+    if end < 0:
+        raise ValueError(f'Strategy end marker not found. Tried: {STRATEGY_ENDS}')
+
     return full_prompt[start:end].rstrip()
 
 

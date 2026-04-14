@@ -51,11 +51,13 @@ class AttemptCompletionManager(ToolManager):
         Returns:
             Dict indicating completion was attempted
         """
+        result_text = tool_call.get("result", "")
+        message = f"Running verifier to check completion...\n\nCompletion result: {result_text}" if result_text else "Running verifier to check completion..."
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="✓ Attempting completion",
-                message="Running verifier to check completion...",
+                message=message,
                 status=MessageStatus.FINISHED
             ),
             agent_id=agent_id,

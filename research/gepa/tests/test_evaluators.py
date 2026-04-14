@@ -67,8 +67,8 @@ class TestMEBehavioral:
         """Duplicate tasks should NOT be mutually exclusive."""
         from research.gepa.tests.fixtures import make_planner_response
         duplicate = make_planner_response(tasks=[
-            {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
-            {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
+            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
         ])
         result, _ = await evaluate_me('Book a flight', duplicate)
         assert 'STUB' not in result.reasoning
@@ -92,8 +92,8 @@ class TestCEBehavioral:
         """Single search step doesn't cover 'compare and book'."""
         from research.gepa.tests.fixtures import make_planner_response
         incomplete = make_planner_response(tasks=[
-            {'goal': 'Search for flights', 'tool_name': 'web_search', 'depends_on': []},
-            {'goal': 'Search again', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
+            {'goal': 'Search again', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
         ])
         result, _ = await evaluate_ce('Search, compare, and book the cheapest flight', incomplete)
         assert 'STUB' not in result.reasoning
@@ -118,8 +118,8 @@ class TestComplexityBehavioral:
     async def test_complex_child_fails(self):
         from research.gepa.tests.fixtures import make_planner_response
         complex_child = make_planner_response(tasks=[
-            {'goal': 'Plan entire international trip with flights hotels activities and dining', 'tool_name': 'web_search', 'depends_on': []},
-            {'goal': 'Confirm booking', 'tool_name': 'web_search', 'depends_on': [0]},
+            {'goal': 'Plan entire international trip with flights hotels activities and dining', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
+            {'goal': 'Confirm booking', 'tool_name': 'spawn_explore_agent', 'depends_on': [0]},
         ])
         result, _ = await evaluate_complexity('Book a hotel', complex_child)
         assert 'STUB' not in result.reasoning

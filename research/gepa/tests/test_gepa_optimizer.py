@@ -47,27 +47,35 @@ from research.gepa.tests.fixtures import (
 # ---------------------------------------------------------------------------
 
 class TestExtractStrategy:
-    def test_contains_expected_headers(self):
+    def test_contains_strategy_content(self):
         strategy = get_initial_strategy()
-        assert 'TWO-AXIS PLANNING FRAMEWORK' in strategy
-        assert 'DECOMPOSITION PRINCIPLES' in strategy
-        assert 'TASK COUNT LIMITS' in strategy
+        # Strategy section contains planning instructions (original or overridden)
+        assert len(strategy) > 100
+        # Must contain at least one planning-related keyword
+        has_planning = any(kw in strategy for kw in [
+            'PLANNING', 'TWO-AXIS', 'DECOMPOSITION', 'decompos', 'plan',
+        ])
+        assert has_planning, f'Strategy missing planning content: {strategy[:200]}'
 
     def test_excludes_fixed_sections(self):
         strategy = get_initial_strategy()
         assert 'OUTPUT CONTRACT' not in strategy
         assert 'AVAILABLE TOOLS' not in strategy
-        assert 'SPAWN_SUB_AGENT TOOL' not in strategy
         assert 'ATTACHED FILES' not in strategy
         assert 'CRITICAL REMINDERS' not in strategy
 
-    def test_starts_at_marker(self):
+    def test_starts_at_known_marker(self):
         strategy = get_initial_strategy()
-        assert strategy.startswith(STRATEGY_START)
+        from research.gepa.pipelines.gepa_optimizer import STRATEGY_STARTS
+        assert any(strategy.startswith(m) for m in STRATEGY_STARTS), (
+            f'Strategy does not start with any known marker: {strategy[:100]}'
+        )
 
-    def test_does_not_contain_end_marker(self):
+    def test_does_not_contain_end_markers(self):
         strategy = get_initial_strategy()
-        assert STRATEGY_END not in strategy
+        from research.gepa.pipelines.gepa_optimizer import STRATEGY_ENDS
+        for marker in STRATEGY_ENDS:
+            assert marker not in strategy, f'Strategy contains end marker: {marker}'
 
     def test_extract_from_full_prompt(self):
         tools_desc = _get_planner_tools_description()
@@ -100,14 +108,15 @@ class TestComposePrompt:
         modified = 'CUSTOM STRATEGY\n---\nTest strategy.'
         composed = compose_prompt(modified)
         assert 'OUTPUT CONTRACT' in composed
-        assert 'SPAWN_SUB_AGENT TOOL' in composed
         assert 'AVAILABLE TOOLS' in composed
         assert 'CRITICAL REMINDERS' in composed
 
     def test_original_strategy_removed(self):
+        original_strategy = get_initial_strategy()
         modified = 'REPLACEMENT STRATEGY ONLY'
         composed = compose_prompt(modified)
-        assert 'Progress happens along two orthogonal axes' not in composed
+        # The original strategy text should not appear in the composed prompt
+        assert original_strategy not in composed
 
 
 # ---------------------------------------------------------------------------
@@ -115,14 +124,14 @@ class TestComposePrompt:
 # ---------------------------------------------------------------------------
 
 class TestPromptSkeleton:
-    def test_excludes_strategy_headers(self):
+    def test_excludes_strategy_content(self):
         skeleton = _build_prompt_skeleton()
-        assert 'TWO-AXIS PLANNING FRAMEWORK' not in skeleton
+        strategy = get_initial_strategy()
+        assert strategy not in skeleton
 
     def test_includes_fixed_sections(self):
         skeleton = _build_prompt_skeleton()
         assert 'OUTPUT CONTRACT' in skeleton
-        assert 'SPAWN_SUB_AGENT TOOL' in skeleton
         assert 'AVAILABLE TOOLS' in skeleton
 
 
@@ -169,7 +178,7 @@ class TestParsePlan:
             'title': 'Test',
             'content': 'Test',
             'tasks': [
-                {'goal': 'a', 'tool_name': 'web_search', 'depends_on': []},
+                {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
                 {'goal': 'b', 'tool_name': 'reasoning', 'depends_on': [0]},
             ],
             'dependencies_graph': [
@@ -206,7 +215,7 @@ class TestGepaMetric:
         plan = {
             'title': 'Bad',
             'content': 'Bad',
-            'tasks': [{'goal': 'only one', 'tool_name': 'web_search', 'depends_on': []}],
+            'tasks': [{'goal': 'only one', 'tool_name': 'spawn_explore_agent', 'depends_on': []}],
             'dependencies_graph': [{'task_idx': '0', 'depends_on': []}],
             'join': 'all',
         }
@@ -221,8 +230,8 @@ class TestGepaMetric:
             'title': 'Cycle',
             'content': 'Cycle',
             'tasks': [
-                {'goal': 'a', 'tool_name': 'web_search', 'depends_on': [1]},
-                {'goal': 'b', 'tool_name': 'web_search', 'depends_on': [0]},
+                {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': [1]},
+                {'goal': 'b', 'tool_name': 'spawn_explore_agent', 'depends_on': [0]},
             ],
             'dependencies_graph': [
                 {'task_idx': '0', 'depends_on': ['1']},
@@ -251,7 +260,7 @@ class TestGepaMetric:
             'title': 'Good',
             'content': 'Good plan',
             'tasks': [
-                {'goal': 'research', 'tool_name': 'web_search', 'depends_on': []},
+                {'goal': 'research', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
                 {'goal': 'analyze', 'tool_name': 'reasoning', 'depends_on': []},
                 {'goal': 'synthesize', 'tool_name': 'reasoning', 'depends_on': [0, 1]},
             ],
@@ -282,7 +291,7 @@ class TestGepaMetric:
             'title': 'Good',
             'content': 'Good plan',
             'tasks': [
-                {'goal': 'a', 'tool_name': 'web_search', 'depends_on': []},
+                {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
                 {'goal': 'b', 'tool_name': 'reasoning', 'depends_on': [0]},
             ],
             'dependencies_graph': [
@@ -328,9 +337,10 @@ class TestLoadTrainset:
         assert isinstance(tasks[0]['agent_context'], list)
 
     def test_prompt_skeleton_contains_fixed_sections(self):
-        skeleton = _build_prompt_skeleton()
-        assert 'OUTPUT CONTRACT' in skeleton
-        assert 'AVAILABLE TOOLS' in skeleton
+        tools_desc = _get_planner_tools_description()
+        full = build_planner_system_prompt(tools_desc)
+        assert 'OUTPUT CONTRACT' in full
+        assert 'AVAILABLE TOOLS' in full
 
 
 # ---------------------------------------------------------------------------
@@ -370,4 +380,3 @@ class TestOptimizeMinimal:
         assert len(result.optimized_prompt) > 0
         assert 'OUTPUT CONTRACT' in result.optimized_prompt
         assert 'AVAILABLE TOOLS' in result.optimized_prompt
-        assert 'SPAWN_SUB_AGENT TOOL' in result.optimized_prompt

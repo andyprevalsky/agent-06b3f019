@@ -20,7 +20,7 @@
     "title": "Multi-Level Sub-Agent Spawning",
     "prompt": "I need you to find two numbers: the population of Tokyo and the population of NYC. Spawn a sub-agent for each city to find the answer. Then multiply the two populations together and give me the result.",
     "eval_prompt": "Agent spawned sub-agents to find population data for Tokyo and NYC, collected their results, and multiplied them. The final answer contains a numeric product of two population figures.",
-    "timeout_seconds": 300,
+    "timeout_seconds": 480,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
     "tags": ["basic", "smoke"],

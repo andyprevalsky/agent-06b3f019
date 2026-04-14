@@ -5,7 +5,20 @@
       "supabase/functions/api-keys/index.ts",
       "supabase/functions/chat/index.ts",
       "supabase/functions/cost/index.ts",
-      "supabase/functions/rose-bench/index.ts"
+      "supabase/functions/delete-api-key/handler.ts",
+      "supabase/functions/delete-api-key/index.ts",
+      "supabase/functions/rose-bench/index.ts",
+      "supabase/functions/generate-api-key/index.ts",
+      "supabase/functions/generate-api-key/handler.ts",
+      "benchmarks/evaluators/repetition-checker.ts",
+      "benchmarks/evaluators/equality-checker.ts",
+      "benchmarks/evaluators/math-evaluator.ts",
+      "benchmarks/evaluators/code-evaluator.ts",
+      "benchmarks/harnesses/base.ts",
+      "benchmarks/harnesses/mmlu-pro.ts",
+      "benchmarks/harnesses/terminal-bench.ts",
+      "benchmarks/test-runner.ts",
+      "benchmarks/run_production_benchmarks.ts"
     ],
     "rules": {
       "tags": ["recommended"],

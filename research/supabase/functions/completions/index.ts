@@ -3593,6 +3593,19 @@ function applyAnthropicToolConfig(
   }
 
   if (responseFormat?.json_schema?.schema) {
+    // For claudeAuth, try native tool extraction first to avoid "compiled grammar too large"
+    if (isClaudeAuth) {
+      const extracted = _extractToolsFromResponseFormat(responseFormat);
+      if (extracted) {
+        anthropicBody.tools = extracted.tools;
+        anthropicBody.tool_choice = { type: 'any' };
+        // Remove structured output — we'll reconstruct the JSON envelope from tool_use blocks
+        delete anthropicBody.output_config;
+        delete anthropicBody.output_format;
+        return true; // native tool mode
+      }
+    }
+
     const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
     if (isClaudeAuth) {
       anthropicBody.output_config = {
@@ -3889,14 +3902,22 @@ async function handleStreaming(
         anthropicBody.system = [identityBlock, disclaimerBlock];
       }
     }
-    if (temperature !== undefined) {
-      anthropicBody.temperature = temperature;
-    }
     if (claudeAuth) {
       anthropicBody.thinking = { type: 'adaptive' };
+      // Claude requires temperature=1 when thinking is enabled
+      anthropicBody.temperature = 1;
+    } else if (temperature !== undefined) {
+      anthropicBody.temperature = temperature;
     }
 
     nativeToolMode = applyAnthropicToolConfig(anthropicBody, responseFormat, !!claudeAuth);
+
+    // Anthropic: thinking is incompatible with tool_choice that forces tool use
+    if (nativeToolMode && anthropicBody.thinking) {
+      delete anthropicBody.thinking;
+      // temperature=1 was set for thinking; remove the constraint
+      delete anthropicBody.temperature;
+    }
 
     // Add cache_control breakpoints on messages at regular intervals.
     // Anthropic allows up to 4 breakpoints total; 1 is on system, leaving 3 for messages.
@@ -4243,7 +4264,8 @@ async function handleStreaming(
 
                   if (nativeToolMode) {
                     // === NATIVE TOOL MODE ===
-                    // With tool_choice=any, model MUST produce tool_use blocks.
+                    // With tool_choice=any (forced), model MUST produce tool_use blocks.
+                    // Thinking is disabled to avoid incompatibility with forced tool use.
                     // Reconstruct: {"response": "<text>", "tool_calls": [{"tool": "<name>", ...}]}
 
                     if (parsed.type === 'content_block_start') {
@@ -4277,8 +4299,12 @@ async function handleStreaming(
                       hasReceivedContent = true;
                       if (ntCurrentBlock === 'text' && parsed.delta?.text) {
                         emitDelta(escapeForJsonString(parsed.delta.text));
-                      } else if (ntCurrentBlock === 'tool_use' && parsed.delta?.partial_json) {
-                        const fragment = parsed.delta.partial_json;
+                      } else if (ntCurrentBlock === 'tool_use' && parsed.delta && 'partial_json' in parsed.delta) {
+                        const fragment: string = parsed.delta.partial_json ?? '';
+                        if (!fragment) {
+                          // Empty string delta — skip, wait for actual content
+                          continue;
+                        }
                         if (!ntToolInputStarted) {
                           ntToolInputStarted = true;
                           if (fragment === '{}') {
@@ -4296,6 +4322,10 @@ async function handleStreaming(
                     }
 
                     if (parsed.type === 'content_block_stop') {
+                      // If tool_use block ended without any non-empty partial_json, emit bare tool name
+                      if (ntCurrentBlock === 'tool_use' && !ntToolInputStarted) {
+                        emitDelta(`{"tool": "${ntCurrentToolName}"}`);
+                      }
                       ntCurrentBlock = null;
                       continue;
                     }
@@ -4934,7 +4964,7 @@ serve(async (req) => {
             system: [identityBlock, disclaimerBlock, ...systemBlocks],
             messages: anthropicMessages,
             max_tokens: 16000,
-            temperature: 0.3,
+            temperature: 1,
             thinking: { type: 'enabled', budget_tokens: 10000 },
           };
 
@@ -5639,8 +5669,9 @@ serve(async (req) => {
           } else {
             anthropicBody.system = [identityBlock, disclaimerBlock];
           }
-          if (temperature !== undefined) anthropicBody.temperature = temperature;
+          // Claude requires temperature=1 when thinking is enabled
           anthropicBody.thinking = { type: 'adaptive' };
+          anthropicBody.temperature = 1;
 
           const nativeToolMode = applyAnthropicToolConfig(
             anthropicBody,
@@ -5649,6 +5680,12 @@ serve(async (req) => {
             tools,
             tool_choice,
           );
+
+          // Anthropic: thinking is incompatible with tool_choice that forces tool use
+          if (nativeToolMode && anthropicBody.thinking) {
+            delete anthropicBody.thinking;
+            delete anthropicBody.temperature;
+          }
 
           slog(
             'info',
@@ -5864,6 +5901,8 @@ serve(async (req) => {
         const status = statusMatch ? parseInt(statusMatch[1]) : 0;
         if (status === 401 || status === 403) {
           claudeTokenError = 'auth_error';
+        } else if (status === 400) {
+          claudeTokenError = 'invalid_request';
         } else if (status === 429) {
           claudeTokenError = 'rate_limit';
         } else if (isStall) {

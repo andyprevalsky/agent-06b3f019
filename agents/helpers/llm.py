@@ -2274,6 +2274,10 @@ async def call_llm_activity(
             _context_key = messages_or_agent_id
             pending = _pending_llm_context.get(_context_key)
             if pending is None:
+                # Temporal activity retry may race with context population — brief wait
+                await asyncio.sleep(0.5)
+                pending = _pending_llm_context.get(_context_key)
+            if pending is None:
                 raise ValueError(f"No pending LLM context for agent {_context_key}")
             context, system_prompt, pre_resolved_ids = pending
             messages = await build_llm_messages(context, system_prompt, pre_resolved_ids=pre_resolved_ids)

@@ -299,8 +299,11 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree "$pid"
     done
-    # Stop containers we manage (data persists in named volumes)
-    docker stop "$DB_CONTAINER" 2>/dev/null || true
+    # In benchmark mode, keep the DB container alive — a single service crash
+    # shouldn't cascade-kill the database (data persists in named volumes).
+    if ! $BENCHMARK_MODE; then
+        docker stop "$DB_CONTAINER" 2>/dev/null || true
+    fi
     if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
         (cd research/supabase && supabase stop 2>/dev/null) || true
     fi

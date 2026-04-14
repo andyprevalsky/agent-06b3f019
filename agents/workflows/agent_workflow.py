@@ -1600,7 +1600,7 @@ class AgentWorkflow:
             if (self.claude_max_token
                     and actual_model != "unknown"
                     and not actual_model.endswith("-claude")):
-                if claude_token_error in ("auth_error", "rate_limit"):
+                if claude_token_error in ("auth_error", "rate_limit", "invalid_request"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
                         f"invalidating cached token"
