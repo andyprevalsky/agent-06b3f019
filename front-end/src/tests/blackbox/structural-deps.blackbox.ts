@@ -148,7 +148,7 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   // blog is a shared component/data library consumed by research-blog and research-blog-post
   'features/research-blog/hooks.ts': ['Cross-domain import: "@/features/blog"'],
   'features/research-blog/components/ResearchBlog.tsx': ['Cross-domain import: "@/features/blog"'],
-  'features/research-blog-post/hooks.ts': ['Cross-domain import: "@/features/blog"'],
+  'features/research-blog-post/api.ts': ['Cross-domain import: "@/features/blog"'],
   'features/research-blog-post/components/ResearchBlogPost.tsx': ['Cross-domain import: "@/features/blog"'],
 };
 
