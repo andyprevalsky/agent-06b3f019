@@ -186,7 +186,11 @@ export function generateStreamId(): string {
 /**
  * Core broadcast function - sends to Supabase Realtime
  */
-async function broadcast(params: { topic: string; event: string; payload: Record<string, unknown> }): Promise<void> {
+async function broadcast(params: {
+  topic: string;
+  event: string;
+  payload: Record<string, unknown>;
+}): Promise<void> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     log.warn('[Broadcast] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     return;

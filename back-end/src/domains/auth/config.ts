@@ -9,6 +9,9 @@ export const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
 /** Whether we're running in local development (explicit opt-in, not just "not production") */
 export const IS_DEV = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
 
+/** Whether blackbox test capture is active (disables dev shortcuts) */
+export const IS_BLACKBOX_TEST = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1';
+
 /** Access token expiry: 90 days in seconds */
 export const SESSION_EXPIRES_IN = 7776000;
 
