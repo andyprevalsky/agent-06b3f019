@@ -164,7 +164,48 @@ This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
 
-**ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, or any other failure mode must be diagnosed and fixed. If a benchmark fails due to local resource contention, try running fewer in parallel or running them sequentially. If you cannot get 100% pass rate, STOP and escalate to the user — do NOT proceed to Phase 2.
+### Monitoring agent progress during smoke tests
+
+**Do NOT fire-and-forget.** While benchmarks run, actively monitor agent progress by polling each agent's detail endpoint (`GET /api/agents/{id}`). Use this schedule:
+
+```
+5s, 5s, 5s, 15s, 30s, 60s, 60s, 60s, ... (repeat 60s until all agents finish)
+```
+
+At each poll, check:
+- Agent status (ACTIVE, COMPLETED, FAILED, ERROR)
+- Message count and latest messages
+- Progress score
+- Any error messages
+
+**If any agent shows signs of trouble** (stuck at 0 messages for 30s+, ERROR status, backend 500s in logs), immediately:
+1. Kill ALL running benchmark agents (DELETE each agent)
+2. Read logs (backend, worker, research) to diagnose
+3. Fix the root cause
+4. Re-run sequentially (without `--parallel`) to isolate failures
+
+### Pass criteria
+
+**ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+
+**Diagnosis process:**
+1. Read the log files (backend, worker, research — see table below)
+2. Use `agent_logs.py` on failed agents to get the full event timeline
+3. Identify which part of the agent lifecycle or LLM request is causing the failure (e.g., slow activity, backend crash under load, edge function error)
+4. Fix the root cause in code, restart services, and re-run
+
+**NOT allowed when fixing smoke tests:**
+- Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
+- Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
+- Skipping or disabling tests
+
+**Escalation is ONLY for:**
+- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded")
+- Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
+
+Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
+
+If a benchmark fails due to local resource contention, try running fewer in parallel or running them sequentially — but you must still get all 5 passing.
 
 ### Cleanup: Delete smoke test agents
 

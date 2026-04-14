@@ -2,6 +2,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import { authenticate } from './providers/auth';
@@ -200,8 +202,6 @@ app.get('/health', (req, res) => {
 
 // Dev-only: Frontend console log capture endpoint
 if (process.env.NODE_ENV !== 'production') {
-  const fs = require('fs');
-  const path = require('path');
   const logPath = path.join(process.cwd(), '..', 'front-end', 'frontend-logs.log');
 
   app.post('/api/dev/log', (req, res) => {
@@ -324,24 +324,28 @@ app.use('/api/data', dataRouter);
 app.use('/api', authenticate, formatRouter);
 
 // Error handling middleware
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  // Don't crash on errors, just log and respond appropriately
-  const uuidMatch = req.path.match(UUID_RE);
-  log.error('Error in request', {
-    error: err.message,
-    path: req.path,
-    method: req.method,
-    ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
-    stack: err.stack,
-  });
+app.use(
+  (err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    // Don't crash on errors, just log and respond appropriately
+    const uuidMatch = req.path.match(UUID_RE);
+    const errObj = err instanceof Error ? err : new Error(String(err));
+    const statusCode =
+      (err as Record<string, number>).statusCode ?? (err as Record<string, number>).status ?? 500;
+    log.error('Error in request', {
+      error: errObj.message,
+      path: req.path,
+      method: req.method,
+      ...(uuidMatch ? { agent_id: uuidMatch[1] } : {}),
+      stack: errObj.stack,
+    });
 
-  // Return appropriate status code
-  const statusCode = err.statusCode || err.status || 500;
-  res.status(statusCode).json({
-    error: err.message || 'Internal server error',
-    path: req.path,
-  });
-});
+    // Return appropriate status code
+    res.status(statusCode).json({
+      error: errObj.message || 'Internal server error',
+      path: req.path,
+    });
+  }
+);
 
 // Start server
 app.listen(PORT, () => {
@@ -385,3 +389,11 @@ const shutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Prevent server crash on unhandled errors (e.g., cascading DB disconnects)
+process.on('unhandledRejection', (reason) => {
+  log.error(`Unhandled rejection: ${reason}`);
+});
+process.on('uncaughtException', (err) => {
+  log.error(`Uncaught exception: ${err.message}\n${err.stack}`);
+});

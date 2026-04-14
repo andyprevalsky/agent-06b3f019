@@ -274,6 +274,62 @@ function testMissingToolCallIdThrows(transformMessagesForAnthropic) {
   );
 }
 
+function testConsecutiveToolResultsBundled(transformMessagesForAnthropic) {
+  const input = [
+    { role: "user", content: "Do three things." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "tc-1", type: "function", function: { name: "web_search", arguments: '{"query":"a"}' } },
+        { id: "tc-2", type: "function", function: { name: "web_search", arguments: '{"query":"b"}' } },
+        { id: "tc-3", type: "function", function: { name: "web_fetch", arguments: '{"url":"c"}' } },
+      ],
+    },
+    { role: "tool", tool_call_id: "tc-1", content: "result 1" },
+    { role: "tool", tool_call_id: "tc-2", content: "result 2" },
+    { role: "tool", tool_call_id: "tc-3", content: "result 3" },
+  ];
+
+  const transformed = transformMessagesForAnthropic(input);
+
+  // Should be: user, assistant, user (bundled 3 tool_results)
+  assert.equal(transformed.messages.length, 3, `expected 3 messages, got ${transformed.messages.length}`);
+
+  const bundledUser = transformed.messages[2];
+  assert.equal(bundledUser.role, "user");
+  assert.equal(bundledUser.content.length, 3, `expected 3 tool_result blocks, got ${bundledUser.content.length}`);
+  assert.equal(bundledUser.content[0].type, "tool_result");
+  assert.equal(bundledUser.content[0].tool_use_id, "tc-1");
+  assert.equal(bundledUser.content[1].tool_use_id, "tc-2");
+  assert.equal(bundledUser.content[2].tool_use_id, "tc-3");
+}
+
+function testNonConsecutiveToolResultsNotBundled(transformMessagesForAnthropic) {
+  const input = [
+    { role: "user", content: "step 1" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "tc-1", type: "function", function: { name: "web_search", arguments: '{"q":"a"}' } }],
+    },
+    { role: "tool", tool_call_id: "tc-1", content: "result 1" },
+    { role: "user", content: "step 2" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "tc-2", type: "function", function: { name: "web_search", arguments: '{"q":"b"}' } }],
+    },
+    { role: "tool", tool_call_id: "tc-2", content: "result 2" },
+  ];
+
+  const transformed = transformMessagesForAnthropic(input);
+
+  // user, assistant, user(tool_result), user, assistant, user(tool_result) = 6 messages
+  // tool_results are NOT consecutive so they should NOT be bundled
+  assert.equal(transformed.messages.length, 6, `expected 6 messages, got ${transformed.messages.length}`);
+}
+
 function main() {
   console.log("transformMessagesForAnthropic local tests:");
   const transformMessagesForAnthropic = loadTransformMessagesForAnthropic();
@@ -290,6 +346,14 @@ function main() {
     runTest(
       "tool message missing tool_call_id fails with descriptive error",
       () => testMissingToolCallIdThrows(transformMessagesForAnthropic),
+    ),
+    runTest(
+      "consecutive tool_result messages bundled into one user message",
+      () => testConsecutiveToolResultsBundled(transformMessagesForAnthropic),
+    ),
+    runTest(
+      "non-consecutive tool_result messages not bundled",
+      () => testNonConsecutiveToolResultsNotBundled(transformMessagesForAnthropic),
     ),
   ];
 

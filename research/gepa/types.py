@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
-from helpers.tool_schemas import PlannerResponse
+if TYPE_CHECKING:
+    from helpers.tool_schemas import PlannerResponse
 
 
 @dataclass
@@ -18,24 +19,24 @@ class ValidationError:
 class ClarifiedTask:
     id: str
     raw_seed: str
-    agent_context: List[Dict[str, Any]]  # user/assistant turns (no system prompt)
-    set_plan_args: Dict[str, Any]
+    agent_context: list[dict[str, Any]]  # user/assistant turns (no system prompt)
+    set_plan_args: dict[str, Any]
 
 
 @dataclass
 class EvalResult:
     passed: bool
-    score: float  # 0.0–1.0
+    score: float  # 0.0-1.0
     reasoning: str
 
 
 @dataclass
 class DecompositionCandidate:
     planner_response: PlannerResponse
-    validation_errors: List[ValidationError]
-    me: Optional[EvalResult] = None
-    ce: Optional[EvalResult] = None
-    complexity: Optional[EvalResult] = None
+    validation_errors: list[ValidationError]
+    me: EvalResult | None = None
+    ce: EvalResult | None = None
+    complexity: EvalResult | None = None
 
 
 @dataclass

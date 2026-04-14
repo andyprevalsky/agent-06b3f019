@@ -6,9 +6,7 @@ call_llm_structured_streaming with PlannerResponse, routing through rose-1-ultra
 
 import asyncio
 import logging
-from typing import List, Optional
 
-from config import load_config
 from helpers.llm import call_llm_structured_streaming
 from helpers.prompts import build_planner_system_prompt
 from helpers.tool_schemas import PlannerResponse
@@ -35,9 +33,7 @@ def _build_planner_messages(task: ClarifiedTask) -> list:
     # First user message from context is the raw seed
     goal = task.raw_seed
 
-    base_messages = [
-        {'role': 'user', 'content': f'GOAL: {goal}\n\nPlan this goal into tasks.'}
-    ]
+    base_messages = [{'role': 'user', 'content': f'GOAL: {goal}\n\nPlan this goal into tasks.'}]
 
     # Map agent_context messages (these use lowercase roles from clarifar)
     for msg in task.agent_context:
@@ -71,7 +67,7 @@ async def decompose_once(
     # Ensure messages end with a user message (some providers reject assistant-ending conversations)
     if base_messages and base_messages[-1]['role'] != 'user':
         base_messages.append({'role': 'user', 'content': 'Generate the plan now.'})
-    full_messages = [{'role': 'system', 'content': system_prompt}] + base_messages
+    full_messages = [{'role': 'system', 'content': system_prompt}, *base_messages]
 
     async def noop(text: str, count: int):
         pass
@@ -98,10 +94,14 @@ async def decompose_k(
     task: ClarifiedTask,
     k: int = K_CANDIDATES,
     model: str = MODEL,
-    temperatures: List[float] = TEMPERATURES,
-) -> List[DecompositionCandidate]:
+    temperatures: list[float] = TEMPERATURES,
+) -> list[DecompositionCandidate]:
     """Generate K candidate decompositions in parallel, each with a different model_seed."""
-    temps = temperatures[:k] if len(temperatures) >= k else (temperatures * ((k // len(temperatures)) + 1))[:k]
+    temps = (
+        temperatures[:k]
+        if len(temperatures) >= k
+        else (temperatures * ((k // len(temperatures)) + 1))[:k]
+    )
     coros = [decompose_once(task, model, temp, model_seed=i) for i, temp in enumerate(temps)]
     results = await asyncio.gather(*coros, return_exceptions=True)
 

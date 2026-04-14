@@ -369,6 +369,8 @@ async function testBoundary_unknownPhoneCapturesSurgeCall() {
 }
 
 async function testBoundary_invalidPayloadZeroCaptures() {
+  // Small delay to let any in-flight captures from prior tests settle
+  await new Promise((r) => setTimeout(r, 100));
   const cursorRes = await request(`${BASE_URL}/api/test/captures`);
   if (cursorRes.status !== 200) {
     console.warn('  ⚠ capture harness not active — skipping');
