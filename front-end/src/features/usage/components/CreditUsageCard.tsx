@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
-import type { UsageData } from '../types';
+import { type UsageData } from '../types';
 
 interface CreditUsageCardProps {
   usage: UsageData | null;

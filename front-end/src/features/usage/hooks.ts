@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import type { UsageData, ModelStats } from './types';
+import { type UsageData, type ModelStats } from './types';
 import { fetchUsageData } from './api';
 
 /** Fetches and manages usage data state. */
