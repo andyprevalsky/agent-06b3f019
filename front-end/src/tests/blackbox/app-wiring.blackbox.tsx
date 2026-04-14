@@ -10,7 +10,7 @@ import About from '@/pages/About';
 import Terminal from '@/pages/Terminal';
 import ResearchBlog from '@/pages/ResearchBlog';
 import ResearchBlogPost from '@/pages/ResearchBlogPost';
-import Download from '@/pages/Download';
+import Download from '@/features/download';
 
 /**
  * Renders the full route table from App.tsx inside the test wrapper's MemoryRouter.
