@@ -4,7 +4,7 @@
  * [MOUNTED] --> renders browser-type icon (pure, stateless).
  */
 
-import type { BrowserType } from '@/contexts/IntegrationHandlersContext';
+import type { BrowserType } from '@/features/integration-handlers-context';
 
 import chromeIcon from '@/assets/chrome-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';

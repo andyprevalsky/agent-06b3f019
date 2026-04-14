@@ -1,4 +1,4 @@
-import type { BrowserType } from '@/contexts/IntegrationHandlersContext';
+import type { BrowserType } from '@/features/integration-handlers-context';
 
 export const API_BASE_URL = (
   import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
