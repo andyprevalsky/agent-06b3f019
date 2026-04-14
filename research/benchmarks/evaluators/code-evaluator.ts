@@ -1,12 +1,12 @@
 /**
  * Code Evaluator (Placeholder)
- * 
+ *
  * This would run code in a Docker sandbox and check if it passes unit tests.
  * Implementation requires:
  * - Docker setup
  * - Sandbox container
  * - Security considerations
- * 
+ *
  * For now, this is a placeholder that marks todos as deferred.
  */
 
@@ -20,27 +20,28 @@ export interface CodeEvaluationResult {
 
 /**
  * Evaluate if code passes unit tests
- * 
+ *
  * @param code - Python code to evaluate
  * @param tests - Unit tests to run
  * @param timeout - Timeout in seconds (default: 10)
  * @returns Evaluation result
  */
-export async function evaluateCode(
-  code: string,
-  tests: string,
-  timeout: number = 10
+export function evaluateCode(
+  _code: string,
+  _tests: string,
+  _timeout: number = 10,
 ): Promise<CodeEvaluationResult> {
-  // TODO: Implement Docker sandbox execution
+  // TODO(#deferred): Implement Docker sandbox execution
+  // deno-lint-ignore no-console -- placeholder diagnostic until Docker sandbox is implemented
   console.warn('Code evaluator not yet implemented - requires Docker sandbox setup');
-  
-  return {
+
+  return Promise.resolve({
     passed: false,
     stdout: '',
     stderr: 'Code evaluator not implemented',
     exitCode: -1,
-    error: 'Docker sandbox not configured'
-  };
+    error: 'Docker sandbox not configured',
+  });
 }
 
 /**
@@ -52,24 +53,13 @@ export function extractPythonCode(response: string): string {
   if (pythonMatch) {
     return pythonMatch[1].trim();
   }
-  
+
   // Try generic ``` blocks
   const codeMatch = response.match(/```\n([\s\S]*?)```/);
   if (codeMatch) {
     return codeMatch[1].trim();
   }
-  
+
   // Return the whole response if no code block found
   return response.trim();
 }
-
-
-
-
-
-
-
-
-
-
-

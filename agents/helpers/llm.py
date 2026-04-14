@@ -713,6 +713,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
+    _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -797,6 +798,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         pool_name = "unknown"
         pool_size = 0
         claude_token_error = None  # Set when claude_token call failed (auth_error, rate_limit, stall, server_error)
+        final_finish_reason = ""  # Captured from last chunk with finish_reason
         was_cancelled = False
         chunk_count = 0
         stream_usage = None  # Captured from final chunk with stream_options
@@ -863,7 +865,8 @@ async def call_llm_structured_streaming(  # noqa: C901
             request_start_time = _safe_time()
             ttft_logged = False
 
-            async with httpx.AsyncClient(timeout=300.0) as http_client:  # noqa: SIM117
+            last_chunk_time = _safe_time()  # Track time since last chunk for stall detection
+            async with httpx.AsyncClient(timeout=httpx.Timeout(130.0, connect=30.0)) as http_client:  # noqa: SIM117
                 async with http_client.stream(
                     "POST",
                     config.rose.api_url,
@@ -885,7 +888,25 @@ async def call_llm_structured_streaming(  # noqa: C901
                         f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}"
                     )
 
-                    async for line in stream_response.aiter_lines():
+                    # Watchdog task: heartbeat independently of stream data arrival
+                    # so Temporal doesn't timeout during true socket stalls
+                    watchdog_running = True
+
+                    async def _heartbeat_watchdog():
+                        while watchdog_running:
+                            await asyncio.sleep(30)
+                            if not watchdog_running:
+                                break
+                            elapsed_since_chunk = _safe_time() - last_chunk_time
+                            if elapsed_since_chunk > 30:
+                                logger.warning(f"⚠️ Stream stall detected ({int(elapsed_since_chunk)}s no data)")
+                                _safe_heartbeat(f"Stream stall {int(elapsed_since_chunk)}s")
+                            else:
+                                _safe_heartbeat("Streaming...")
+
+                    watchdog_task = asyncio.create_task(_heartbeat_watchdog())
+                    try:
+                      async for line in stream_response.aiter_lines():
                         chunk_count += 1
 
                         # Log TTFT on first chunk
@@ -894,7 +915,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                             logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
                             ttft_logged = True
 
-                        # Heartbeat moved to after content processing (see below)
+                        last_chunk_time = _safe_time()
+
 
                         if chunk_count == 1:
                             logger.info("📦 First streaming line received")
@@ -947,6 +969,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                             reasoning_delta = delta.get("reasoning") or ""
                             content = delta.get("content") or ""
                             fin = choices[0].get("finish_reason") or ""
+                            if fin:
+                                final_finish_reason = fin
 
                             # DEBUG: Log every 50 chunks with state info
                             if chunk_count % 50 == 0 or fin:
@@ -1070,7 +1094,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                                     await on_chunk(response_text, token_count)
                                     last_emitted_for_chunk = response_text
 
-                            # Heartbeat every 5 chunks with state info
+                            # Heartbeat every 5 chunks with state info (fires on reasoning chunks too)
                             if chunk_count % 5 == 0:
                                 # Determine current phase
                                 if reasoning_delta:
@@ -1093,6 +1117,13 @@ async def call_llm_structured_streaming(  # noqa: C901
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
+                    finally:
+                      watchdog_running = False
+                      watchdog_task.cancel()
+                      try:
+                          await watchdog_task
+                      except asyncio.CancelledError:
+                          pass
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
@@ -1129,8 +1160,57 @@ async def call_llm_structured_streaming(  # noqa: C901
             return empty_response, usage, detected_tools_ordered
 
         logger.info(
-            f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars"
+            f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
+            f"reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars, "
+            f"finish_reason={final_finish_reason}"
         )
+
+        # Escalate max_tokens on truncation (finish_reason=length) — retry once with 32768
+        # Guard: skip escalation if not enough time remains for another streaming call (need 120s headroom)
+        elapsed = _safe_time() - request_start_time if request_start_time else 0
+        if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed < 180:
+            logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)")
+
+            # Known limitation: the retry restarts text_so_far from "" but callers that
+            # track delta state (e.g. last_text[0] in run_agent.py) still hold the first
+            # attempt's accumulated text. This causes the caller to emit empty deltas until
+            # the retry response exceeds the first attempt's length, then only the tail is
+            # shown. The final parsed result is correct — only the live-streaming display
+            # is affected. A proper fix requires a stream-reset signal in the on_chunk
+            # callback contract (or buffering the first attempt and not calling on_chunk
+            # until we know there's no escalation, which defeats streaming).
+            first_attempt_chars = len(last_emitted_for_chunk)
+            logger.info(
+                f"⚠️ [{call_site}] Escalation retry starting — first attempt streamed "
+                f"{first_attempt_chars} chars to caller; live-streaming of retry may show "
+                f"a content jump on the frontend"
+            )
+
+            return await call_llm_structured_streaming(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=32768,
+                response_model=response_model,
+                on_chunk=on_chunk,
+                reasoning_max_tokens=reasoning_max_tokens,
+                model_preference=model_preference,
+                model_seed=model_seed,
+                agent_id=agent_id,
+                on_tool_detected=on_tool_detected,
+                on_attention_stream=on_attention_stream,
+                on_raw_progress=on_raw_progress,
+                claude_token=claude_token,
+                on_model_detected=on_model_detected,
+                skip_cache=skip_cache,
+                call_site=call_site,
+                _is_escalation=True,
+            )
+        elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
+            logger.warning(
+                f"⚠️ [{call_site}] Response truncated but skipping escalation — not enough time "
+                f"(elapsed={elapsed:.1f}s, need <180s). Returning truncated result."
+            )
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
         response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
@@ -2320,6 +2400,10 @@ async def call_llm_activity(  # noqa: C901
             # Agent ID passed — build messages from shared state (avoids 2MB payload limit)
             _context_key = messages_or_agent_id
             pending = _pending_llm_context.get(_context_key)
+            if pending is None:
+                # Temporal activity retry may race with context population — brief wait
+                await asyncio.sleep(0.5)
+                pending = _pending_llm_context.get(_context_key)
             if pending is None:
                 raise ValueError(f"No pending LLM context for agent {_context_key}")
             context, system_prompt, pre_resolved_ids = pending

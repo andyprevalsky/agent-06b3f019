@@ -1,0 +1,77 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["gepa", "."]
+
+[tool.ruff.lint]
+select = [
+  "E",      # pycodestyle errors
+  "W",      # pycodestyle warnings
+  "F",      # pyflakes
+  "I",      # isort
+  "N",      # pep8-naming
+  "UP",     # pyupgrade
+  "B",      # flake8-bugbear
+  "SIM",    # flake8-simplify
+  "RUF",    # ruff-specific
+  # ── Strict rules (applied to cleaned domains, ignored elsewhere) ──
+  "C901",   # McCabe complexity
+  "TCH",    # type-checking imports
+  "ASYNC",  # async correctness
+  "T20",    # no print() — use logging instead
+]
+ignore = [
+  "E501",   # line too long (handled by formatter)
+  "E741",   # ambiguous variable name (common in math/ML code)
+  "RUF002", # ambiguous unicode in docstrings (intentional math notation)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gepa", "research"]
+
+# ---------------------------------------------------------------------------
+# Strict per-domain enforcement
+# ---------------------------------------------------------------------------
+# Strict rules (C901, TCH, ASYNC, T20) are enabled globally in [select] above,
+# then IGNORED on all files that haven't been cleaned yet via per-file-ignores.
+#
+# As each domain is cleaned by /setup-formatter-and-linter, its entries are
+# REMOVED from the ignore list below so strict rules become enforceable.
+#
+# Current strict domains: gepa
+[tool.ruff.lint.per-file-ignores]
+# ── Test files: allow print, relax type-checking imports ──
+"gepa/tests/**" = ["T20", "TCH"]
+"tests/**" = ["C901", "TCH", "ASYNC", "T20"]
+# ── Files NOT yet under strict enforcement ──
+"supabase/**" = ["C901", "TCH", "ASYNC", "T20"]
+"benchmarks/**" = ["C901", "TCH", "ASYNC", "T20"]
+"browser-use-repo/**" = ["C901", "TCH", "ASYNC", "T20"]
+"scripts/**" = ["C901", "TCH", "ASYNC", "T20"]
+"shared/**" = ["C901", "TCH", "ASYNC", "T20"]
+"test_*.py" = ["C901", "TCH", "ASYNC", "T20"]
+"measure_*.py" = ["C901", "TCH", "ASYNC", "T20"]
+"__init__.py" = ["T20"]  # __init__ files rarely print
+# ── gepa/ files NOT in the cleaned 'gepa' domain (belong to other gepa sub-domains) ──
+"gepa/__init__.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/embeddings.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/evaluators/__init__.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/labeler.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/modal_critic.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/__init__.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/clarifar.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/data_generation.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/expansion.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/simulate_user.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/pipelines/synthetic_pairs.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/run_full_pipeline.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/run_judge.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/smoke_optimizer.py" = ["C901", "TCH", "ASYNC", "T20"]
+"gepa/verify_labels.py" = ["C901", "TCH", "ASYNC", "T20"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"

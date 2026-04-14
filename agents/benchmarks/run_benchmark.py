@@ -810,6 +810,136 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         return all_tasks()
 
 
+async def _warmup_edge_functions(base_url: str):
+    """Send a small completion request to warm up the local Supabase edge function.
+
+    The Deno runtime in local Supabase needs to resolve external DNS (OpenRouter,
+    Anthropic, etc.) on the first request. This often fails with 503 "name resolution
+    failed" for the first few seconds. A warmup ensures DNS is cached before
+    benchmarks start — particularly important for chat-mode which has no Temporal
+    activity retries.
+    """
+    # Derive research port from backend port (CONDUCTOR_PORT + 3)
+    research_port = os.environ.get("RESEARCH_PORT")
+    if not research_port:
+        try:
+            backend_port = int(base_url.rsplit(":", 1)[1].split("/")[0])
+            research_port = str(backend_port + 3)
+        except (ValueError, IndexError):
+            return
+
+    completions_url = f"http://localhost:{research_port}/functions/v1/completions"
+    anon_key = os.environ.get("SUPABASE_ANON_KEY", os.environ.get("VITE_SUPABASE_ANON_KEY", ""))
+    api_key = os.environ.get("ROSE_API_KEY", "")
+    if not anon_key:
+        print("  ⚠ Skipping edge function warmup (no SUPABASE_ANON_KEY)")
+        return
+
+    payload = {
+        "model": "rose-labs/rose-1-lite",
+        "messages": [{"role": "user", "content": "Say hi"}],
+        "max_tokens": 5,
+        "stream": False,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {anon_key}",
+        "x-api-key": api_key,
+    }
+
+    print("  🔥 Warming up edge functions (DNS resolution)...", end="", flush=True)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+        for attempt in range(1, 11):
+            try:
+                resp = await client.post(completions_url, json=payload, headers=headers)
+                if 200 <= resp.status_code < 300:
+                    print(f" ready ({attempt} attempt(s))", flush=True)
+                    return
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, Exception) as e:
+                if attempt == 1:
+                    print(f" (attempt {attempt}: {type(e).__name__})", end="", flush=True)
+            await asyncio.sleep(2)
+    print(f" ⚠ warmup did not succeed after 10 attempts (continuing anyway)", flush=True)
+
+
+async def _terminate_stale_workflows():
+    """Terminate all running Temporal workflows on the local task queue.
+
+    Stale workflows from previous benchmark runs continue dispatching activities
+    to the new worker, flooding the backend with 404s for deleted agents and
+    consuming DB connections + LLM quota. Clearing them before a new run
+    prevents cascading resource exhaustion.
+    """
+    try:
+        from temporalio.client import Client, TLSConfig
+        from config import load_config
+
+        config = load_config()
+
+        # Safety check: only terminate workflows on local Temporal or when explicitly allowed
+        temporal_addr = config.temporal.address
+        is_local = any(h in temporal_addr for h in ("localhost", "127.0.0.1"))
+        allow_cleanup = os.environ.get("ALLOW_TEMPORAL_CLEANUP", "").lower() == "true"
+        if not is_local and not allow_cleanup:
+            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local and ALLOW_TEMPORAL_CLEANUP is not set")
+            return
+
+        # run.sh exports TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
+        # but config.py may load a different value from .env. Prefer the env var
+        # that the running worker actually uses.
+        task_queue = os.environ.get("TEMPORAL_TASK_QUEUE", config.temporal.task_queue)
+
+        client = await Client.connect(
+            config.temporal.address,
+            namespace=config.temporal.namespace,
+            tls=TLSConfig(client_cert=None, client_private_key=None),
+            rpc_metadata={
+                "temporal-namespace": config.temporal.namespace,
+                "Authorization": f"Bearer {config.temporal.api_key}",
+            },
+        )
+
+        query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
+        count = (await client.count_workflows(query)).count
+        if count == 0:
+            print(f"  ✅ No stale workflows on {task_queue}")
+            return
+
+        print(f"  🧹 Terminating {count} stale workflow(s) on {task_queue}...")
+        terminated = 0
+        async for wf in client.list_workflows(query):
+            try:
+                handle = client.get_workflow_handle(wf.id, run_id=wf.run_id)
+                await handle.terminate(reason="Pre-benchmark cleanup of stale workflows")
+                terminated += 1
+            except Exception:
+                pass  # Already completed/terminated — safe to ignore
+        print(f"  ✅ Terminated {terminated} stale workflow(s)")
+    except Exception as e:
+        print(f"  ⚠ Could not clean stale workflows: {e}")
+
+
+async def _check_claude_code_credentials(base_url: str) -> bool:
+    """Check if Claude Code OAuth credentials are available for the benchmark user.
+
+    Returns True if valid credentials exist, False otherwise.
+    """
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{base_url}/api/integrations/claude-code/credentials/token",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return bool(data.get("token"))
+            return False
+    except Exception:
+        return False
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -861,6 +991,22 @@ async def main_async(args):
     except Exception as e:
         print(f"  ⚠ Auth failed ({e}), falling back to API key")
 
+    # Pre-flight for local runs: clean stale workflows and warm up edge functions
+    if not args.prod and base_url.startswith("http://localhost"):
+        await _terminate_stale_workflows()
+        await _warmup_edge_functions(base_url)
+
+    # Pre-flight: check Claude Code credentials for tests that need them
+    skipped_claude_tasks: List[BenchmarkTask] = []
+    claude_code_tasks = [t for t in tasks if t.requires_claude_code]
+    if claude_code_tasks:
+        has_claude_creds = await _check_claude_code_credentials(base_url)
+        if not has_claude_creds:
+            skipped_names = [t.name for t in claude_code_tasks]
+            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
+            skipped_claude_tasks = claude_code_tasks
+            tasks = [t for t in tasks if not t.requires_claude_code]
+
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()
     print(f"  📡 {fly_status}")
@@ -870,11 +1016,26 @@ async def main_async(args):
     print(f"  Agent Benchmark Harness")
     print(f"  URL:   {base_url}")
     print(f"  Suite: {suite_name}")
-    print(f"  Tasks: {len(tasks)}")
+    print(f"  Tasks: {len(tasks)}{f' (+{len(skipped_claude_tasks)} skipped)' if skipped_claude_tasks else ''}")
     print(f"{'='*60}")
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
+
+    # Record skipped Claude Code tasks in results
+    for t in skipped_claude_tasks:
+        run.task_results.append(TaskResult(
+            name=t.name,
+            passed=False,
+            agent_id="",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason="Claude Code credentials unavailable (user needs to re-authenticate)",
+        ))
+
     try:
         if args.parallel:
             # Run all tasks concurrently
@@ -913,8 +1074,9 @@ async def main_async(args):
 
     # Print summary
     s = run.summary
+    skipped_str = f", {s['skipped']} skipped" if s.get('skipped') else ""
     print(f"\n{'='*60}")
-    print(f"  RESULTS: {s['passed']}/{s['total']} passed ({s['pass_rate']:.0%})")
+    print(f"  RESULTS: {s['passed']}/{s['total']} passed ({s['pass_rate']:.0%}{skipped_str})")
     print(f"  Cost: {s['total_cost_cents']:.1f}c | Duration: {s['total_duration_seconds']:.0f}s")
     print(f"{'='*60}")
 

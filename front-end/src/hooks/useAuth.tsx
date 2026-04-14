@@ -150,7 +150,7 @@ export function useAuth() {
           userId: existingSession.user?.id,
         });
         await applySession('init', existingSession);
-      } else if (import.meta.env.DEV) {
+      } else if (import.meta.env.DEV && !import.meta.env.VITEST) {
         // Dev mode: auto-login with test credentials
         log('Dev mode: auto-logging in with test credentials...');
         try {
