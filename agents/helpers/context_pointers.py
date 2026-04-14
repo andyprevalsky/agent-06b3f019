@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 # Regex for @ref:message:<uuid> with optional [start="..."|end="..."] slice
 POINTER_PATTERN = re.compile(
-    r'@ref:message:([a-f0-9-]{36})'
+    r"@ref:message:([a-f0-9-]{36})"
     r'(?:\[start="([^"]+)"\|end="([^"]+)"\])?'
 )
 
@@ -40,12 +40,14 @@ def parse_pointers(text: str) -> List[Pointer]:
     """Extract all @ref:message: pointers from text."""
     pointers = []
     for match in POINTER_PATTERN.finditer(text):
-        pointers.append(Pointer(
-            id=match.group(1),
-            start=match.group(2),
-            end=match.group(3),
-            raw=match.group(0),
-        ))
+        pointers.append(
+            Pointer(
+                id=match.group(1),
+                start=match.group(2),
+                end=match.group(3),
+                raw=match.group(0),
+            )
+        )
     return pointers
 
 
@@ -70,9 +72,7 @@ def annotate_with_pointer(msg: Dict[str, Any]) -> None:
     role = msg.get("role", "")
     metadata = msg.get("metadata") or {}
 
-    if role == "USER":
-        msg["text"] = f"{text}\n\nReference: @ref:message:{message_id}"
-    elif role == "TOOL" and metadata.get("toolStatus") == "FINISHED":
+    if role == "USER" or role == "TOOL" and metadata.get("toolStatus") == "FINISHED":
         msg["text"] = f"{text}\n\nReference: @ref:message:{message_id}"
 
 
@@ -94,7 +94,7 @@ def _apply_slice(text: str, start: Optional[str], end: Optional[str]) -> str:
     if end_idx == -1:
         return text
 
-    return text[start_idx:end_idx + len(end)]
+    return text[start_idx : end_idx + len(end)]
 
 
 async def _fetch_messages_batch(message_ids: List[str]) -> Dict[str, Optional[tuple]]:
@@ -111,7 +111,7 @@ async def _fetch_messages_batch(message_ids: List[str]) -> Dict[str, Optional[tu
         config = load_config()
         # Chunk into batches of BATCH_SIZE
         for i in range(0, len(uncached), BATCH_SIZE):
-            chunk = uncached[i:i + BATCH_SIZE]
+            chunk = uncached[i : i + BATCH_SIZE]
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(
@@ -141,9 +141,7 @@ async def _fetch_messages_batch(message_ids: List[str]) -> Dict[str, Optional[tu
     return {mid: _message_cache.get(mid) for mid in message_ids}
 
 
-def _resolve_from_local_context(
-    message_id: str, local_context: Optional[List[Dict]]
-) -> Optional[str]:
+def _resolve_from_local_context(message_id: str, local_context: Optional[List[Dict]]) -> Optional[str]:
     """Try to resolve a message from local context by message_id."""
     if not local_context:
         return None
@@ -205,12 +203,12 @@ async def resolve_pointers_in_text(
         # Strip any existing pointer annotation from the resolved text
         ref_suffix = f"\n\nReference: @ref:message:{p_id}"
         if raw_text.endswith(ref_suffix):
-            raw_text = raw_text[:-len(ref_suffix)]
+            raw_text = raw_text[: -len(ref_suffix)]
 
         resolved_content = _apply_slice(raw_text, p_start, p_end)
         resolved_block = f'<resolved-ref pointer="{match.group(0)}">{resolved_content}</resolved-ref>'
 
-        result_parts.append(text[last_end:match.start()])
+        result_parts.append(text[last_end : match.start()])
         result_parts.append(resolved_block)
         last_end = match.end()
 
@@ -248,9 +246,7 @@ async def resolve_pointers_in_messages(
             changed = False
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    new_text = await resolve_pointers_in_text(
-                        block.get("text", ""), local_context
-                    )
+                    new_text = await resolve_pointers_in_text(block.get("text", ""), local_context)
                     if new_text != block.get("text", ""):
                         new_blocks.append({**block, "text": new_text})
                         changed = True

@@ -1,0 +1,56 @@
+# =============================================================================
+# Strict Ruff rules — applied ONLY to cleaned domain files
+#
+# This config extends pyproject.toml and adds tighter rules:
+#   B    — flake8-bugbear (common bugs, design problems)
+#   SIM  — flake8-simplify (unnecessary complexity)
+#   C901 — McCabe complexity
+#   TCH  — flake8-type-checking (move type-only imports behind TYPE_CHECKING)
+#   T20  — flake8-print (no raw print statements — use structlog)
+#
+# Usage:
+#   ruff check --config ruff-strict.toml <files>
+#
+# The /setup-formatter-and-linter skill updates STRICT_DOMAIN_FILES below
+# as domains are cleaned. To add a domain:
+#   1. Run: python scripts/map_domains.py <domain-name>
+#   2. Format + base-lint all files
+#   3. Add file paths to STRICT_DOMAIN_FILES below
+#   4. Run: ruff check --config ruff-strict.toml <files>
+#   5. Fix all violations until 0 errors
+# =============================================================================
+
+extend = "pyproject.toml"
+
+[lint]
+select = [
+    # ── Base rules (inherited intent, re-stated for clarity) ──
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    # ── Strict additions ──
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C901",   # McCabe complexity
+    "TCH",    # flake8-type-checking
+    "T20",    # flake8-print (use structlog, not print)
+]
+
+ignore = [
+    "E501",   # line-too-long — handled by formatter
+]
+
+[lint.mccabe]
+max-complexity = 15
+
+[lint.per-file-ignores]
+# Tests and scripts: allow print, relax complexity
+"tests/**/*.py" = ["T20", "C901", "I"]
+"scripts/**/*.py" = ["T20", "C901", "I"]
+# Composition root: imports after load_dotenv() + env var check (intentional), print for startup
+"worker.py" = ["E402", "T201"]
+# Activity-only imports after sys.path setup (intentional)
+"tools/knowledge_base.py" = ["E402"]
+# Test file: allow print statements, nested async with for readability
+"test_ttft.py" = ["T201", "SIM117"]

@@ -1,10 +1,11 @@
 """Health check HTTP server for fly.io monitoring."""
 
-from flask import Flask, jsonify
 import threading
 from datetime import datetime
-import structlog
+
 import psutil
+import structlog
+from flask import Flask, jsonify
 
 logger = structlog.get_logger()
 
@@ -14,7 +15,7 @@ app = Flask(__name__)
 worker_status = {
     "healthy": True,
     "started_at": datetime.utcnow().isoformat(),
-    "last_heartbeat": datetime.utcnow().isoformat()
+    "last_heartbeat": datetime.utcnow().isoformat(),
 }
 
 # Reuse process handle so CPU deltas are computed between scrapes.
@@ -26,13 +27,26 @@ _task_queue_backlog = 0
 _running_workflow_count = 0
 _desired_machine_count = 2  # Adaptive autoscaler output (min=2)
 _current_machine_count = 1  # Observed via Fly DNS
-_is_leader = False           # Whether this instance is the autoscaler leader
+_is_leader = False  # Whether this instance is the autoscaler leader
 _observed_task_capacity = 0  # Dynamic capacity from SDK resource-based tuner
 
 
-def set_queue_metrics(backlog: int, workflow_count: int, desired_machines: int, current_machines: int, is_leader: bool = False, observed_capacity: int = 0):
+def set_queue_metrics(
+    backlog: int,
+    workflow_count: int,
+    desired_machines: int,
+    current_machines: int,
+    is_leader: bool = False,
+    observed_capacity: int = 0,
+):
     """Update queue metrics from background poller. Thread-safe via GIL."""
-    global _task_queue_backlog, _running_workflow_count, _desired_machine_count, _current_machine_count, _is_leader, _observed_task_capacity
+    global \
+        _task_queue_backlog, \
+        _running_workflow_count, \
+        _desired_machine_count, \
+        _current_machine_count, \
+        _is_leader, \
+        _observed_task_capacity
     _task_queue_backlog = backlog
     _running_workflow_count = workflow_count
     _desired_machine_count = desired_machines
@@ -41,26 +55,18 @@ def set_queue_metrics(backlog: int, workflow_count: int, desired_machines: int, 
     _observed_task_capacity = observed_capacity
 
 
-@app.route('/health')
+@app.route("/health")
 def health():
     """Health check endpoint."""
     worker_status["last_heartbeat"] = datetime.utcnow().isoformat()
-    
+
     if worker_status["healthy"]:
-        return jsonify({
-            "status": "healthy",
-            "worker": "running",
-            **worker_status
-        }), 200
+        return jsonify({"status": "healthy", "worker": "running", **worker_status}), 200
     else:
-        return jsonify({
-            "status": "unhealthy",
-            "worker": "stopped",
-            **worker_status
-        }), 503
+        return jsonify({"status": "unhealthy", "worker": "stopped", **worker_status}), 503
 
 
-@app.route('/metrics')
+@app.route("/metrics")
 def metrics():
     """Metrics endpoint (basic Prometheus format)."""
     uptime = (datetime.utcnow() - datetime.fromisoformat(worker_status["started_at"])).total_seconds()
@@ -103,7 +109,7 @@ autoscaler_is_leader {1 if _is_leader else 0}
 observed_task_capacity {_observed_task_capacity}
 """
 
-    return metrics_text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    return metrics_text, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 def set_worker_status(healthy: bool):
@@ -115,16 +121,13 @@ def set_worker_status(healthy: bool):
 def run_health_server(port: int = 8080):
     """Run the health check server in a separate thread."""
     logger.info(f"Starting health check server on port {port}")
-    
+
     # Run in a separate thread so it doesn't block the worker
-    server_thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=port, debug=False),
-        daemon=True
-    )
+    server_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False), daemon=True)
     server_thread.start()
-    
+
     logger.info(f"Health check server running at http://0.0.0.0:{port}/health")
-    
+
     return server_thread
 
 
@@ -132,4 +135,5 @@ if __name__ == "__main__":
     # For testing
     run_health_server()
     import time
+
     time.sleep(60)

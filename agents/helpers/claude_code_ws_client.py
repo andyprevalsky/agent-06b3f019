@@ -8,7 +8,8 @@ Provides bidirectional communication with the Claude Code sandbox:
 
 import asyncio
 import json
-from typing import Callable, Optional, Awaitable
+from typing import Awaitable, Callable, Optional
+
 import aiohttp
 import structlog
 
@@ -288,7 +289,7 @@ class ClaudeCodeWsClient:
                 "[ClaudeCodeWs] Reconnecting",
                 attempt=self._reconnect_count,
                 max_attempts=self.max_reconnects,
-                delay_s=delay
+                delay_s=delay,
             )
 
             await asyncio.sleep(delay)

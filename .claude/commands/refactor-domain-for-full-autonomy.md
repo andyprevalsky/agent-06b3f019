@@ -123,6 +123,18 @@ find . -maxdepth 2 -name 'eslint.config.*' -o -name '.eslintrc.*' -o -name 'pypr
 
 Check that blackbox tests exist for this domain. If not, tell the user to run `/create-domain-blackbox-tests $ARGUMENTS` first and stop.
 
+### 0d: Test files are read-only in this skill
+
+This skill is for production code refactoring only.
+
+- Do NOT edit, add, rename, move, or delete test files.
+- Treat these patterns as read-only:
+  - `**/tests/**`
+  - `**/*.blackbox.*`
+  - `**/*.spec.*`
+  - `**/*test*.*`
+- If a test appears stale, stop and ask for explicit user approval to run a separate test-update task.
+
 ## Step 0b: One-time infrastructure setup
 
 **Skip this step if the codebase already has a `providers/` (or equivalent shared infrastructure) directory.**
@@ -284,6 +296,16 @@ Run the structural test. It must pass with 0 violations.
 Run the FULL blackbox test suite — the wiring file imports changed, so all domains could be affected.
 
 If tests fail, the refactor introduced a behavior change. **Fix the domain code, not the tests.** The behavior must be identical.
+
+## Step 13b: Enforce no-test-changes gate
+
+Before reporting success, verify no test files were modified by this skill run:
+
+```bash
+git diff --name-only | grep -E '(^|/)(tests?/|.*test|.*spec|.*blackbox)' && echo "FAIL: test files changed" && exit 1 || true
+```
+
+If this gate fails, the refactor is invalid until test-file changes are removed.
 
 ## Step 14: Report
 

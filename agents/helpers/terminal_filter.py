@@ -55,7 +55,7 @@ class TerminalFilter:
             stripped = line.rstrip()
             if stripped:
                 lines.append(stripped)
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
     def get_display_full(self) -> str:
         """
@@ -64,7 +64,7 @@ class TerminalFilter:
         Returns:
             Full terminal display preserving structure.
         """
-        return '\n'.join(line.rstrip() for line in self.screen.display)
+        return "\n".join(line.rstrip() for line in self.screen.display)
 
     def reset(self) -> None:
         """Reset the terminal state (e.g., on reconnection with new buffer)."""

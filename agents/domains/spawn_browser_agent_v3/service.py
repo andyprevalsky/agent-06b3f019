@@ -1,0 +1,334 @@
+"""Service layer for spawn-browser-agent-v3 domain.
+
+Business logic orchestration: context building, session file extraction,
+prompt construction, and usage calculation.
+"""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import structlog
+
+from domains.spawn_browser_agent_v3.config import STEEL_COST_CENTS_PER_MS
+from domains.spawn_browser_agent_v3.repo import (
+    download_file_from_steel,
+    list_session_files,
+)
+from helpers.error_utils import extract_error_message
+
+logger = structlog.get_logger()
+
+
+# ========================================
+# SAFE TIME
+# ========================================
+
+
+def safe_time() -> float:
+    """Get current time, returning 0 if in workflow sandbox."""
+    try:
+        return time.time()
+    except Exception:
+        return 0.0
+
+
+# ========================================
+# CONTEXT SUMMARY BUILDER
+# ========================================
+
+
+def build_context_summary(
+    success: bool,
+    close_reasoning: str,
+    visited_urls: list,
+    reasoning_messages: list,
+    action_summary: list,
+    error_context: Optional[str] = None,
+) -> str:
+    """Build detailed execution context summary for main agent."""
+    summary_parts = []
+
+    status = "\u2705 SUCCESS" if success else "\u274c FAILED"
+    summary_parts.append(f"**Status**: {status}")
+
+    if close_reasoning:
+        summary_parts.append(f"\n**Outcome**: {close_reasoning}")
+
+    if error_context:
+        summary_parts.append(f"\n**Error**: {error_context}")
+
+    if visited_urls:
+        last_urls = visited_urls[-5:]
+        summary_parts.append(f"\n**URLs Visited** ({len(visited_urls)} total, showing last {len(last_urls)}):")
+        for i, url in enumerate(last_urls, 1):
+            summary_parts.append(f"  {i}. {url}")
+
+    if reasoning_messages:
+        last_reasoning = reasoning_messages[-3:]
+        summary_parts.append(f"\n**Agent Reasoning** (last {len(last_reasoning)}):")
+        for i, reasoning in enumerate(last_reasoning, 1):
+            summary_parts.append(f"  {i}. {reasoning}")
+
+    if action_summary:
+        last_actions = action_summary[-10:]
+        summary_parts.append(f"\n**Actions Taken** ({len(action_summary)} total, showing last {len(last_actions)}):")
+        for action in last_actions:
+            summary_parts.append(f"  \u2022 {action}")
+
+    return "\n".join(summary_parts)
+
+
+# ========================================
+# SESSION FILE EXTRACTION
+# ========================================
+
+
+async def extract_session_files(
+    session_id: str, user_id: str, config: Any, exclude_paths: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    """Extract all files from a Steel browser session.
+
+    1. List files in session (direct Steel API call)
+    2. Download each file from Steel (direct Steel API call)
+    3. Upload to Supabase storage (direct Supabase API call)
+    4. Return list of FilePointer dicts
+    """
+    from helpers.attachments import upload_to_storage
+
+    session_files = await list_session_files(session_id)
+    if not session_files:
+        logger.info("No files to extract from session", session_id=session_id)
+        return []
+
+    exclude_set = set(exclude_paths or [])
+    if exclude_set:
+        original_count = len(session_files)
+        session_files = [f for f in session_files if f.get("path") not in exclude_set]
+        if len(session_files) < original_count:
+            logger.info(f"[Extract] Filtered out {original_count - len(session_files)} uploaded file(s)")
+
+    logger.info(f"[Extract] Found {len(session_files)} file(s) to extract in session {session_id}")
+
+    output_files: List[Dict[str, Any]] = []
+
+    for file_info in session_files:
+        file_path = file_info.get("path", "")
+        if not file_path:
+            continue
+
+        logger.info(f"[Extract] Processing: {file_path}")
+
+        downloaded = await download_file_from_steel(session_id, file_path)
+        if not downloaded:
+            logger.warning(f"[Extract] Failed to download: {file_path}")
+            continue
+
+        try:
+            file_pointer = await upload_to_storage(
+                user_id=user_id,
+                file_content=downloaded["content"],
+                filename=downloaded["filename"],
+                mime_type=downloaded["mime_type"],
+            )
+            output_files.append(file_pointer)
+            logger.info(f"[Extract] Uploaded: {downloaded['filename']} -> {file_pointer['storage_path']}")
+        except Exception as e:
+            logger.warning(f"[Extract] Failed to upload {downloaded['filename']}: {extract_error_message(e)}")
+            continue
+
+    logger.info(
+        f"[Extract] Extracted {len(output_files)}/{len(session_files)} files",
+        session_id=session_id,
+    )
+    return output_files
+
+
+# ========================================
+# BROWSER SYSTEM PROMPT
+# ========================================
+
+
+def get_browser_system_prompt(
+    goal: str, current_url: str, custom_instructions: str = "", available_files: Optional[List[str]] = None
+) -> str:
+    """Build browser agent system prompt."""
+    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
+
+    files_section = ""
+    if available_files:
+        files_section = f"""
+AVAILABLE FILES FOR UPLOAD:
+The following files are available to upload using the upload_file action.
+To upload a file, find a file input element (<input type="file">) and use upload_file with the filename.
+Files: {", ".join(available_files)}
+"""
+
+    return f"""Current time: {current_time}
+
+CURRENT GOAL: {goal}
+CURRENT URL: {current_url}
+{files_section}
+You will receive:
+1. The current DOM tree with indexed elements like [1] button "Submit", [2] input[type=text], etc.
+2. A screenshot of the current page
+3. History of your previous actions and their results
+
+To interact with elements, use their index number from the DOM tree.
+
+AVAILABLE ACTIONS:
+- click: Click an element by index
+- input_text: Type text into an input element
+- press_key: Press keyboard keys (Enter, Tab, Escape, etc.)
+- scroll: Scroll the page up or down
+- goto: Navigate to a URL
+- navback: Go back in browser history
+- wait: Wait for a specified time
+- dropdown_options: Get options from a dropdown
+- select_dropdown: Select an option from a dropdown
+- evaluate: Execute JavaScript
+- extract: Extract structured data from the page
+- upload_file: Upload a file to a file input element (requires filename from available_files)
+- screenshot: Take a full-page screenshot (returned to the orchestrating agent)
+- attempt_completion: Signal you believe the task is complete
+- send_message_to_user: Request user assistance
+
+CRITICAL SAFETY RULES:
+- NEVER delete or close any user account
+- NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
+- When making payments or posting to social media, you may be asked to confirm with the user first
+
+{custom_instructions}
+
+SCREENSHOT TOOL:
+Use the screenshot action to capture a full-page screenshot. Only screenshots taken with this tool will be returned to the orchestrating agent that spawned you. The orchestrator does NOT see your per-step viewport screenshots \u2014 those are for your own use only. The orchestrator always receives a final screenshot of the last page when your task completes.
+
+IMPORTANT: One screenshot call captures the ENTIRE page (full-page, not just viewport). Do NOT call screenshot multiple times for the same page. After calling screenshot once, proceed to your next task or call attempt_completion.
+
+Use screenshot when:
+- The orchestrating agent needs visual proof of a page state
+- You need to capture something for the parent agent to inspect
+- The task explicitly asks for a screenshot to be returned
+
+Think step-by-step about what action to take next. Always prefer using element indices from the DOM tree for precise interactions."""
+
+
+# ========================================
+# USAGE CALCULATION
+# ========================================
+
+
+def build_usage_items(
+    total_input_tokens: int,
+    total_output_tokens: int,
+    model_pricing: Dict[str, Any],
+    execution_time_ms: float,
+) -> List[Dict[str, Any]]:
+    """Build standardized usage items for cost tracking."""
+    return [
+        {
+            "type": "llm",
+            "cost_cents": round(
+                (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"]
+                + (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
+                4,
+            ),
+            "provider": "Rose 1 Browser Use",
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+        },
+        {
+            "type": "service",
+            "cost_cents": round(execution_time_ms * STEEL_COST_CENTS_PER_MS, 4),
+            "provider": "Steel.dev Browser",
+        },
+    ]
+
+
+# ========================================
+# ACTION TITLE BUILDER
+# ========================================
+
+
+def build_action_titles(  # noqa: C901
+    action_name: str,
+    unified_action: Dict[str, Any],
+    element_desc: Optional[str],
+    coords: Optional[Dict],
+    secret_refs: Optional[Dict[str, str]],
+) -> tuple[str, str, str]:
+    """Build human-readable title_progress, title_done, and resolved action_name.
+
+    Returns:
+        (title_progress, title_done, resolved_action_name)
+    """
+    title_progress = f"{action_name}..."
+    title_done = action_name
+    resolved_action_name = action_name
+
+    if action_name == "click":
+        if element_desc:
+            title_progress = f"Clicking {element_desc}"
+            title_done = f"Clicked {element_desc}"
+        elif coords:
+            title_progress = f"Clicking at ({coords.get('x', '?')}, {coords.get('y', '?')})"
+            title_done = f"Clicked at ({coords.get('x', '?')}, {coords.get('y', '?')})"
+        else:
+            title_progress = "Clicking..."
+            title_done = "Clicked"
+    elif action_name == "input_text":
+        text = unified_action.get("params", {}).get("text", "")
+        display_text = "[encrypted_data]" if (secret_refs and text in secret_refs) else text[:25]
+        if element_desc:
+            title_progress = f"Typing into {element_desc}"
+            title_done = f"Typed '{display_text}' into {element_desc}"
+        elif coords:
+            title_progress = f"Typing at ({coords.get('x', '?')}, {coords.get('y', '?')})"
+            title_done = f"Typed '{display_text}' at ({coords.get('x', '?')}, {coords.get('y', '?')})"
+        else:
+            title_progress = "Typing..."
+            title_done = f"Typed '{display_text}'"
+    elif action_name == "goto":
+        url = unified_action.get("params", {}).get("url", "")[:50]
+        title_progress = f"Navigating \u2192 {url}"
+        title_done = f"Navigated \u2192 {url}"
+    elif action_name == "scroll":
+        direction = unified_action.get("params", {}).get("direction", "down")
+        amount = unified_action.get("params", {}).get("amount", 300)
+        title_progress = f"Scrolling {direction} {amount}px..."
+        title_done = f"Scrolled {direction} {amount}px"
+        resolved_action_name = f"scroll_{direction}"
+    elif action_name == "press_key":
+        key = unified_action.get("params", {}).get("key", "?")
+        title_progress = f"Pressing {key}..."
+        title_done = f"Pressed {key}"
+    elif action_name == "extract":
+        title_progress = "Extracting data..."
+        title_done = "Extracted data"
+    elif action_name == "wait":
+        time_ms = unified_action.get("params", {}).get("time_ms", 1000)
+        title_progress = f"Waiting {time_ms}ms..."
+        title_done = f"Waited {time_ms}ms"
+    elif action_name == "select_dropdown":
+        value = unified_action.get("params", {}).get("value", "?")
+        if element_desc:
+            title_progress = f"Selecting '{value}' from {element_desc}"
+            title_done = f"Selected '{value}' from {element_desc}"
+        else:
+            title_progress = f"Selecting '{value}'..."
+            title_done = f"Selected '{value}'"
+    elif action_name == "upload_file":
+        filename = unified_action.get("params", {}).get("filename", "file")
+        if element_desc:
+            title_progress = f"Uploading {filename} to {element_desc}"
+            title_done = f"Uploaded {filename} to {element_desc}"
+        else:
+            title_progress = f"Uploading {filename}..."
+            title_done = f"Uploaded {filename}"
+    elif action_name == "screenshot":
+        title_progress = "Taking screenshot..."
+        title_done = "Screenshot captured"
+
+    return title_progress, title_done, resolved_action_name

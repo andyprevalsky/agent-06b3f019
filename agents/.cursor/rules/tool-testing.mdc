@@ -4,7 +4,7 @@ description: >
   
   All agent tools MUST have corresponding tests. When creating or modifying agent tools, you MUST create/update tests to maintain code quality and prevent regressions.
   
-  Test location: agents/tests/test_<tool_name>.py
+  Test location: agents/tests/blackbox/<domain>.blackbox.py
   
   Required coverage:
   1. Activity/function logic with mocking (REQUIRED)
@@ -27,14 +27,15 @@ When creating or modifying agent tools, you MUST create/update tests to maintain
 
 ## Test Location
 
-All tests should be in `agents/tests/` with the naming convention `test_<tool_name>.py`
+All contract tests should live in `agents/tests/blackbox/` with the naming convention `<domain>.blackbox.py`.
 
 ```
 agents/
   tools/
     my_tool.py
   tests/
-    test_my_tool.py  ← Test file here
+    blackbox/
+      my-tool.blackbox.py  ← Domain blackbox suite
     run_all_tests.py
     README.md
 ```
@@ -273,10 +274,10 @@ cd agents/tests
 python run_all_tests.py
 ```
 
-### Run Individual Test
+### Run Individual Domain
 ```bash
-cd agents/tests
-python test_your_tool.py
+cd agents
+python scripts/run_blackbox_tests.py <domain>
 ```
 
 ### Pre-commit Hook
@@ -298,19 +299,17 @@ Minimum required coverage for each tool:
 ## Examples
 
 See these files for reference:
-- `agents/tests/test_web_search.py` - Full coverage with real API calls
-- `agents/tests/test_amazon_shopping.py` - Activity testing with mocks
-- `agents/tests/test_knowledge_base.py` - HTTP mocking
-- `agents/tests/test_spawn_sub_agents.py` - Complex mocking
-- `agents/tests/README.md` - Complete testing documentation
+- `agents/tests/blackbox/web_search.blackbox.py` - domain blackbox coverage
+- `agents/tests/blackbox/knowledge_base.blackbox.py` - HTTP boundary mocking
+- `agents/tests/blackbox/spawn_sub_agents.blackbox.py` - activity boundary coverage
+- `agents/tests/README.md` - complete testing documentation
 
 ## Pre-commit Checks
 
 Before committing:
-1. ✅ Created test file in `agents/tests/test_<tool_name>.py`
+1. ✅ Created/updated test file in `agents/tests/blackbox/<domain>.blackbox.py`
 2. ✅ Tested activity/function logic with mocks
 3. ✅ Tested all formatters
 4. ✅ Tested error cases
-5. ✅ Added import to `run_all_tests.py`
-6. ✅ Added test execution to appropriate runner function
-7. ✅ Ran `python run_all_tests.py` and all tests passed
+5. ✅ Ran `python scripts/run_blackbox_tests.py <domain>` and it passed
+6. ✅ Ran `python tests/run_all_tests.py` and all tests passed

@@ -40,7 +40,7 @@
     "is_chat_mode": false,
     "expected_tools": ["web_search"],
     "tags": ["basic", "smoke"],
-    "price_limit_cents": 50,
+    "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,

@@ -2,37 +2,35 @@
 
 import asyncio
 import base64
+import contextlib
+import json
 import random
 import re
-import uuid
 import time  # Import at module level for Temporal workflow sandbox compatibility
+import uuid
 from datetime import datetime
-from typing import List, Dict, Optional, Any, TypeVar, Type, AsyncIterator, Tuple, Callable, Awaitable
-from temporalio import activity
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
+
+import httpx  # Used with instructor
+import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
-import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-import instructor  # Import at module level for Temporal workflow sandbox compatibility
-import httpx  # Used with instructor
+from temporalio import activity
 
 from config import load_config
-from helpers.get_user_context import fetch_user_context
-from helpers.error_utils import extract_error_message
-from helpers.prompts import build_system_prompt, build_verifier_prompt
-from helpers.tool_schemas import (
-    ProgressScore,
-    create_agent_action_model,
-)
-from helpers.messages import stream_assistant_chunk, stream_tool_event, stream_attention_event, stream_plan_event
-from tools.base import ToolSchema
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
-    get_file_from_pointer,
     get_cached_file,
+    get_file_from_pointer,
 )
 from helpers.context_pointers import resolve_pointers_in_messages
+from helpers.error_utils import extract_error_message
+from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.tool_schemas import (
+    create_agent_action_model,
+)
 
 logger = structlog.get_logger()
 
@@ -45,10 +43,8 @@ _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt
 
 def _safe_heartbeat(message: str) -> None:
     """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
-    try:
+    with contextlib.suppress(Exception):
         activity.heartbeat(message)
-    except Exception:
-        pass  # Not in activity context - running from workflow
 
 
 def _safe_time() -> float:
@@ -58,8 +54,11 @@ def _safe_time() -> float:
     except Exception:
         return 0.0  # Workflow sandbox - TTFT logging will show 0ms
 
-T = TypeVar('T', bound=BaseModel)
-def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
     """
     Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
 
@@ -90,6 +89,7 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
             if def_name in defs:
                 # Return a deep copy to avoid mutation issues
                 import copy
+
                 return copy.deepcopy(defs[def_name])
         raise ValueError(f"Cannot resolve reference: {ref}")
 
@@ -173,12 +173,12 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
-def convert_context_to_messages(
+def convert_context_to_messages(  # noqa: C901
     context: List[Dict[str, Any]],
     include_system: bool = True,
     # Default False: including assistant messages is prone to reward hacking
     # (agent can bias verifier with its own reasoning)
-    include_assistant: bool = False
+    include_assistant: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Convert workflow context to OpenAI/OpenRouter message format.
@@ -204,7 +204,7 @@ def convert_context_to_messages(
         List of OpenAI-formatted messages in chronological order
     """
     messages = []
-    
+
     # Sort context by timestamp to ensure chronological order
     # This is critical after polling for new user messages or continue-as-new
     def parse_timestamp(ts: str) -> datetime:
@@ -213,68 +213,68 @@ def convert_context_to_messages(
             return datetime(1970, 1, 1)
         try:
             # Handle both with and without timezone
-            if ts.endswith('Z'):
-                ts = ts[:-1] + '+00:00'
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
             return datetime.fromisoformat(ts)
         except (ValueError, AttributeError):
             return datetime(1970, 1, 1)
-    
+
     # Build map of tool_call_id -> IN_PROGRESS timestamp
     # This allows FINISHED messages to use the IN_PROGRESS timestamp for sorting,
     # ensuring tool results stay grouped with their declaring ASSISTANT message
     # even if a USER message arrives before the tool completes
     tool_start_times: Dict[str, str] = {}
     for msg in context:
-        meta = msg.get('metadata', {}) or {}
-        if msg.get('role') == 'TOOL' and meta.get('toolStatus') == 'IN_PROGRESS':
-            tool_call_id = meta.get('toolCallId')
+        meta = msg.get("metadata", {}) or {}
+        if msg.get("role") == "TOOL" and meta.get("toolStatus") == "IN_PROGRESS":
+            tool_call_id = meta.get("toolCallId")
             if tool_call_id:
-                tool_start_times[tool_call_id] = msg.get('timestamp', '')
-    
+                tool_start_times[tool_call_id] = msg.get("timestamp", "")
+
     def get_timestamp(msg: Dict[str, Any]) -> datetime:
         """Get timestamp for sorting. FINISHED tool messages use their IN_PROGRESS timestamp."""
-        meta = msg.get('metadata', {}) or {}
-        
+        meta = msg.get("metadata", {}) or {}
+
         # For FINISHED tool messages, use the IN_PROGRESS timestamp if available
         # This keeps tool results grouped with their ASSISTANT tool_call, not separated by USER messages
-        if msg.get('role') == 'TOOL' and meta.get('toolStatus') == 'FINISHED':
-            tool_call_id = meta.get('toolCallId')
+        if msg.get("role") == "TOOL" and meta.get("toolStatus") == "FINISHED":
+            tool_call_id = meta.get("toolCallId")
             if tool_call_id and tool_call_id in tool_start_times:
                 return parse_timestamp(tool_start_times[tool_call_id])
-        
-        return parse_timestamp(msg.get('timestamp', ''))
-    
+
+        return parse_timestamp(msg.get("timestamp", ""))
+
     # Sort with SYSTEM messages first (but chronological among themselves),
     # then all other messages chronologically
     def sort_key(msg: Dict[str, Any]) -> tuple:
         """Sort key: (is_not_system, timestamp) so SYSTEM messages come first."""
-        is_system = msg.get('role') == 'SYSTEM'
+        is_system = msg.get("role") == "SYSTEM"
         timestamp = get_timestamp(msg)
         return (not is_system, timestamp)  # False sorts before True, so SYSTEM first
-    
+
     sorted_context = sorted(context, key=sort_key)
-    
+
     # Track which tool_call_ids have been declared by ASSISTANT messages
     declared_tool_ids = set()
-    
+
     for msg in sorted_context:
-        role = msg.get('role', 'ASSISTANT')
-        content = msg.get('text', '')
-        metadata = msg.get('metadata', {}) or {}  # Handle explicit None values
-        
-        if role == 'SYSTEM':
+        role = msg.get("role", "ASSISTANT")
+        content = msg.get("text", "")
+        metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
+
+        if role == "SYSTEM":
             if include_system:
                 messages.append({"role": "system", "content": content})
-                
-        elif role == 'USER':
+
+        elif role == "USER":
             messages.append({"role": "user", "content": content})
-            
-        elif role == 'ASSISTANT':
+
+        elif role == "ASSISTANT":
             # Still track declared tool IDs even if not including assistant messages
             # This ensures TOOL messages can be properly matched
-            if metadata.get('tool_calls'):
-                for tc in metadata['tool_calls']:
-                    tc_id = str(tc.get('tool_call_id', uuid.uuid4()))
+            if metadata.get("tool_calls"):
+                for tc in metadata["tool_calls"]:
+                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
 
             if not include_assistant:
@@ -282,75 +282,79 @@ def convert_context_to_messages(
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
-            if metadata.get('tool_calls'):
+            if metadata.get("tool_calls"):
                 # Convert our tool call format to OpenAI format
                 tool_calls = []
-                for tc in metadata['tool_calls']:
+                for tc in metadata["tool_calls"]:
                     # Get or generate tool_call_id
-                    tc_id = str(tc.get('tool_call_id', uuid.uuid4()))
-                    tool_calls.append({
-                        "id": tc_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.get('tool'),
-                            "arguments": json.dumps({k: v for k, v in tc.items() if k not in ['tool', 'tool_call_id']})
+                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
+                    tool_calls.append(
+                        {
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("tool"),
+                                "arguments": json.dumps(
+                                    {k: v for k, v in tc.items() if k not in ["tool", "tool_call_id"]}
+                                ),
+                            },
                         }
-                    })
+                    )
                 assistant_msg["tool_calls"] = tool_calls
 
             messages.append(assistant_msg)
-            
-        elif role == 'TOOL':
+
+        elif role == "TOOL":
             # Skip sub-agent internal messages (browser steps, explore greps, etc.)
-            if metadata.get('subAgentId'):
+            if metadata.get("subAgentId"):
                 continue
 
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
-            if metadata.get('toolStatus') == 'IN_PROGRESS':
+            if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
-            
+
             # Special handling for verifier messages: convert to ASSISTANT
             # These need to be in the conversation flow for the agent to see them
-            if metadata.get('verifierMessage'):
+            if metadata.get("verifierMessage"):
                 assistant_content = content
-                if metadata.get('title'):
+                if metadata.get("title"):
                     assistant_content = f"{metadata['title']}: {content}"
                 messages.append({"role": "assistant", "content": assistant_content})
                 continue
-            
-            tool_call_id = str(metadata.get('toolCallId', ''))
-            
+
+            tool_call_id = str(metadata.get("toolCallId", ""))
+
             # Only use tool role if this tool_call_id was declared by a preceding ASSISTANT message
             if tool_call_id and tool_call_id in declared_tool_ids:
                 # Use proper tool role with tool_call_id and name
                 # Prefix content with title (what user sees in UI) for context
                 tool_content = content
-                if metadata.get('title'):
+                if metadata.get("title"):
                     tool_content = f"{metadata['title']}: {content}"
                 # Include structured_response for verifier extraction of full FilePointers
-                if metadata.get('structured_response'):
+                if metadata.get("structured_response"):
                     tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                if metadata.get('toolName'):
-                    tool_msg["name"] = metadata['toolName']
+                if metadata.get("toolName"):
+                    tool_msg["name"] = metadata["toolName"]
                 messages.append(tool_msg)
             else:
                 # No matching ASSISTANT tool_call - convert to SYSTEM message
                 # This handles workflow activities like query_blueprints that post TOOL messages
                 # but aren't user-declared tool calls
                 system_content = content
-                if metadata.get('title'):
+                if metadata.get("title"):
                     system_content = f"{metadata['title']}: {content}"
                 # Include structured_response for verifier extraction of full FilePointers
-                if metadata.get('structured_response'):
+                if metadata.get("structured_response"):
                     system_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 messages.append({"role": "system", "content": system_content})
 
     return messages
 
 
-async def build_llm_messages(
+async def build_llm_messages(  # noqa: C901
     context: List[Dict],
     system_prompt: str,
     pre_resolved_ids: Optional[set] = None,
@@ -385,6 +389,7 @@ async def build_llm_messages(
     def parse_timestamp(ts) -> datetime:
         """Parse timestamp to datetime, return epoch for invalid/missing."""
         from datetime import timezone
+
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         if not ts:
             return epoch
@@ -394,7 +399,7 @@ async def build_llm_messages(
             return ts
         try:
             # ISO format: 2024-01-15T10:30:00.000Z
-            return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             return epoch
 
@@ -506,20 +511,19 @@ async def build_llm_messages(
                 base64_data = base64.b64encode(file_content).decode("utf-8")
 
                 if fp.is_image():
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{fp.mime_type};base64,{base64_data}"
-                        }
-                    })
+                    content.append(
+                        {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
+                    )
                 elif fp.is_pdf():
-                    content.append({
-                        "type": "file",
-                        "file": {
-                            "filename": fp.original_filename,
-                            "file_data": f"data:{fp.mime_type};base64,{base64_data}"
+                    content.append(
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": fp.original_filename,
+                                "file_data": f"data:{fp.mime_type};base64,{base64_data}",
+                            },
                         }
-                    })
+                    )
                 elif fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
@@ -568,27 +572,35 @@ async def build_llm_messages(
             raw_tool_calls = metadata.get("tool_calls")
             if raw_tool_calls:
                 if not isinstance(raw_tool_calls, list):
-                    raise ValueError(f"ASSISTANT message metadata.tool_calls must be a list (got {type(raw_tool_calls).__name__})")
+                    raise ValueError(
+                        f"ASSISTANT message metadata.tool_calls must be a list (got {type(raw_tool_calls).__name__})"
+                    )
                 parsed_tool_calls = []
                 for idx, tc in enumerate(raw_tool_calls):
                     if not isinstance(tc, dict):
-                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] must be an object (got {type(tc).__name__})")
+                        raise ValueError(
+                            f"ASSISTANT metadata.tool_calls[{idx}] must be an object (got {type(tc).__name__})"
+                        )
                     tool_name = tc.get("tool")
                     tool_call_id = tc.get("tool_call_id")
                     if not tool_name:
                         raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool'")
                     if not tool_call_id:
-                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'")
+                        raise ValueError(
+                            f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
+                        )
                     declared_tool_call_ids.add(str(tool_call_id))
                     args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
-                    parsed_tool_calls.append({
-                        "id": str(tool_call_id),
-                        "type": "function",
-                        "function": {
-                            "name": str(tool_name),
-                            "arguments": json.dumps(args),
-                        },
-                    })
+                    parsed_tool_calls.append(
+                        {
+                            "id": str(tool_call_id),
+                            "type": "function",
+                            "function": {
+                                "name": str(tool_name),
+                                "arguments": json.dumps(args),
+                            },
+                        }
+                    )
                 assistant_msg["tool_calls"] = parsed_tool_calls
 
             messages.append(assistant_msg)
@@ -677,7 +689,7 @@ async def build_llm_messages(
     return messages
 
 
-async def call_llm_structured_streaming(
+async def call_llm_structured_streaming(  # noqa: C901
     messages: List[Dict[str, Any]],
     model: Optional[str],
     temperature: float,
@@ -688,9 +700,15 @@ async def call_llm_structured_streaming(
     model_preference: Optional[str] = None,
     model_seed: Optional[int] = None,  # Index into Rose model pool (bypasses racing)
     agent_id: Optional[str] = None,  # For cancellation checking
-    on_tool_detected: Optional[Callable[[str, str], Awaitable[None]]] = None,  # Called when any tool detected (tool_name, tool_call_id)
-    on_attention_stream: Optional[Callable[[str, str, bool], Awaitable[None]]] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
-    on_raw_progress: Optional[Callable[[int], Awaitable[None]]] = None,  # Called with total accumulated bytes (reasoning + json)
+    on_tool_detected: Optional[
+        Callable[[str, str], Awaitable[None]]
+    ] = None,  # Called when any tool detected (tool_name, tool_call_id)
+    on_attention_stream: Optional[
+        Callable[[str, str, bool], Awaitable[None]]
+    ] = None,  # Called with (tool_call_id, message, is_question) for send_message_to_user
+    on_raw_progress: Optional[
+        Callable[[int], Awaitable[None]]
+    ] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
@@ -722,18 +740,20 @@ async def call_llm_structured_streaming(
         detected_tools_ordered: List of (tool_name, tool_call_id, timestamp) tuples in detection order
     """
     config = load_config()
-    
+
     # Check if this is a Rose model - route to Supabase edge function with streaming
-    is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
-    
+    is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
+
     if is_rose_model:
         # Generate unique request ID for tracing
         request_id = str(uuid.uuid4())[:8]
-        logger.info(f"📤 [{request_id}] [{call_site}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
+        logger.info(
+            f"📤 [{request_id}] [{call_site}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
+        )
 
         # Build JSON schema from Pydantic model
         schema = prepare_schema_for_openai(response_model)
-        
+
         request_body = {
             "model": model,
             "messages": messages,
@@ -743,14 +763,10 @@ async def call_llm_structured_streaming(
             "stream_options": {"include_usage": True},  # Get token usage in final chunk
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {
-                    "name": response_model.__name__,
-                    "schema": schema,
-                    "strict": True
-                }
-            }
+                "json_schema": {"name": response_model.__name__, "schema": schema, "strict": True},
+            },
         }
-        
+
         if model_preference:
             request_body["model_preference"] = model_preference
             logger.info(f"🎯 Streaming with model_preference: {model_preference}")
@@ -770,7 +786,7 @@ async def call_llm_structured_streaming(
         if reasoning_max_tokens:
             request_body["reasoning"] = {"max_tokens": reasoning_max_tokens}
             logger.info(f"🧠 Streaming with reasoning max_tokens: {reasoning_max_tokens}")
-        
+
         # Stream SSE from Rose endpoint
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
         accumulated_json = ""  # JSON content for parsing
@@ -786,20 +802,22 @@ async def call_llm_structured_streaming(
         was_cancelled = False
         chunk_count = 0
         stream_usage = None  # Captured from final chunk with stream_options
-        
+
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
-        detected_tool_positions: Dict[str, int] = {}  # tool_name -> count detected (for tracking multiple same-name tools)
-        
+        detected_tool_positions: Dict[
+            str, int
+        ] = {}  # tool_name -> count detected (for tracking multiple same-name tools)
+
         # State transition tracking for debugging
         first_reasoning_chunk: Optional[int] = None
         first_response_chunk: Optional[int] = None
         first_tool_calls_chunk: Optional[int] = None
-        
+
         # Attention message streaming tracking (for send_message_to_user)
         attention_tool_call_id: Optional[str] = None
         last_attention_message = ""
-        
+
         try:
             # Log outbound request summary for debugging 400s
             logger.debug(
@@ -819,16 +837,20 @@ async def call_llm_structured_streaming(
                                 "name": tc.get("function", {}).get("name"),
                                 "has_arguments": "arguments" in tc.get("function", {}),
                                 "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
-                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50] if tc.get("function", {}).get("arguments") else "MISSING"
+                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50]
+                                if tc.get("function", {}).get("arguments")
+                                else "MISSING",
                             }
                             for tc in m.get("tool_calls", [])
-                        ] if m.get("tool_calls") else None,
-                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None
+                        ]
+                        if m.get("tool_calls")
+                        else None,
+                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None,
                     }
                     for i, m in enumerate(messages)
-                ]
+                ],
             )
-            
+
             # Log FULL request for replay/debugging slow requests
             log_body = {k: v for k, v in request_body.items() if k != "claude_token"}
             logger.info(
@@ -836,17 +858,17 @@ async def call_llm_structured_streaming(
                 url=config.rose.api_url,
                 request_body_json=json.dumps(log_body, default=str),
             )
-            
+
             # Heartbeat before starting - catches cancellation if pause was already clicked
             _safe_heartbeat("Starting Rose LLM stream...")
-            
+
             request_start_time = _safe_time()
             ttft_logged = False
-            
+
             last_chunk_time = _safe_time()  # Track time since last chunk for stall detection
-            async with httpx.AsyncClient(timeout=httpx.Timeout(170.0, connect=30.0)) as http_client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(170.0, connect=30.0)) as http_client:  # noqa: SIM117
                 async with http_client.stream(
-                    'POST',
+                    "POST",
                     config.rose.api_url,
                     json=request_body,
                     headers={
@@ -856,17 +878,19 @@ async def call_llm_structured_streaming(
                         "x-request-id": request_id,
                         "x-agent-id": agent_id or "",
                         "x-call-site": call_site,
-                    }
+                    },
                 ) as stream_response:
                     stream_response.raise_for_status()
-                    
+
                     # Heartbeat after connection established - catches cancellation during initial request
                     _safe_heartbeat("Rose stream connected, waiting for chunks...")
-                    logger.info(f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}")
-                    
+                    logger.info(
+                        f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}"
+                    )
+
                     async for line in stream_response.aiter_lines():
                         chunk_count += 1
-                        
+
                         # Log TTFT on first chunk
                         if not ttft_logged:
                             ttft_ms = int((_safe_time() - request_start_time) * 1000)
@@ -879,15 +903,16 @@ async def call_llm_structured_streaming(
                             logger.warning(f"⚠️ Stream stall detected ({int(now - last_chunk_time)}s no data)")
                             _safe_heartbeat(f"Stream stall {int(now - last_chunk_time)}s")
                         last_chunk_time = now
-                        
+
+
                         if chunk_count == 1:
-                            logger.info(f"📦 First streaming line received")
-                        
-                        if not line or not line.startswith('data: '):
+                            logger.info("📦 First streaming line received")
+
+                        if not line or not line.startswith("data: "):
                             continue
-                        
+
                         data_str = line[6:]  # Remove 'data: ' prefix
-                        if data_str == '[DONE]':
+                        if data_str == "[DONE]":
                             break
                         try:
                             chunk_data = json.loads(data_str)
@@ -910,12 +935,14 @@ async def call_llm_structured_streaming(
                             # Capture usage from final chunk (sent when stream_options.include_usage=true)
                             if chunk_data.get("usage"):
                                 stream_usage = chunk_data["usage"]
-                                cache_read = stream_usage.get('cache_read_input_tokens', 0)
-                                cache_write = stream_usage.get('cache_creation_input_tokens', 0)
-                                prompt_tokens = stream_usage.get('prompt_tokens', 0)
+                                cache_read = stream_usage.get("cache_read_input_tokens", 0)
+                                cache_write = stream_usage.get("cache_creation_input_tokens", 0)
+                                prompt_tokens = stream_usage.get("prompt_tokens", 0)
                                 total_input = prompt_tokens + cache_read + cache_write
                                 cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
-                                logger.info(f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}%")
+                                logger.info(
+                                    f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}%"
+                                )
 
                             # Extract delta content
                             choices = chunk_data.get("choices", [])
@@ -937,9 +964,15 @@ async def call_llm_structured_streaming(
                                 # Determine current state based on content
                                 has_tool_calls = '"tool_calls"' in accumulated_json
                                 has_response = '"response"' in accumulated_json
-                                state = "reasoning" if reasoning_delta else ("tool_call" if has_tool_calls else ("response" if has_response else "json"))
-                                logger.info(f"🔍 C{chunk_count} state={state} r_len={len(accumulated_reasoning)} json_len={len(accumulated_json)} has_tools={has_tool_calls} fin={fin}")
-                            
+                                state = (
+                                    "reasoning"
+                                    if reasoning_delta
+                                    else ("tool_call" if has_tool_calls else ("response" if has_response else "json"))
+                                )
+                                logger.info(
+                                    f"🔍 C{chunk_count} state={state} r_len={len(accumulated_reasoning)} json_len={len(accumulated_json)} has_tools={has_tool_calls} fin={fin}"
+                                )
+
                             # Accumulate reasoning and JSON separately
                             if reasoning_delta:
                                 if first_reasoning_chunk is None:
@@ -955,29 +988,32 @@ async def call_llm_structured_streaming(
                                 if first_tool_calls_chunk is None and '"tool_calls"' in accumulated_json:
                                     first_tool_calls_chunk = chunk_count
                                     logger.info(f"🔧 C{chunk_count} TOOL_CALLS started")
-                            
+
                             # Estimate tokens (rough: ~4 chars per token)
                             token_count = (len(accumulated_reasoning) + len(accumulated_json)) // 4
-                            
+
                             # Detect any tool calls and emit early IN_PROGRESS
                             # Look for "tool": "tool_name" patterns in the JSON content
                             # Skip tools that shouldn't show early IN_PROGRESS (direct user communication)
                             SKIP_EARLY_PROGRESS = {"send_message_to_user", "attempt_completion"}
-                            
+
                             if on_tool_detected and '"tool_calls"' in accumulated_json:
                                 tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
                                 for tool_name in tool_matches:
                                     # Skip tools that shouldn't have early progress messages
                                     if tool_name in SKIP_EARLY_PROGRESS:
                                         continue
-                                    
+
                                     # Track position for this tool name (handles multiple same-name tools)
                                     current_position = detected_tool_positions.get(tool_name, 0)
                                     # Count how many of this tool we've already detected
                                     existing_count = sum(1 for t, _, _ in detected_tools_ordered if t == tool_name)
-                                    
+
                                     # Only detect if this is a new occurrence
-                                    if existing_count < tool_matches.count(tool_name) and existing_count == current_position:
+                                    if (
+                                        existing_count < tool_matches.count(tool_name)
+                                        and existing_count == current_position
+                                    ):
                                         # Log previous tool's params before emitting IN_PROGRESS for this tool
                                         if len(detected_tools_ordered) > 0:
                                             completed_tools = _extract_completed_tool_calls(accumulated_json)
@@ -997,17 +1033,21 @@ async def call_llm_structured_streaming(
                                         tool_call_id = str(uuid.uuid4())
                                         detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                                         detected_tool_positions[tool_name] = current_position + 1
-                                        logger.info(f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}")
+                                        logger.info(
+                                            f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}"
+                                        )
                                         await on_tool_detected(tool_name, tool_call_id)
-                            
+
                             # Stream send_message_to_user content progressively
                             if on_attention_stream and '"send_message_to_user"' in accumulated_json:
                                 # Assign tool_call_id if not yet assigned
                                 if not attention_tool_call_id:
                                     attention_tool_call_id = str(uuid.uuid4())
-                                    detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
+                                    detected_tools_ordered.append(
+                                        ("send_message_to_user", attention_tool_call_id, _safe_time())
+                                    )
                                     logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
-                                
+
                                 # Extract message content
                                 msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"?', accumulated_json)
                                 if msg_match:
@@ -1015,30 +1055,32 @@ async def call_llm_structured_streaming(
                                         attention_message = json.loads(f'"{msg_match.group(1)}"')
                                     except json.JSONDecodeError:
                                         attention_message = msg_match.group(1)
-                                    
+
                                     # Extract is_question (default True)
                                     is_question = True
                                     iq_match = re.search(r'"is_question"\s*:\s*(true|false)', accumulated_json)
                                     if iq_match:
                                         is_question = iq_match.group(1) == "true"
-                                    
+
                                     # Stream if message has grown
                                     if attention_message and attention_message != last_attention_message:
                                         last_attention_message = attention_message
-                                        await on_attention_stream(attention_tool_call_id, attention_message, is_question)
-                            
+                                        await on_attention_stream(
+                                            attention_tool_call_id, attention_message, is_question
+                                        )
+
                             # Extract response and track for deduplication
                             response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
                             if response_text and response_text != last_emitted_text:
                                 last_emitted_text = response_text
-                                
+
                                 # Only emit when 18+ new chars since last emit
                                 pending_delta = len(response_text) - len(last_emitted_for_chunk)
                                 if pending_delta >= 18:
                                     # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
                                     await on_chunk(response_text, token_count)
                                     last_emitted_for_chunk = response_text
-                            
+
                             # Heartbeat every 5 chunks with state info (fires on reasoning chunks too)
                             if chunk_count % 5 == 0:
                                 # Determine current phase
@@ -1052,7 +1094,9 @@ async def call_llm_structured_streaming(
                                     phase = "response"
                                 else:
                                     phase = "json"
-                                _safe_heartbeat(f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} j={len(accumulated_json)}")
+                                _safe_heartbeat(
+                                    f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} j={len(accumulated_json)}"
+                                )
 
                             # Raw progress callback (every chunk)
                             if on_raw_progress:
@@ -1061,17 +1105,15 @@ async def call_llm_structured_streaming(
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
         except asyncio.CancelledError:
-            logger.info(f"⏹️ Rose streaming cancelled (asyncio.CancelledError)")
+            logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
-        
+
         if was_cancelled:
             logger.info(f"🛑 Rose streaming cancelled, returning partial usage: {token_count} tokens")
             # Return empty response with partial usage - workflow will handle the pause
-            empty_response = response_model.model_validate({
-                "reasoning": "Streaming cancelled by user",
-                "response": "",
-                "tool_calls": []
-            })
+            empty_response = response_model.model_validate(
+                {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
+            )
             # Use stream_usage if captured before cancellation, otherwise estimate
             if stream_usage:
                 usage = {
@@ -1082,7 +1124,7 @@ async def call_llm_structured_streaming(
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
-                    "cancelled": True
+                    "cancelled": True,
                 }
             else:
                 usage = {
@@ -1093,11 +1135,15 @@ async def call_llm_structured_streaming(
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
-                    "cancelled": True
+                    "cancelled": True,
                 }
             return empty_response, usage, detected_tools_ordered
-        
-        logger.info(f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars, finish_reason={final_finish_reason}")
+
+        logger.info(
+            f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
+            f"reasoning={len(accumulated_reasoning)} json={len(accumulated_json)} chars, "
+            f"finish_reason={final_finish_reason}"
+        )
 
         # Escalate max_tokens on truncation (finish_reason=length) — retry once with 32768
         if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation:
@@ -1127,9 +1173,9 @@ async def call_llm_structured_streaming(
         response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
         if response_text and response_text != last_emitted_for_chunk:
             await on_chunk(response_text, token_count)
-        
+
         # Parse final JSON and validate with Pydantic
-        # Rose models output: [explanation text]```json\n{...}\n``` 
+        # Rose models output: [explanation text]```json\n{...}\n```
         # We need to extract the JSON from within the markdown code block
         try:
             if not accumulated_json and accumulated_reasoning:
@@ -1168,12 +1214,12 @@ async def call_llm_structured_streaming(
                                 break
                     if matched_end == -1:
                         break
-                    candidate = accumulated_reasoning[json_start:matched_end + 1]
+                    candidate = accumulated_reasoning[json_start : matched_end + 1]
                     try:
                         json.loads(candidate)
                         accumulated_json = candidate
                         accumulated_reasoning = (
-                            accumulated_reasoning[:json_start] + accumulated_reasoning[matched_end + 1:]
+                            accumulated_reasoning[:json_start] + accumulated_reasoning[matched_end + 1 :]
                         ).strip()
                         logger.info(f"📦 Extracted JSON from reasoning (thinking model, {len(accumulated_json)} chars)")
                     except json.JSONDecodeError:
@@ -1193,17 +1239,17 @@ async def call_llm_structured_streaming(
             # Look for ```json ... ``` pattern, or just raw JSON
             json_content = accumulated_json
             explanation_text = ""
-            
+
             # Check for markdown code block: ```json ... ```
-            code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', accumulated_json)
+            code_block_match = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", accumulated_json)
             if code_block_match:
                 json_content = code_block_match.group(1)
                 # Everything before the code block is explanation
-                explanation_text = accumulated_json[:code_block_match.start()].strip()
+                explanation_text = accumulated_json[: code_block_match.start()].strip()
                 logger.info(f"📦 Extracted JSON from markdown code block, explanation={len(explanation_text)} chars")
             else:
                 # No code block - try to find raw JSON object using balanced braces
-                json_start = accumulated_json.find('{')
+                json_start = accumulated_json.find("{")
                 if json_start != -1:
                     explanation_text = accumulated_json[:json_start].strip()
                     # Walk forward to find matching closing brace (handles nested braces)
@@ -1216,7 +1262,7 @@ async def call_llm_structured_streaming(
                         if escape_next:
                             escape_next = False
                             continue
-                        if c == '\\' and in_string:
+                        if c == "\\" and in_string:
                             escape_next = True
                             continue
                         if c == '"' and not escape_next:
@@ -1224,15 +1270,15 @@ async def call_llm_structured_streaming(
                             continue
                         if in_string:
                             continue
-                        if c == '{':
+                        if c == "{":
                             depth += 1
-                        elif c == '}':
+                        elif c == "}":
                             depth -= 1
                             if depth == 0:
                                 json_end = i
                                 break
                     if json_end != -1:
-                        json_content = accumulated_json[json_start:json_end + 1]
+                        json_content = accumulated_json[json_start : json_end + 1]
                         logger.info(f"📦 Extracted raw JSON, explanation={len(explanation_text)} chars")
 
             parsed_content = json.loads(json_content)
@@ -1273,30 +1319,36 @@ async def call_llm_structured_streaming(
                         logger.warning(
                             f"Recovered nested tool_calls from wrapped response text: {len(normalized_nested_tools)} call(s)"
                         )
-            
+
             # Prepend explanation/reasoning to response so it shows in the same section
             combined_reasoning_parts = []
             if accumulated_reasoning and accumulated_reasoning.strip():
                 combined_reasoning_parts.append(accumulated_reasoning.strip())
 
             json_reasoning = parsed_content.get("reasoning")
-            if isinstance(json_reasoning, str) and json_reasoning.strip():
-                if not combined_reasoning_parts or json_reasoning.strip() != combined_reasoning_parts[0]:
-                    combined_reasoning_parts.append(json_reasoning.strip())
+            if (
+                isinstance(json_reasoning, str)
+                and json_reasoning.strip()
+                and (not combined_reasoning_parts or json_reasoning.strip() != combined_reasoning_parts[0])
+            ):
+                combined_reasoning_parts.append(json_reasoning.strip())
 
             if explanation_text:
                 combined_reasoning_parts.append(explanation_text)
 
             combined_reasoning = "\n\n".join(part for part in combined_reasoning_parts if part)
-            
+
             if combined_reasoning and "response" in parsed_content:
                 parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
-            
+
             response = response_model.model_validate(parsed_content)
         except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Failed to parse streaming Rose response: json={accumulated_json[:500]}", error=extract_error_message(e))
-            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}")
-        
+            logger.error(
+                f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
+                error=extract_error_message(e),
+            )
+            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}") from e
+
         # Use captured stream usage if available, otherwise fall back to estimates
         if stream_usage:
             usage = {
@@ -1332,7 +1384,7 @@ async def call_llm_structured_streaming(
         # Deduplicate single-call-per-step tools (keep only first occurrence)
         # These tools should never be called more than once in the same response
         SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
-        if hasattr(response, 'tool_calls') and response.tool_calls:
+        if hasattr(response, "tool_calls") and response.tool_calls:
             seen_single_call = set()
             deduplicated_tools = []
             for tc in response.tool_calls:
@@ -1358,27 +1410,24 @@ async def call_llm_structured_streaming(
             response.tool_calls = deduplicated_tools
 
         return response, usage, detected_tools_ordered
-    
+
     # For OpenRouter models, use Instructor's partial streaming
-    base_client = AsyncOpenAI(
-        api_key=config.openrouter.api_key,
-        base_url=config.openrouter.base_url
-    )
-    
+    base_client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
+
     # Use Instructor's partial streaming mode
     client = instructor.from_openai(base_client, mode=instructor.Mode.JSON)
-    
+
     extra_args = {}
     if reasoning_max_tokens:
         extra_args["extra_body"] = {"reasoning": {"max_tokens": reasoning_max_tokens}}
-    
+
     last_emitted_text = ""
     last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
     accumulated_text = ""
     final_response = None
     was_cancelled = False
     chunk_count = 0
-    
+
     # Use create_partial for streaming
     try:
         async for partial in client.chat.completions.create_partial(
@@ -1387,65 +1436,63 @@ async def call_llm_structured_streaming(
             temperature=temperature,
             max_tokens=max_tokens,
             response_model=response_model,
-            **extra_args
+            **extra_args,
         ):
             chunk_count += 1
-            
+
             # Heartbeat every 5 chunks - when activity is cancelled, this raises CancelledError
             if chunk_count % 5 == 0:
                 _safe_heartbeat(f"OpenRouter streaming chunk {chunk_count}")
-            
+
             # Extract response text from partial object
-            if hasattr(partial, 'response') and partial.response:
+            if hasattr(partial, "response") and partial.response:
                 current_text = partial.response
                 if current_text != last_emitted_text:
                     accumulated_text = current_text
                     last_emitted_text = current_text
-                    
+
                     # Only emit when 18+ new chars since last emit
                     pending_delta = len(accumulated_text) - len(last_emitted_for_chunk)
                     if pending_delta >= 18:
                         token_count = len(accumulated_text) // 4
                         await on_chunk(accumulated_text, token_count)
                         last_emitted_for_chunk = accumulated_text
-            
+
             final_response = partial
-        
+
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
         if not was_cancelled and accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
-        
+
     except asyncio.CancelledError:
-        logger.info(f"⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
+        logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
         was_cancelled = True
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
         raise
-    
+
     # Handle cancellation
     if was_cancelled:
-        logger.info(f"🛑 OpenRouter streaming cancelled, returning partial usage")
-        empty_response = response_model.model_validate({
-            "reasoning": "Streaming cancelled by user",
-            "response": "",
-            "tool_calls": []
-        })
+        logger.info("🛑 OpenRouter streaming cancelled, returning partial usage")
+        empty_response = response_model.model_validate(
+            {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
+        )
         estimated_tokens = len(accumulated_text) // 4
         usage = {
             "prompt_tokens": 0,
             "completion_tokens": estimated_tokens,
             "total_tokens": estimated_tokens,
-            "cancelled": True
+            "cancelled": True,
         }
         return empty_response, usage, []  # No tool detection in OpenRouter path
-    
+
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
 
     # Deduplicate single-call-per-step tools (keep only first occurrence)
     # These tools should never be called more than once in the same response
     SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
-    if hasattr(final_response, 'tool_calls') and final_response.tool_calls:
+    if hasattr(final_response, "tool_calls") and final_response.tool_calls:
         seen_single_call = set()
         deduplicated_tools = []
         for tc in final_response.tool_calls:
@@ -1463,7 +1510,7 @@ async def call_llm_structured_streaming(
         "prompt_tokens": 0,
         "completion_tokens": estimated_tokens,
         "total_tokens": estimated_tokens,
-        "cancelled": False
+        "cancelled": False,
     }
 
     return final_response, usage, []  # No tool detection in OpenRouter path
@@ -1490,15 +1537,15 @@ def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]
     obj_start = None
 
     for i, char in enumerate(content):
-        if char == '{':
+        if char == "{":
             if depth == 0:
                 obj_start = i
             depth += 1
-        elif char == '}':
+        elif char == "}":
             depth -= 1
             if depth == 0 and obj_start is not None:
                 # Complete object found
-                obj_str = content[obj_start:i+1]
+                obj_str = content[obj_start : i + 1]
                 try:
                     obj = json.loads(obj_str)
                     completed.append(obj)
@@ -1512,51 +1559,51 @@ def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]
 def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Optional[str]:
     """
     Extract streamable text from reasoning and partial JSON content.
-    
+
     Rose models output: [explanation text]```json\n{...}\n```
     We extract explanation text plus JSON `reasoning` and `response` fields.
-    
+
     Note: send_message_to_user.message is NOT streamed here because it creates
     a separate TOOL message in the DB - streaming it would cause duplicate display.
-    
+
     Args:
         reasoning: Accumulated reasoning/thinking text (may be empty for Rose)
         json_content: Accumulated content which may include explanation + markdown code block
-    
+
     Returns:
         Combined text: "reasoning\n\nexplanation\n\nresponse" (whichever parts exist)
     """
     reasoning = reasoning.strip() if reasoning else ""
-    
+
     # No content yet, just return reasoning
     if not json_content:
         return reasoning if reasoning else None
-    
+
     # Extract explanation text (everything before the JSON/markdown block)
     explanation = ""
     json_only = json_content
-    
+
     # Check for markdown code block start
-    code_block_start = json_content.find('```')
+    code_block_start = json_content.find("```")
     if code_block_start > 0:
         explanation = json_content[:code_block_start].strip()
         json_only = json_content[code_block_start:]
     else:
         # Look for raw JSON start
-        json_start = json_content.find('{')
+        json_start = json_content.find("{")
         if json_start > 0:
             explanation = json_content[:json_start].strip()
             json_only = json_content[json_start:]
-    
+
     response_text = ""
     json_reasoning = ""
-    
+
     # Try to extract response field from the JSON portion
     # First try complete JSON parse
     try:
         # Strip markdown delimiters if present
-        clean_json = re.sub(r'^```(?:json)?\s*', '', json_only)
-        clean_json = re.sub(r'\s*```$', '', clean_json)
+        clean_json = re.sub(r"^```(?:json)?\s*", "", json_only)
+        clean_json = re.sub(r"\s*```$", "", clean_json)
         data = json.loads(clean_json)
         if isinstance(data, dict):
             json_reasoning = data.get("reasoning", "") or ""
@@ -1577,7 +1624,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
                 response_text = json.loads(f'"{match.group(1)}"')
             except json.JSONDecodeError:
                 response_text = match.group(1)
-    
+
     # Combine all parts: stream reasoning + json reasoning + explanation + response
     parts = []
     if reasoning:
@@ -1591,7 +1638,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
     if response_text:
         # response_text may be a float (e.g., verifier score 0.0-1.0) - convert to string
         parts.append(str(response_text) if not isinstance(response_text, str) else response_text)
-    
+
     return "\n\n".join(parts) if parts else None
 
 
@@ -1606,14 +1653,14 @@ def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
     trimmed = text.strip()
     candidates: List[str] = [trimmed]
 
-    fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*\})\s*```', trimmed)
+    fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", trimmed)
     if fence_match:
         candidates.insert(0, fence_match.group(1))
     else:
-        start = trimmed.find('{')
-        end = trimmed.rfind('}')
+        start = trimmed.find("{")
+        end = trimmed.rfind("}")
         if start != -1 and end != -1 and end > start:
-            candidates.append(trimmed[start:end + 1])
+            candidates.append(trimmed[start : end + 1])
 
     for candidate in candidates:
         try:
@@ -1662,13 +1709,15 @@ async def call_llm(
         model = model or config.openrouter.model
 
         # Check if this is a Rose model - route to Supabase edge function
-        is_rose_model = model is not None and ('rose-labs' in model.lower() or model.lower() in ['rose', 'rose-ultra'])
+        is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
 
         if is_rose_model:
             # Generate unique request ID for tracing
             request_id = str(uuid.uuid4())[:8]
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
-            logger.info(f"📤 [{request_id}] [{call_site}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}")
+            logger.info(
+                f"📤 [{request_id}] [{call_site}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
+            )
 
             request_body = {
                 "model": model,
@@ -1701,14 +1750,18 @@ async def call_llm(
                                 "name": tc.get("function", {}).get("name"),
                                 "has_arguments": "arguments" in tc.get("function", {}),
                                 "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
-                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50] if tc.get("function", {}).get("arguments") else "MISSING"
+                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50]
+                                if tc.get("function", {}).get("arguments")
+                                else "MISSING",
                             }
                             for tc in m.get("tool_calls", [])
-                        ] if m.get("tool_calls") else None,
-                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None
+                        ]
+                        if m.get("tool_calls")
+                        else None,
+                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None,
                     }
                     for i, m in enumerate(messages)
-                ]
+                ],
             )
 
             # Log FULL request for replay/debugging slow requests
@@ -1730,7 +1783,7 @@ async def call_llm(
                         "x-request-id": request_id,
                         "x-agent-id": agent_id or "",
                         "x-call-site": call_site,
-                    }
+                    },
                 )
                 http_response.raise_for_status()
 
@@ -1744,8 +1797,8 @@ async def call_llm(
                 "usage": {
                     "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
                     "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-                    "total_tokens": data.get("usage", {}).get("total_tokens", 0)
-                }
+                    "total_tokens": data.get("usage", {}).get("total_tokens", 0),
+                },
             }
 
             logger.info(
@@ -1754,36 +1807,33 @@ async def call_llm(
                 model=model,
                 tokens=result["usage"]["total_tokens"],
                 content_length=len(content),
-                content_preview=content[:100] if content else "EMPTY"
+                content_preview=content[:100] if content else "EMPTY",
             )
 
             return result
-        
+
         # Use OpenRouter for all other models
-        client = AsyncOpenAI(
-            api_key=config.openrouter.api_key,
-            base_url=config.openrouter.base_url
-        )
-        
+        client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
+
         # Call OpenRouter
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=response_format
+            response_format=response_format,
         )
-        
+
         # Log full response to debug
         logger.info(
             "Raw LLM response",
             has_choices=len(response.choices) > 0,
             message_dict=response.choices[0].message.model_dump() if response.choices else None,
-            finish_reason=response.choices[0].finish_reason if response.choices else None
+            finish_reason=response.choices[0].finish_reason if response.choices else None,
         )
-        
+
         content = response.choices[0].message.content or ""
-        
+
         result = {
             "content": content,
             "model": response.model,
@@ -1791,20 +1841,20 @@ async def call_llm(
             "usage": {
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
-            }
+                "total_tokens": response.usage.total_tokens,
+            },
         }
-        
+
         logger.info(
             "LLM call complete",
             model=model,
             tokens=result["usage"]["total_tokens"],
             content_length=len(content),
-            content_preview=content[:100] if content else "EMPTY"
+            content_preview=content[:100] if content else "EMPTY",
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error("LLM call failed", error=extract_error_message(e))
         raise
@@ -1814,7 +1864,7 @@ async def call_llm(
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
-async def _call_llm_verifier(
+async def _call_llm_verifier(  # noqa: C901
     messages: List[Dict[str, Any]],
     model: str,
     config: Any,
@@ -1841,12 +1891,12 @@ async def _call_llm_verifier(
         "temperature": 0.3,
         "max_tokens": 4096,
         "stream": True,
-        "response_format": _build_verifier_json_schema(response_schema)
+        "response_format": _build_verifier_json_schema(response_schema),
     }
 
     if claude_token:
         request_body["claude_token"] = claude_token
-    
+
     accumulated_reasoning = ""
     accumulated_json = ""
     actual_model = "unknown"
@@ -1857,60 +1907,62 @@ async def _call_llm_verifier(
 
     stream_interrupted = False
     try:
-        async with httpx.AsyncClient(timeout=60.0) as http_client:
-            async with http_client.stream(
-                'POST',
+        async with (
+            httpx.AsyncClient(timeout=60.0) as http_client,
+            http_client.stream(
+                "POST",
                 config.rose.api_url,
                 json=request_body,
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                     "x-api-key": config.rose.api_key,
-                }
-            ) as stream_response:
-                stream_response.raise_for_status()
+                },
+            ) as stream_response,
+        ):
+            stream_response.raise_for_status()
 
-                async for line in stream_response.aiter_lines():
-                    chunk_count += 1
+            async for line in stream_response.aiter_lines():
+                chunk_count += 1
 
-                    if chunk_count % 10 == 0:
-                        _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
+                if chunk_count % 10 == 0:
+                    _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
 
-                    if not line or not line.startswith('data: '):
+                if not line or not line.startswith("data: "):
+                    continue
+
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    chunk_data = json.loads(data_str)
+
+                    if chunk_data.get("actual_model"):
+                        actual_model = chunk_data["actual_model"]
+                    if chunk_data.get("pool_name"):
+                        pool_name = chunk_data["pool_name"]
+                    if chunk_data.get("claude_token_error") and not claude_token_error:
+                        claude_token_error = chunk_data["claude_token_error"]
+                        logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
+
+                    # Capture usage from final chunk (includes cache metrics)
+                    if chunk_data.get("usage"):
+                        stream_usage = chunk_data["usage"]
+
+                    choices = chunk_data.get("choices", [])
+                    if not choices:
                         continue
+                    delta = choices[0].get("delta", {})
 
-                    data_str = line[6:]
-                    if data_str == '[DONE]':
-                        break
+                    # Accumulate both reasoning and content
+                    if delta.get("reasoning"):
+                        accumulated_reasoning += delta["reasoning"]
+                    if delta.get("content"):
+                        accumulated_json += delta["content"]
 
-                    try:
-                        chunk_data = json.loads(data_str)
-
-                        if chunk_data.get("actual_model"):
-                            actual_model = chunk_data["actual_model"]
-                        if chunk_data.get("pool_name"):
-                            pool_name = chunk_data["pool_name"]
-                        if chunk_data.get("claude_token_error") and not claude_token_error:
-                            claude_token_error = chunk_data["claude_token_error"]
-                            logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
-
-                        # Capture usage from final chunk (includes cache metrics)
-                        if chunk_data.get("usage"):
-                            stream_usage = chunk_data["usage"]
-
-                        choices = chunk_data.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {})
-
-                        # Accumulate both reasoning and content
-                        if delta.get("reasoning"):
-                            accumulated_reasoning += delta["reasoning"]
-                        if delta.get("content"):
-                            accumulated_json += delta["content"]
-
-                    except json.JSONDecodeError:
-                        continue
+                except json.JSONDecodeError:
+                    continue
     except (httpx.RemoteProtocolError, httpx.ReadError) as e:
         # Connection dropped mid-stream - try to use whatever we accumulated
         stream_interrupted = True
@@ -1923,14 +1975,16 @@ async def _call_llm_verifier(
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
-    logger.info(f"🏁 [{call_site}] Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}")
+    logger.info(
+        f"🏁 [{call_site}] Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}"
+    )
 
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
 
     if not json_content and accumulated_reasoning:
         # Thinking models might put JSON in reasoning
-        json_match = re.search(r'\{[\s\S]*\}', accumulated_reasoning)
+        json_match = re.search(r"\{[\s\S]*\}", accumulated_reasoning)
         if json_match:
             json_content = json_match.group(0)
             logger.info("📦 Extracted JSON from reasoning (thinking model)")
@@ -1968,10 +2022,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
         JSON schema dict for use with OpenAI structured outputs
     """
     # Base schema always has reasoning and score
-    properties = {
-        "reasoning": {"type": "string"},
-        "score": {"type": "number", "minimum": 0, "maximum": 1}
-    }
+    properties = {"reasoning": {"type": "string"}, "score": {"type": "number", "minimum": 0, "maximum": 1}}
     required = ["reasoning", "score"]
 
     # If response_schema provided, add output field
@@ -2003,15 +2054,33 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                     "type": "object",
                     "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
                     "properties": {
-                        "id": {"type": "string", "description": "File UUID. MUST copy exactly from Structured Response."},
-                        "storage_path": {"type": "string", "description": "Supabase storage path. MUST copy exactly from Structured Response."},
-                        "original_filename": {"type": "string", "description": "Original filename. MUST copy exactly from Structured Response."},
-                        "mime_type": {"type": "string", "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response."},
-                        "size_bytes": {"type": "integer", "description": "File size in bytes. MUST copy exactly from Structured Response."},
-                        "created_at": {"type": "string", "description": "ISO timestamp. MUST copy exactly from Structured Response."}
+                        "id": {
+                            "type": "string",
+                            "description": "File UUID. MUST copy exactly from Structured Response.",
+                        },
+                        "storage_path": {
+                            "type": "string",
+                            "description": "Supabase storage path. MUST copy exactly from Structured Response.",
+                        },
+                        "original_filename": {
+                            "type": "string",
+                            "description": "Original filename. MUST copy exactly from Structured Response.",
+                        },
+                        "mime_type": {
+                            "type": "string",
+                            "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response.",
+                        },
+                        "size_bytes": {
+                            "type": "integer",
+                            "description": "File size in bytes. MUST copy exactly from Structured Response.",
+                        },
+                        "created_at": {
+                            "type": "string",
+                            "description": "ISO timestamp. MUST copy exactly from Structured Response.",
+                        },
                     },
                     "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 }
                 json_type = file_pointer_schema
             elif field_type == "list[file_pointer]":
@@ -2020,20 +2089,35 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                     "type": "object",
                     "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
                     "properties": {
-                        "id": {"type": "string", "description": "File UUID. MUST copy exactly from Structured Response."},
-                        "storage_path": {"type": "string", "description": "Supabase storage path. MUST copy exactly from Structured Response."},
-                        "original_filename": {"type": "string", "description": "Original filename. MUST copy exactly from Structured Response."},
-                        "mime_type": {"type": "string", "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response."},
-                        "size_bytes": {"type": "integer", "description": "File size in bytes. MUST copy exactly from Structured Response."},
-                        "created_at": {"type": "string", "description": "ISO timestamp. MUST copy exactly from Structured Response."}
+                        "id": {
+                            "type": "string",
+                            "description": "File UUID. MUST copy exactly from Structured Response.",
+                        },
+                        "storage_path": {
+                            "type": "string",
+                            "description": "Supabase storage path. MUST copy exactly from Structured Response.",
+                        },
+                        "original_filename": {
+                            "type": "string",
+                            "description": "Original filename. MUST copy exactly from Structured Response.",
+                        },
+                        "mime_type": {
+                            "type": "string",
+                            "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response.",
+                        },
+                        "size_bytes": {
+                            "type": "integer",
+                            "description": "File size in bytes. MUST copy exactly from Structured Response.",
+                        },
+                        "created_at": {
+                            "type": "string",
+                            "description": "ISO timestamp. MUST copy exactly from Structured Response.",
+                        },
                     },
                     "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 }
-                json_type = {
-                    "type": "array",
-                    "items": file_pointer_schema
-                }
+                json_type = {"type": "array", "items": file_pointer_schema}
             elif field_type == "session_file_pointer":
                 # Session file pointer - used by cloud agent verifiers (spawn_claude_code_agent, spawn_browser_agent)
                 # Only extracts the path from terminal output - activity handles download/upload
@@ -2041,10 +2125,13 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                     "type": "object",
                     "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
                     "properties": {
-                        "path": {"type": "string", "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output."}
+                        "path": {
+                            "type": "string",
+                            "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output.",
+                        }
                     },
                     "required": ["path"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 }
                 json_type = session_file_pointer_schema
             elif field_type == "list[session_file_pointer]":
@@ -2053,15 +2140,15 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                     "type": "object",
                     "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
                     "properties": {
-                        "path": {"type": "string", "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output."}
+                        "path": {
+                            "type": "string",
+                            "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output.",
+                        }
                     },
                     "required": ["path"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 }
-                json_type = {
-                    "type": "array",
-                    "items": session_file_pointer_schema
-                }
+                json_type = {"type": "array", "items": session_file_pointer_schema}
             else:
                 json_type = {"type": "string"}  # Default fallback
 
@@ -2074,7 +2161,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             "type": "object",
             "properties": output_properties,
             "required": output_required,
-            "additionalProperties": False
+            "additionalProperties": False,
         }
         required.append("output")
 
@@ -2082,14 +2169,9 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
         "type": "json_schema",
         "json_schema": {
             "name": "ProgressScoreWithOutput" if response_schema else "ProgressScore",
-            "schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": False
-            },
-            "strict": True
-        }
+            "schema": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
+            "strict": True,
+        },
     }
 
 
@@ -2141,7 +2223,7 @@ async def check_progress(
         config = load_config()
         # Use the pre-built verifier prompt directly (no double-building)
         system_prompt = verifier_system_prompt
-        
+
         # Convert full context to OpenAI message format (no truncation)
         # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)
         messages = [{"role": "system", "content": system_prompt}]
@@ -2155,17 +2237,17 @@ async def check_progress(
         logger.info(
             "Verifier context",
             total_messages=len(context),
-            agent_messages=len([m for m in context if m.get('role') == 'ASSISTANT']),
-            system_messages_excluded=len([m for m in context if m.get('role') == 'SYSTEM']),
-            context_summary=[f"{m.get('role')}: {m.get('text', '')[:50]}..." for m in context[-5:]]  # Last 5 messages
+            agent_messages=len([m for m in context if m.get("role") == "ASSISTANT"]),
+            system_messages_excluded=len([m for m in context if m.get("role") == "SYSTEM"]),
+            context_summary=[f"{m.get('role')}: {m.get('text', '')[:50]}..." for m in context[-5:]],  # Last 5 messages
         )
-        
+
         # === RAW CONTEXT LOG: Full original context for debugging ===
         logger.debug(
             "📦 Verifier raw context (pre-conversion)",
-            raw_context_json=json.dumps(context, ensure_ascii=False, default=str)
+            raw_context_json=json.dumps(context, ensure_ascii=False, default=str),
         )
-        
+
         # Use dedicated verifier LLM call (simple, no streaming UI)
         # Pass response_schema so the verifier includes output extraction in same call
         # Retry with exponential backoff + jitter on transient failures (e.g. malformed JSON from streaming)
@@ -2174,12 +2256,14 @@ async def check_progress(
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                result, usage = await _call_llm_verifier(messages, model, config, response_schema, claude_token=claude_token, call_site=call_site)
+                result, usage = await _call_llm_verifier(
+                    messages, model, config, response_schema, claude_token=claude_token, call_site=call_site
+                )
                 break
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
+                    delay = base_delay * (2**attempt)
                     jitter = random.uniform(0, delay * 0.5)
                     logger.warning(
                         "Verifier call failed, retrying",
@@ -2190,7 +2274,7 @@ async def check_progress(
                     )
                     await asyncio.sleep(delay + jitter)
                 else:
-                    raise last_error
+                    raise last_error from last_error
 
         score = result["score"]
         reasoning = result["reasoning"]
@@ -2202,7 +2286,7 @@ async def check_progress(
             tokens=usage.get("total_tokens", 0),
             actual_model=usage.get("actual_model"),
             pool_name=usage.get("pool_name"),
-            has_output="output" in result
+            has_output="output" in result,
         )
 
         # Only use output when score >= 1.0 (schema enforcement is handled by strict JSON schema)
@@ -2213,7 +2297,7 @@ async def check_progress(
             "reasoning": reasoning,
             "message": f"{reasoning}\n\nScore: {score}",
             "usage": usage,
-            "structured_response": structured_response
+            "structured_response": structured_response,
         }
     except Exception as e:
         logger.error("Failed to check progress", error=extract_error_message(e))
@@ -2224,12 +2308,12 @@ async def check_progress(
             "reasoning": error_message,
             "message": f"{error_message}\n\nScore: 0.5",
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            "structured_response": None
+            "structured_response": None,
         }
 
 
 @activity.defn
-async def call_llm_activity(
+async def call_llm_activity(  # noqa: C901
     messages_or_agent_id: Any,
     model: str,
     tool_names: List[str],
@@ -2284,10 +2368,10 @@ async def call_llm_activity(
         else:
             # Legacy: pre-built messages list passed directly
             messages = messages_or_agent_id
-        
+
         # Create dynamic action model
         AgentActionModel = create_agent_action_model(tool_names)
-        
+
         # _is_claude detected from actual_model in stream response, not from input model/token
         _is_claude = [False]  # Mutable list so closures can update it
 
@@ -2305,7 +2389,7 @@ async def call_llm_activity(
         async def on_chunk(text_so_far: str, tokens: int):
             _safe_heartbeat(f"LLM streaming... {len(text_so_far)} chars")
             if agent_id and stream_id:
-                delta = text_so_far[len(last_text[0]):]
+                delta = text_so_far[len(last_text[0]) :]
                 if delta:
                     await stream_assistant_chunk(
                         agent_id=agent_id,
@@ -2344,13 +2428,13 @@ async def call_llm_activity(
             on_model_detected=on_model_detected,
             call_site=call_site,
         )
-        
+
         # Send final done=True chunk
         if agent_id and stream_id:
             try:
                 final_delta = ""
-                if hasattr(result, 'response') and result.response:
-                    final_delta = result.response[len(last_text[0]):]
+                if hasattr(result, "response") and result.response:
+                    final_delta = result.response[len(last_text[0]) :]
                 await stream_assistant_chunk(
                     agent_id=agent_id,
                     stream_id=stream_id,
@@ -2362,27 +2446,27 @@ async def call_llm_activity(
                 )
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {e}")
-        
+
         # Validate result
         if result is None:
             raise ValueError(f"LLM returned None result (model={model})")
-        
-        if not hasattr(result, 'response') or not hasattr(result, 'tool_calls'):
+
+        if not hasattr(result, "response") or not hasattr(result, "tool_calls"):
             raise ValueError(f"LLM result missing required fields (model={model})")
-        
+
         # Convert tool calls to dicts
         tool_calls_dict = []
         if result.tool_calls:
             for tc in result.tool_calls:
                 if tc is not None:
-                    tc_dict = tc.model_dump() if hasattr(tc, 'model_dump') else tc.dict()
+                    tc_dict = tc.model_dump() if hasattr(tc, "model_dump") else tc.dict()
                     tool_calls_dict.append(tc_dict)
-        
+
         logger.info(
             "LLM activity completed",
             response_len=len(result.response) if result.response else 0,
             tool_calls=len(tool_calls_dict),
-            tokens=usage.get("total_tokens", 0)
+            tokens=usage.get("total_tokens", 0),
         )
 
         # Clean up shared state on success
@@ -2395,7 +2479,7 @@ async def call_llm_activity(
             "usage": usage,
             "detected_tools_ordered": detected_tools_ordered,  # [(tool_name, tool_call_id, timestamp), ...]
         }
-        
+
     except Exception as e:
         # Do NOT clean up _pending_llm_context here — Temporal may retry the activity,
         # and the retry needs the shared state to still be present.
@@ -2423,10 +2507,11 @@ async def set_response_schema_activity(
         The generated schema dict with 'fields' array, or None on failure
     """
     import time
+
     activity_start = time.perf_counter()
 
     config = load_config()
-    backend_url = config.backend.api_url.rstrip('/')
+    backend_url = config.backend.api_url.rstrip("/")
     api_key = config.backend.api_key
 
     if not api_key:
@@ -2449,16 +2534,13 @@ async def set_response_schema_activity(
             api_start = time.perf_counter()
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
-                headers={
-                    "X-API-Key": api_key,
-                    "Content-Type": "application/json"
-                },
-                json={"goal": goal}
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"goal": goal},
             )
             schema_response.raise_for_status()
             schema_data = schema_response.json()
             api_elapsed = time.perf_counter() - api_start
-            logger.info(f"[TIMING] Schema generation API call: {api_elapsed*1000:.1f}ms ({api_elapsed:.2f}s)")
+            logger.info(f"[TIMING] Schema generation API call: {api_elapsed * 1000:.1f}ms ({api_elapsed:.2f}s)")
 
             schema = schema_data.get("schema")
             tokens_in = schema_data.get("tokensIn", 0)
@@ -2473,33 +2555,30 @@ async def set_response_schema_activity(
                 agent_id=agent_id,
                 field_count=len(schema.get("fields", [])),
                 tokens_in=tokens_in,
-                tokens_out=tokens_out
+                tokens_out=tokens_out,
             )
 
             # 2. Save schema to agent record
             save_start = time.perf_counter()
             save_response = await client.patch(
                 f"{backend_url}/api/agents/{agent_id}",
-                headers={
-                    "X-API-Key": api_key,
-                    "Content-Type": "application/json"
-                },
-                json={"response_schema": schema}
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"response_schema": schema},
             )
             save_elapsed = time.perf_counter() - save_start
-            logger.info(f"[TIMING] Schema save API call: {save_elapsed*1000:.1f}ms")
+            logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
             if not save_response.is_success:
                 logger.warning(
-                    "Failed to save response schema",
-                    agent_id=agent_id,
-                    status_code=save_response.status_code
+                    "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
                 )
             else:
                 logger.info("Saved response schema to agent", agent_id=agent_id)
 
             activity_elapsed = time.perf_counter() - activity_start
-            logger.info(f"[TIMING] Total response schema activity: {activity_elapsed*1000:.1f}ms ({activity_elapsed:.2f}s)")
+            logger.info(
+                f"[TIMING] Total response schema activity: {activity_elapsed * 1000:.1f}ms ({activity_elapsed:.2f}s)"
+            )
             return {
                 "schema": schema,
                 "usage": {
@@ -2514,15 +2593,11 @@ async def set_response_schema_activity(
             "Backend API error generating response schema",
             agent_id=agent_id,
             status_code=e.response.status_code,
-            response_text=e.response.text[:500]
+            response_text=e.response.text[:500],
         )
         return None
     except Exception as e:
-        logger.error(
-            "Failed to generate response schema",
-            agent_id=agent_id,
-            error=extract_error_message(e)
-        )
+        logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         return None
 
 
@@ -2596,6 +2671,7 @@ async def call_planner_llm_activity(
         Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
     """
     import time
+
     from helpers.prompts import build_planner_system_prompt
     from helpers.tool_schemas import PlannerResponse
 
@@ -2606,7 +2682,7 @@ async def call_planner_llm_activity(
     prompt_start = time.perf_counter()
     system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
     prompt_elapsed = time.perf_counter() - prompt_start
-    logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed*1000:.1f}ms")
+    logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -2627,17 +2703,16 @@ async def call_planner_llm_activity(
 
     async def on_plan_progress(total_bytes: int):
         """Called every 5 chunks with total accumulated bytes (reasoning + json)."""
-        if agent_id and tool_call_id:
-            # Only broadcast when 50+ new bytes since last broadcast
-            if total_bytes - last_broadcast_len[0] >= 50:
-                last_broadcast_len[0] = total_bytes
-                await stream_plan_event(
-                    agent_id=agent_id,
-                    stream_id=plan_stream_id,
-                    tool_call_id=tool_call_id,
-                    title="Generating Plan",
-                    char_count=total_bytes,
-                )
+        # Only broadcast when 50+ new bytes since last broadcast
+        if agent_id and tool_call_id and total_bytes - last_broadcast_len[0] >= 50:
+            last_broadcast_len[0] = total_bytes
+            await stream_plan_event(
+                agent_id=agent_id,
+                stream_id=plan_stream_id,
+                tool_call_id=tool_call_id,
+                title="Generating Plan",
+                char_count=total_bytes,
+            )
 
     try:
         llm_start = time.perf_counter()
@@ -2667,7 +2742,9 @@ async def call_planner_llm_activity(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
         )
-        logger.info(f"[TIMING] Planner LLM API call: {llm_elapsed*1000:.1f}ms ({llm_elapsed:.2f}s), total activity: {activity_elapsed*1000:.1f}ms")
+        logger.info(
+            f"[TIMING] Planner LLM API call: {llm_elapsed * 1000:.1f}ms ({llm_elapsed:.2f}s), total activity: {activity_elapsed * 1000:.1f}ms"
+        )
 
         # Return plan with usage for cost tracking
         # Use actual_model from Rose response (may be "claude-opus-4-6-claude" for $0 pricing)
@@ -2675,14 +2752,16 @@ async def call_planner_llm_activity(
         return {
             "result": result.model_dump(),
             "usage": {
-                "llm": [{
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "model": actual_model,
-                    "provider": "Rose Planner",
-                }],
+                "llm": [
+                    {
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "model": actual_model,
+                        "provider": "Rose Planner",
+                    }
+                ],
                 "service": [],
-            }
+            },
         }
 
     except Exception as e:

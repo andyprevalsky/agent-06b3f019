@@ -5,9 +5,9 @@ Updates Agent.tokensIn, tokensOut, tokenCount in the database.
 Called by handle_tool_event for USAGE events with UsageType.LLM.
 """
 
-from temporalio import activity
-import structlog
 import httpx
+import structlog
+from temporalio import activity
 
 from config import load_config
 
@@ -22,10 +22,10 @@ async def update_agent_tokens_activity(
 ) -> None:
     """
     Atomically increment Agent token counts in the database.
-    
+
     This activity calls PATCH /api/agents/{agent_id}/tokens to increment
     the tokensIn, tokensOut, and tokenCount fields.
-    
+
     Args:
         agent_id: Agent ID
         tokens_in: Number of input tokens to add
@@ -33,12 +33,12 @@ async def update_agent_tokens_activity(
     """
     try:
         activity.heartbeat(f"Updating tokens for agent {agent_id}")
-        
+
         config = load_config()
-        
+
         # Calculate total
         total_tokens = tokens_in + tokens_out
-        
+
         async with httpx.AsyncClient() as client:
             response = await client.patch(
                 f"{config.backend.api_url}/api/agents/{agent_id}/tokens",
@@ -47,30 +47,24 @@ async def update_agent_tokens_activity(
                     "tokensOut": tokens_out,
                     "tokenCount": total_tokens,
                 },
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=15.0
+                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                timeout=15.0,
             )
-            
+
             if response.status_code == 404:
                 # Endpoint doesn't exist yet - fall back to status update
-                logger.warning(
-                    "Token update endpoint not found, using status update fallback",
-                    agent_id=agent_id
-                )
+                logger.warning("Token update endpoint not found, using status update fallback", agent_id=agent_id)
                 # For now, just log - the endpoint needs to be created
                 return
-            
+
             response.raise_for_status()
-            
+
             logger.debug(
                 "Agent tokens updated",
                 agent_id=agent_id,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                total=total_tokens
+                total=total_tokens,
             )
 
     except Exception as e:
@@ -79,7 +73,7 @@ async def update_agent_tokens_activity(
             f"Failed to update agent tokens (non-fatal): {e}",
             agent_id=agent_id,
             tokens_in=tokens_in,
-            tokens_out=tokens_out
+            tokens_out=tokens_out,
         )
 
 
@@ -109,11 +103,8 @@ async def update_agent_tree_cost_activity(
                     "tree_cost_cents": tree_cost_cents,
                     "own_cost_cents": own_cost_cents,
                 },
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=15.0
+                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                timeout=15.0,
             )
 
             response.raise_for_status()
@@ -131,9 +122,3 @@ async def update_agent_tree_cost_activity(
             agent_id=agent_id,
             tree_cost_cents=tree_cost_cents,
         )
-
-
-
-
-
-

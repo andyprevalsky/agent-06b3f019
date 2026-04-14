@@ -25,16 +25,15 @@ to full FilePointer objects (with storage URLs).
 6. Full file_pointer returned to parent agent
 """
 
-import uuid
 import copy
+import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
-from dataclasses import dataclass, asdict
 
 import structlog
 
 from .attachments import FilePointer
-
 
 logger = structlog.get_logger(__name__)
 
@@ -104,6 +103,7 @@ class PartialFilePointer:
     Partial file pointer returned by cloud agents.
     Contains relative path to file in agent workspace.
     """
+
     path: str  # Relative path in agent workspace (e.g., "output/report.pdf")
     original_filename: Optional[str] = None  # Optional - derived from path if not provided
     mime_type: Optional[str] = None  # Optional - derived from extension if not provided
@@ -183,25 +183,19 @@ async def resolve_file_pointers_in_response(
 
         # Handle file_pointer type
         if field_type == "file_pointer":
-            resolved_value, fps = await _resolve_file_pointer_value(
-                value, file_extractor, user_id, upload_fn
-            )
+            resolved_value, fps = await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
             resolved[key] = resolved_value
             all_file_pointers.extend(fps)
 
         # Handle list[file_pointer] type
         elif field_type == "list[file_pointer]":
-            resolved_list, fps = await _resolve_file_pointer_list(
-                value, file_extractor, user_id, upload_fn
-            )
+            resolved_list, fps = await _resolve_file_pointer_list(value, file_extractor, user_id, upload_fn)
             resolved[key] = resolved_list
             all_file_pointers.extend(fps)
 
         # Auto-detect partial file pointers even without schema type
         elif PartialFilePointer.is_partial(value):
-            resolved_value, fps = await _resolve_file_pointer_value(
-                value, file_extractor, user_id, upload_fn
-            )
+            resolved_value, fps = await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
             resolved[key] = resolved_value
             all_file_pointers.extend(fps)
 
@@ -293,9 +287,7 @@ async def _resolve_file_pointer_list(
     all_fps: List[FilePointer] = []
 
     for item in value:
-        resolved_item, fps = await _resolve_file_pointer_value(
-            item, file_extractor, user_id, upload_fn
-        )
+        resolved_item, fps = await _resolve_file_pointer_value(item, file_extractor, user_id, upload_fn)
         resolved_list.append(resolved_item)
         all_fps.extend(fps)
 
@@ -371,7 +363,7 @@ def resolve_file_pointers_from_extracted(
         return structured_response or {}
 
     # Build lookup by filename (basename only)
-    import os
+
     file_lookup: Dict[str, Dict[str, Any]] = {}
     for fp in extracted_files:
         if isinstance(fp, dict) and fp.get("original_filename"):
@@ -428,6 +420,7 @@ def _match_partial_to_full(
 
     # Extract filename from path
     import os
+
     filename = os.path.basename(partial.path)
 
     # Look up full FilePointer

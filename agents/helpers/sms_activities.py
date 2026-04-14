@@ -7,9 +7,10 @@ Activities for:
 """
 
 from typing import Dict
-from temporalio import activity
-import structlog
+
 import httpx
+import structlog
+from temporalio import activity
 
 from config import load_config
 
@@ -95,9 +96,7 @@ async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
 
 
 @activity.defn
-async def notify_sms_event_activity(
-    user_id: str, event_type: str, agent_id: str, payload: Dict
-) -> Dict:
+async def notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: Dict) -> Dict:
     """
     Send a lifecycle SMS notification via the backend /api/send-sms/notify endpoint.
 

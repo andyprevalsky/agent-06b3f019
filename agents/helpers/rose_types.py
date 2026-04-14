@@ -9,13 +9,14 @@ produce chunks conforming to this shape.
 """
 
 from typing import List, Optional
+
 from typing_extensions import TypedDict
 
 
 class ChunkDelta(TypedDict, total=False):
-    content: str       # Text or JSON tokens
-    reasoning: str     # Thinking/reasoning from reasoning-capable models
-    role: str          # Only on first chunk (OpenRouter includes this)
+    content: str  # Text or JSON tokens
+    reasoning: str  # Thinking/reasoning from reasoning-capable models
+    role: str  # Only on first chunk (OpenRouter includes this)
 
 
 class ChunkChoice(TypedDict, total=False):

@@ -3,7 +3,7 @@
 Converts raw tool names + args into human-readable display strings.
 """
 
-from typing import Dict, Any
+from typing import Any, Dict
 
 
 def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
@@ -27,7 +27,9 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
             else f"Waiting for {_truncate(args.get('condition', '...'), 50)}"
         ),
         "send_message_to_user": lambda args: "Messaging user",
-        "search_user_network_for_people": lambda args: f"Searching contacts for {_truncate(args.get('name', args.get('query', '...')), 30)}",
+        "search_user_network_for_people": lambda args: (
+            f"Searching contacts for {_truncate(args.get('name', args.get('query', '...')), 30)}"
+        ),
         "find_all": lambda args: f"Finding all {_truncate(args.get('objective', '...'), 40)}",
         "enrich": lambda args: f"Enriching {_truncate(args.get('name', '...'), 30)}",
         "monitor": lambda args: f"Monitoring {_truncate(args.get('condition', '...'), 40)}",
@@ -72,4 +74,4 @@ def _truncate(text: str, max_len: int) -> str:
         return "..."
     if len(text) <= max_len:
         return text
-    return text[:max_len - 3] + "..."
+    return text[: max_len - 3] + "..."

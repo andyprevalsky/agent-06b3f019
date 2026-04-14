@@ -4,9 +4,11 @@ This is the SINGLE helper for GET /api/agents/{agent_id}.
 Other helpers should import and use _fetch_agent_data_impl directly.
 """
 
-from temporalio import activity
-import structlog
+from typing import Any, Dict
+
 import httpx
+import structlog
+from temporalio import activity
 from typing import Dict, List, Any, Optional
 from urllib.parse import quote
 
@@ -52,16 +54,16 @@ async def _fetch_agent_data_impl(agent_id: str, since: Optional[str] = None) -> 
 async def fetch_agent_config(agent_id: str) -> Dict:
     """
     Activity: Fetch agent configuration from database.
-    
+
     Returns:
         dict with: model, status, tool_ids, verifier_prompt
     """
     try:
-        activity.heartbeat(f"Fetching agent config")
-        
+        activity.heartbeat("Fetching agent config")
+
         data = await _fetch_agent_data_impl(agent_id)
         agent = data["agent"]
-        
+
         result = {
             "model": agent["model"],
             "reasoning_max_tokens": agent.get("reasoning_max_tokens", 256),
@@ -74,22 +76,17 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "token_out_price_microdollars": agent.get("token_out_price_microdollars"),  # For cost calculation
             "write_lock_enabled": agent.get("writeLockEnabled", True),  # Write lock for browser actions (default: True)
         }
-        
+
         logger.info(
             "Agent config fetched",
             agent_id=agent_id,
             model=result["model"],
             reasoning_max_tokens=result["reasoning_max_tokens"],
-            status=result["status"]
+            status=result["status"],
         )
-        
-        return result
-        
-    except Exception as e:
-        logger.error(
-            "Failed to fetch agent config",
-            agent_id=agent_id,
-            error=str(e)
-        )
-        raise
 
+        return result
+
+    except Exception as e:
+        logger.error("Failed to fetch agent config", agent_id=agent_id, error=str(e))
+        raise

@@ -4,10 +4,11 @@ This is the SINGLE helper for PATCH /api/agents/{agent_id}/status.
 Other helpers should import and use _update_agent_status_impl directly.
 """
 
-from temporalio import activity
-import structlog
-import httpx
 from typing import Dict, Optional
+
+import httpx
+import structlog
+from temporalio import activity
 
 from config import load_config
 
@@ -24,7 +25,7 @@ async def _update_agent_status_impl(
     message_count: int,
     tokens_in: int = 0,
     tokens_out: int = 0,
-    structured_response: Optional[Dict] = None
+    structured_response: Optional[Dict] = None,
 ) -> None:
     """
     Core implementation for updating agent status.
@@ -45,7 +46,7 @@ async def _update_agent_status_impl(
         structured_response: Extracted structured output (when completing with schema)
     """
     config = load_config()
-    
+
     async with httpx.AsyncClient() as client:
         payload = {
             "status": status,
@@ -55,7 +56,7 @@ async def _update_agent_status_impl(
             "tokensIn": tokens_in,
             "tokensOut": tokens_out,
             "contextSize": context_size,
-            "messageCount": message_count
+            "messageCount": message_count,
         }
         if structured_response is not None:
             payload["structuredResponse"] = structured_response
@@ -63,14 +64,11 @@ async def _update_agent_status_impl(
         response = await client.patch(
             f"{config.backend.api_url}/api/agents/{agent_id}/status",
             json=payload,
-            headers={
-                "X-API-Key": config.backend.api_key,
-                "Content-Type": "application/json"
-            },
-            timeout=30.0
+            headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+            timeout=30.0,
         )
         response.raise_for_status()
-        
+
         logger.info(
             "Agent status updated",
             agent_id=agent_id,
@@ -80,7 +78,7 @@ async def _update_agent_status_impl(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             context_size=context_size,
-            messages=message_count
+            messages=message_count,
         )
 
 
@@ -94,7 +92,7 @@ async def update_agent_status(
     context_size: int,
     message_count: int,
     tokens_in: int = 0,
-    tokens_out: int = 0
+    tokens_out: int = 0,
 ) -> None:
     """
     Activity wrapper for updating agent status and metrics in the database.
@@ -110,13 +108,8 @@ async def update_agent_status(
             context_size=context_size,
             message_count=message_count,
             tokens_in=tokens_in,
-            tokens_out=tokens_out
+            tokens_out=tokens_out,
         )
     except Exception as e:
-        logger.error(
-            "Failed to update agent status",
-            agent_id=agent_id,
-            error=str(e)
-        )
+        logger.error("Failed to update agent status", agent_id=agent_id, error=str(e))
         # Non-fatal - just log and continue
-

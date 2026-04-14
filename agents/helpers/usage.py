@@ -19,14 +19,11 @@ Usage Pattern:
     actual = result.get("result", result)
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 
 def llm_usage(
-    tokens_in: int,
-    tokens_out: int,
-    model: Optional[str] = None,
-    provider: Optional[str] = None
+    tokens_in: int, tokens_out: int, model: Optional[str] = None, provider: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Create an LLM usage item.
@@ -60,8 +57,7 @@ def service_usage(cost_cents: int, provider: str) -> Dict[str, Any]:
 
 
 def make_usage(
-    llm: Optional[List[Dict[str, Any]]] = None,
-    service: Optional[List[Dict[str, Any]]] = None
+    llm: Optional[List[Dict[str, Any]]] = None, service: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, List]:
     """
     Create a usage dict to include in activity results.
@@ -77,9 +73,7 @@ def make_usage(
 
 
 def with_usage(
-    result: Any,
-    llm: Optional[List[Dict[str, Any]]] = None,
-    service: Optional[List[Dict[str, Any]]] = None
+    result: Any, llm: Optional[List[Dict[str, Any]]] = None, service: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
     Wrap an activity result with usage info.

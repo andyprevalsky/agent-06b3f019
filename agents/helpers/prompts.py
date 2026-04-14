@@ -1,11 +1,7 @@
-from textwrap import dedent
 from datetime import datetime
 from pathlib import Path
+from textwrap import dedent
 from typing import Any, Dict, List, Optional, Union
-
-from tools.base import ToolSchema
-from helpers.tool_schemas import TOOL_MODELS
-
 
 # ============================================================================
 # SHARED PROMPT SECTIONS (deduplicated)
@@ -71,35 +67,23 @@ spawn_agent(type="browser", goal="Add item to cart")  SESSION LOST! Starts fresh
 spawn_agent(type="explore", goal="Find pricing for Acme Corp enterprise plans")
 spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, logout", output_schema=...)
 </good-example>""",
-
     "send_message_to_user": """Must be ONLY tool in that turn. Use is_question=true for clarifications.""",
-
     "attempt_completion": """Must be ONLY tool in that turn. Call when goal is 100% done. A separate verifier LLM will check your work by looking at the tools you called — NOT the result field.""",
-
     "web_search": """Search the web for real-time information. Use for current events, recent data, fact-checking.""",
-
     "web_fetch": """Fetch and extract content from a URL with JavaScript rendering support. Use when you need to read page content, find specific information, or analyze web pages. Set download_files to a list of extensions (e.g. ["pdf", "csv"]) to automatically download files of those types found on the page.""",
-
     "set_plan": """Signal readiness for plan generation. A dedicated planner LLM will analyze the conversation and generate an execution plan.""",
-
     "wait_for": """Wait until a specific time or until a condition is met.
 - Timestamp mode: provide until_timestamp (ISO 8601) to sleep until that time.
 - Condition mode: provide condition (natural language) + check_interval_seconds (60-86400, default 900) + max_checks (1-100, default 20). An explore agent will periodically check if the condition is satisfied using web search and local data.
 Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10), wait_for(until_timestamp="2026-03-12T09:00:00Z")""",
-
     "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
-
     "message_person": """Send a message to a person via iMessage or email. Provide a person identifier (name, phone, or email) and describe the intent — the tool generates the message, reads history, and requests user approval before sending. Do NOT write the message yourself.""",
-
     "call_phone_number": """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt, and output schema. Only call ONCE per number — do NOT make parallel calls to the same number.""",
-
     "grep": """Search user's local data (message threads) by keyword. Searches iMessage and email conversations for matching messages with surrounding context. Use empty string to return all messages.""",
-
     "add_memory": """Save important context that should persist across all future agents for this user.
 Use this proactively to remember: user preferences, completed actions (bookings, purchases, decisions), key facts, or anything the user would want future agents to know.
 Do NOT store ephemeral task state or raw tool outputs - store synthesized, actionable facts.
 Examples: dietary restrictions, travel preferences, completed reservations, important dates, relationship context.""",
-
     "read_memories": """Search the user's stored memories and profile for relevant context.
 Provide a specific query to find matching memories, or leave query empty to get the full user profile.
 The profile contains static facts (expertise, preferences) and dynamic context (recent activity, current projects).
@@ -114,7 +98,7 @@ BEHAVIORAL_RULES = """
 """
 
 
-def build_system_prompt(
+def build_system_prompt(  # noqa: C901
     phase: str,
     enabled_tools: List[Union[str, Dict]],  # Tool names or dicts
     disabled_tools: List[Union[str, Dict]] = None,
@@ -324,7 +308,7 @@ EXECUTE - Follow the approved plan and deliver verifiable outcomes.
                 prompt += f"\n{guidance}"
 
     # File attachments note (always include)
-    prompt += "\n\n**File attachments**: Sub-agents don't inherit files. Pass via `attachments: [\"filename.ext\"]` using original_filename from file_pointer."
+    prompt += '\n\n**File attachments**: Sub-agents don\'t inherit files. Pass via `attachments: ["filename.ext"]` using original_filename from file_pointer.'
 
     # ========================================================================
     # 5. RULES
@@ -357,10 +341,9 @@ You are the executor, not an advisor:
 
     # Add required output schema if defined
     if response_schema and response_schema.get("fields"):
-        fields_desc = "\n".join([
-            f"  - {f['name']} ({f['type']}): {f['description']}"
-            for f in response_schema["fields"]
-        ])
+        fields_desc = "\n".join(
+            [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
+        )
         prompt += dedent(f"""
 
 REQUIRED OUTPUT - gather this data before calling attempt_completion:
@@ -444,10 +427,9 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
 
     # Build output section based on whether we have a response schema
     if response_schema and response_schema.get("fields"):
-        fields_desc = "\n".join([
-            f"  - {f['name']} ({f['type']}): {f['description']}"
-            for f in response_schema["fields"]
-        ])
+        fields_desc = "\n".join(
+            [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
+        )
         num_fields = len(response_schema["fields"])
         output_section = dedent(
             f"""
@@ -532,18 +514,19 @@ def build_browser_system_prompt(
 ) -> str:
     """
     Build system prompt for browser agent.
-    
+
     Args:
         goal: The browser task goal
         current_url: Current page URL for context
         custom_instructions: Optional custom instructions (shipping, payment, etc.)
-        
+
     Returns:
         System prompt for browser agent
     """
     from datetime import datetime
+
     current_date = datetime.now().strftime("%B %d, %Y")
-    
+
     base_prompt = f"""You are a web automation assistant using browser automation tools to accomplish the user's goal.
 
 Your task: {goal}
@@ -585,10 +568,10 @@ Today's date is {current_date}."""
 
     if current_url:
         base_prompt += f"\nYou're currently on: {current_url}"
-    
+
     if custom_instructions:
         base_prompt = f"{custom_instructions}\n\n{base_prompt}"
-    
+
     return base_prompt
 
 
@@ -611,10 +594,12 @@ def build_planner_system_prompt(
     # Build response schema section if defined
     response_schema_section = ""
     if response_schema and response_schema.get("fields"):
-        fields_desc = "\n".join([
-            f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f['description']}"
-            for f in response_schema["fields"]
-        ])
+        fields_desc = "\n".join(
+            [
+                f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f['description']}"
+                for f in response_schema["fields"]
+            ]
+        )
         response_schema_section = f"""
 
 REQUIRED OUTPUT SCHEMA

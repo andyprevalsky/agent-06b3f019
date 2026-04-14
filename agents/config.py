@@ -6,8 +6,8 @@ This allows the module to be safely imported in Temporal workflow context.
 """
 
 import os
-from typing import Optional
 from dataclasses import dataclass
+from typing import Optional
 
 # Lazy initialization - NO side effects at import time
 _dotenv_loaded = False
@@ -18,6 +18,7 @@ def _ensure_dotenv_loaded():
     global _dotenv_loaded
     if not _dotenv_loaded:
         from dotenv import load_dotenv
+
         load_dotenv()
         _dotenv_loaded = True
 
@@ -25,25 +26,25 @@ def _ensure_dotenv_loaded():
 @dataclass
 class TemporalConfig:
     """Temporal Cloud connection configuration."""
-    
+
     api_key: str
     namespace: str
     address: str
     task_queue: str
-    
+
     # Worker concurrency settings
     max_concurrent_activities: int = 50  # Reduced to prevent DB connection exhaustion
-    max_concurrent_workflows: int = 50   # Max concurrent agents (aligned with activities)
-    max_cached_workflows: int = 100      # Reduced to match workflow count
+    max_concurrent_workflows: int = 50  # Max concurrent agents (aligned with activities)
+    max_cached_workflows: int = 100  # Reduced to match workflow count
     max_concurrent_activity_task_polls: int = 2
     max_concurrent_workflow_task_polls: int = 2
-    
+
     # Timeout settings (in seconds)
     activity_start_to_close_timeout: int = 300
     activity_schedule_to_close_timeout: int = 600
     activity_heartbeat_timeout: int = 30
     workflow_task_timeout: int = 10
-    
+
     # Retry settings - EXTREME BACKOFF
     activity_max_attempts: int = 6
     activity_retry_backoff_coefficient: float = 4.0
@@ -54,7 +55,7 @@ class TemporalConfig:
 @dataclass
 class BackendConfig:
     """Backend API configuration."""
-    
+
     api_url: str
     api_key: Optional[str] = None
 
@@ -62,7 +63,7 @@ class BackendConfig:
 @dataclass
 class OpenRouterConfig:
     """OpenRouter configuration."""
-    
+
     api_key: str
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "openai/gpt-4-turbo-preview"
@@ -71,7 +72,7 @@ class OpenRouterConfig:
 @dataclass
 class OpenAIConfig:
     """OpenAI configuration for web search."""
-    
+
     api_key: str
     model: str = "gpt-4.1"  # GPT-4.1 with web search capability
 
@@ -79,7 +80,7 @@ class OpenAIConfig:
 @dataclass
 class PerplexityConfig:
     """Perplexity configuration for deep research."""
-    
+
     api_key: str
     model: str = "sonar-deep-research"
 
@@ -87,7 +88,7 @@ class PerplexityConfig:
 @dataclass
 class GeminiConfig:
     """Google Gemini configuration."""
-    
+
     api_key: str
 
 
@@ -102,7 +103,7 @@ class SteelConfig:
 @dataclass
 class ParallelConfig:
     """Parallel AI configuration for Find All, Enrich, and Monitor APIs."""
-    
+
     api_key: str
 
 
@@ -119,7 +120,7 @@ class RoseConfig:
 @dataclass
 class SupabaseConfig:
     """Supabase configuration for direct Realtime broadcasts."""
-    
+
     url: str = "https://kzlurqihzaolhzsbkctf.supabase.co"
     anon_key: str = ""  # Supabase anon key for Realtime
     service_role_key: str = ""  # Supabase service role key (can broadcast to private channels)
@@ -128,14 +129,14 @@ class SupabaseConfig:
 @dataclass
 class PaymentConfig:
     """Payment decryption configuration for agent autopay."""
-    
+
     decryption_key: str = ""  # Base64-encoded RSA private key for decrypting payment info
 
 
 @dataclass
 class X402Config:
     """x402 protocol configuration for paid API services."""
-    
+
     receiving_wallet: str = ""  # Wallet address for receiving x402 payments (also used as buyer)
     wallet_secret: str = ""  # CDP wallet secret (PKCS#8 DER format, base64-encoded)
 
@@ -143,7 +144,7 @@ class X402Config:
 @dataclass
 class CursorConfig:
     """Cursor Cloud Agent API configuration."""
-    
+
     api_key: str = ""  # Cursor API key for spawning cloud agents
     base_url: str = "https://api.cursor.com/v1"
 
@@ -182,7 +183,7 @@ class ExaConfig:
 @dataclass
 class AppConfig:
     """Complete application configuration."""
-    
+
     temporal: TemporalConfig
     backend: BackendConfig
     openrouter: OpenRouterConfig
@@ -208,12 +209,12 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     """Load configuration from environment variables.
-    
+
     Ensures .env file is loaded on first call (lazy initialization).
     Safe to call from both workflow and activity contexts.
     """
     _ensure_dotenv_loaded()
-    
+
     temporal = TemporalConfig(
         api_key=os.environ["TEMPORAL_API_KEY"],
         namespace=os.environ["TEMPORAL_NAMESPACE"],
@@ -233,45 +234,45 @@ def load_config() -> AppConfig:
         activity_retry_initial_interval=int(os.getenv("ACTIVITY_RETRY_INITIAL_INTERVAL", "2")),
         activity_retry_max_interval=int(os.getenv("ACTIVITY_RETRY_MAX_INTERVAL", "64")),
     )
-    
+
     # Normalize URL - strip trailing slash to prevent double slashes
     backend_url = os.getenv("BACKEND_API_URL", "https://navi-j9a9.onrender.com")
-    backend_url = backend_url.rstrip('/') if backend_url else "https://navi-j9a9.onrender.com"
-    
+    backend_url = backend_url.rstrip("/") if backend_url else "https://navi-j9a9.onrender.com"
+
     backend = BackendConfig(
         api_url=backend_url,
         api_key=os.getenv("BACKEND_API_KEY"),
     )
-    
+
     openrouter = OpenRouterConfig(
         api_key=os.environ["OPENROUTER_API_KEY"],
         base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4-turbo-preview"),
     )
-    
+
     openai = OpenAIConfig(
         api_key=os.environ["OPENAI_API_KEY"],
         model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
     )
-    
+
     perplexity = PerplexityConfig(
         api_key=os.environ["PERPLEXITY_API_KEY"],
         model=os.getenv("PERPLEXITY_MODEL", "sonar-deep-research"),
     )
-    
+
     gemini = GeminiConfig(
         api_key=os.environ["GEMINI_API_KEY"],
     )
-    
+
     steel = SteelConfig(
         api_key=os.environ["BROWSERBASE_API_KEY"],
         project_id=os.environ["BROWSERBASE_PROJECT_ID"],
     )
-    
+
     parallel = ParallelConfig(
         api_key=os.environ["PARRALLEL_API_KEY"],
     )
-    
+
     # Use local Supabase functions in development, production URL otherwise
     environment = os.getenv("ENVIRONMENT", "production")
     rose_functions_url = (
@@ -285,27 +286,27 @@ def load_config() -> AppConfig:
         api_key=os.getenv("ROSE_API_KEY", ""),
         supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
     )
-    
+
     supabase = SupabaseConfig(
         url=os.getenv("SUPABASE_URL", "https://kzlurqihzaolhzsbkctf.supabase.co"),
         anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
         service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
     )
-    
+
     payment = PaymentConfig(
         decryption_key=os.getenv("PAYMENT_DECRYPTION_KEY", ""),
     )
-    
+
     x402 = X402Config(
         receiving_wallet=os.getenv("X402_RECEIVING_WALLET", ""),
         wallet_secret=os.getenv("CDP_WALLET_SECRET", ""),
     )
-    
+
     cursor = CursorConfig(
         api_key=os.getenv("CURSOR_API_KEY", ""),
         base_url=os.getenv("CURSOR_API_BASE_URL", "https://api.cursor.com/v1"),
     )
-    
+
     vercel = VercelConfig(
         token=os.getenv("VERCEL_TOKEN", ""),
         team_id=os.getenv("VERCEL_TEAM_ID"),
@@ -347,4 +348,3 @@ def load_config() -> AppConfig:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),
     )
-
