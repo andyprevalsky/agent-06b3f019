@@ -127,8 +127,10 @@ function aggregatePricing(
     if (ctx !== undefined && ctx < minContext) minContext = ctx;
 
     if (info.pricing) {
-      totalPrompt += parseFloat(info.pricing.prompt ?? '0');
-      totalCompletion += parseFloat(info.pricing.completion ?? '0');
+      const promptPrice = parseFloat(info.pricing.prompt ?? '0');
+      const completionPrice = parseFloat(info.pricing.completion ?? '0');
+      totalPrompt += Number.isFinite(promptPrice) ? promptPrice : 0;
+      totalCompletion += Number.isFinite(completionPrice) ? completionPrice : 0;
       validModels++;
     }
   }

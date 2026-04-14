@@ -19,6 +19,9 @@ echo "=== TypeScript (deno fmt + deno lint) ==="
 if $FIX; then
   deno fmt || true
   deno lint --fix || true
+  # Re-check after fix to detect unfixable issues
+  deno fmt --check || FAIL=1
+  deno lint || FAIL=1
 else
   deno fmt --check || FAIL=1
   deno lint || FAIL=1
@@ -28,6 +31,8 @@ echo ""
 echo "=== TypeScript strict overlay (cleaned domains) ==="
 if $FIX; then
   deno lint --fix --config deno-strict.json || true
+  # Re-check after fix to detect unfixable issues
+  deno lint --config deno-strict.json || FAIL=1
 else
   deno lint --config deno-strict.json || FAIL=1
 fi
@@ -41,6 +46,9 @@ echo "=== Python (ruff format + ruff check) ==="
 if $FIX; then
   ruff format .
   ruff check --fix .
+  # Re-check after fix to detect unfixable issues
+  ruff format --check . || FAIL=1
+  ruff check . || FAIL=1
 else
   ruff format --check . || FAIL=1
   ruff check . || FAIL=1

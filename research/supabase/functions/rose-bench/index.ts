@@ -5,7 +5,36 @@ import { createClient } from 'npm:@supabase/supabase-js@~2.39.3';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-api-key',
+  'Access-Control-Allow-Methods': 'OPTIONS, POST',
 };
+
+/** Allowlist of hostnames permitted for benchmark endpoint URLs. */
+const ALLOWED_HOSTNAMES = new Set([
+  'kzlurqihzaolhzsbkctf.supabase.co',
+  'api.openai.com',
+  'api.anthropic.com',
+  'openrouter.ai',
+  'generativelanguage.googleapis.com',
+  'localhost',
+]);
+
+/** Validate that a user-provided URL is https (or localhost) and on the allowlist. */
+function validateBenchmarkUrl(raw: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Invalid URL');
+  }
+  const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  if (parsed.protocol !== 'https:' && !isLocalhost) {
+    throw new Error('Only HTTPS URLs are allowed');
+  }
+  if (!ALLOWED_HOSTNAMES.has(parsed.hostname)) {
+    throw new Error(`Hostname not allowed: ${parsed.hostname}`);
+  }
+  return parsed.toString();
+}
 
 interface BenchmarkQuestion {
   id: string;
@@ -218,7 +247,7 @@ async function runSingleBenchmark(
     totalQuestions: SAMPLE_QUESTIONS.length,
     sampledQuestions: questions.length,
     correctAnswers,
-    accuracy: (correctAnswers / results.length) * 100,
+    accuracy: results.length > 0 ? (correctAnswers / results.length) * 100 : 0,
     totalCostCents: 0, // Cost tracked in logs
     totalDurationSeconds,
     results,
@@ -247,6 +276,19 @@ serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 400,
       });
+    }
+
+    let validatedUrl: string;
+    try {
+      validatedUrl = validateBenchmarkUrl(url);
+    } catch (e) {
+      return new Response(
+        JSON.stringify({ error: `Invalid url: ${e instanceof Error ? e.message : 'validation failed'}` }),
+        {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 400,
+        },
+      );
     }
 
     if (!modelConfig || !modelConfig.model) {
@@ -288,7 +330,7 @@ serve(async (req) => {
       for (const benchmarkType of allBenchmarks) {
         try {
           const result = await runSingleBenchmark(
-            url,
+            validatedUrl,
             headers || {},
             modelConfig,
             benchmarkType,
@@ -320,7 +362,7 @@ serve(async (req) => {
       );
     }
 
-    const result = await runSingleBenchmark(url, headers || {}, modelConfig, benchmark, seed);
+    const result = await runSingleBenchmark(validatedUrl, headers || {}, modelConfig, benchmark, seed);
 
     try {
       const supabaseUrl = Deno.env.get('SUPABASE_URL');
@@ -328,7 +370,7 @@ serve(async (req) => {
       if (supabaseUrl && supabaseServiceKey) {
         const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-        await supabase
+        const { error: insertError } = await supabase
           .from('BenchmarkRun')
           .insert({
             userId: 'anonymous', // TODO(#auth): Get actual user if authenticated
@@ -340,6 +382,9 @@ serve(async (req) => {
             sampledQuestions: result.sampledQuestions,
             durationSeconds: Math.round(result.totalDurationSeconds),
           });
+        if (insertError) {
+          console.error('Supabase insert error:', insertError.message);
+        }
       }
     } catch (error) {
       console.error('Failed to log benchmark run:', error);
@@ -351,12 +396,8 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error('Benchmark error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return new Response(
-      JSON.stringify({
-        error: 'Failed to run benchmark',
-        details: errorMessage,
-      }),
+      JSON.stringify({ error: 'Failed to run benchmark' }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 500,

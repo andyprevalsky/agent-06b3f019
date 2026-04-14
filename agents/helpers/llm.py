@@ -866,7 +866,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             ttft_logged = False
 
             last_chunk_time = _safe_time()  # Track time since last chunk for stall detection
-            async with httpx.AsyncClient(timeout=httpx.Timeout(170.0, connect=30.0)) as http_client:  # noqa: SIM117
+            async with httpx.AsyncClient(timeout=httpx.Timeout(130.0, connect=30.0)) as http_client:  # noqa: SIM117
                 async with http_client.stream(
                     "POST",
                     config.rose.api_url,
@@ -1146,8 +1146,10 @@ async def call_llm_structured_streaming(  # noqa: C901
         )
 
         # Escalate max_tokens on truncation (finish_reason=length) — retry once with 32768
-        if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation:
-            logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768")
+        # Guard: skip escalation if not enough time remains for another streaming call (need 120s headroom)
+        elapsed = _safe_time() - request_start_time if request_start_time else 0
+        if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed < 180:
+            logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)")
             return await call_llm_structured_streaming(
                 messages=messages,
                 model=model,
@@ -1167,6 +1169,11 @@ async def call_llm_structured_streaming(  # noqa: C901
                 skip_cache=skip_cache,
                 call_site=call_site,
                 _is_escalation=True,
+            )
+        elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
+            logger.warning(
+                f"⚠️ [{call_site}] Response truncated but skipping escalation — not enough time "
+                f"(elapsed={elapsed:.1f}s, need <180s). Returning truncated result."
             )
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)

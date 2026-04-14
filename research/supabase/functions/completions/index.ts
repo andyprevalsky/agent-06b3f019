@@ -7,6 +7,24 @@ const corsHeaders = {
     'authorization, x-client-info, apikey, content-type, x-api-key, x-request-id, x-agent-id, x-call-site',
 };
 
+/**
+ * Parse the Retry-After header, handling both delta-seconds and HTTP-date formats.
+ * Returns milliseconds to wait. Falls back to `fallbackMs` on unparseable values.
+ */
+function parseRetryAfterMs(raw: string | null, fallbackMs = 2000): number {
+  if (!raw) return fallbackMs;
+  const deltaSeconds = Number(raw);
+  if (Number.isFinite(deltaSeconds) && deltaSeconds > 0) {
+    return deltaSeconds * 1000;
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    const delayMs = dateMs - Date.now();
+    return delayMs > 0 ? delayMs : fallbackMs;
+  }
+  return fallbackMs;
+}
+
 // Structured logging helper
 function slog(
   level: 'info' | 'warn' | 'error',
@@ -3991,9 +4009,8 @@ async function handleStreaming(
 
     // Retry on transient errors (429, 5xx) before starting the stream reader
     if (!fetchResponse.ok && (fetchResponse.status === 429 || fetchResponse.status >= 500)) {
-      const retryAfterRaw = fetchResponse.headers.get('retry-after');
       const delayMs = fetchResponse.status === 429
-        ? Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000)
+        ? Math.min(Math.max(parseRetryAfterMs(fetchResponse.headers.get('retry-after')), 1000), 5000)
         : 2000;
       slog('warn', `[Anthropic Stream] ${fetchResponse.status}, retrying in ${delayMs}ms`);
       await new Promise((r) => setTimeout(r, delayMs));
@@ -5015,8 +5032,13 @@ serve(async (req) => {
               const parseRetryAfter = (raw: string | null): number | null => {
                 if (!raw) return null;
                 const seconds = Number(raw);
-                if (!Number.isFinite(seconds) || seconds <= 0) return null;
-                return Math.floor(seconds);
+                if (Number.isFinite(seconds) && seconds > 0) return Math.floor(seconds);
+                const dateMs = Date.parse(raw);
+                if (Number.isFinite(dateMs)) {
+                  const delaySec = Math.ceil((dateMs - Date.now()) / 1000);
+                  return delaySec > 0 ? delaySec : null;
+                }
+                return null;
               };
 
               const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
@@ -5717,8 +5739,7 @@ serve(async (req) => {
               });
               if (response.ok) break;
               if (response.status === 429) {
-                const retryAfterRaw = response.headers.get('retry-after');
-                const delayMs = Math.min(Math.max((Number(retryAfterRaw) || 2) * 1000, 1000), 5000);
+                const delayMs = Math.min(Math.max(parseRetryAfterMs(response.headers.get('retry-after')), 1000), 5000);
                 slog(
                   'warn',
                   `[${requestId}] Non-streaming 429, retrying in ${delayMs}ms (attempt ${

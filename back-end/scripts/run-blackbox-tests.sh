@@ -47,6 +47,10 @@ if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
     export DATABASE_URL="$LOCAL_DB_URL"
     export DIRECT_URL="$LOCAL_DB_URL"
     echo "Using local Postgres at localhost:$LOCAL_DB_PORT"
+  else
+    echo "❌ Local Postgres container '$DB_CONTAINER' is not ready (port $LOCAL_DB_PORT)."
+    echo "   Start it with: docker start $DB_CONTAINER"
+    exit 1
   fi
 fi
 

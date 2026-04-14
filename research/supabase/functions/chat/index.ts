@@ -9,14 +9,24 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 
 const COMPLETIONS_URL = Deno.env.get('SUPABASE_URL') + '/functions/v1/completions';
 
+const corsHeaders: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type, x-api-key, x-request-id, x-agent-id, x-call-site',
+};
+
 serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
+
   const url = new URL(req.url);
   const path = url.pathname.replace(/^\/chat/, '');
 
   if (path !== '/completions' && path !== '') {
     return new Response(JSON.stringify({ error: 'Not found' }), {
       status: 404,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 
@@ -38,7 +48,7 @@ serve(async (req: Request) => {
     console.error('Error proxying to completions:', error);
     return new Response(JSON.stringify({ error: 'Internal server error' }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 });
