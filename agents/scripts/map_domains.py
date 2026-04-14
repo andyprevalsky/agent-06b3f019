@@ -353,12 +353,12 @@ def main() -> None:
             tested = "✓" if entry["testFile"] else "✗"
             print(f"  {tested} {entry['file']:<45} ({entry['usedByCount']} domains)")
 
-        print(f"\nApp wiring (composition root):\n")
+        print("\nApp wiring (composition root):\n")
         for f in classification["appWiring"]:
             print(f"  {f}")
 
         if classification["orphaned"]:
-            print(f"\nOrphaned (in no domain's import graph):\n")
+            print("\nOrphaned (in no domain's import graph):\n")
             for f in classification["orphaned"]:
                 print(f"  {f}")
 
@@ -410,9 +410,9 @@ def main() -> None:
             test = "✓ tested" if d["testFile"] else "✗ NO TESTS"
             print(f"    {d['domain']:<30} {d['fileCount']:>3} files  [{test}]")
 
-    print(f"\nUse: python scripts/map_domains.py <domain> for details")
-    print(f"Use: python scripts/map_domains.py --json for machine-readable output")
-    print(f"Use: python scripts/map_domains.py --classify for shared file analysis")
+    print("\nUse: python scripts/map_domains.py <domain> for details")
+    print("Use: python scripts/map_domains.py --json for machine-readable output")
+    print("Use: python scripts/map_domains.py --classify for shared file analysis")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ This provides visibility into what's happening inside the sandbox for debugging.
 """
 
 import asyncio
+import contextlib
 from typing import Optional
+
 import structlog
 
 logger = structlog.get_logger()
@@ -41,11 +43,17 @@ class SandboxLogCollector:
             # --level DEBUG captures all log levels
             # --loggers covers: process, filesystem, terminal, network
             self.process = await asyncio.create_subprocess_exec(
-                'e2b', 'sandbox', 'logs', self.sandbox_id,
-                '-f',  # Follow/stream logs
-                '--level', 'DEBUG',
-                '--loggers', 'process,filesystem,terminal,network',
-                '--format', 'pretty',  # Human readable
+                "e2b",
+                "sandbox",
+                "logs",
+                self.sandbox_id,
+                "-f",  # Follow/stream logs
+                "--level",
+                "DEBUG",
+                "--loggers",
+                "process,filesystem,terminal,network",
+                "--format",
+                "pretty",  # Human readable
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # Merge stderr into stdout
             )
@@ -90,7 +98,7 @@ class SandboxLogCollector:
                     break
 
                 # Decode and strip the line
-                log_line = line.decode('utf-8', errors='replace').rstrip()
+                log_line = line.decode("utf-8", errors="replace").rstrip()
                 if log_line:
                     # Log with E2B:Sandbox prefix for easy filtering
                     logger.info(
@@ -115,10 +123,8 @@ class SandboxLogCollector:
         # Cancel reader task
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                pass
 
         # Terminate the e2b CLI process
         if self.process:

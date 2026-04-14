@@ -103,6 +103,18 @@ export async function updateAgent(agentId: string, data: Record<string, unknown>
   });
 }
 
+/** Mark an agent as FAILED only if it's still in a pre-terminal, non-paused state.
+ *  Prevents background error handlers from overwriting user-initiated status changes. */
+export async function failAgentIfStillActive(agentId: string, statusMessage: string) {
+  return prisma.agent.updateMany({
+    where: {
+      id: agentId,
+      status: { in: ['STARTING_UP', 'ACTIVE'] },
+    },
+    data: { status: 'FAILED', statusMessage },
+  });
+}
+
 /** Soft-delete an agent. */
 export async function softDeleteAgent(agentId: string) {
   return prisma.agent.update({

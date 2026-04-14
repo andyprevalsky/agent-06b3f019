@@ -3589,10 +3589,6 @@ async function runAll(): Promise<void> {
   if (captureAvailable) {
     sequentialTests.push(
       {
-        name: 'boundary — validation short-circuit makes no outbound calls',
-        fn: testBoundary_validationShortCircuitNoOutbound,
-      },
-      {
         name: 'boundary — create agent calls OpenRouter for model pricing',
         fn: testBoundary_createAgentModelPricing,
       },
@@ -3607,6 +3603,13 @@ async function runAll(): Promise<void> {
       {
         name: 'boundary — create agent call ordering (sync before fire-and-forget)',
         fn: testBoundary_createAgentCallOrdering,
+      },
+      {
+        // Run last: Phase 1 fire-and-forget handlers (GitHub, chat) may still be
+        // making outbound calls when Phase 2 starts. Running this test last gives
+        // those background calls time to drain before we assert zero outbound calls.
+        name: 'boundary — validation short-circuit makes no outbound calls',
+        fn: testBoundary_validationShortCircuitNoOutbound,
       }
     );
   } else {

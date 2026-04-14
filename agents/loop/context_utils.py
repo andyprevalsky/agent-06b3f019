@@ -1,7 +1,7 @@
 """Shared context utilities for run_agent and DAG executor."""
 
 from datetime import datetime
-from typing import Callable, Awaitable, List, Dict
+from typing import Awaitable, Callable, Dict, List
 
 import structlog
 
@@ -37,7 +37,7 @@ async def poll_and_update_context(
             ts_str = msg.get("timestamp", "")
             if ts_str:
                 try:
-                    msg_ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                    msg_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                     if msg_ts > last_checked:
                         last_checked = msg_ts
                 except Exception:

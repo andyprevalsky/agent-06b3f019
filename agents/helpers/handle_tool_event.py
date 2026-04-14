@@ -9,13 +9,15 @@ Usage tracking is handled by workflow._track_usage() - tools return standardized
 """
 
 from datetime import timedelta
-from typing import Optional, Callable, Awaitable, Any
+from typing import Any, Awaitable, Callable, Optional
+
 import structlog
 
 # All imports at module level - no inline imports to avoid workflow sandbox issues
 from temporalio.common import RetryPolicy
-from tools.base import EventType, AssistantEvent
+
 from helpers.messages import post_agent_message, stream_assistant_chunk
+from tools.base import AssistantEvent, EventType
 
 logger = structlog.get_logger()
 
@@ -63,21 +65,21 @@ async def handle_tool_event(
             "toolStatus": event.status.value if event.status else "IN_PROGRESS",
             "title": event.title or tool_name,
         }
-        
+
         # Add sub_agent_id for routing if provided
         if sub_agent_id:
             metadata["subAgentId"] = sub_agent_id
-        
+
         # Merge any custom metadata from the event
         if event.metadata:
             metadata.update(event.metadata)
-        
+
         # Include structured data (e.g., plan tasks) in metadata for FE
         if event.data:
             metadata["data"] = event.data
 
         # Get file_pointer if present (for file attachment messages)
-        file_pointer = getattr(event, 'file_pointer', None)
+        file_pointer = getattr(event, "file_pointer", None)
 
         await execute_activity(
             post_agent_message,
@@ -85,7 +87,7 @@ async def handle_tool_event(
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
-    
+
     elif event.type == EventType.STREAM_MESSAGE:
         # Stream chunks to Supabase Realtime (NOT an activity - direct HTTP call)
         # Works the same in both workflow and activity contexts

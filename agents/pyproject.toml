@@ -1,0 +1,75 @@
+# =============================================================================
+# Ruff configuration for agents/ Python codebase
+#
+# Two-tier lint enforcement (mirrors back-end/eslint.config.mjs pattern):
+#   1. Base rules   — all source files (this file)
+#   2. Strict rules — cleaned domain files only (ruff-strict.toml)
+#
+# Commands:
+#   ruff check .                                    # base lint (all files)
+#   ruff format --check .                           # format check (all files)
+#   ruff check --config ruff-strict.toml <files>    # strict lint (cleaned domains)
+# =============================================================================
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+# Exclude non-source directories
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    "benchmarks",
+    "browser_tools",
+]
+
+# ── Formatter ──
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# ── Lint: base rules (all source files) ──
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort (import sorting)
+]
+
+ignore = [
+    "E501",  # line-too-long — handled by formatter
+    "W291",  # trailing whitespace — handled by formatter
+    "W292",  # no newline at end of file — handled by formatter
+    "W293",  # whitespace before ':'  — handled by formatter
+]
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "domains",
+    "config",
+    "domains",
+    "tools",
+    "helpers",
+    "loop",
+    "activities",
+    "workflows",
+    "browser_tools",
+    "domains",
+]
+
+# Per-file rule relaxations
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["I", "F401", "F841", "E402", "F541", "E712", "E722"]
+"scripts/**/*.py" = ["I"]
+# Composition root: imports after load_dotenv() + env var check (intentional)
+"worker.py" = ["E402"]
+# Activity-only imports after sys.path setup (intentional)
+"tools/knowledge_base.py" = ["E402"]

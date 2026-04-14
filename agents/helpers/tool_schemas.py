@@ -1,11 +1,10 @@
 """Tool schemas and dynamic models used by the LLM orchestration layer."""
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type, Union, Literal, TYPE_CHECKING
+from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
 from pydantic import BaseModel, Field, create_model
-
 
 logger = structlog.get_logger(__name__)
 
@@ -51,8 +50,10 @@ PLANNER_ASSIGNABLE_TOOLS = [
     "reasoning",  # Pure thinking/analysis step (no tool call)
 ]
 
+
 class PlanToolName(str, Enum):
     """The tool to execute for this task, or 'reasoning' for thinking/analysis."""
+
     spawn_explore_agent = "spawn_explore_agent"
     spawn_browser_agent = "spawn_browser_agent"
     spawn_code_agent = "spawn_code_agent"
@@ -81,24 +82,31 @@ assert _plan_tool_values == _expected_tools, (
 
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
-    goal: str = Field(description=(
-        "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
-        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
-        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
-        "Be specific and explicit — if the sub-agent needs it, put it here."
-    ))
+
+    goal: str = Field(
+        description=(
+            "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
+            "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+            "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
+            "Be specific and explicit — if the sub-agent needs it, put it here."
+        )
+    )
     tool_name: PlanToolName
-    depends_on: List[int] = Field(default_factory=list, description="Indices of tasks this depends on (empty = no deps)")
+    depends_on: List[int] = Field(
+        default_factory=list, description="Indices of tasks this depends on (empty = no deps)"
+    )
 
 
 class DependencyEntry(BaseModel):
     """A single entry in the dependencies graph."""
+
     task_idx: str = Field(description="The task index (0-based, as string)")
     depends_on: List[str] = Field(default_factory=list, description="List of task indices this task depends on")
 
 
 class PlannerResponse(BaseModel):
     """Structured output from the planner LLM."""
+
     title: str = Field(description="Short plan title")
     content: str = Field(description="Markdown explanation of the plan")
     tasks: List[PlannerTask] = Field(description="List of tasks with dependencies")
@@ -122,11 +130,13 @@ class ResponseSchemaFieldConfig(BaseModel):
     """Configuration for a single field in the output schema."""
 
     name: str = Field(description="Field name in snake_case")
-    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]", "file_pointer", "list[file_pointer]"] = Field(
-        description="Field type: str, int, float, bool, list[str], list[int], file_pointer, or list[file_pointer]. "
-        "IMPORTANT: If the output is a FILE (image, document, generated artifact, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'. "
-        "Using 'str' for file paths will NOT work - files will not be downloaded or transferred. "
-        "The file_pointer type enables automatic file transfer from remote environments to persistent storage."
+    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]", "file_pointer", "list[file_pointer]"] = (
+        Field(
+            description="Field type: str, int, float, bool, list[str], list[int], file_pointer, or list[file_pointer]. "
+            "IMPORTANT: If the output is a FILE (image, document, generated artifact, etc.), you MUST use 'file_pointer' or 'list[file_pointer]'. "
+            "Using 'str' for file paths will NOT work - files will not be downloaded or transferred. "
+            "The file_pointer type enables automatic file transfer from remote environments to persistent storage."
+        )
     )
     required: bool = Field(description="Whether this field is required in the output")
     description: str = Field(description="Brief description of what this field contains")
@@ -148,11 +158,13 @@ class ResponseSchemaConfig(BaseModel):
 class SubAgentConfig(BaseModel):
     """Configuration for a single sub-agent."""
 
-    goal: str = Field(description=(
-        "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
-        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
-        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion."
-    ))
+    goal: str = Field(
+        description=(
+            "Self-contained task brief. Sub-agents have NO access to your conversation, user messages, or context — "
+            "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+            "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion."
+        )
+    )
     # model removed - always inherits from parent agent
     read_only: bool = Field(
         default=False,
@@ -162,7 +174,7 @@ class SubAgentConfig(BaseModel):
     output_schema: ResponseSchemaConfig
     attachments: Optional[List[str]] = Field(
         default=None,
-        description="List of filenames to pass to this sub-agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'rs.jpeg'). Do NOT use the file's `id` field or any other format."
+        description="List of filenames to pass to this sub-agent. Use the exact `original_filename` value from file_pointer objects in your context (e.g., 'rs.jpeg'). Do NOT use the file's `id` field or any other format.",
     )
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
@@ -170,7 +182,7 @@ class SubAgentConfig(BaseModel):
             "Control which user context sections the sub-agent receives. "
             "All default to true. Set to false to exclude a section and save compute. "
             "Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files."
-        )
+        ),
     )
 
 
@@ -180,21 +192,23 @@ class WaitForTool(BaseModel):
     tool: Literal["wait_for"]
     until_timestamp: Optional[str] = Field(
         default=None,
-        description="ISO 8601 timestamp to wait until (e.g., '2026-03-12T09:00:00Z'). Mutually exclusive with condition."
+        description="ISO 8601 timestamp to wait until (e.g., '2026-03-12T09:00:00Z'). Mutually exclusive with condition.",
     )
     condition: Optional[str] = Field(
         default=None,
-        description="Natural language condition to poll for (e.g., 'Bitcoin price drops below $50,000'). An explore agent will periodically check if this condition is satisfied."
+        description="Natural language condition to poll for (e.g., 'Bitcoin price drops below $50,000'). An explore agent will periodically check if this condition is satisfied.",
     )
     check_interval_seconds: int = Field(
         default=900,
-        ge=60, le=86400,
-        description="Seconds between condition checks (60-86400, default 900). Only used with condition."
+        ge=60,
+        le=86400,
+        description="Seconds between condition checks (60-86400, default 900). Only used with condition.",
     )
     max_checks: int = Field(
         default=20,
-        ge=1, le=100,
-        description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition."
+        ge=1,
+        le=100,
+        description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
@@ -204,8 +218,8 @@ class WaitForTool(BaseModel):
             "Keys: 'network' (gates 500-contact network metadata), "
             "'recent_communications' (gates local message thread summary). "
             "All default to true. Set to false for pure web-based condition checks. "
-            "Example: {\"network\": false, \"recent_communications\": false}"
-        )
+            'Example: {"network": false, "recent_communications": false}'
+        ),
     )
 
 
@@ -226,7 +240,7 @@ class WebFetchTool(BaseModel):
     full_content: bool = Field(default=False, description="Return complete page content instead of excerpts")
     download_files: Optional[List[str]] = Field(
         default=None,
-        description="File extensions to auto-download from the page (e.g. ['pdf', 'csv', 'xlsx']). Discovered URLs matching these extensions are downloaded and returned as file pointers."
+        description="File extensions to auto-download from the page (e.g. ['pdf', 'csv', 'xlsx']). Discovered URLs matching these extensions are downloaded and returned as file pointers.",
     )
 
 
@@ -239,10 +253,21 @@ class GrepTool(BaseModel):
     """
 
     tool: Literal["grep"]
-    pattern: str = Field(description="Text to search for in messages (plain text, not regex). Use '' to return all messages. E.g. 'dinner', 'project update'")
-    source: str = Field(default="messages", description="Data source to search. 'messages' = iMessage/email threads. 'agent_network_user_messages' = user messages across the agent network (all agents in this workflow tree). 'agent_network_tool_results' = tool call results across the agent network (search results, research findings, etc.).")
-    person_id: Optional[str] = Field(default=None, description="Optional person identifier to scope search to one thread. Can be an email address, phone number, or full name.")
-    since: Optional[str] = Field(default=None, description="ISO 8601 timestamp cutoff — only return messages after this time. E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.")
+    pattern: str = Field(
+        description="Text to search for in messages (plain text, not regex). Use '' to return all messages. E.g. 'dinner', 'project update'"
+    )
+    source: str = Field(
+        default="messages",
+        description="Data source to search. 'messages' = iMessage/email threads. 'agent_network_user_messages' = user messages across the agent network (all agents in this workflow tree). 'agent_network_tool_results' = tool call results across the agent network (search results, research findings, etc.).",
+    )
+    person_id: Optional[str] = Field(
+        default=None,
+        description="Optional person identifier to scope search to one thread. Can be an email address, phone number, or full name.",
+    )
+    since: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 timestamp cutoff — only return messages after this time. E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.",
+    )
 
 
 class PeopleSearchTool(BaseModel):
@@ -281,26 +306,24 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
 
 class EnableWritePermissionsTool(BaseModel):
     """Request write permissions before performing a hard write to an internet database.
-    
+
     You MUST call this tool before:
     1. Transferring value (e.g., clicking a pay button, confirming a purchase)
     2. Publishing content (e.g., submitting a social media post, creating a listing)
     3. Transmitting messages (e.g., sending an email, SMS, or chat message)
-    
+
     ⚠️ WARNING: If you perform any of these actions WITHOUT first calling this tool,
     you will be terminated. We don't want to terminate you!
-    
+
     Permission is SINGLE-USE: only the immediate next action is authorized.
     Before calling this tool, ensure the state is fully prepared (all fields filled,
     page ready) so no other action is needed between permission and execution.
-    
+
     This tool is resource-intensive - use it only when truly needed.
     """
 
     tool: Literal["enable_write_permissions"]
-    reason: str = Field(
-        description="Why write permission is needed. Be specific about what will be written/sent/paid."
-    )
+    reason: str = Field(description="Why write permission is needed. Be specific about what will be written/sent/paid.")
     action_description: str = Field(
         description="Exact description of the action that will be performed immediately after permission is granted. "
         "E.g., 'Click the Pay Now button to complete $42.99 purchase on Amazon', "
@@ -315,15 +338,21 @@ class SendSmsTool(BaseModel):
     phone_number: str = Field(
         description="The phone number to send the SMS to (E.164 format, e.g., +19729777432). Use the user's phone number if sending to them."
     )
-    message: str = Field(description="The SMS message to send. Keep it concise (160 characters recommended for standard SMS).")
+    message: str = Field(
+        description="The SMS message to send. Keep it concise (160 characters recommended for standard SMS)."
+    )
 
 
 class SendSmsAsUserTool(BaseModel):
     """Tool call for sending SMS via the user's own iMessage client (Mac-only)."""
 
     tool: Literal["send_sms_as_user"]
-    phone_number: str = Field(description="Recipient phone number to send via the user's Mac iMessage (E.164 format, e.g., +19729777432).")
-    message: str = Field(description="The exact SMS/iMessage text to send. Keep it conversational and ready to send without additional edits.")
+    phone_number: str = Field(
+        description="Recipient phone number to send via the user's Mac iMessage (E.164 format, e.g., +19729777432)."
+    )
+    message: str = Field(
+        description="The exact SMS/iMessage text to send. Keep it conversational and ready to send without additional edits."
+    )
 
 
 class SendEmailTool(BaseModel):
@@ -356,7 +385,7 @@ class MessagePersonTool(BaseModel):
     from_email: Optional[str] = Field(
         default=None,
         description="The email address to send from (required when channel is 'email'). "
-        "Must match one of the user's connected email accounts."
+        "Must match one of the user's connected email accounts.",
     )
     intent: str = Field(
         description="Detailed description of the intent/purpose of the message. "
@@ -373,7 +402,7 @@ class MessagePersonTool(BaseModel):
             "Keys: 'recent_communications' (gates cross-contact voice/style sample, 1-5k tokens). "
             "Defaults to true. Set to false if voice matching is not needed. "
             "Other gate keys are not applicable — 1-on-1 thread and person enrichment are always fetched."
-        )
+        ),
     )
 
 
@@ -407,12 +436,14 @@ class SpawnAgentTool(BaseModel):
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "sub_agent", "explore", "for_each"]
-    goal: str = Field(description=(
-        "Self-contained task brief. Spawned agents have NO access to your conversation, user messages, or context — "
-        "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
-        "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
-        "Be specific and explicit — if the agent needs it, put it here."
-    ))
+    goal: str = Field(
+        description=(
+            "Self-contained task brief. Spawned agents have NO access to your conversation, user messages, or context — "
+            "the goal is their ONLY source of information. Include ALL relevant details: user preferences, constraints, "
+            "addresses, names, budget, deadlines, prior research findings, and any other context needed for completion. "
+            "Be specific and explicit — if the agent needs it, put it here."
+        )
+    )
 
     output_schema: Optional[ResponseSchemaConfig] = Field(
         default=None,
@@ -420,12 +451,12 @@ class SpawnAgentTool(BaseModel):
             "REQUIRED for type=browser, type=code, type=sub_agent, and type=for_each. "
             "MUST NOT be provided for type=explore. "
             "Defines the structured data the agent returns. "
-            "Example: {\"summary\": \"str\", \"items\": \"list[str]\", \"file\": \"file_pointer\"}"
-        )
+            'Example: {"summary": "str", "items": "list[str]", "file": "file_pointer"}'
+        ),
     )
     attachments: Optional[List[str]] = Field(
         default=None,
-        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context."
+        description="List of filenames to pass to this agent. Use the exact `original_filename` value from file_pointer objects in your context.",
     )
 
     start_url: Optional[str] = Field(
@@ -433,21 +464,19 @@ class SpawnAgentTool(BaseModel):
         description=(
             "REQUIRED for type=browser. Not used by other types. "
             "The URL to navigate to first. Must be a user-facing URL, not a deep-link."
-        )
+        ),
     )
     # code only - GitHub repo to clone into sandbox
     github_repo_link: Optional[str] = Field(
         default=None,
-        description="(code only) GitHub repository URL to clone. Format: 'https://github.com/{owner}/{repo}'"
+        description="(code only) GitHub repository URL to clone. Format: 'https://github.com/{owner}/{repo}'",
     )
     # sub_agent only
     read_only: Optional[bool] = Field(
-        default=None,
-        description="(sub_agent/for_each only) True if sub-agent must stay read-only (plan-phase spawn)."
+        default=None, description="(sub_agent/for_each only) True if sub-agent must stay read-only (plan-phase spawn)."
     )
     verifier: Optional[VerifierConfig] = Field(
-        default=None,
-        description="(sub_agent/for_each only) Verification config for evaluating agent success."
+        default=None, description="(sub_agent/for_each only) Verification config for evaluating agent success."
     )
     start_phase: Optional[Literal["plan", "execute"]] = Field(
         default=None,
@@ -456,21 +485,21 @@ class SpawnAgentTool(BaseModel):
             "Use 'execute' for clear direct tasks expected to need 1-2 tool calls. "
             "Use 'plan' for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination. "
             "When in doubt, prefer 'plan'."
-        )
+        ),
     )
     items: Optional[List[Any]] = Field(
         default=None,
         description=(
             "(for_each only) List of items/rows. The shared goal is reused for each item, "
             "and one downstream spawn_sub_agent child is started per item."
-        )
+        ),
     )
     items_csv: Optional[str] = Field(
         default=None,
         description=(
             "(for_each only) CSV string input. The shared goal is reused for each parsed row, "
             "and one downstream spawn_sub_agent child is started per row."
-        )
+        ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
@@ -481,8 +510,8 @@ class SpawnAgentTool(BaseModel):
             "For sub_agent/for_each: all keys apply (gates user_context in system prompt). "
             "For explore: 'network' gates the 500-contact network metadata, "
             "'recent_communications' gates the local message thread summary. Other keys ignored. "
-            "Example: {\"network\": false, \"recent_communications\": false} for pure web research tasks."
-        )
+            'Example: {"network": false, "recent_communications": false} for pure web research tasks.'
+        ),
     )
 
 
@@ -504,21 +533,33 @@ class SearchUserNetworkTool(BaseModel):
     industry: Optional[str] = Field(None, description="Industry (e.g., 'venture capital', 'technology', 'healthcare')")
 
     # Relationship criteria
-    relation: Optional[str] = Field(None, description="Relationship type (e.g., 'best_friend', 'colleague', 'mentor', 'family')")
-    communication_frequency: Optional[str] = Field(None, description="How often you communicate: 'daily', 'weekly', 'monthly', 'yearly', 'rarely'")
-    relationship_quality: Optional[str] = Field(None, description="Relationship quality: 'strong', 'moderate', 'weak', 'strained'")
+    relation: Optional[str] = Field(
+        None, description="Relationship type (e.g., 'best_friend', 'colleague', 'mentor', 'family')"
+    )
+    communication_frequency: Optional[str] = Field(
+        None, description="How often you communicate: 'daily', 'weekly', 'monthly', 'yearly', 'rarely'"
+    )
+    relationship_quality: Optional[str] = Field(
+        None, description="Relationship quality: 'strong', 'moderate', 'weak', 'strained'"
+    )
 
     # Skills & Interests
-    skills: Optional[List[str]] = Field(None, description="Skills they possess (e.g., ['fundraising', 'product management', 'marketing'])")
+    skills: Optional[List[str]] = Field(
+        None, description="Skills they possess (e.g., ['fundraising', 'product management', 'marketing'])"
+    )
     interests: Optional[List[str]] = Field(None, description="Their interests (e.g., ['AI', 'sustainability', 'art'])")
 
     # Influence & Reach
     total_online_reach: Optional[int] = Field(None, description="Minimum social media reach/followers")
-    estimated_net_worth_usd: Optional[float] = Field(None, description="Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)")
+    estimated_net_worth_usd: Optional[float] = Field(
+        None, description="Minimum estimated net worth in USD (e.g., 1500000 for $1.5M)"
+    )
     estimated_world_power_ranking: Optional[int] = Field(None, description="World power ranking 1-10 (1=most powerful)")
 
     # Availability
-    current_bandwidth: Optional[str] = Field(None, description="Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'")
+    current_bandwidth: Optional[str] = Field(
+        None, description="Their availability: 'totally_free', 'light', 'moderate', 'busy', 'totally_swamped'"
+    )
     contact_status: Optional[str] = Field(None, description="Contact status: 'active', 'dormant', 'lost_contact'")
 
     # Network Orientation
@@ -752,8 +793,7 @@ class CheckMonitorEventsTool(BaseModel):
         ge=1,
         le=100,
         description=(
-            "Maximum number of events to return. Range: 1-100. Default: 10. "
-            "Returns most recent events first."
+            "Maximum number of events to return. Range: 1-100. Default: 10. Returns most recent events first."
         ),
     )
 
@@ -809,7 +849,7 @@ class AttemptCompletionTool(BaseModel):
     tool: Literal["attempt_completion"]
     result: str = Field(
         default="",
-        description="Summary of your final result for logging and display. The verifier does not see this — it evaluates your tool calls directly."
+        description="Summary of your final result for logging and display. The verifier does not see this — it evaluates your tool calls directly.",
     )
 
 
@@ -871,7 +911,9 @@ class PayForX402BazaarServiceTool(BaseModel):
             "Example: 'https://minifetch.com/api/v1/x402/extract/url-metadata'"
         )
     )
-    method: Literal["GET", "POST"] = Field(default="GET", description="HTTP method for the request (shown in search results). Default: GET")
+    method: Literal["GET", "POST"] = Field(
+        default="GET", description="HTTP method for the request (shown in search results). Default: GET"
+    )
     params: Dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -908,9 +950,7 @@ class CallPhoneNumberTool(BaseModel):
     """
 
     tool: Literal["call_phone_number"]
-    to: str = Field(
-        description="Phone number to call in E.164 format (e.g., +19729777432)"
-    )
+    to: str = Field(description="Phone number to call in E.164 format (e.g., +19729777432)")
     system_prompt: str = Field(
         description=(
             "Instructions for how the voice agent should behave, who they are, and what they're calling about. "
@@ -961,7 +1001,7 @@ class ReadMemoriesTool(BaseModel):
             "Search query to find specific memories. Use descriptive keywords. "
             "Leave empty to retrieve the full user profile (preferences, facts, patterns). "
             "Examples: 'travel preferences', 'restaurant reservations', 'work schedule'"
-        )
+        ),
     )
 
 
@@ -1017,7 +1057,7 @@ def create_agent_action_model(
     - Only available tools are in the schema (better LLM guidance)
     - Type-safe tool calls (Pydantic validates structure)
     - No JSON string parsing hacks needed
-    
+
     NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
     OpenRouter's reasoning_details which are extracted from API responses and
     stored in message metadata.
@@ -1043,15 +1083,24 @@ def create_agent_action_model(
     if not tool_types:
         # No tools available - agent can only communicate
         ToolCallUnion = type(None)  # Empty type
-        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="No tools available for this agent"))
+        tool_calls_field = (
+            List[ToolCallUnion],
+            Field(default_factory=list, description="No tools available for this agent"),
+        )
     elif len(tool_types) == 1:
         # Single tool type - no union needed
         ToolCallUnion = tool_types[0]
-        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="List of tools to call in sequence"))
+        tool_calls_field = (
+            List[ToolCallUnion],
+            Field(default_factory=list, description="List of tools to call in sequence"),
+        )
     else:
         # Multiple tools - create union
         ToolCallUnion = Union[tuple(tool_types)]
-        tool_calls_field = (List[ToolCallUnion], Field(default_factory=list, description="List of tools to call in sequence"))
+        tool_calls_field = (
+            List[ToolCallUnion],
+            Field(default_factory=list, description="List of tools to call in sequence"),
+        )
 
     # Dynamically create the AgentAction model
     # NOTE: reasoning is handled externally via OpenRouter reasoning_details
@@ -1061,8 +1110,8 @@ def create_agent_action_model(
             str,
             Field(
                 description="Thinking/reasoning about what to do next. Explain your observations "
-                           "and strategy. This is shown to the user as 'Thinking...' text. "
-                           "Write in plain prose. No markup, no bullet prefixes, no special formatting symbols."
+                "and strategy. This is shown to the user as 'Thinking...' text. "
+                "Write in plain prose. No markup, no bullet prefixes, no special formatting symbols."
             ),
         ),
         tool_calls=tool_calls_field,

@@ -1,0 +1,106 @@
+"""Business logic for the message-person domain.
+
+Pure functions that classify, format, and transform data.
+No I/O, no framework dependencies.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from domains.message_person.repo import (
+    fetch_recent_messages_activity as fetch_recent_messages_activity,
+    generate_message_activity as generate_message_activity,
+)
+from domains.message_person.types import PersonIdFields
+
+
+def classify_person_id(person_id: str) -> PersonIdFields:
+    """Classify person_id as phone, email, or name.
+
+    Returns dict with exactly one key set:
+      {"phone": "+19725551234"} or {"email": "a@b.com"} or {"first_name": "John", "last_name": "Smith"}
+    """
+    pid = person_id.strip()
+
+    # Phone: digits with optional +, spaces, dashes, parens - at least 7 digits
+    if re.match(r"^[\+\d\s\-()]+$", pid) and sum(c.isdigit() for c in pid) >= 7:
+        # Normalise to E.164
+        digits = re.sub(r"[^\d]", "", pid)
+        if len(digits) == 10:
+            digits = "1" + digits
+        return PersonIdFields(phone=f"+{digits}")
+
+    # Email: contains @
+    if "@" in pid and "." in pid.split("@")[-1]:
+        return PersonIdFields(email=pid.lower().strip())
+
+    # Name: must be at least first + last
+    parts = pid.strip().split()
+    if len(parts) >= 2:
+        return PersonIdFields(first_name=parts[0], last_name=" ".join(parts[1:]))
+
+    # Fallback: treat as name with empty last
+    return PersonIdFields(first_name=pid, last_name="")
+
+
+def format_messages_for_context(messages: list[dict[str, Any]], limit: int = 100) -> str:
+    """Format message records into readable text for LLM context."""
+    if not messages:
+        return "No previous messages."
+
+    lines = []
+    for msg in messages[:limit]:
+        channel = msg.get("channel", "?")
+        from_addr = msg.get("from", "?")
+        to_addr = msg.get("to", "?")
+        ts = msg.get("timestamp", "")
+        content = msg.get("message", "")
+        lines.append(f"[{channel}] {ts} | {from_addr} \u2192 {to_addr}: {content}")
+    return "\n".join(lines)
+
+
+def format_person_display(person: dict[str, Any]) -> str:
+    """Build a display name from person dict."""
+    first = person.get("firstName", "")
+    last = person.get("lastName", "")
+    name = f"{first} {last}".strip()
+    return name or person.get("email") or person.get("phoneNumber") or "Unknown"
+
+
+def build_conversation_summary(context: list[dict[str, Any]]) -> str:
+    """Build a full conversation context string from workflow context messages."""
+    if not context:
+        return "No conversation history."
+    lines = []
+    for msg in context:
+        role = msg.get("role", "UNKNOWN")
+        text = msg.get("text", "")
+        if not text:
+            continue
+        # Truncate very long individual messages
+        if len(text) > 2000:
+            text = text[:2000] + "...(truncated)"
+        lines.append(f"[{role}]: {text}")
+    return "\n".join(lines) if lines else "No conversation history."
+
+
+def extract_user_name(system_name: str, user_context_section: str) -> str:
+    """Extract the user's real name from user context, falling back to system_name."""
+    for line in user_context_section.split("\n"):
+        if line.strip().startswith("Name:"):
+            extracted = line.strip().replace("Name:", "").strip()
+            if extracted:
+                return extracted
+    return system_name
+
+
+def build_cold_outreach_person(email: str | None, phone: str | None) -> dict[str, Any]:
+    """Create a synthetic person dict for cold outreach (no existing contact)."""
+    return {
+        "firstName": "",
+        "lastName": "",
+        "email": email,
+        "phoneNumber": phone,
+    }

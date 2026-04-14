@@ -1,16 +1,17 @@
 """Temporal worker for Rose autonomous agents."""
 
 import asyncio
+import logging
+import os
 import signal
 import sys
-import os
-import logging
+
+import structlog
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
-from temporalio.runtime import Runtime, TelemetryConfig, PrometheusConfig
-from temporalio.worker import Worker, WorkerTuner, ResourceBasedSlotConfig
+from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
+from temporalio.worker import ResourceBasedSlotConfig, Worker, WorkerTuner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
-import structlog
 
 # Load .env file before anything else
 load_dotenv()
@@ -21,82 +22,90 @@ if not os.getenv("BACKEND_API_KEY"):
     print("Please add BACKEND_API_KEY to your .env file")
     sys.exit(1)
 
-from config import load_config
-from workflows import AgentWorkflow
-# User-configurable tools
-from tools.spawn_sub_agents import spawn_sub_agent_activity
-from tools.request_user_approval import create_approval_request_activity
-from tools.send_sms import send_sms_activity
-from tools.send_sms_as_user import queue_imessage_activity
-from tools.send_email import send_email_activity
-from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
-from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude Code in E2B sandbox
-# New event-driven tools
-from tools.deep_research import deep_research_activity
-from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
-from tools.web_search import web_search_activity
-from tools.web_fetch import web_fetch_activity
-from tools.people_search import people_search_activity
-from tools.add_memory import add_memory_activity
-from tools.read_memories import read_memories_activity
-from tools.find_all import (
-    find_all_ingest_activity,
-    find_all_create_run_activity,
-    find_all_poll_status_once_activity,
-    find_all_get_results_activity,
-)
-from tools.enrich import (
-    enrich_create_task_activity,
-    enrich_poll_status_once_activity,
-    enrich_get_task_results_activity,
-)
-from tools.monitor import monitor_activity
-from tools.check_monitor_events import check_monitor_events_activity
-from tools.search_user_network import search_user_network_activity
-from tools.read_message_history import read_message_history_activity
-from tools.message_person import generate_message_activity, fetch_recent_messages_activity
-from tools.x402_bazaar import search_x402_bazaar_activity, pay_for_x402_service_activity
-from tools.call_phone_number import call_phone_number_activity
-# Helper activities (workflow orchestration, not exposed to LLM)
-from helpers import (
-    poll_new_messages,
-    post_agent_message,
-    call_llm,
-    check_progress,
-    call_llm_activity,
-    update_agent_status,
-    compress_context,
-    generate_completion_summary,
-    get_model_context_window,
-    fetch_agent_tools,
-    mark_finished,
-    fetch_agent_config,
-    check_user_usage,
-    get_user_context,
-    get_user_system_name,
-    get_user_custom_system_prompt,
-    fetch_model_pricing,
-)
-from helpers.llm import call_planner_llm_activity, set_response_schema_activity, fetch_claude_max_token_activity
-from helpers.attachments import resolve_attachments_activity
-from helpers.messages import update_agent_tree_state
-from helpers.save_tool_usage import save_tool_usage
-from tools.spawn_agent import spawn_explore_agent_activity, _resolve_explore_attachments_activity, fetch_full_network_metadata
-from tools.wait_for import evaluate_condition_activity
-from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
-from tools.grep import grep_activity, fetch_local_data_summary
-from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
-from helpers.sms_activities import (
-    get_agent_source,
-    send_direct_sms_activity,
-    notify_sms_event_activity,
-)
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
-from activities.reasoning import execute_reasoning_activity
+from domains.reasoning.handler import execute_reasoning_activity
+
 # Shared memory activities
-from activities.shared_memory import get_shared_memory, append_shared_memory
-from health_server import run_health_server, set_worker_status, set_queue_metrics
+from activities.shared_memory import append_shared_memory, get_shared_memory
+from config import load_config
+from domains.search_user_network import search_user_network_activity
+from health_server import run_health_server, set_queue_metrics, set_worker_status
+
+# Helper activities (workflow orchestration, not exposed to LLM)
+from helpers import (
+    call_llm,
+    call_llm_activity,
+    check_progress,
+    check_user_usage,
+    compress_context,
+    fetch_agent_config,
+    fetch_agent_tools,
+    fetch_model_pricing,
+    generate_completion_summary,
+    get_model_context_window,
+    get_user_context,
+    get_user_custom_system_prompt,
+    get_user_system_name,
+    mark_finished,
+    poll_new_messages,
+    post_agent_message,
+    update_agent_status,
+)
+from helpers.attachments import resolve_attachments_activity
+from helpers.llm import call_planner_llm_activity, fetch_claude_max_token_activity, set_response_schema_activity
+from helpers.messages import update_agent_tree_state
+from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
+from helpers.save_tool_usage import save_tool_usage
+from helpers.sms_activities import (
+    get_agent_source,
+    notify_sms_event_activity,
+    send_direct_sms_activity,
+)
+from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
+from domains.add_memory.service import add_memory_activity
+from tools.call_phone_number import call_phone_number_activity
+from tools.check_monitor_events import check_monitor_events_activity
+
+# New event-driven tools
+from tools.deep_research import deep_research_activity
+from domains.enrich.repo import (
+    enrich_create_task_activity,
+    enrich_get_task_results_activity,
+    enrich_poll_status_once_activity,
+)
+from tools.find_all import (
+    find_all_create_run_activity,
+    find_all_get_results_activity,
+    find_all_ingest_activity,
+    find_all_poll_status_once_activity,
+)
+from domains.grep.repo import fetch_local_data_summary, grep_activity
+from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
+from tools.message_person import fetch_recent_messages_activity, generate_message_activity
+from tools.monitor import monitor_activity
+from domains.people_search.handler import people_search_activity
+from tools.read_memories import read_memories_activity
+from tools.read_message_history import read_message_history_activity
+from tools.request_user_approval import create_approval_request_activity
+from tools.send_email import send_email_activity
+from tools.send_sms import send_sms_activity
+from tools.send_sms_as_user import queue_imessage_activity
+from domains.spawn_agent.service import (
+    _resolve_explore_attachments_activity,
+    fetch_full_network_metadata,
+    spawn_explore_agent_activity,
+)
+from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
+from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude Code in E2B sandbox
+
+# User-configurable tools
+from tools.spawn_sub_agents import spawn_sub_agent_activity
+from tools.wait_for import evaluate_condition_activity
+from tools.web_fetch import web_fetch_activity
+from tools.web_search import web_search_activity
+from tools.x402_bazaar import pay_for_x402_service_activity, search_x402_bazaar_activity
+from workflows import AgentWorkflow
 
 # Configure unified structured logging
 # All log output (structlog + stdlib including Temporal's workflow.logger)
@@ -144,29 +153,31 @@ root_logger.addHandler(handler)
 root_logger.setLevel(logging.DEBUG)
 
 # Silence verbose library logging
-logging.getLogger('browser_use').setLevel(logging.INFO)
-logging.getLogger('browser_use.browser').setLevel(logging.INFO)
-logging.getLogger('cdp_use').setLevel(logging.WARNING)
-logging.getLogger('cdp_use.client').setLevel(logging.WARNING)
-logging.getLogger('cdp_use.cdp').setLevel(logging.WARNING)
-logging.getLogger('cdp_use.cdp.registry').setLevel(logging.WARNING)
-logging.getLogger('websockets.client').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('httpcore').setLevel(logging.WARNING)
-logging.getLogger('temporalio.activity').setLevel(logging.WARNING)
-logging.getLogger('temporalio.worker').setLevel(logging.WARNING)
+logging.getLogger("browser_use").setLevel(logging.INFO)
+logging.getLogger("browser_use.browser").setLevel(logging.INFO)
+logging.getLogger("cdp_use").setLevel(logging.WARNING)
+logging.getLogger("cdp_use.client").setLevel(logging.WARNING)
+logging.getLogger("cdp_use.cdp").setLevel(logging.WARNING)
+logging.getLogger("cdp_use.cdp.registry").setLevel(logging.WARNING)
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("temporalio.activity").setLevel(logging.WARNING)
+logging.getLogger("temporalio.worker").setLevel(logging.WARNING)
 
 # Disable Temporal's default message appending (workflow details are now in structured fields)
 from temporalio import workflow as _wf
+
 _wf.logger.workflow_info_on_message = False
 
 logger = structlog.get_logger()
 
 
-import httpx
 import math
 import socket
 import time
+
+import httpx
 
 # ── Adaptive autoscaler ──────────────────────────────────────────────────
 # Built-in controller: no separate autoscaler machine needed.
@@ -183,11 +194,11 @@ import time
 
 MIN_MACHINES = 2
 MAX_MACHINES = 10
-SCALE_DOWN_COOLDOWN_SECS = 60   # Seconds of zero backlog before probing downward
-SCALE_UP_THRESHOLD = 0.2        # Fraction of machine capacity that triggers scale-up
-SCALE_UP_COOLDOWN_SECS = 10     # Seconds to wait after a scale-up before allowing another
-POLL_INTERVAL_SECS = 1          # 3 Temporal API calls/s — well within 1000 req/s limit
-LOG_INTERVAL_SECS = 30          # Periodic summary log (avoid 86k lines/day at 1s polls)
+SCALE_DOWN_COOLDOWN_SECS = 60  # Seconds of zero backlog before probing downward
+SCALE_UP_THRESHOLD = 0.2  # Fraction of machine capacity that triggers scale-up
+SCALE_UP_COOLDOWN_SECS = 10  # Seconds to wait after a scale-up before allowing another
+POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
+LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
 DEFAULT_CAPACITY = 50  # Fallback when SDK metrics not yet available (matches max_concurrent_activities)
 
@@ -348,9 +359,9 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
     """
     global _backlog_zero_since, _desired_machines, _last_log_time, _last_scale_up_time, _prev_desired
 
-    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
-    from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
     from temporalio.api.enums.v1 import TaskQueueType
+    from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
+    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 
     async with httpx.AsyncClient(timeout=10.0) as http:
         while True:
@@ -362,8 +373,7 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                 workflow_count = count_result.count
 
                 backlog = 0
-                for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
-                                  TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
+                for task_type in [TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW]:
                     try:
                         resp = await client.workflow_service.describe_task_queue(
                             DescribeTaskQueueRequest(
@@ -403,19 +413,17 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                         _backlog_zero_since = now
 
                     if now - _backlog_zero_since >= SCALE_DOWN_COOLDOWN_SECS:
-                        if workflow_count == 0:
-                            # No work at all — go straight to minimum
-                            _desired_machines = MIN_MACHINES
-                        else:
-                            # Workflows running but no backlog — probe -1
-                            _desired_machines = current_machines - 1
+                        # No work at all — go straight to minimum; otherwise probe -1
+                        _desired_machines = MIN_MACHINES if workflow_count == 0 else current_machines - 1
                         _backlog_zero_since = now  # Reset timer for next probe
                     else:
                         _desired_machines = current_machines  # Hold steady
 
                 _desired_machines = max(MIN_MACHINES, min(MAX_MACHINES, _desired_machines))
 
-                set_queue_metrics(backlog, workflow_count, _desired_machines, current_machines, is_leader, observed_capacity)
+                set_queue_metrics(
+                    backlog, workflow_count, _desired_machines, current_machines, is_leader, observed_capacity
+                )
 
                 # ── Leader actuates ───────────────────────────────────────
                 if is_leader and _desired_machines != current_machines:
@@ -425,8 +433,7 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
 
                 # ── Smart logging (every 30s or on state change) ──────────
                 now_mono = time.monotonic()
-                if (_desired_machines != _prev_desired or
-                        now_mono - _last_log_time >= LOG_INTERVAL_SECS):
+                if _desired_machines != _prev_desired or now_mono - _last_log_time >= LOG_INTERVAL_SECS:
                     logger.info(
                         "Autoscaler poll",
                         backlog=backlog,
@@ -459,19 +466,17 @@ async def main():
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
     # Exposes worker_task_slots_used/available from the resource-based tuner
     # on a local port. The autoscaler scrapes these to get real capacity.
-    runtime = Runtime(telemetry=TelemetryConfig(
-        metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")
-    ))
+    runtime = Runtime(telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")))
 
     # Start health check server
-    health_thread = run_health_server(config.health_check_port)
+    _health_thread = run_health_server(config.health_check_port)
     set_worker_status(True)
 
     logger.info(
         "Starting Temporal worker",
         namespace=config.temporal.namespace,
         task_queue=config.temporal.task_queue,
-        environment=config.environment
+        environment=config.environment,
     )
 
     # Connect to Temporal Cloud
@@ -484,21 +489,19 @@ async def main():
         ),
         rpc_metadata={
             "temporal-namespace": config.temporal.namespace,
-            "Authorization": f"Bearer {config.temporal.api_key}"
+            "Authorization": f"Bearer {config.temporal.api_key}",
         },
         runtime=runtime,
     )
-    
+
     logger.info("Connected to Temporal Cloud")
 
     # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
-    asyncio.create_task(poll_queue_metrics(
-        client, config.temporal.namespace, config.temporal.task_queue
-    ))
+    asyncio.create_task(poll_queue_metrics(client, config.temporal.namespace, config.temporal.task_queue))
 
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
-    
+
     # Configure workflow sandbox to passthrough logging libraries
     # These libraries use threading.local which isn't allowed in the sandbox,
     # but they're only used in activities, not workflows
@@ -517,7 +520,7 @@ async def main():
         # called from build_llm_messages when resolving file attachments
         "helpers.attachments",
     )
-    
+
     # Resource-based tuner: dynamically adjusts slot counts based on actual
     # CPU/memory pressure. No hardcoded concurrency limits — the tuner determines
     # how many concurrent activities/workflows this machine can handle in real-time.
@@ -537,9 +540,7 @@ async def main():
     worker = Worker(
         client,
         task_queue=config.temporal.task_queue,
-        workflows=[
-            AgentWorkflow
-        ],
+        workflows=[AgentWorkflow],
         activities=[
             spawn_sub_agent_activity,
             create_approval_request_activity,
@@ -630,7 +631,7 @@ async def main():
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
     )
-    
+
     logger.info(
         "Worker configured with resource-based tuner",
         max_activity_slots=config.temporal.max_concurrent_activities,
@@ -638,17 +639,17 @@ async def main():
         target_cpu=0.8,
         target_memory=0.8,
     )
-    
+
     # Handle shutdown gracefully using asyncio signal handlers
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
     force_kill_event = asyncio.Event()
     shutdown_count = 0
-    
+
     def handle_shutdown():
         nonlocal shutdown_count
         shutdown_count += 1
-        
+
         if shutdown_count == 1:
             logger.info("🛑 Shutdown signal received (Ctrl+C again to force kill)...")
             shutdown_event.set()
@@ -657,36 +658,33 @@ async def main():
             force_kill_event.set()
             # Schedule force exit after a brief moment to let logs flush
             loop.call_later(0.5, lambda: os._exit(1))
-    
+
     # Register signal handlers with the event loop (asyncio-compatible)
     loop.add_signal_handler(signal.SIGINT, handle_shutdown)
     loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
-    
+
     # Run worker
     logger.info("Worker started, waiting for tasks...")
-    
+
     try:
         # Run worker and shutdown event concurrently
         worker_task = asyncio.create_task(worker.run())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
-        
+
         # Wait for either worker to stop or shutdown signal
-        done, pending = await asyncio.wait(
-            [worker_task, shutdown_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        
+        done, pending = await asyncio.wait([worker_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
+
         # If shutdown was signaled, shutdown worker cleanly with timeout
         if shutdown_task in done:
             logger.info("Stopping worker task (5s timeout, Ctrl+C again to force)...")
-            
+
             # Create a force kill watcher
             async def force_kill_watcher():
                 await force_kill_event.wait()
                 raise SystemExit(1)
-            
+
             force_task = asyncio.create_task(force_kill_watcher())
-            
+
             try:
                 # Try graceful shutdown with 5 second timeout
                 await asyncio.wait_for(worker.shutdown(), timeout=5.0)
@@ -696,14 +694,14 @@ async def main():
                 os._exit(1)
             finally:
                 force_task.cancel()
-            
+
             # Cancel the worker task and wait for it
             worker_task.cancel()
             try:
                 await asyncio.wait_for(worker_task, timeout=2.0)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 logger.info("Worker task cancelled")
-        
+
     except asyncio.CancelledError:
         logger.info("Worker cancelled, shutting down...")
         try:
@@ -723,4 +721,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

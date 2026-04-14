@@ -17,10 +17,11 @@ Usage:
     )
 """
 
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import structlog
 from temporalio import activity
 from temporalio.client import Client
-import structlog
 
 logger = structlog.get_logger()
 

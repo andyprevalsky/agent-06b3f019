@@ -6,75 +6,78 @@ Uses run_agent for the core loop. Workflow handles:
 - continue_as_new for context overflow
 """
 
-from datetime import timedelta, datetime
-from typing import Dict, List, Optional, Any, Set, Tuple
-from datetime import timezone
+import asyncio
+import contextlib
+import json as _json
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Set, Tuple
+
+import structlog
+import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
-import asyncio
-import json as _json
-import structlog
-import structlog.contextvars
 
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from activities.shared_memory import append_shared_memory, get_shared_memory
+    from domains.search_user_network import search_user_network_for_people
     from helpers import (
-        poll_new_messages,
-        post_agent_message,
-        update_agent_status,
-        generate_completion_summary,
-        get_model_context_window,
-        mark_finished,
-        get_user_context,
-        get_user_system_name,
-        get_user_custom_system_prompt,
         check_user_usage,
         fetch_agent_config,
         fetch_model_pricing,
+        generate_completion_summary,
+        get_model_context_window,
+        get_user_context,
+        get_user_custom_system_prompt,
+        get_user_system_name,
+        mark_finished,
+        poll_new_messages,
+        post_agent_message,
+        update_agent_status,
     )
-    from helpers.messages import broadcast_to_bus, update_agent_tree_state
-    from helpers.prompts import build_system_prompt, build_verifier_prompt
+    from helpers.error_utils import extract_error_message
+    from helpers.format_tool_display import format_tool_display
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import fetch_claude_max_token_activity
-    from helpers.save_tool_usage import save_tool_usage
+    from helpers.messages import update_agent_tree_state
     from helpers.model_pricing import get_anthropic_pricing
-    from helpers.tool_schemas import PLAN_PHASE_TOOLS, EXECUTE_PHASE_TOOLS
-    from tools.base import ToolEvent, AssistantEvent, EventType, MessageStatus
+    from helpers.prompts import build_system_prompt, build_verifier_prompt
+    from helpers.query_parent_state import query_parent_state_activity
+    from helpers.save_tool_usage import save_tool_usage
+    from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
+    from loop.run_agent import run_agent
+    from tools.add_memory import add_memory
+    from tools.attempt_completion import attempt_completion
+    from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
+    from tools.call_phone_number import call_phone_number
+    from tools.call_phone_number import get_manager as get_call_phone_manager
+    from tools.check_monitor_events import check_monitor_events
+
     # Tool executors (map tool name → workflow helper)
     from tools.deep_research import deep_research
-    from tools.wait_for import wait_for
-    from tools.send_message_to_user import send_message_to_user
     from tools.enable_write_permissions import enable_write_permissions
-    from tools.request_user_approval import request_user_approval_direct, UserRejectedError
-    from tools.knowledge_base import save_blueprint_activity
-    from tools.web_search import web_search
-    from tools.web_fetch import web_fetch
-    from tools.grep import grep
-    from helpers.error_utils import extract_error_message
-    from tools.spawn_agent import spawn_agent  # Unified: browser/code/sub_agent/explore
-    from tools.search_user_network import search_user_network_for_people
-    from tools.find_all import find_all
     from tools.enrich import enrich
-    from tools.monitor import monitor
-    from tools.check_monitor_events import check_monitor_events
+    from tools.find_all import find_all
+    from tools.grep import grep
+    from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
-    from tools.set_plan import set_plan
-    from tools.attempt_completion import attempt_completion
-    from tools.x402_bazaar import search_x402_bazaar, pay_for_x402_bazaar_service
-    from helpers.sms_activities import get_agent_source, send_direct_sms_activity, notify_sms_event_activity
-    from helpers.query_parent_state import query_parent_state_activity
-    from tools.request_user_signup import request_user_signup
-    from tools.call_phone_number import call_phone_number, get_manager as get_call_phone_manager
+    from tools.monitor import monitor
     from tools.people_search import people_search
-    from tools.add_memory import add_memory
-    from loop.run_agent import run_agent
-    from loop.dag_executor import extract_plan_from_context, TaskDAG, execute_dag
-    from helpers.format_tool_display import format_tool_display
-    from activities.shared_memory import get_shared_memory, append_shared_memory
+    from tools.request_user_approval import UserRejectedError, request_user_approval_direct
+    from tools.request_user_signup import request_user_signup
+    from tools.send_message_to_user import send_message_to_user
+    from tools.set_plan import set_plan
+    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/sub_agent/explore
+    from tools.wait_for import wait_for
+    from tools.web_fetch import web_fetch
+    from tools.web_search import web_search
+    from tools.x402_bazaar import pay_for_x402_bazaar_service, search_x402_bazaar
 
 logger = structlog.get_logger()
 
@@ -120,12 +123,12 @@ APPROVAL_REQUIRED_TOOLS = {
 class AgentWorkflow:
     """
     Main workflow for autonomous agent task execution.
-    
+
     Two-phase execution:
     1. PLAN: Research, ask questions, create execution plan
     2. EXECUTE: Run the plan with full tool access
     """
-    
+
     def __init__(self):
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
@@ -214,11 +217,11 @@ class AgentWorkflow:
         self.shared_memory_hash: Optional[str] = None  # Current hash for cache invalidation
         self.shared_memory_content: List[Dict] = []  # Current shared memory entries
         self.appended_message_ids: Set[str] = set()  # Track message IDs we've already appended
-    
+
     # =========================================================================
     # SIGNALS
     # =========================================================================
-    
+
     @workflow.signal
     async def pause(self):
         """Pause workflow execution."""
@@ -254,7 +257,7 @@ class AgentWorkflow:
                 await handle.signal("resume")
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade resume to child: {e}")
-    
+
     @workflow.signal
     async def receive_user_response(self, response: str):
         """Receive user response - sets flag and stores response for approval checks."""
@@ -273,7 +276,7 @@ class AgentWorkflow:
         # Legacy: plain string (from chat messages, SMS, etc.)
         self._last_signal_response = response
         self._has_new_messages = True
-    
+
     @workflow.signal
     async def child_progress(self, data: dict):
         """Receive progress update from child agent."""
@@ -283,14 +286,18 @@ class AgentWorkflow:
         tokens_out = data.get("tokens_out", 0)
         token_count = data.get("token_count", 0)
         goal = data.get("goal", "")
-        
+
         # Calculate token delta
         last = self.child_last_tokens.get(child_agent_id, {"tokens_in": 0, "tokens_out": 0, "token_count": 0})
         self.tokens_in += tokens_in - last["tokens_in"]
         self.tokens_out += tokens_out - last["tokens_out"]
         self.token_count += token_count - last["token_count"]
-        self.child_last_tokens[child_agent_id] = {"tokens_in": tokens_in, "tokens_out": tokens_out, "token_count": token_count}
-        
+        self.child_last_tokens[child_agent_id] = {
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "token_count": token_count,
+        }
+
         # Post progress update
         child_tool_id = self.child_tool_ids.get(child_agent_id)
         if child_tool_id:
@@ -303,10 +310,10 @@ class AgentWorkflow:
                     "toolStatus": "IN_PROGRESS",
                     "title": goal[:30] if goal else "Sub-agent",
                     "subAgentId": child_agent_id,
-                    "progress": progress
-                }
+                    "progress": progress,
+                },
             )
-    
+
     @workflow.signal
     async def child_completed(self, data: dict):
         """Receive completion signal from child agent (success or failure)."""
@@ -332,7 +339,7 @@ class AgentWorkflow:
                         "title": f"❌ Sub-agent failed: {goal_text[:30]}",
                         "subAgentId": child_agent_id,
                         "error": True,
-                    }
+                    },
                 )
         else:
             # Child agent succeeded
@@ -356,8 +363,8 @@ class AgentWorkflow:
                         "title": f"Sub-agent completed: {goal_text[:30]}",
                         "subAgentId": child_agent_id,
                         "progress": 1.0,
-                        "structuredResponse": structured_response
-                    }
+                        "structuredResponse": structured_response,
+                    },
                 )
 
         # Store result for file extraction in spawn_sub_agents after wait_condition
@@ -439,9 +446,9 @@ class AgentWorkflow:
     # =========================================================================
     # MAIN RUN
     # =========================================================================
-        
+
     @workflow.run
-    async def run(
+    async def run(  # noqa: C901
         self,
         agent_id: str,
         user_id: str,
@@ -482,7 +489,7 @@ class AgentWorkflow:
         self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
-        
+
         # Fetch model context window
         if self.max_context_tokens is None:
             try:
@@ -490,21 +497,19 @@ class AgentWorkflow:
                     get_model_context_window,
                     args=[model],
                     start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3)
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except Exception:
                 self.max_context_tokens = 100_000
-        
+
         # Update status
-        try:
+        with contextlib.suppress(Exception):
             await workflow.execute_activity(
                 update_agent_status,
                 args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, 0, 0, 0],
                 start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
-        except Exception:
-            pass
 
         # Fetch and cache agent source (WEB, MAC_APP, SMS) for notification gating
         try:
@@ -533,6 +538,7 @@ class AgentWorkflow:
 
         # Fetch user context once (for both phases), respecting context_gates
         user_context_section = ""
+
         # Helper: gate is open unless explicitly set to False
         def _gate_open(name: str) -> bool:
             return self.context_gates.get(name, True)
@@ -542,7 +548,7 @@ class AgentWorkflow:
                 get_user_context,
                 args=[user_id, self.context_gates],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch user context: {e}")
@@ -557,7 +563,7 @@ class AgentWorkflow:
                 get_user_system_name,
                 args=[user_id],
                 start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2)
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
             workflow.logger.info(f"Using system name: {self.system_name}")
         except Exception as e:
@@ -571,7 +577,7 @@ class AgentWorkflow:
                     get_user_custom_system_prompt,
                     args=[user_id],
                     start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=2)
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 if self.custom_system_prompt:
                     workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
@@ -593,7 +599,7 @@ class AgentWorkflow:
                     metadata={
                         "hidden": True,
                         "isCustomSystemPrompt": True,
-                    }
+                    },
                 )
                 workflow.logger.info("Injected custom system prompt as hidden USER message")
             except Exception as e:
@@ -606,12 +612,14 @@ class AgentWorkflow:
                 fetch_agent_config,
                 args=[agent_id],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             response_schema = agent_config.get("response_schema")
             self.output_schema = response_schema  # Single source of truth for output schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
-            workflow.logger.info(f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}")
+            workflow.logger.info(
+                f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}"
+            )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
@@ -621,7 +629,7 @@ class AgentWorkflow:
                 fetch_model_pricing,
                 args=[model],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             self.input_cents_per_1k = pricing["input_cents_per_1k"]
             self.output_cents_per_1k = pricing["output_cents_per_1k"]
@@ -658,7 +666,7 @@ class AgentWorkflow:
 
         # Determine whether to skip PLAN phase and/or DAG
         skip_plan = start_phase in ("execute", "execute_continued")
-        skip_dag = (start_phase == "execute_continued")  # After continue_as_new, DAG already ran
+        skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
 
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
@@ -673,7 +681,9 @@ class AgentWorkflow:
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=self.build_system_prompt,
-                verifier_prompt_generator=self._make_verifier_prompt_generator("PLAN", self.verifier.get("llmJudgePrompt", "")),
+                verifier_prompt_generator=self._make_verifier_prompt_generator(
+                    "PLAN", self.verifier.get("llmJudgePrompt", "")
+                ),
                 model=model,
                 tools=plan_tools,
                 is_inside_temporal_activity=False,
@@ -704,7 +714,7 @@ class AgentWorkflow:
             workflow.logger.info("✓ PLAN complete, starting EXECUTE")
         else:
             workflow.logger.info("⏭️ Skipping PLAN phase, starting EXECUTE directly")
-        
+
         # =====================================================================
         # PHASE 2: EXECUTE (run the plan with full tool access)
         # =====================================================================
@@ -770,7 +780,9 @@ class AgentWorkflow:
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=self.build_system_prompt,
-            verifier_prompt_generator=self._make_verifier_prompt_generator("EXECUTE", self.verifier.get("llmJudgePrompt", "")),
+            verifier_prompt_generator=self._make_verifier_prompt_generator(
+                "EXECUTE", self.verifier.get("llmJudgePrompt", "")
+            ),
             model=model,
             tools=execute_tools,
             initial_context=None,  # Don't pass - run_agent polls from DB
@@ -798,14 +810,11 @@ class AgentWorkflow:
         await self._track_tokens_and_cost(execute_result)
 
         if execute_result["status"] == "completed":
-            await self._mark_complete(
-                execute_result.get("context", []),
-                execute_result.get("structured_response")
-            )
+            await self._mark_complete(execute_result.get("context", []), execute_result.get("structured_response"))
             return {"status": "completed", "goal": goal}
-        
+
         return await self._handle_incomplete(execute_result, "EXECUTE")
-    
+
     # =========================================================================
     # CALLBACKS FOR run_agent
     # =========================================================================
@@ -816,6 +825,7 @@ class AgentWorkflow:
         This allows schema to be polled/fetched when actually needed, avoiding race conditions
         where the schema isn't ready at phase start.
         """
+
         async def generate() -> str:
             # Poll for schema if not available (handles async schema generation race condition)
             if self.output_schema is None:
@@ -826,7 +836,7 @@ class AgentWorkflow:
                             fetch_agent_config,
                             args=[self.agent_id],
                             start_to_close_timeout=timedelta(seconds=30),
-                            retry_policy=RetryPolicy(maximum_attempts=2)
+                            retry_policy=RetryPolicy(maximum_attempts=2),
                         )
                         self.output_schema = agent_config.get("response_schema")
                         if self.output_schema:
@@ -847,6 +857,7 @@ class AgentWorkflow:
         Called at verification time, after verifier_prompt_generator has polled for schema.
         This ensures check_progress receives the dynamically-fetched schema for structured output extraction.
         """
+
         async def get_schema() -> Optional[Dict]:
             return self.output_schema
 
@@ -875,21 +886,20 @@ class AgentWorkflow:
         """Wait for new messages."""
         try:
             await workflow.wait_condition(
-                lambda: self._has_new_messages or not self.is_paused,
-                timeout=timedelta(seconds=30)
+                lambda: self._has_new_messages or not self.is_paused, timeout=timedelta(seconds=30)
             )
             result = self._has_new_messages
             self._has_new_messages = False
             return result
         except (asyncio.TimeoutError, TemporalTimeoutError):
             return False
-    
+
     async def _handle_context_overflow(self, compressed_context: List[Dict]) -> None:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
 
         # Post a visible tool message so the user sees the context reset
-        try:
+        with contextlib.suppress(Exception):
             await workflow.execute_activity(
                 post_agent_message,
                 args=[
@@ -906,29 +916,29 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-        except Exception:
-            pass  # Non-fatal — don't block continue_as_new
 
         # Temporal SDK requires args=[] for multi-param workflows
         # Use "execute_continued" to skip DAG re-execution (DAG already ran)
-        workflow.continue_as_new(args=[
-            self.agent_id,
-            self.user_id,
-            self.goal,
-            self.model,
-            self.reasoning_max_tokens,
-            self.verifier,
-            compressed_context,
-            self.parent_workflow_id,
-            self.parent_agent_id,
-            self.depth,
-            self.bus_id,
-            "execute_continued",  # Skip both PLAN and DAG — go straight to LLM
-            self.max_iterations,
-            self.price_limit_cents,
-            self.context_gates or None,  # Preserve context gates across continue_as_new
-        ])
-    
+        workflow.continue_as_new(
+            args=[
+                self.agent_id,
+                self.user_id,
+                self.goal,
+                self.model,
+                self.reasoning_max_tokens,
+                self.verifier,
+                compressed_context,
+                self.parent_workflow_id,
+                self.parent_agent_id,
+                self.depth,
+                self.bus_id,
+                "execute_continued",  # Skip both PLAN and DAG — go straight to LLM
+                self.max_iterations,
+                self.price_limit_cents,
+                self.context_gates or None,  # Preserve context gates across continue_as_new
+            ]
+        )
+
     async def _check_paused(self) -> bool:
         """Check if paused, querying parent state first (non-root only)."""
         await self._check_parent_state()
@@ -943,7 +953,7 @@ class AgentWorkflow:
                 check_user_usage,
                 args=[self.user_id],
                 start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2)
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
             if result and not result.get("has_credits", True):
                 workflow.logger.warning("💰 Credits depleted - pausing agent")
@@ -953,7 +963,7 @@ class AgentWorkflow:
                 self._has_credits = True
         except Exception as e:
             workflow.logger.warning(f"Credit check failed (continuing): {e}")
-    
+
     # Claude token TTL: 5 minutes
     CLAUDE_TOKEN_TTL = timedelta(minutes=5)
 
@@ -986,14 +996,14 @@ class AgentWorkflow:
                 post_agent_message,
                 args=[self.agent_id, text, role, metadata],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Track message count and broadcast tree state
             self.message_count += 1
             await self._update_tree_state()
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {e}")
-    
+
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.
 
@@ -1005,7 +1015,7 @@ class AgentWorkflow:
                 poll_new_messages,
                 args=[self.agent_id, last_checked],  # Use run_agent's timestamp, not self.last_message_check
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             # Update workflow context for tools that check it
@@ -1047,10 +1057,12 @@ class AgentWorkflow:
             files = []
             file_pointer = msg.get("file_pointer") or msg.get("filePointer")
             if file_pointer:
-                files.append({
-                    "original_filename": file_pointer.get("original_filename", ""),
-                    "mime_type": file_pointer.get("mime_type", ""),
-                })
+                files.append(
+                    {
+                        "original_filename": file_pointer.get("original_filename", ""),
+                        "mime_type": file_pointer.get("mime_type", ""),
+                    }
+                )
 
             try:
                 result = await workflow.execute_activity(
@@ -1063,7 +1075,7 @@ class AgentWorkflow:
                         files if files else None,
                     ],
                     start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3)
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
 
                 if result:
@@ -1083,7 +1095,7 @@ class AgentWorkflow:
                 get_shared_memory,
                 args=[self.bus_id, self.shared_memory_hash],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             if result is None:
@@ -1118,22 +1130,18 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch shared memory: {e}")
             return ""
-    
-    async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
+
+    async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:  # noqa: C901
         """Execute a tool - supports both new and legacy signatures during migration."""
         if tool_name not in TOOL_EXECUTORS:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
 
         # Enforce: during PLAN phase, spawn_agent only allows type="explore"
-        if (
-            tool_name == "spawn_agent"
-            and self.current_phase == "PLAN"
-            and tool_args.get("type") != "explore"
-        ):
+        if tool_name == "spawn_agent" and self.current_phase == "PLAN" and tool_args.get("type") != "explore":
             return {
                 "error": True,
                 "message": "During PLAN phase, spawn_agent only supports type='explore'. "
-                           "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents.",
+                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents.",
             }
 
         # Track tool as in-use with human-readable display string
@@ -1147,7 +1155,9 @@ class AgentWorkflow:
                 manager = APPROVAL_REQUIRED_TOOLS[tool_name]()
                 if manager.requires_approval:
                     # Pass system_name for dynamic name in approval messages
-                    question = manager.get_approval_question({"tool": tool_name, "system_name": self.system_name, **tool_args})
+                    question = manager.get_approval_question(
+                        {"tool": tool_name, "system_name": self.system_name, **tool_args}
+                    )
                     # Let UserRejectedError bubble up to outer Exception handler
                     # which posts ERROR for tool_call_id_A
                     await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
@@ -1157,11 +1167,17 @@ class AgentWorkflow:
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
             NEW_SIGNATURE_TOOLS = {
-                "web_search", "web_fetch", "send_email", "send_sms",
+                "web_search",
+                "web_fetch",
+                "send_email",
+                "send_sms",
                 "search_user_network_for_people",
-                "monitor", "check_monitor_events",
-                "deep_research", "attempt_completion",
-                "search_x402_bazaar", "pay_for_x402_bazaar_service",
+                "monitor",
+                "check_monitor_events",
+                "deep_research",
+                "attempt_completion",
+                "search_x402_bazaar",
+                "pay_for_x402_bazaar_service",
                 "call_phone_number",
                 "people_search",
                 "grep",
@@ -1188,7 +1204,9 @@ class AgentWorkflow:
 
                 # Post downloaded files as ASSISTANT messages (like browser/code agents do)
                 # This makes FilePointers visible in the frontend and agent context
-                downloaded_files = (result.get("original", {}) or {}).get("downloaded_files", []) if isinstance(result, dict) else []
+                downloaded_files = (
+                    (result.get("original", {}) or {}).get("downloaded_files", []) if isinstance(result, dict) else []
+                )
                 if not downloaded_files and isinstance(result, dict):
                     downloaded_files = result.get("downloaded_files", [])
                 for fp in downloaded_files:
@@ -1223,7 +1241,7 @@ class AgentWorkflow:
 
             # Include user's rejection feedback in the error message
             if isinstance(e, UserRejectedError) and e.rejection_message:
-                error_msg = f"User rejected with feedback: \"{e.rejection_message}\""
+                error_msg = f'User rejected with feedback: "{e.rejection_message}"'
                 workflow.logger.info(f"Tool {tool_name} rejected by user: {e.rejection_message[:100]}")
             else:
                 workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
@@ -1234,11 +1252,11 @@ class AgentWorkflow:
             if tool_name == "spawn_agent" and tool_args.get("type") == "sub_agent":
                 meta = {}
                 # Find the child agent spawned by this tool_call_id
-                for child_id, tid in getattr(self, 'child_tool_ids', {}).items():
+                for child_id, tid in getattr(self, "child_tool_ids", {}).items():
                     if tid == tool_call_id:
                         meta["subAgentIds"] = [child_id]
                         break
-                bus_id = getattr(self, 'bus_id', None)
+                bus_id = getattr(self, "bus_id", None)
                 if bus_id:
                     meta["busId"] = bus_id
                 if meta:
@@ -1254,14 +1272,14 @@ class AgentWorkflow:
                     metadata=error_metadata,
                 ),
                 tool_call_id,
-                tool_name
+                tool_name,
             )
             return {"error": True, "message": error_msg}
         finally:
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)
             await self._update_tree_state()
-    
+
     async def _handle_tool_event(self, event: ToolEvent, tool_call_id: str, tool_name: str) -> None:
         """
         Handle ToolEvent emitted by tool managers.
@@ -1282,7 +1300,7 @@ class AgentWorkflow:
             user_id=self.user_id,
             sub_agent_id=None,  # Main workflow doesn't have sub_agent_id
         )
-    
+
     # =========================================================================
     # HELPERS
     # =========================================================================
@@ -1323,10 +1341,7 @@ class AgentWorkflow:
 
         # Calculate cost from tokens using stored pricing (fractional cents)
         if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
-            cost_cents = (
-                (tokens_in * self.input_cents_per_1k / 1000) +
-                (tokens_out * self.output_cents_per_1k / 1000)
-            )
+            cost_cents = (tokens_in * self.input_cents_per_1k / 1000) + (tokens_out * self.output_cents_per_1k / 1000)
             if cost_cents > 0:
                 self.own_cost_cents += cost_cents
                 workflow.logger.info(
@@ -1338,14 +1353,21 @@ class AgentWorkflow:
                 try:
                     await workflow.execute_activity(
                         save_tool_usage,
-                        args=[self.agent_id, self.user_id, call_site, [{
-                            "type": "llm",
-                            "cost_cents": cost_cents,
-                            "call_site": call_site,
-                            "tokens_in": tokens_in,
-                            "tokens_out": tokens_out,
-                            "model": self.model,
-                        }]],
+                        args=[
+                            self.agent_id,
+                            self.user_id,
+                            call_site,
+                            [
+                                {
+                                    "type": "llm",
+                                    "cost_cents": cost_cents,
+                                    "call_site": call_site,
+                                    "tokens_in": tokens_in,
+                                    "tokens_out": tokens_out,
+                                    "model": self.model,
+                                }
+                            ],
+                        ],
                         start_to_close_timeout=timedelta(seconds=15),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -1355,7 +1377,9 @@ class AgentWorkflow:
                 # Recalculate subtree cost and check limit
                 await self._update_cost_and_signal_parent()
 
-    async def _track_usage(self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None) -> None:
+    async def _track_usage(
+        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None
+    ) -> None:
         """
         Track usage from any activity result.
 
@@ -1387,7 +1411,9 @@ class AgentWorkflow:
             # Get pricing for this model (fetch if not cached)
             pricing = await self._get_model_pricing(model)
             if not pricing:
-                workflow.logger.warning(f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens")
+                workflow.logger.warning(
+                    f"⚠️ No pricing for model {model}, skipping cost for {tokens_in}/{tokens_out} tokens"
+                )
                 continue
 
             input_rate = pricing["input_cents_per_1k"]
@@ -1396,15 +1422,15 @@ class AgentWorkflow:
             # Apply provider-specific cache discounts if cache fields present
             cache_read = llm.get("cache_read_input_tokens", 0)
             cache_write = llm.get("cache_creation_input_tokens", 0)
-            is_anthropic = model and ('claude' in model.lower() or model.lower().endswith('-claude'))
+            is_anthropic = model and ("claude" in model.lower() or model.lower().endswith("-claude"))
             cache_read_mult = 0.1 if is_anthropic else 0.25
             cache_write_mult = 1.25 if is_anthropic else 1.0
 
             cost_cents = (
-                (tokens_in * input_rate / 1000) +
-                (cache_read * input_rate * cache_read_mult / 1000) +
-                (cache_write * input_rate * cache_write_mult / 1000) +
-                (tokens_out * output_rate / 1000)
+                (tokens_in * input_rate / 1000)
+                + (cache_read * input_rate * cache_read_mult / 1000)
+                + (cache_write * input_rate * cache_write_mult / 1000)
+                + (tokens_out * output_rate / 1000)
             )
             effective_call_site = call_site or tool_name or "unknown"
             if cost_cents > 0:
@@ -1412,15 +1438,17 @@ class AgentWorkflow:
                 workflow.logger.info(
                     f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
                 )
-                usage_items_for_db.append({
-                    "type": "llm",
-                    "cost_cents": cost_cents,
-                    "call_site": effective_call_site,
-                    "provider": provider,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "model": model,
-                })
+                usage_items_for_db.append(
+                    {
+                        "type": "llm",
+                        "cost_cents": cost_cents,
+                        "call_site": effective_call_site,
+                        "provider": provider,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "model": model,
+                    }
+                )
 
         # Process service usage items (pre-calculated costs)
         for svc in usage.get("service", []):
@@ -1430,12 +1458,14 @@ class AgentWorkflow:
                 total_cost_cents += cost_cents
                 workflow.logger.info(f"💰 Service cost: +{cost_cents}c ({provider})")
                 effective_call_site = call_site or tool_name or "unknown"
-                usage_items_for_db.append({
-                    "type": "service",
-                    "cost_cents": cost_cents,
-                    "call_site": effective_call_site,
-                    "provider": provider,
-                })
+                usage_items_for_db.append(
+                    {
+                        "type": "service",
+                        "cost_cents": cost_cents,
+                        "call_site": effective_call_site,
+                        "provider": provider,
+                    }
+                )
 
         if total_cost_cents > 0:
             # Update workflow cost state
@@ -1477,7 +1507,7 @@ class AgentWorkflow:
                 fetch_model_pricing,
                 args=[model],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2)
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
             self.model_pricing_cache[model] = pricing
             workflow.logger.info(f"💰 Fetched pricing for {model}: {pricing}")
@@ -1551,8 +1581,7 @@ class AgentWorkflow:
 
     def _get_pending_child_workflow_ids(self) -> List[str]:
         """Get workflow IDs of pending children for signaling."""
-        return [self.child_workflow_ids[cid] for cid in self.pending_children
-                if cid in self.child_workflow_ids]
+        return [self.child_workflow_ids[cid] for cid in self.pending_children if cid in self.child_workflow_ids]
 
     def _get_children_tokens(self) -> Tuple[int, int]:
         """Get current sum of children's tokens for tree aggregation."""
@@ -1597,13 +1626,10 @@ class AgentWorkflow:
             # Detect Claude token fallback: we had a token but Rose used racing instead
             # Only invalidate the token for permanent failures (auth errors, rate limits).
             # Transient failures (stalls, server errors) keep the token for retry on next call.
-            if (self.claude_max_token
-                    and actual_model != "unknown"
-                    and not actual_model.endswith("-claude")):
+            if self.claude_max_token and actual_model != "unknown" and not actual_model.endswith("-claude"):
                 if claude_token_error in ("auth_error", "rate_limit"):
                     workflow.logger.warning(
-                        f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
-                        f"invalidating cached token"
+                        f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, invalidating cached token"
                     )
                     self.claude_max_token = None
                     self.claude_max_token_fetched_at = None
@@ -1632,7 +1658,7 @@ class AgentWorkflow:
         # Calculate cost with provider-specific cache discounts
         # Anthropic direct: cache read = 0.1x input, cache write = 1.25x input
         # OpenRouter (all other providers): cache read = 0.25x input, cache write = 1.0x input
-        is_anthropic = actual_model and ('claude' in actual_model.lower() or actual_model.lower().endswith('-claude'))
+        is_anthropic = actual_model and ("claude" in actual_model.lower() or actual_model.lower().endswith("-claude"))
         cache_read_mult = 0.1 if is_anthropic else 0.25
         cache_write_mult = 1.25 if is_anthropic else 1.0
 
@@ -1662,14 +1688,21 @@ class AgentWorkflow:
         try:
             await workflow.execute_activity(
                 save_tool_usage,
-                args=[self.agent_id, self.user_id, call_site, [{
-                    "type": "llm",
-                    "cost_cents": cost_cents,
-                    "call_site": call_site,
-                    "tokens_in": tokens_in_delta,
-                    "tokens_out": tokens_out_delta,
-                    "model": model_for_usage,
-                }]],
+                args=[
+                    self.agent_id,
+                    self.user_id,
+                    call_site,
+                    [
+                        {
+                            "type": "llm",
+                            "cost_cents": cost_cents,
+                            "call_site": call_site,
+                            "tokens_in": tokens_in_delta,
+                            "tokens_out": tokens_out_delta,
+                            "model": model_for_usage,
+                        }
+                    ],
+                ],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -1692,12 +1725,15 @@ class AgentWorkflow:
         if self.parent_workflow_id:
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                await parent.signal("child_cost_update", {
-                    "child_agent_id": self.agent_id,
-                    "subtree_cost_cents": self.subtree_cost_cents,
-                    "subtree_tokens_in": self.tree_tokens_in,
-                    "subtree_tokens_out": self.tree_tokens_out,
-                })
+                await parent.signal(
+                    "child_cost_update",
+                    {
+                        "child_agent_id": self.agent_id,
+                        "subtree_cost_cents": self.subtree_cost_cents,
+                        "subtree_tokens_in": self.tree_tokens_in,
+                        "subtree_tokens_out": self.tree_tokens_out,
+                    },
+                )
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent cost update: {e}")
         else:
@@ -1711,9 +1747,17 @@ class AgentWorkflow:
             try:
                 await workflow.execute_activity(
                     update_agent_status,
-                    args=[self.agent_id, "ACTIVE", 0.5, "Processing",
-                          self.token_count, self.context_size, self.message_count,
-                          self.tree_tokens_in, self.tree_tokens_out],
+                    args=[
+                        self.agent_id,
+                        "ACTIVE",
+                        0.5,
+                        "Processing",
+                        self.token_count,
+                        self.context_size,
+                        self.message_count,
+                        self.tree_tokens_in,
+                        self.tree_tokens_out,
+                    ],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
@@ -1726,9 +1770,7 @@ class AgentWorkflow:
             return  # Only root checks limit
 
         if self.subtree_cost_cents >= self.price_limit_cents and not self._cost_limit_reached:
-            workflow.logger.warning(
-                f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c"
-            )
+            workflow.logger.warning(f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c")
             self._cost_limit_reached = True
             self.is_paused = True
 
@@ -1736,10 +1778,19 @@ class AgentWorkflow:
             try:
                 await workflow.execute_activity(
                     update_agent_status,
-                    args=[self.agent_id, "COST_LIMIT_REACHED", 0.0, "Cost limit reached",
-                          self.token_count, self.context_size, self.message_count, self.tokens_in, self.tokens_out],
+                    args=[
+                        self.agent_id,
+                        "COST_LIMIT_REACHED",
+                        0.0,
+                        "Cost limit reached",
+                        self.token_count,
+                        self.context_size,
+                        self.message_count,
+                        self.tokens_in,
+                        self.tokens_out,
+                    ],
                     start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=3)
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except Exception as e:
                 workflow.logger.error(f"Failed to update status to COST_LIMIT_REACHED: {e}")
@@ -1749,10 +1800,15 @@ class AgentWorkflow:
                 try:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
-                        args=[self.user_id, "cost_limit", self.agent_id, {
-                            "tree_cost_cents": int(self.subtree_cost_cents),
-                            "price_limit_cents": self.price_limit_cents,
-                        }],
+                        args=[
+                            self.user_id,
+                            "cost_limit",
+                            self.agent_id,
+                            {
+                                "tree_cost_cents": int(self.subtree_cost_cents),
+                                "price_limit_cents": self.price_limit_cents,
+                            },
+                        ],
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -1771,12 +1827,13 @@ class AgentWorkflow:
     async def _persist_tree_cost(self) -> None:
         """Persist subtree cost and own cost to DB."""
         from helpers.update_tokens import update_agent_tree_cost_activity
+
         try:
             await workflow.execute_activity(
                 update_agent_tree_cost_activity,
                 args=[self.agent_id, int(self.subtree_cost_cents), self.own_cost_cents],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(maximum_attempts=2)
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to persist tree cost: {e}")
@@ -1840,11 +1897,11 @@ class AgentWorkflow:
                 update_agent_tree_state,
                 args=[self.agent_id, tools_list, self.bus_id, broadcast_payload],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(maximum_attempts=2)
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as e:
             workflow.logger.debug(f"Tree state update failed (non-fatal): {e}")
-    
+
     async def _handle_incomplete(self, result: Dict, phase: str) -> Dict:
         """Handle non-completed phase result."""
         workflow.logger.info(f"{phase} ended: {result['status']}")
@@ -1852,23 +1909,25 @@ class AgentWorkflow:
         if result["status"] == "paused":
             await workflow.wait_condition(lambda: not self.is_paused)
             # Temporal SDK requires args=[] for multi-param workflows
-            workflow.continue_as_new(args=[
-                self.agent_id,
-                self.user_id,
-                self.goal,
-                self.model,
-                self.reasoning_max_tokens,
-                self.verifier,
-                result.get("context"),
-                self.parent_workflow_id,
-                self.parent_agent_id,
-                self.depth,
-                self.bus_id,
-                "execute",  # start_phase: skip PLAN since we already have context
-                self.max_iterations,
-                self.price_limit_cents,
-                self.context_gates or None,  # Preserve context gates across pause/resume
-            ])
+            workflow.continue_as_new(
+                args=[
+                    self.agent_id,
+                    self.user_id,
+                    self.goal,
+                    self.model,
+                    self.reasoning_max_tokens,
+                    self.verifier,
+                    result.get("context"),
+                    self.parent_workflow_id,
+                    self.parent_agent_id,
+                    self.depth,
+                    self.bus_id,
+                    "execute",  # start_phase: skip PLAN since we already have context
+                    self.max_iterations,
+                    self.price_limit_cents,
+                    self.context_gates or None,  # Preserve context gates across pause/resume
+                ]
+            )
             return result
 
         if result["status"] == "max_iterations":
@@ -1963,11 +2022,13 @@ class AgentWorkflow:
                 is_error = metadata.get("error", False) or tool_status == "ERROR"
                 error_message = msg.get("text", "") if is_error else None
 
-                trajectory.append({
-                    "tool_name": tool_name,
-                    "success": not is_error,
-                    "error_message": error_message[:200] if error_message else None
-                })
+                trajectory.append(
+                    {
+                        "tool_name": tool_name,
+                        "success": not is_error,
+                        "error_message": error_message[:200] if error_message else None,
+                    }
+                )
 
         # Use verifier progress if available, fallback to step-based estimate
         steps_taken = len(trajectory)
@@ -1975,7 +2036,9 @@ class AgentWorkflow:
             progress_estimate = f"{verifier_progress * 100:.0f}%"
         else:
             successful_steps = sum(1 for t in trajectory if t["success"])
-            progress_estimate = f"{successful_steps}/{steps_taken} steps succeeded" if steps_taken > 0 else "No steps completed"
+            progress_estimate = (
+                f"{successful_steps}/{steps_taken} steps succeeded" if steps_taken > 0 else "No steps completed"
+            )
 
         return {
             "trajectory": trajectory,
@@ -2023,23 +2086,27 @@ class AgentWorkflow:
 
         try:
             # 1. Post FINISHED message with error details
-            await self._post_message("", "TOOL", {
-                "toolCallId": tool_call_id,
-                "toolName": "completion_summary",
-                "toolStatus": "ERROR",
-                "isFinalSummary": True,
-                "title": f"❌ {message}",
-                "completionSummary": {
-                    "summary": f"Agent failed: {message}",
-                    "outputs": [],
-                    "toolUsage": [],
-                    "totalToolCalls": failure_context["steps_taken"],
-                    "durationSeconds": duration_seconds,
-                    "costDollars": 0,
-                    "error": True,
-                    "errorReason": reason,
-                }
-            })
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": tool_call_id,
+                    "toolName": "completion_summary",
+                    "toolStatus": "ERROR",
+                    "isFinalSummary": True,
+                    "title": f"❌ {message}",
+                    "completionSummary": {
+                        "summary": f"Agent failed: {message}",
+                        "outputs": [],
+                        "toolUsage": [],
+                        "totalToolCalls": failure_context["steps_taken"],
+                        "durationSeconds": duration_seconds,
+                        "costDollars": 0,
+                        "error": True,
+                        "errorReason": reason,
+                    },
+                },
+            )
 
             # 2. Broadcast FAILED status to tree with failure context
             await self._update_tree_state(progress=1.0, status="FAILED", failure_context=failure_context)
@@ -2047,9 +2114,19 @@ class AgentWorkflow:
             # 3. Update DB status to FAILED
             await workflow.execute_activity(
                 update_agent_status,
-                args=[self.agent_id, "FAILED", 1.0, message, self.token_count, self.context_size, len(context), self.tokens_in, self.tokens_out],
+                args=[
+                    self.agent_id,
+                    "FAILED",
+                    1.0,
+                    message,
+                    self.token_count,
+                    self.context_size,
+                    len(context),
+                    self.tokens_in,
+                    self.tokens_out,
+                ],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
         except Exception as e:
@@ -2059,18 +2136,21 @@ class AgentWorkflow:
         if self.parent_workflow_id:
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                await parent.signal("child_completed", {
-                    "child_agent_id": self.agent_id,
-                    "result": {
-                        "status": "failed",
-                        "goal": self.goal,
-                        "summary": f"Failed: {message}",
-                        "error_reason": reason,
-                        "failure_context": failure_context,  # Full context for parent learning
-                        "structured_response": None,
-                        "tool_counts": {}
-                    }
-                })
+                await parent.signal(
+                    "child_completed",
+                    {
+                        "child_agent_id": self.agent_id,
+                        "result": {
+                            "status": "failed",
+                            "goal": self.goal,
+                            "summary": f"Failed: {message}",
+                            "error_reason": reason,
+                            "failure_context": failure_context,  # Full context for parent learning
+                            "structured_response": None,
+                            "tool_counts": {},
+                        },
+                    },
+                )
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
@@ -2085,11 +2165,13 @@ class AgentWorkflow:
         for field in fields:
             field_name = field.get("name")
             if field_name and field_name in structured_response:
-                outputs.append({
-                    "key": field_name,
-                    "label": field.get("description", field_name.replace("_", " ").title()),
-                    "value": structured_response[field_name]
-                })
+                outputs.append(
+                    {
+                        "key": field_name,
+                        "label": field.get("description", field_name.replace("_", " ").title()),
+                        "value": structured_response[field_name],
+                    }
+                )
 
         return outputs
 
@@ -2117,10 +2199,12 @@ class AgentWorkflow:
                     fetch_agent_config,
                     args=[self.agent_id],
                     start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=2)
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 self.output_schema = agent_config.get("response_schema")
-                workflow.logger.info(f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}")
+                workflow.logger.info(
+                    f"Fetched output_schema attempt {schema_attempt}/{max_schema_attempts}: {self.output_schema is not None}"
+                )
 
                 if self.output_schema is None and schema_attempt < max_schema_attempts:
                     workflow.logger.info("Schema not ready, waiting 1s...")
@@ -2136,19 +2220,23 @@ class AgentWorkflow:
 
         try:
             # Post IN_PROGRESS message for FE loading state
-            await self._post_message("", "TOOL", {
-                "toolCallId": tool_call_id,
-                "toolName": "completion_summary",
-                "toolStatus": "IN_PROGRESS",
-                "title": "Generating summary",
-            })
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": tool_call_id,
+                    "toolName": "completion_summary",
+                    "toolStatus": "IN_PROGRESS",
+                    "title": "Generating summary",
+                },
+            )
 
             # Generate summary - pass structured_response, output_schema, and child_tool_counts
             summary_result = await workflow.execute_activity(
                 generate_completion_summary,
                 args=[context, self.goal, self.model, structured_response, self.output_schema, self.child_tool_counts],
                 start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             summary = summary_result.get("summary", "")
             tool_counts = summary_result.get("tool_counts", {})
@@ -2173,21 +2261,25 @@ class AgentWorkflow:
             cost_dollars = (self.tokens_in / 1000 * 0.001) + (self.tokens_out / 1000 * 0.003)
 
             # Post FINISHED message with completion summary (same toolCallId)
-            await self._post_message("", "TOOL", {
-                "toolCallId": tool_call_id,
-                "isFinalSummary": True,
-                "toolName": "completion_summary",
-                "toolStatus": "FINISHED",
-                "title": "✅ Task Complete",
-                "completionSummary": {
-                    "summary": summary,
-                    "outputs": self._format_outputs(structured_response),
-                    "toolUsage": tool_usage,
-                    "totalToolCalls": total_tool_calls,
-                    "durationSeconds": duration_seconds,
-                    "costDollars": round(cost_dollars, 4),
-                }
-            })
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": tool_call_id,
+                    "isFinalSummary": True,
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "title": "✅ Task Complete",
+                    "completionSummary": {
+                        "summary": summary,
+                        "outputs": self._format_outputs(structured_response),
+                        "toolUsage": tool_usage,
+                        "totalToolCalls": total_tool_calls,
+                        "durationSeconds": duration_seconds,
+                        "costDollars": round(cost_dollars, 4),
+                    },
+                },
+            )
 
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
@@ -2196,10 +2288,19 @@ class AgentWorkflow:
             # Mark finished (includes structured_response for persistence)
             await workflow.execute_activity(
                 mark_finished,
-                args=[self.agent_id, context, self.token_count, self.context_size, len(context), self.tokens_in, self.tokens_out,
-                      summary if self.parent_workflow_id else "", structured_response],
+                args=[
+                    self.agent_id,
+                    context,
+                    self.token_count,
+                    self.context_size,
+                    len(context),
+                    self.tokens_in,
+                    self.tokens_out,
+                    summary if self.parent_workflow_id else "",
+                    structured_response,
+                ],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3)
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             # Send completion SMS notification (root + SMS-source only)
@@ -2224,16 +2325,19 @@ class AgentWorkflow:
         if self.parent_workflow_id:
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                await parent.signal("child_completed", {
-                    "child_agent_id": self.agent_id,
-                    "result": {
-                        "status": "completed",
-                        "goal": self.goal,
-                        "summary": summary,
-                        "structured_response": structured_response,
-                        "tool_counts": tool_counts
-                    }
-                })
+                await parent.signal(
+                    "child_completed",
+                    {
+                        "child_agent_id": self.agent_id,
+                        "result": {
+                            "status": "completed",
+                            "goal": self.goal,
+                            "summary": summary,
+                            "structured_response": structured_response,
+                            "tool_counts": tool_counts,
+                        },
+                    },
+                )
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
@@ -2245,12 +2349,12 @@ class AgentWorkflow:
                     save_blueprint_activity,
                     args=[self.user_id, context],
                     start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=2)
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 workflow.logger.info("Blueprint saved successfully")
             except Exception as e:
                 workflow.logger.warning(f"Blueprint save failed (non-fatal): {e}")
-    
+
     @workflow.query
     def get_status(self) -> Dict:
         """Query current status."""

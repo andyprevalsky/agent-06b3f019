@@ -1,0 +1,19 @@
+"""Request user approval domain configuration.
+
+Constants and defaults for the approval domain.
+Imports: own types only.
+"""
+
+# Timeouts
+CREATE_REQUEST_TIMEOUT_SECONDS = 30.0
+SMS_NOTIFY_TIMEOUT_SECONDS = 30.0
+
+# Retry configuration
+CREATE_REQUEST_MAX_ATTEMPTS = 3
+SMS_NOTIFY_MAX_ATTEMPTS = 2
+
+# Tool name constant (used in event handling)
+TOOL_NAME = "request_user_approval"
+
+# Rejection sentinel value sent via signal
+REJECTION_SENTINEL = "__REJECTED__"

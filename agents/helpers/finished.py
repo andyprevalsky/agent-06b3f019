@@ -1,12 +1,12 @@
 """Finished tool for marking agent task completion."""
 
-from typing import Dict, List, Optional
 from datetime import datetime
-from temporalio import activity
+from typing import Dict, List, Optional
+
 import structlog
+from temporalio import activity
 
 from helpers.utils import extract_goal_from_context
-from helpers.update_status import update_agent_status
 
 logger = structlog.get_logger()
 
@@ -21,13 +21,13 @@ async def mark_finished(
     tokens_in: int = 0,
     tokens_out: int = 0,
     summary: str = "",
-    structured_response: Optional[Dict] = None
+    structured_response: Optional[Dict] = None,
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
-    
+
     This updates the agent status to COMPLETED in the database.
-    
+
     Args:
         agent_id: Agent ID
         steps_taken: Detailed steps taken (first USER message is the goal)
@@ -44,12 +44,13 @@ async def mark_finished(
     """
     try:
         activity.heartbeat("Marking task as finished")
-        
+
         # Extract goal from first USER message
         goal = extract_goal_from_context(steps_taken)
-        
+
         # Use the single update_agent_status helper (no activity wrapper - call directly)
         from helpers.update_status import _update_agent_status_impl
+
         await _update_agent_status_impl(
             agent_id=agent_id,
             status="COMPLETED",
@@ -60,28 +61,23 @@ async def mark_finished(
             message_count=message_count,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            structured_response=structured_response
+            structured_response=structured_response,
         )
-        
+
         logger.info("Agent status updated to COMPLETED", agent_id=agent_id)
-        
+
         result = {
             "agent_id": agent_id,
             "goal": goal,
             "steps_count": len(steps_taken),
             "completed_at": datetime.utcnow().isoformat(),
-            "summary": summary  # Include summary for parent signaling
+            "summary": summary,  # Include summary for parent signaling
         }
-        
-        logger.info("Task marked as finished", agent_id=agent_id, goal=goal[:50], has_summary=bool(summary))
-        
-        return result
-        
-    except Exception as e:
-        logger.error(
-            "Failed to mark task as finished",
-            agent_id=agent_id,
-            error=str(e)
-        )
-        raise
 
+        logger.info("Task marked as finished", agent_id=agent_id, goal=goal[:50], has_summary=bool(summary))
+
+        return result
+
+    except Exception as e:
+        logger.error("Failed to mark task as finished", agent_id=agent_id, error=str(e))
+        raise

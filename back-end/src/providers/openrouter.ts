@@ -13,6 +13,11 @@ export const openrouter = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1',
 });
 
+// Use OpenAI directly for prompt generation (avoids OpenRouter credit dependency)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 export async function generateLLMJudgePrompt(goal: string): Promise<string> {
   const systemPrompt = `You are an expert at creating LLM judge prompts for evaluating a SUPER-INTELLIGENT AUTONOMOUS SYSTEM capable of solving ANY problem with enough persistence, creativity, and effort.
 
@@ -36,8 +41,8 @@ IMPORTANT: Do NOT make excuses for the AI. Do NOT accept "as an AI, I cannot..."
 
 Return ONLY the judge prompt text, nothing else.`;
 
-  const completion = await openrouter.chat.completions.create({
-    model: 'openai/gpt-4.1', // OpenRouter format: provider/model
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4.1',
     messages: [
       { role: 'system', content: systemPrompt },
       {

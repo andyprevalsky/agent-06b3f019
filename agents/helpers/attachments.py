@@ -5,13 +5,13 @@ Handles resolving FilePointers to multimodal content for LLM messages.
 """
 
 import base64
-import httpx
 import logging
 import uuid
-from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+import httpx
 from temporalio import activity
 
 from config import load_config
@@ -22,10 +22,17 @@ logger = logging.getLogger(__name__)
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
 PDF_MIME_TYPES = {"application/pdf"}
 TEXT_MIME_TYPES = {
-    "text/plain", "text/csv", "text/markdown", "text/html",
-    "application/json", "application/xml",
-    "text/javascript", "text/typescript", "text/python",
-    "application/javascript", "application/typescript",
+    "text/plain",
+    "text/csv",
+    "text/markdown",
+    "text/html",
+    "application/json",
+    "application/xml",
+    "text/javascript",
+    "text/typescript",
+    "text/python",
+    "application/javascript",
+    "application/typescript",
 }
 
 # Size threshold for inline content sent to LLM (20MB)
@@ -35,6 +42,7 @@ INLINE_THRESHOLD = 20 * 1024 * 1024
 @dataclass
 class FilePointer:
     """Represents a file attachment reference. All files stored in Supabase Storage."""
+
     id: str
     storage_path: str  # All files stored in storage
     original_filename: str
@@ -60,7 +68,24 @@ class FilePointer:
         return self.mime_type in PDF_MIME_TYPES
 
     # Extensions treated as text when mime_type is ambiguous (e.g. application/octet-stream)
-    _TEXT_EXTENSIONS = {".csv", ".txt", ".md", ".json", ".xml", ".html", ".js", ".ts", ".py", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log", ".sql"}
+    _TEXT_EXTENSIONS = {
+        ".csv",
+        ".txt",
+        ".md",
+        ".json",
+        ".xml",
+        ".html",
+        ".js",
+        ".ts",
+        ".py",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".log",
+        ".sql",
+    }
 
     def is_text(self) -> bool:
         if self.mime_type in TEXT_MIME_TYPES or self.mime_type.startswith("text/"):
@@ -237,7 +262,7 @@ def extract_attachments_from_context(context: List[Dict]) -> List[FilePointer]:
 def build_attachment_metadata_text(file_pointer: FilePointer) -> str:
     """Build metadata text for files that can't be read directly by LLM."""
     size_kb = file_pointer.size_bytes / 1024
-    size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+    size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
 
     return f"""[Attached file: {file_pointer.original_filename}]
 - Type: {file_pointer.mime_type}
@@ -280,22 +305,21 @@ async def resolve_attachments_for_llm(
             if fp.is_image():
                 # Image: inject as image_url content block
                 base64_data = base64.b64encode(content).decode("utf-8")
-                content_blocks.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{fp.mime_type};base64,{base64_data}"
-                    }
-                })
+                content_blocks.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
+                )
             elif fp.is_pdf():
                 # PDF: inject as file content block (for capable models)
                 base64_data = base64.b64encode(content).decode("utf-8")
-                content_blocks.append({
-                    "type": "file",
-                    "file": {
-                        "filename": fp.original_filename,
-                        "file_data": f"data:{fp.mime_type};base64,{base64_data}"
+                content_blocks.append(
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": fp.original_filename,
+                            "file_data": f"data:{fp.mime_type};base64,{base64_data}",
+                        },
                     }
-                })
+                )
             elif fp.is_text():
                 # Text: inject as text content
                 try:

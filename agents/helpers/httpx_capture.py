@@ -171,9 +171,7 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         # (avoids capturing calls to test infrastructure like health checks).
         # When a mock handler IS active, all calls should be captured since
         # they are test-controlled.
-        if _mock_handler is None and (
-            "localhost" in url or "127.0.0.1" in url or "0.0.0.0" in url
-        ):
+        if _mock_handler is None and ("localhost" in url or "127.0.0.1" in url or "0.0.0.0" in url):
             return await self._wrapped.handle_async_request(request)
 
         with _lock:

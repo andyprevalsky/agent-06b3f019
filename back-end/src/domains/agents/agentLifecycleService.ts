@@ -167,10 +167,10 @@ function startChatMode(
       error: err instanceof Error ? err.message : String(err),
     });
     repo
-      .updateAgent(agentDbId, {
-        status: 'FAILED',
-        statusMessage: 'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
-      })
+      .failAgentIfStillActive(
+        agentDbId,
+        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+      )
       .catch((updateErr: unknown) =>
         log.error('Failed to update agent status', {
           agent_id: agentDbId,

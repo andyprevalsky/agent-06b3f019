@@ -12,19 +12,19 @@ USAGE:
 - On failure: error already in context, returns needs_llm for recovery
 """
 
-from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional, Any, Callable, Awaitable
 import asyncio
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from tools.base import ToolEvent, EventType, MessageStatus
 from loop.context_utils import poll_and_update_context
+from tools.base import EventType, MessageStatus, ToolEvent
 
 logger = structlog.get_logger()
 
@@ -90,6 +90,7 @@ def extract_error_message(e: Exception) -> str:
 
 class TaskState(str, Enum):
     """State of a task in the DAG."""
+
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
@@ -99,6 +100,7 @@ class TaskState(str, Enum):
 @dataclass
 class DAGTask:
     """A single task in the DAG."""
+
     index: int
     goal: str
     tool_name: str
@@ -144,12 +146,14 @@ class TaskDAG:
             deps = dependencies.get(str(i), [])
             depends_on = [int(d) for d in deps]
 
-            self.tasks.append(DAGTask(
-                index=i,
-                goal=goal,
-                tool_name=tool_name,
-                depends_on=depends_on,
-            ))
+            self.tasks.append(
+                DAGTask(
+                    index=i,
+                    goal=goal,
+                    tool_name=tool_name,
+                    depends_on=depends_on,
+                )
+            )
 
     def get_ready_tasks(self) -> List[DAGTask]:
         """
@@ -164,10 +168,7 @@ class TaskDAG:
                 continue
 
             # Check if all dependencies are completed
-            deps_satisfied = all(
-                self.tasks[dep_idx].state == TaskState.COMPLETED
-                for dep_idx in task.depends_on
-            )
+            deps_satisfied = all(self.tasks[dep_idx].state == TaskState.COMPLETED for dep_idx in task.depends_on)
 
             if deps_satisfied:
                 ready.append(task)
@@ -219,8 +220,7 @@ def extract_plan_from_context(context: List[Dict]) -> Optional[Dict[str, Any]]:
     """
     for msg in reversed(context):
         metadata = msg.get("metadata") or {}
-        if (metadata.get("toolName") == "set_plan" and
-            metadata.get("toolStatus") == "FINISHED"):
+        if metadata.get("toolName") == "set_plan" and metadata.get("toolStatus") == "FINISHED":
             return metadata.get("data")
     return None
 
@@ -262,7 +262,6 @@ async def execute_dag(
         - context: Updated context
     """
     # Import here to avoid circular imports
-    from activities.param_populator import populate_tool_params_activity
 
     # Map task index to pending asyncio.Task
     pending_tasks: Dict[int, asyncio.Task] = {}
@@ -278,7 +277,7 @@ async def execute_dag(
         ts_str = msg.get("timestamp", "")
         if ts_str:
             try:
-                msg_ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                msg_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                 if msg_ts > last_checked:
                     last_checked = msg_ts
             except Exception:
@@ -323,10 +322,7 @@ async def execute_dag(
             }
 
         # Wait for ANY task to complete
-        done, _ = await asyncio.wait(
-            pending_tasks.values(),
-            return_when=asyncio.FIRST_COMPLETED
-        )
+        done, _ = await asyncio.wait(pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED)
 
         # Process completed tasks
         for completed_future in done:
@@ -342,7 +338,9 @@ async def execute_dag(
 
             if not success:
                 # Error already posted to context by execute_tool/handle_tool_event
-                workflow.logger.info(f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery")
+                workflow.logger.info(
+                    f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery"
+                )
                 dag.mark_failed(task_index)
 
                 # Cancel remaining pending tasks
@@ -426,7 +424,8 @@ async def _execute_single_task(
                 if r_in > 0 or r_out > 0:
                     try:
                         await on_tokens(
-                            r_in, r_out,
+                            r_in,
+                            r_out,
                             reasoning_usage.get("actual_model"),
                             cache_read_input_tokens=reasoning_usage.get("cache_read_input_tokens", 0),
                             cache_creation_input_tokens=reasoning_usage.get("cache_creation_input_tokens", 0),
@@ -436,11 +435,7 @@ async def _execute_single_task(
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
 
             # Post reasoning to DB as ASSISTANT message
-            await post_message(
-                reasoning_content,
-                "ASSISTANT",
-                {"reasoning": True, "dagTaskIndex": task.index}
-            )
+            await post_message(reasoning_content, "ASSISTANT", {"reasoning": True, "dagTaskIndex": task.index})
 
             return True
 
@@ -462,7 +457,7 @@ async def _execute_single_task(
                         status=MessageStatus.IN_PROGRESS,
                     ),
                     tool_call_id,
-                    task.tool_name
+                    task.tool_name,
                 )
 
             param_result = await execute_activity(
@@ -487,7 +482,8 @@ async def _execute_single_task(
                 if p_in > 0 or p_out > 0:
                     try:
                         await on_tokens(
-                            p_in, p_out,
+                            p_in,
+                            p_out,
                             param_usage.get("actual_model"),
                             cache_read_input_tokens=param_usage.get("cache_read_input_tokens", 0),
                             cache_creation_input_tokens=param_usage.get("cache_creation_input_tokens", 0),
@@ -514,10 +510,7 @@ async def _execute_single_task(
 
             # Check for error status
             # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure
-            if result.get("error") or result.get("success") is False or result.get("status") == "error":
-                return False
-
-            return True
+            return not (result.get("error") or result.get("success") is False or result.get("status") == "error")
 
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
@@ -533,7 +526,7 @@ async def _execute_single_task(
                 status=MessageStatus.ERROR,
             ),
             tool_call_id,
-            task.tool_name
+            task.tool_name,
         )
 
         return False

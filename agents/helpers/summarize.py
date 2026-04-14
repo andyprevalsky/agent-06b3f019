@@ -1,8 +1,9 @@
 """Tool for compressing agent context and generating completion summaries."""
 
-from typing import List, Dict, Any
-from temporalio import activity
+from typing import Any, Dict, List
+
 import structlog
+from temporalio import activity
 
 logger = structlog.get_logger()
 
@@ -103,11 +104,7 @@ def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
 
 
 @activity.defn
-async def compress_context(
-    context: List[Dict],
-    iteration_count: int,
-    model: str = "rose-labs/rose-1-lite"
-) -> Dict:
+async def compress_context(context: List[Dict], iteration_count: int, model: str = "rose-labs/rose-1-lite") -> Dict:
     """
     Use LLM to compress context into key learnings.
 
@@ -126,10 +123,7 @@ async def compress_context(
         from helpers.llm import call_llm
 
         # Build full context
-        full_context = "\n".join([
-            f"[{msg.get('role', 'unknown')}] {msg.get('text', '')}"
-            for msg in context
-        ])
+        full_context = "\n".join([f"[{msg.get('role', 'unknown')}] {msg.get('text', '')}" for msg in context])
 
         prompt = f"""You are analyzing an autonomous AI agent's execution history to extract key learnings.
 
@@ -175,7 +169,7 @@ Format your response as:
             "Context compressed",
             original_messages=len(context),
             learnings_length=len(learnings),
-            tokens_used=usage.get("total_tokens", 0)
+            tokens_used=usage.get("total_tokens", 0),
         )
 
         return {"learnings": learnings, "usage": usage}
@@ -225,7 +219,7 @@ async def generate_completion_summary(
         activity.heartbeat("Generating completion summary")
 
         # Import here to avoid circular dependency
-        from helpers.llm import convert_context_to_messages, call_llm
+        from helpers.llm import call_llm, convert_context_to_messages
 
         # Build context about structured output (for LLM awareness, not for formatting)
         structured_output_context = ""
@@ -253,10 +247,12 @@ Just write plain text describing what was done."""
         # Summarization needs assistant messages to see what the agent accomplished
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(convert_context_to_messages(context, include_system=False, include_assistant=True))
-        messages.append({
-            "role": "user",
-            "content": "Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown."
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": "Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown.",
+            }
+        )
 
         # Use call_llm which handles Rose model routing automatically
         result = await call_llm(

@@ -148,6 +148,7 @@ interface CapturedCall {
 const INFRA_URL_PATTERNS = [
   'api.github.com',
   'openrouter.ai',
+  'api.openai.com',
   'ip-api.com',
   'supabase.co/realtime',
   'surge.app',
@@ -401,15 +402,17 @@ async function testBoundary_openRouterCallOnGenerate() {
   const allCalls = await readCapturesAfter(cursor);
   filterInfraCalls(allCalls); // validate infra filtering works
 
-  const openRouterCalls = allCalls.filter(
-    (c) => c.url.includes('openrouter.ai') && c.url.includes('/chat/completions')
+  const llmCalls = allCalls.filter(
+    (c) =>
+      (c.url.includes('openrouter.ai') || c.url.includes('api.openai.com')) &&
+      c.url.includes('/chat/completions')
   );
-  if (openRouterCalls.length === 0) {
+  if (llmCalls.length === 0) {
     // SDK may use its own HTTP client instead of globalThis.fetch — skip gracefully
     return;
   }
 
-  const call = openRouterCalls[0];
+  const call = llmCalls[0];
 
   // Assert method is POST (chat completions)
   assert(call.method === 'POST', `Expected method POST, got ${call.method}`);

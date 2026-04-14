@@ -9,6 +9,7 @@ import { prisma } from '../../providers/database';
 export {
   createAgentTransaction,
   updateAgent,
+  failAgentIfStillActive,
   softDeleteAgent,
   deleteAttentionRequests,
   createGithubRepoAccess,

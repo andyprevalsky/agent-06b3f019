@@ -1,0 +1,633 @@
+"""Runtime layer for the message-person domain.
+
+Thin ToolManager that orchestrates activities via Temporal workflow calls.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any, AsyncGenerator
+
+import structlog
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+
+from domains.message_person.service import (
+    fetch_recent_messages_activity,
+    generate_message_activity,
+    build_cold_outreach_person,
+    build_conversation_summary,
+    classify_person_id,
+    extract_user_name,
+    format_messages_for_context,
+    format_person_display,
+)
+from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, extract_root_error
+from tools.people_search import people_search_activity
+from tools.read_message_history import read_message_history_activity
+from tools.request_user_approval import UserRejectedError, request_user_approval_direct
+from tools.send_email import send_email_activity
+from tools.send_sms_as_user import queue_imessage_activity
+
+logger = structlog.get_logger()
+
+
+class MessagePersonManager(ToolManager):
+    """Unified tool: resolve person -> read history -> enrich -> generate message -> approve -> send."""
+
+    tool_name = "message_person"
+    requires_approval = False  # Approval handled internally after message generation
+
+    async def execute_tool(  # noqa: C901
+        self,
+        workflow_instance: Any,
+        tool_call: dict[str, Any],
+        tool_call_id: str,
+    ) -> AsyncGenerator[ToolEvent, None]:
+        person_id_raw = tool_call.get("person_id", "")
+        channel = tool_call.get("channel", "").lower()
+        from_email = tool_call.get("from_email", "")
+        intent = tool_call.get("intent", "")
+        user_id = workflow_instance.user_id
+        agent_id = workflow_instance.agent_id
+        model = workflow_instance.model
+
+        # -- Validate inputs --
+        validation_error = self._validate_inputs(person_id_raw, channel, from_email, intent)
+        if validation_error:
+            yield validation_error
+            return
+
+        # -- Step 1: Resolve person & read messages --
+        id_fields = classify_person_id(person_id_raw)
+        person_display = person_id_raw  # fallback until we resolve
+
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"Reading Messages with {person_display}",
+            message=f"Looking up **{person_display}** and reading conversation history...",
+            status=MessageStatus.IN_PROGRESS,
+        )
+
+        history_result = await self._read_history(id_fields, user_id)
+        if isinstance(history_result, ToolEvent):
+            yield history_result
+            return
+
+        # Handle multiple matches
+        if history_result.get("multiple_matches"):
+            yield self._build_ambiguous_error(history_result, id_fields, person_id_raw)
+            return
+
+        # Handle no person found
+        person = history_result.get("person")
+        if not person:
+            cold_email = id_fields.get("email")
+            cold_phone = id_fields.get("phone")
+            if cold_email or cold_phone:
+                person = build_cold_outreach_person(cold_email, cold_phone)
+                logger.info(
+                    "Cold outreach - no existing contact, using direct identifier",
+                    email=cold_email,
+                    phone=cold_phone,
+                )
+            else:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"No person found: {person_display}",
+                    message=history_result.get("message", f"No person found matching: {person_display}"),
+                    status=MessageStatus.ERROR,
+                )
+                return
+
+        # We have a resolved person (or synthetic cold contact)
+        person_display = format_person_display(person)
+        messages = history_result.get("messages", [])
+        person_phone = person.get("phoneNumber")
+        person_email_addr = person.get("email")
+
+        # -- Channel validation --
+        channel_error = self._validate_channel(channel, person_phone, person_email_addr, person_display)
+        if channel_error:
+            yield channel_error
+            return
+
+        # -- Step 1b: Fetch general recent messages for voice/style --
+        # Per-call context_gates override workflow-level gates.
+        context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
+        general_messages_context = await self._fetch_voice_context(context_gates, user_id)
+
+        # -- Step 2: Exa enrichment (only if we have a name) --
+        exa_context = ""
+        has_name = person.get("firstName") and person.get("lastName")
+        if has_name:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Gathering Information about {person_display}",
+                message=f"Researching **{person_display}** online...",
+                status=MessageStatus.IN_PROGRESS,
+            )
+            exa_context = await self._enrich_person(person)
+
+        # -- Step 3: Generate message via LLM --
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"Generating Message for {person_display}",
+            message=f"Crafting a message for **{person_display}** based on your intent...",
+            status=MessageStatus.IN_PROGRESS,
+        )
+
+        conversation_context = build_conversation_summary(workflow_instance.context)
+        messages_context = format_messages_for_context(messages, limit=100)
+        user_context = getattr(workflow_instance, "user_context_section", "") or ""
+        user_name = extract_user_name(workflow_instance.system_name, user_context)
+
+        gen_result = await self._generate_message(
+            model,
+            user_name,
+            conversation_context,
+            person_display,
+            messages_context,
+            exa_context,
+            intent,
+            channel,
+            person_email_addr,
+            general_messages_context,
+        )
+        if isinstance(gen_result, ToolEvent):
+            yield gen_result
+            return
+
+        generated_message = gen_result.get("message", "")
+        generated_subject = gen_result.get("subject")
+        gen_usage = gen_result.get("usage", {})
+
+        if not generated_message:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Empty message generated",
+                message="The LLM returned an empty message. Please try again with a clearer intent.",
+                status=MessageStatus.ERROR,
+            )
+            return
+
+        # -- Step 4: User approval --
+        recipient = person_phone if channel == "imessage" else person_email_addr
+        channel_label = "iMessage" if channel == "imessage" else "Email"
+
+        approval_error = await self._request_approval(
+            workflow_instance,
+            channel,
+            channel_label,
+            person_display,
+            recipient,
+            from_email,
+            generated_subject,
+            intent,
+            generated_message,
+        )
+        if approval_error:
+            yield approval_error
+            return
+
+        # -- Step 5: Send --
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"Sending {channel_label} to {person_display}",
+            message=(
+                f"Delivering email from **{from_email}** to **{person_display}**..."
+                if channel == "email"
+                else f"Delivering message to **{person_display}**..."
+            ),
+            status=MessageStatus.IN_PROGRESS,
+        )
+
+        send_error = await self._send_message(
+            channel,
+            user_id,
+            agent_id,
+            person_phone,
+            person_email_addr,
+            generated_message,
+            generated_subject,
+            from_email,
+            person_display,
+        )
+        if send_error:
+            yield send_error
+            return
+
+        # -- Done --
+        yield self._build_finished_event(
+            channel,
+            channel_label,
+            person_display,
+            recipient,
+            from_email,
+            generated_subject,
+            generated_message,
+            gen_usage,
+            model,
+        )
+
+    # ── Private helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_inputs(
+        person_id_raw: str,
+        channel: str,
+        from_email: str,
+        intent: str,
+    ) -> ToolEvent | None:
+        if not person_id_raw:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Missing person_id",
+                message="person_id is required.",
+                status=MessageStatus.ERROR,
+            )
+        if channel not in ("imessage", "email"):
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Invalid channel",
+                message=f"Channel must be 'imessage' or 'email', got: '{channel}'",
+                status=MessageStatus.ERROR,
+            )
+        if channel == "email" and not from_email:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Missing from_email",
+                message="from_email is required when channel is 'email'. "
+                "Specify which connected email address to send from.",
+                status=MessageStatus.ERROR,
+            )
+        if not intent:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Missing intent",
+                message="intent is required - describe what the message should accomplish.",
+                status=MessageStatus.ERROR,
+            )
+        return None
+
+    @staticmethod
+    def _validate_channel(
+        channel: str,
+        person_phone: str | None,
+        person_email: str | None,
+        person_display: str,
+    ) -> ToolEvent | None:
+        if channel == "imessage" and not person_phone:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Cannot send iMessage to {person_display}",
+                message=f"No phone number found for {person_display}. Try the email channel instead.",
+                status=MessageStatus.ERROR,
+            )
+        if channel == "email" and not person_email:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Cannot send email to {person_display}",
+                message=f"No email address found for {person_display}. Try the imessage channel instead.",
+                status=MessageStatus.ERROR,
+            )
+        return None
+
+    @staticmethod
+    def _build_ambiguous_error(
+        history_result: dict[str, Any],
+        id_fields: dict[str, Any],
+        person_id_raw: str,
+    ) -> ToolEvent:
+        matches = history_result.get("matches", [])
+        id_type = "name" if id_fields.get("first_name") else "email" if id_fields.get("email") else "phone"
+        lines = [f"Multiple people found with the {id_type}: **{person_id_raw}**\n"]
+        for i, m in enumerate(matches, 1):
+            name = f"{m.get('firstName', '')} {m.get('lastName', '')}".strip()
+            email_str = m.get("email") or "no email"
+            phone_str = m.get("phoneNumber") or "no phone"
+            msg_count = m.get("messageCount", 0)
+            lines.append(f"{i}. **{name}** - {email_str}, {phone_str}, {msg_count} messages")
+        lines.append("\nPlease specify using their phone number or email address.")
+        return ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"Ambiguous: multiple matches for {person_id_raw}",
+            message="\n".join(lines),
+            status=MessageStatus.ERROR,
+        )
+
+    @staticmethod
+    async def _read_history(
+        id_fields: dict[str, Any],
+        user_id: str,
+    ) -> dict[str, Any] | ToolEvent:
+        try:
+            return await workflow.execute_activity(
+                read_message_history_activity,
+                args=[
+                    user_id,
+                    id_fields.get("phone"),
+                    id_fields.get("email"),
+                    id_fields.get("first_name"),
+                    id_fields.get("last_name"),
+                    100,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                ),
+            )
+        except Exception as e:
+            error_msg = extract_root_error(e)
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Failed to look up person",
+                message=f"Error reading message history: {error_msg}",
+                status=MessageStatus.ERROR,
+            )
+
+    @staticmethod
+    async def _fetch_voice_context(context_gates: dict[str, Any], user_id: str) -> str:
+        if not context_gates.get("recent_communications", True):
+            return ""
+        try:
+            general_result = await workflow.execute_activity(
+                fetch_recent_messages_activity,
+                args=[user_id, 100, 30],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                ),
+            )
+            general_messages = general_result.get("messages", [])
+            return format_messages_for_context(general_messages, limit=100)
+        except Exception as e:
+            logger.warning("Failed to fetch general recent messages, continuing without", error=str(e))
+            return ""
+
+    @staticmethod
+    async def _enrich_person(person: dict[str, Any]) -> str:
+        try:
+            exa_query = f"{person.get('firstName')} {person.get('lastName')}"
+            if person.get("company"):
+                exa_query += f" {person.get('company')}"
+            exa_result = await workflow.execute_activity(
+                people_search_activity,
+                args=[exa_query, 3],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                ),
+            )
+            return exa_result.get("answer", "")
+        except Exception as e:
+            logger.warning("Exa enrichment failed, continuing without it", error=str(e))
+            return ""
+
+    @staticmethod
+    async def _generate_message(
+        model: str,
+        user_name: str,
+        conversation_context: str,
+        person_display: str,
+        messages_context: str,
+        exa_context: str,
+        intent: str,
+        channel: str,
+        person_email: str | None,
+        general_messages_context: str,
+    ) -> dict[str, Any] | ToolEvent:
+        try:
+            return await workflow.execute_activity(
+                generate_message_activity,
+                args=[
+                    model,
+                    user_name,
+                    conversation_context,
+                    person_display,
+                    messages_context,
+                    exa_context,
+                    intent,
+                    channel,
+                    person_email,
+                    general_messages_context,
+                ],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=2),
+                    maximum_interval=timedelta(seconds=15),
+                ),
+            )
+        except Exception as e:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Message generation failed for {person_display}",
+                message=f"Error generating message: {e}",
+                status=MessageStatus.ERROR,
+            )
+
+    @staticmethod
+    async def _request_approval(
+        workflow_instance: Any,
+        channel: str,
+        channel_label: str,
+        person_display: str,
+        recipient: str | None,
+        from_email: str,
+        generated_subject: str | None,
+        intent: str,
+        generated_message: str,
+    ) -> ToolEvent | None:
+        approval_text = (
+            f"""{workflow_instance.system_name} wants to send """
+            f"""{"an" if channel == "email" else "a"} **{channel_label}**\n\n"""
+            f"""**To:** {person_display} ({recipient})"""
+        )
+
+        if channel == "email":
+            approval_text += f"\n**From:** {from_email}"
+            if generated_subject:
+                approval_text += f"\n**Subject:** {generated_subject}"
+
+        approval_text += (
+            f'\n\n**Intent:** {intent}\n\n**Message:**\n{generated_message}\n\nReply to approve, or say "no" to cancel.'
+        )
+
+        try:
+            await request_user_approval_direct(
+                workflow_instance,
+                question=approval_text,
+                metadata={"toolApproval": True},
+            )
+        except UserRejectedError as e:
+            rejection_feedback = e.rejection_message
+            error_msg = f"User declined to send the message: {generated_message}"
+            if rejection_feedback:
+                error_msg = (
+                    f'User rejected with feedback: "{rejection_feedback}"\n\nDeclined message: {generated_message}'
+                )
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Message to {person_display} cancelled",
+                message=error_msg,
+                status=MessageStatus.ERROR,
+            )
+        return None
+
+    @staticmethod
+    async def _send_message(  # noqa: C901
+        channel: str,
+        user_id: str,
+        agent_id: str,
+        person_phone: str | None,
+        person_email: str | None,
+        generated_message: str,
+        generated_subject: str | None,
+        from_email: str,
+        person_display: str,
+    ) -> ToolEvent | None:
+        channel_label = "iMessage" if channel == "imessage" else "Email"
+        try:
+            if channel == "imessage":
+                send_result = await workflow.execute_activity(
+                    queue_imessage_activity,
+                    args=[user_id, agent_id, person_phone, generated_message],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        backoff_coefficient=2.0,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=10),
+                    ),
+                )
+                if not send_result.get("success"):
+                    error_msg = send_result.get("error", "Unknown error")
+                    if "imessage" in error_msg.lower() or "mac" in error_msg.lower():
+                        error_msg = "iMessage integration is not setup for the current user (Mac app not connected)"
+                    return ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"Failed to send iMessage to {person_display}",
+                        message=error_msg,
+                        status=MessageStatus.ERROR,
+                    )
+            else:  # email
+                await workflow.execute_activity(
+                    send_email_activity,
+                    args=[
+                        user_id,
+                        person_email,
+                        generated_subject or "(no subject)",
+                        generated_message,
+                        None,
+                        from_email,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3,
+                        backoff_coefficient=2.0,
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=10),
+                    ),
+                )
+        except Exception as e:
+            error_str = extract_root_error(e)
+            if channel == "email" and ("gmail" in error_str.lower() or "not connected" in error_str.lower()):
+                error_str = "Email integration is not setup for the current user"
+            elif channel == "imessage" and ("imessage" in error_str.lower() or "mac" in error_str.lower()):
+                error_str = "iMessage integration is not setup for the current user (Mac app not connected)"
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to send {channel_label} to {person_display}",
+                message=error_str,
+                status=MessageStatus.ERROR,
+            )
+        return None
+
+    @staticmethod
+    def _build_finished_event(
+        channel: str,
+        channel_label: str,
+        person_display: str,
+        recipient: str | None,
+        from_email: str,
+        generated_subject: str | None,
+        generated_message: str,
+        gen_usage: dict[str, Any],
+        model: str,
+    ) -> ToolEvent:
+        preview = generated_message if len(generated_message) <= 200 else generated_message[:197] + "..."
+        finished_parts = [f"**To:** {person_display} ({recipient})"]
+        if channel == "email":
+            finished_parts.append(f"**From:** {from_email}")
+            if generated_subject:
+                finished_parts.append(f"**Subject:** {generated_subject}")
+        finished_parts.append(f"\n**Message:**\n{preview}")
+        finished_data = None
+        if gen_usage:
+            finished_data = {
+                "usage": {
+                    "llm": [
+                        {
+                            "tokens_in": gen_usage.get("prompt_tokens", 0),
+                            "tokens_out": gen_usage.get("completion_tokens", 0),
+                            "model": gen_usage.get("actual_model", model),
+                            "provider": "message_person",
+                        }
+                    ]
+                }
+            }
+        return ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title=f"{channel_label} sent to {person_display}",
+            message="\n".join(finished_parts),
+            status=MessageStatus.FINISHED,
+            data=finished_data,
+        )
+
+
+# ── Singleton ────────────────────────────────────────────────────────────
+
+_manager: MessagePersonManager | None = None
+
+
+def get_manager() -> MessagePersonManager:
+    global _manager  # noqa: PLW0603
+    if _manager is None:
+        _manager = MessagePersonManager()
+    return _manager
+
+
+# ── Workflow helper (legacy signature) ───────────────────────────────────
+
+
+async def message_person(
+    workflow_instance: Any,
+    tool_call: dict[str, Any],
+    tool_call_id: str,
+) -> str | None:
+    """Legacy-signature workflow helper. Receives workflow_instance directly."""
+    manager = get_manager()
+    last_status = None
+
+    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+        await workflow_instance._handle_tool_event(event, tool_call_id, "message_person")
+        if isinstance(event, ToolEvent) and event.status:
+            last_status = event.status
+        # Track LLM usage piggy-backed on the FINISHED event
+        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
+            await workflow_instance._track_usage(
+                event.data["usage"], tool_name="message_person", call_site="message_person"
+            )
+
+    return last_status
