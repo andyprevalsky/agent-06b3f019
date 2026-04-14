@@ -852,7 +852,7 @@ async def _warmup_edge_functions(base_url: str):
         for attempt in range(1, 11):
             try:
                 resp = await client.post(completions_url, json=payload, headers=headers)
-                if resp.status_code < 500:
+                if 200 <= resp.status_code < 300:
                     print(f" ready ({attempt} attempt(s))", flush=True)
                     return
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, Exception) as e:
@@ -875,6 +875,15 @@ async def _terminate_stale_workflows():
         from config import load_config
 
         config = load_config()
+
+        # Safety check: only terminate workflows on local Temporal or when explicitly allowed
+        temporal_addr = config.temporal.address
+        is_local = any(h in temporal_addr for h in ("localhost", "127.0.0.1"))
+        allow_cleanup = os.environ.get("ALLOW_TEMPORAL_CLEANUP", "").lower() == "true"
+        if not is_local and not allow_cleanup:
+            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local and ALLOW_TEMPORAL_CLEANUP is not set")
+            return
+
         # run.sh exports TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
         # but config.py may load a different value from .env. Prefer the env var
         # that the running worker actually uses.

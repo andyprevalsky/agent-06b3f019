@@ -888,7 +888,25 @@ async def call_llm_structured_streaming(  # noqa: C901
                         f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}"
                     )
 
-                    async for line in stream_response.aiter_lines():
+                    # Watchdog task: heartbeat independently of stream data arrival
+                    # so Temporal doesn't timeout during true socket stalls
+                    watchdog_running = True
+
+                    async def _heartbeat_watchdog():
+                        while watchdog_running:
+                            await asyncio.sleep(30)
+                            if not watchdog_running:
+                                break
+                            elapsed_since_chunk = _safe_time() - last_chunk_time
+                            if elapsed_since_chunk > 30:
+                                logger.warning(f"⚠️ Stream stall detected ({int(elapsed_since_chunk)}s no data)")
+                                _safe_heartbeat(f"Stream stall {int(elapsed_since_chunk)}s")
+                            else:
+                                _safe_heartbeat("Streaming...")
+
+                    watchdog_task = asyncio.create_task(_heartbeat_watchdog())
+                    try:
+                      async for line in stream_response.aiter_lines():
                         chunk_count += 1
 
                         # Log TTFT on first chunk
@@ -897,12 +915,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                             logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
                             ttft_logged = True
 
-                        # Mid-stream stall detection: heartbeat if no chunks for 50s (under 60s heartbeat_timeout)
-                        now = _safe_time()
-                        if now - last_chunk_time > 50:
-                            logger.warning(f"⚠️ Stream stall detected ({int(now - last_chunk_time)}s no data)")
-                            _safe_heartbeat(f"Stream stall {int(now - last_chunk_time)}s")
-                        last_chunk_time = now
+                        last_chunk_time = _safe_time()
 
 
                         if chunk_count == 1:
@@ -1104,6 +1117,13 @@ async def call_llm_structured_streaming(  # noqa: C901
                         except json.JSONDecodeError:
                             logger.error(f"Failed to parse chunk: {data_str}")
                             continue
+                    finally:
+                      watchdog_running = False
+                      watchdog_task.cancel()
+                      try:
+                          await watchdog_task
+                      except asyncio.CancelledError:
+                          pass
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
@@ -1150,6 +1170,22 @@ async def call_llm_structured_streaming(  # noqa: C901
         elapsed = _safe_time() - request_start_time if request_start_time else 0
         if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed < 180:
             logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)")
+
+            # Known limitation: the retry restarts text_so_far from "" but callers that
+            # track delta state (e.g. last_text[0] in run_agent.py) still hold the first
+            # attempt's accumulated text. This causes the caller to emit empty deltas until
+            # the retry response exceeds the first attempt's length, then only the tail is
+            # shown. The final parsed result is correct — only the live-streaming display
+            # is affected. A proper fix requires a stream-reset signal in the on_chunk
+            # callback contract (or buffering the first attempt and not calling on_chunk
+            # until we know there's no escalation, which defeats streaming).
+            first_attempt_chars = len(last_emitted_for_chunk)
+            logger.info(
+                f"⚠️ [{call_site}] Escalation retry starting — first attempt streamed "
+                f"{first_attempt_chars} chars to caller; live-streaming of retry may show "
+                f"a content jump on the frontend"
+            )
+
             return await call_llm_structured_streaming(
                 messages=messages,
                 model=model,
