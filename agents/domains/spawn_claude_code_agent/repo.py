@@ -9,8 +9,8 @@ import httpx
 import structlog
 
 from config import load_config
-from helpers.error_utils import extract_error_message
 from tools.base import MessageStatus
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

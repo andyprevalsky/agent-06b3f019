@@ -32,10 +32,10 @@ from domains.spawn_claude_code_agent.repo import (
 from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.e2b_log_collector import SandboxLogCollector
-from helpers.error_utils import extract_error_message
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.terminal_filter import TerminalFilter
 from tools.base import MessageStatus
+from utils.error_utils import extract_error_message
+from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()
 
@@ -536,8 +536,8 @@ async def _run_verifier(
     Returns (score, reasoning, structured_response, input_tokens, output_tokens).
     """
     from helpers.llm import check_progress
-    from helpers.prompts import build_verifier_prompt
     from loop.activity_helper import call_temporal_activity_from_activity
+    from utils.prompts import build_verifier_prompt
 
     verifier_call_id = str(uuid_module.uuid4())
     input_tokens = 0

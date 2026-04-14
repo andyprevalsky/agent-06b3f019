@@ -11,6 +11,8 @@ from typing import Any
 
 from domains.message_person.repo import (
     fetch_recent_messages_activity as fetch_recent_messages_activity,
+)
+from domains.message_person.repo import (
     generate_message_activity as generate_message_activity,
 )
 from domains.message_person.types import PersonIdFields

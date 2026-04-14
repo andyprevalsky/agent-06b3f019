@@ -17,7 +17,7 @@ from domains.spawn_browser_agent_v3.repo import (
     download_file_from_steel,
     list_session_files,
 )
-from helpers.error_utils import extract_error_message
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

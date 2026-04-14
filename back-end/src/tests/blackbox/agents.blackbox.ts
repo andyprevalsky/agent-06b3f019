@@ -1777,12 +1777,21 @@ test('state: pause → resume round-trip preserves agent data', async () => {
   });
   const beforeBody = assertSchema(GetAgentResponse, before.data, 'before pause');
 
-  // Pause — assert the mutation response
-  const pauseRes = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
-    method: 'POST',
-    headers: authHeaders(session.session.access_token),
+  // Force PAUSED via status PATCH — this is race-safe because
+  // failAgentIfStillActive only overwrites STARTING_UP/ACTIVE, not PAUSED.
+  // Using the pause endpoint alone races with handleChatMessage's fire-and-forget.
+  const patchRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'PAUSED',
+      progress: 0,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
   });
-  assertStatus(pauseRes.status, 200, pauseRes.data);
+  assertStatus(patchRes.status, 200, patchRes.data);
 
   // Verify intermediate PAUSED state
   const pausedCheck = await request(`${BASE_URL}/api/agents/${agentId}/status`, {

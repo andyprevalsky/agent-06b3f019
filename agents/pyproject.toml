@@ -38,6 +38,7 @@ select = [
     "F",    # pyflakes
     "W",    # pycodestyle warnings
     "I",    # isort (import sorting)
+    "TID252",  # flake8-tidy-imports: banned-api (enforce canonical utils/)
 ]
 
 ignore = [
@@ -53,16 +54,15 @@ unfixable = []
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "domains",
     "config",
     "domains",
     "tools",
     "helpers",
+    "utils",
     "loop",
     "activities",
     "workflows",
     "browser_tools",
-    "domains",
 ]
 
 # Per-file rule relaxations
@@ -73,3 +73,44 @@ known-first-party = [
 "worker.py" = ["E402"]
 # Activity-only imports after sys.path setup (intentional)
 "tools/knowledge_base.py" = ["E402"]
+
+# ── Banned APIs: enforce canonical utils/ imports ──
+# Modules moved from helpers/ to utils/ have re-export shims for backwards
+# compatibility, but all new code must import from utils/ directly.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# helpers.error_utils → utils.error_utils
+"helpers.error_utils".msg = "Moved to utils.error_utils — use `from utils.error_utils import ...`."
+"helpers.error_utils.extract_error_message".msg = "Moved to utils.error_utils — use `from utils.error_utils import extract_error_message`."
+# helpers.format_tool_display → utils.format_tool_display
+"helpers.format_tool_display".msg = "Moved to utils.format_tool_display — use `from utils.format_tool_display import ...`."
+"helpers.format_tool_display.format_tool_display".msg = "Moved to utils.format_tool_display — use `from utils.format_tool_display import format_tool_display`."
+"helpers.format_tool_display._truncate".msg = "Moved to utils.format_tool_display — use `from utils.format_tool_display import _truncate`."
+# helpers.prompts → utils.prompts
+"helpers.prompts".msg = "Moved to utils.prompts — use `from utils.prompts import ...`."
+"helpers.prompts.build_system_prompt".msg = "Moved to utils.prompts — use `from utils.prompts import build_system_prompt`."
+"helpers.prompts.build_verifier_prompt".msg = "Moved to utils.prompts — use `from utils.prompts import build_verifier_prompt`."
+"helpers.prompts.build_planner_system_prompt".msg = "Moved to utils.prompts — use `from utils.prompts import build_planner_system_prompt`."
+"helpers.prompts.build_browser_system_prompt".msg = "Moved to utils.prompts — use `from utils.prompts import build_browser_system_prompt`."
+"helpers.prompts.EXPLORE_AGENT_SYSTEM_PROMPT".msg = "Moved to utils.prompts — use `from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT`."
+"helpers.prompts.CRITICAL_CONSTRAINTS_BOX".msg = "Moved to utils.prompts — use `from utils.prompts import CRITICAL_CONSTRAINTS_BOX`."
+"helpers.prompts.FILE_RULES".msg = "Moved to utils.prompts — use `from utils.prompts import FILE_RULES`."
+"helpers.prompts.TOOL_GUIDANCE".msg = "Moved to utils.prompts — use `from utils.prompts import TOOL_GUIDANCE`."
+"helpers.prompts.BEHAVIORAL_RULES".msg = "Moved to utils.prompts — use `from utils.prompts import BEHAVIORAL_RULES`."
+# helpers.rose_types → utils.rose_types
+"helpers.rose_types".msg = "Moved to utils.rose_types — use `from utils.rose_types import ...`."
+"helpers.rose_types.ChunkDelta".msg = "Moved to utils.rose_types — use `from utils.rose_types import ChunkDelta`."
+"helpers.rose_types.ChunkChoice".msg = "Moved to utils.rose_types — use `from utils.rose_types import ChunkChoice`."
+"helpers.rose_types.ChunkUsage".msg = "Moved to utils.rose_types — use `from utils.rose_types import ChunkUsage`."
+"helpers.rose_types.RoseCompletionChunk".msg = "Moved to utils.rose_types — use `from utils.rose_types import RoseCompletionChunk`."
+# helpers.terminal_filter → utils.terminal_filter
+"helpers.terminal_filter".msg = "Moved to utils.terminal_filter — use `from utils.terminal_filter import ...`."
+"helpers.terminal_filter.TerminalFilter".msg = "Moved to utils.terminal_filter — use `from utils.terminal_filter import TerminalFilter`."
+# helpers.usage → utils.usage
+"helpers.usage".msg = "Moved to utils.usage — use `from utils.usage import ...`."
+"helpers.usage.llm_usage".msg = "Moved to utils.usage — use `from utils.usage import llm_usage`."
+"helpers.usage.service_usage".msg = "Moved to utils.usage — use `from utils.usage import service_usage`."
+"helpers.usage.make_usage".msg = "Moved to utils.usage — use `from utils.usage import make_usage`."
+"helpers.usage.with_usage".msg = "Moved to utils.usage — use `from utils.usage import with_usage`."
+# helpers.utils → utils.utils
+"helpers.utils".msg = "Moved to utils.utils — use `from utils.utils import ...`."
+"helpers.utils.extract_goal_from_context".msg = "Moved to utils.utils — use `from utils.utils import extract_goal_from_context`."

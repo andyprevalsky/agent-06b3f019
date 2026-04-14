@@ -19,8 +19,8 @@ from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
     spawn_sub_agent_activity,
 )
-from helpers.error_utils import extract_error_message
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

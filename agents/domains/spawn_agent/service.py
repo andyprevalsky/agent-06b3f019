@@ -18,12 +18,16 @@ from domains.spawn_agent.config import (
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
+)
+from domains.spawn_agent.repo import (
     fetch_full_network_metadata as fetch_full_network_metadata,
+)
+from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
-from helpers.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from tools.base import MessageStatus
+from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 
 logger = structlog.get_logger()
 

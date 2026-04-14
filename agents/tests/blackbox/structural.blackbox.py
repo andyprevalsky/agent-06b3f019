@@ -2,11 +2,13 @@
 
 Auto-discovers all domains under domains/ and validates that
 import directions follow forward-only rules:
-  types   -> external packages only
-  config  -> own types only
-  repo    -> own types, own config, providers (helpers/)
-  service -> own repo, own types, own config, providers (helpers/)
-  handler -> own service, own types, providers (helpers/), external
+  types   -> utils/, external packages only
+  config  -> own types, utils/ only
+  repo    -> own types, own config, utils/, providers (helpers/)
+  service -> own repo, own types, own config, utils/, providers (helpers/)
+  handler -> own service, own types, utils/, providers (helpers/), external
+
+utils/ (pure functions, zero side effects) is importable from any layer.
 """
 
 import ast
@@ -88,6 +90,11 @@ def _is_external(module: str) -> bool:
     return top in EXTERNAL_PACKAGES
 
 
+def _is_utils(module: str) -> bool:
+    """Check if a module is in utils/ (pure functions, allowed from any layer)."""
+    return module == "utils" or module.startswith("utils.")
+
+
 def _is_provider(module: str) -> bool:
     """Check if a module is a provider (shared infrastructure)."""
     return any(module.startswith(p) for p in PROVIDER_PREFIXES)
@@ -133,6 +140,10 @@ def _validate_layer_imports(
     for mod in modules:
         # External packages are always allowed
         if _is_external(mod):
+            continue
+
+        # utils/ imports are always allowed (pure functions, zero side effects)
+        if _is_utils(mod):
             continue
 
         # Check if it's an import from our own domain

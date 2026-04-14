@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_simple_error():
     """extract_error_message returns message from plain ValueError."""
-    from helpers.error_utils import extract_error_message
+    from utils.error_utils import extract_error_message
 
     result = extract_error_message(ValueError("test error"))
 
@@ -20,7 +20,7 @@ def test_simple_error():
 
 def test_chained_error():
     """extract_error_message unwraps chained exceptions and returns inner message."""
-    from helpers.error_utils import extract_error_message
+    from utils.error_utils import extract_error_message
 
     inner = RuntimeError("root cause")
     outer = ValueError("wrapper")
@@ -33,7 +33,7 @@ def test_chained_error():
 
 def test_empty_error():
     """extract_error_message with empty message still returns something."""
-    from helpers.error_utils import extract_error_message
+    from utils.error_utils import extract_error_message
 
     result = extract_error_message(Exception(""))
 
@@ -44,7 +44,7 @@ def test_empty_error():
 
 def test_activity_task_failed_wrapper():
     """extract_error_message skips 'Activity task failed' wrapper messages."""
-    from helpers.error_utils import extract_error_message
+    from utils.error_utils import extract_error_message
 
     inner = RuntimeError("actual failure reason")
     outer = Exception("Activity task failed")

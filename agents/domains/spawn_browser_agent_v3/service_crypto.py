@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import structlog
 
 from domains.spawn_browser_agent_v3.repo import fetch_recent_emails
-from helpers.error_utils import extract_error_message
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

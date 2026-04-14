@@ -28,9 +28,9 @@ from domains.spawn_agent.config import (
 )
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
-    fetch_full_network_metadata,
     build_for_each_goal,
     coerce_for_each_items,
+    fetch_full_network_metadata,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,

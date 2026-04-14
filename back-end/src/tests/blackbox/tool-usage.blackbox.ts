@@ -462,6 +462,7 @@ const KNOWN_THIRD_PARTY_HOSTS = [
   'exa.ai',
   'anthropic.com',
   'openai.com',
+  'vapi.ai',
 ];
 function isThirdPartyCapture(url: string): boolean {
   const lower = url.toLowerCase();

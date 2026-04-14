@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_llm_usage():
     """llm_usage creates correct dict structure with all fields."""
-    from helpers.usage import llm_usage
+    from utils.usage import llm_usage
 
     result = llm_usage(tokens_in=100, tokens_out=50, model="rose-ultra", provider="Rose Planner")
 
@@ -23,7 +23,7 @@ def test_llm_usage():
 
 def test_llm_usage_defaults():
     """llm_usage with only required args has None defaults."""
-    from helpers.usage import llm_usage
+    from utils.usage import llm_usage
 
     result = llm_usage(tokens_in=200, tokens_out=75)
 
@@ -35,7 +35,7 @@ def test_llm_usage_defaults():
 
 def test_service_usage():
     """service_usage creates correct dict structure."""
-    from helpers.usage import service_usage
+    from utils.usage import service_usage
 
     result = service_usage(cost_cents=5, provider="Perplexity Search")
 
@@ -45,7 +45,7 @@ def test_service_usage():
 
 def test_make_usage():
     """make_usage combines llm and service lists."""
-    from helpers.usage import llm_usage, service_usage, make_usage
+    from utils.usage import llm_usage, service_usage, make_usage
 
     llm_items = [llm_usage(tokens_in=100, tokens_out=50)]
     svc_items = [service_usage(cost_cents=5, provider="Steel")]
@@ -60,7 +60,7 @@ def test_make_usage():
 
 def test_make_usage_defaults():
     """make_usage with no args returns empty lists."""
-    from helpers.usage import make_usage
+    from utils.usage import make_usage
 
     result = make_usage()
 
@@ -70,7 +70,7 @@ def test_make_usage_defaults():
 
 def test_with_usage():
     """with_usage wraps result dict with usage key."""
-    from helpers.usage import llm_usage, with_usage
+    from utils.usage import llm_usage, with_usage
 
     result = with_usage(
         result={"success": True, "data": "hello"},

@@ -9,13 +9,12 @@ import re
 from datetime import datetime
 from typing import Any
 
-from domains.call_phone_number.repo import save_phone_call_message as save_phone_call_message
-
 from domains.call_phone_number.config import (
     CALL_PROVIDER,
     COST_CENTS_PER_MINUTE,
     MINIMUM_BILLED_MINUTES,
 )
+from domains.call_phone_number.repo import save_phone_call_message as save_phone_call_message
 
 
 def format_phone_number(number: str) -> str:

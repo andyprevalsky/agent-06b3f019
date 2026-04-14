@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Dict
 
 import httpx
 
 from domains.read_memories.config import (
     REQUEST_TIMEOUT_SECS,
+    SUPERMEMORY_API_KEY,
     SUPERMEMORY_PROFILE_URL,
 )
 
@@ -30,8 +30,7 @@ async def fetch_memories(query: str, user_id: str) -> MemoryResult:
         ValueError: If SUPERMEMORY_API_KEY is not configured.
         httpx.HTTPStatusError: If the API returns a non-2xx status.
     """
-    api_key = os.getenv("SUPERMEMORY_API_KEY", "")
-    if not api_key:
+    if not SUPERMEMORY_API_KEY:
         raise ValueError("SUPERMEMORY_API_KEY not configured")
 
     payload: Dict[str, Any] = {"containerTag": user_id}
@@ -42,7 +41,7 @@ async def fetch_memories(query: str, user_id: str) -> MemoryResult:
         response = await client.post(
             SUPERMEMORY_PROFILE_URL,
             headers={
-                "x-supermemory-api-key": api_key,
+                "x-supermemory-api-key": SUPERMEMORY_API_KEY,
                 "Content-Type": "application/json",
             },
             json=payload,

@@ -7,7 +7,6 @@ Typed args in, typed results out.
 from __future__ import annotations
 
 import json
-import os
 import uuid as uuid_module
 from typing import Any, Dict, List, Optional
 
@@ -20,9 +19,10 @@ from domains.spawn_browser_agent_v3.config import (
     EXTRACT_LLM_TEMPERATURE,
     EXTRACT_MAX_CONTENT_LENGTH,
     MIME_TYPE_MAP,
+    STEEL_API_KEY,
 )
-from helpers.error_utils import extract_error_message
 from tools.base import MessageStatus
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -217,15 +217,14 @@ async def save_browser_assistant_message(
 
 async def list_session_files(session_id: str) -> List[Dict[str, Any]]:
     """List all files in a Steel browser session by calling Steel API directly."""
-    steel_api_key = os.environ.get("STEEL_API_KEY")
-    if not steel_api_key:
+    if not STEEL_API_KEY:
         logger.warning("STEEL_API_KEY not set, cannot list session files")
         return []
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"https://api.steel.dev/v1/sessions/{session_id}/files", headers={"steel-api-key": steel_api_key}
+                f"https://api.steel.dev/v1/sessions/{session_id}/files", headers={"steel-api-key": STEEL_API_KEY}
             )
             logger.info(
                 f"[Steel Files API] session={session_id}, status={response.status_code}, body={response.text[:500]}"
@@ -250,8 +249,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
 
     Returns Dict with content (bytes), filename, mime_type, or None on failure.
     """
-    steel_api_key = os.environ.get("STEEL_API_KEY")
-    if not steel_api_key:
+    if not STEEL_API_KEY:
         logger.warning("STEEL_API_KEY not set, cannot download file")
         return None
 
@@ -266,7 +264,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(
                 f"https://api.steel.dev/v1/sessions/{session_id}/files/{relative_path}",
-                headers={"steel-api-key": steel_api_key},
+                headers={"steel-api-key": STEEL_API_KEY},
             )
             if response.status_code == 200:
                 filename = file_path.split("/")[-1] or "download"

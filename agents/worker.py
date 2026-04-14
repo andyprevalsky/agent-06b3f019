@@ -24,12 +24,49 @@ if not os.getenv("BACKEND_API_KEY"):
 
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
-from domains.reasoning.handler import execute_reasoning_activity
 
 # Shared memory activities
 from activities.shared_memory import append_shared_memory, get_shared_memory
 from config import load_config
+from domains.add_memory.service import add_memory_activity
+from domains.call_phone_number.handler import call_phone_number_activity
+from domains.check_monitor_events.repo import check_monitor_events_activity
+from domains.deep_research.repo import deep_research_activity
+from domains.enrich.repo import (
+    enrich_create_task_activity,
+    enrich_get_task_results_activity,
+    enrich_poll_status_once_activity,
+)
+from domains.find_all.repo import (
+    find_all_create_run_activity,
+    find_all_get_results_activity,
+    find_all_ingest_activity,
+    find_all_poll_status_once_activity,
+)
+from domains.grep.repo import fetch_local_data_summary, grep_activity
+from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
+from domains.message_person.repo import fetch_recent_messages_activity, generate_message_activity
+from domains.monitor.handler import monitor_activity
+from domains.people_search.handler import people_search_activity
+from domains.read_memories.handler import read_memories_activity
+from domains.read_message_history.handler import read_message_history_activity
+from domains.reasoning.handler import execute_reasoning_activity
+from domains.request_user_approval.repo import create_approval_request_activity
 from domains.search_user_network import search_user_network_activity
+from domains.send_email.repo import send_email_activity
+from domains.send_sms.repo import send_sms_activity
+from domains.send_sms_as_user.handler import queue_imessage_activity
+from domains.spawn_agent.service import (
+    _resolve_explore_attachments_activity,
+    fetch_full_network_metadata,
+    spawn_explore_agent_activity,
+)
+from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+from domains.spawn_sub_agents.service import spawn_sub_agent_activity
+from domains.wait_for.service import evaluate_condition_activity
+from domains.web_fetch.handler import web_fetch_activity
+from domains.x402_bazaar.repo import pay_for_x402_service_activity, search_x402_bazaar_activity
 from health_server import run_health_server, set_queue_metrics, set_worker_status
 
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -63,48 +100,7 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
-from domains.add_memory.service import add_memory_activity
-from tools.call_phone_number import call_phone_number_activity
-from tools.check_monitor_events import check_monitor_events_activity
-
-# New event-driven tools
-from tools.deep_research import deep_research_activity
-from domains.enrich.repo import (
-    enrich_create_task_activity,
-    enrich_get_task_results_activity,
-    enrich_poll_status_once_activity,
-)
-from tools.find_all import (
-    find_all_create_run_activity,
-    find_all_get_results_activity,
-    find_all_ingest_activity,
-    find_all_poll_status_once_activity,
-)
-from domains.grep.repo import fetch_local_data_summary, grep_activity
-from tools.knowledge_base import query_blueprints_activity, save_blueprint_activity
-from tools.message_person import fetch_recent_messages_activity, generate_message_activity
-from tools.monitor import monitor_activity
-from domains.people_search.handler import people_search_activity
-from tools.read_memories import read_memories_activity
-from tools.read_message_history import read_message_history_activity
-from tools.request_user_approval import create_approval_request_activity
-from tools.send_email import send_email_activity
-from tools.send_sms import send_sms_activity
-from tools.send_sms_as_user import queue_imessage_activity
-from domains.spawn_agent.service import (
-    _resolve_explore_attachments_activity,
-    fetch_full_network_metadata,
-    spawn_explore_agent_activity,
-)
-from tools.spawn_browser_agent_v3 import spawn_browser_agent_activity_v3  # V3: browser-use + Rose API
-from tools.spawn_claude_code_agent import spawn_claude_code_activity  # Claude Code in E2B sandbox
-
-# User-configurable tools
-from tools.spawn_sub_agents import spawn_sub_agent_activity
-from tools.wait_for import evaluate_condition_activity
-from tools.web_fetch import web_fetch_activity
-from tools.web_search import web_search_activity
-from tools.x402_bazaar import pay_for_x402_service_activity, search_x402_bazaar_activity
+from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
 
 # Configure unified structured logging

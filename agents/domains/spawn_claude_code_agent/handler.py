@@ -18,8 +18,8 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from helpers.attachments import extract_attachments_from_context
-from helpers.error_utils import extract_error_message
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

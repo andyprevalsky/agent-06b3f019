@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_format_spawn_agent():
     """format_tool_display for spawn_agent includes type label and goal."""
-    from helpers.format_tool_display import format_tool_display
+    from utils.format_tool_display import format_tool_display
 
     result = format_tool_display("spawn_agent", {
         "type": "explore",
@@ -24,7 +24,7 @@ def test_format_spawn_agent():
 
 def test_format_web_search():
     """format_tool_display for web_search includes query."""
-    from helpers.format_tool_display import format_tool_display
+    from utils.format_tool_display import format_tool_display
 
     result = format_tool_display("web_search", {
         "query": "best hotels in Lisbon",
@@ -36,7 +36,7 @@ def test_format_web_search():
 
 def test_format_unknown_tool():
     """format_tool_display for unknown tool returns raw tool name."""
-    from helpers.format_tool_display import format_tool_display
+    from utils.format_tool_display import format_tool_display
 
     result = format_tool_display("some_unknown_tool", {"x": 1})
 
@@ -45,7 +45,7 @@ def test_format_unknown_tool():
 
 def test_truncate_short():
     """_truncate leaves short strings unchanged."""
-    from helpers.format_tool_display import _truncate
+    from utils.format_tool_display import _truncate
 
     result = _truncate("hello", 50)
 
@@ -54,7 +54,7 @@ def test_truncate_short():
 
 def test_truncate_long():
     """_truncate shortens long strings and adds ellipsis."""
-    from helpers.format_tool_display import _truncate
+    from utils.format_tool_display import _truncate
 
     long_text = "a" * 100
     result = _truncate(long_text, 20)
@@ -65,7 +65,7 @@ def test_truncate_long():
 
 def test_truncate_empty():
     """_truncate returns '...' for empty/falsy input."""
-    from helpers.format_tool_display import _truncate
+    from utils.format_tool_display import _truncate
 
     assert _truncate("", 50) == "..."
     assert _truncate(None, 50) == "..."
@@ -73,7 +73,7 @@ def test_truncate_empty():
 
 def test_format_spawn_agent_browser():
     """format_tool_display for spawn_agent with type=browser includes browsing label."""
-    from helpers.format_tool_display import format_tool_display
+    from utils.format_tool_display import format_tool_display
 
     result = format_tool_display("spawn_agent", {
         "type": "browser",

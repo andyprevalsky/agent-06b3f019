@@ -7,14 +7,13 @@ No I/O, no framework dependencies.
 import re
 from typing import Any
 
-from domains.send_sms.repo import send_sms_activity as send_sms_activity
-
 from domains.send_sms.config import (
     MESSAGE_DISPLAY_MAX_LENGTH,
     MESSAGE_DISPLAY_SUFFIX,
     SMS_COST_CENTS,
     SMS_PROVIDER,
 )
+from domains.send_sms.repo import send_sms_activity as send_sms_activity
 
 
 def format_phone_number(number: str) -> str:
