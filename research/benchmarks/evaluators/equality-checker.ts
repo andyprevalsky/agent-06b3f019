@@ -1,12 +1,14 @@
+// deno-lint-ignore-file no-console -- benchmark evaluator uses console for diagnostic output
 /**
  * Equality Checker Evaluator
- * 
+ *
  * Uses GPT-4o to determine if two answers are semantically equivalent.
  * This runs inside the benchmark harness (not as a separate API).
  * Uses OPENROUTER_API_KEY from environment.
  */
 
-const EQUALITY_CHECKER_PROMPT = `Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
+const EQUALITY_CHECKER_PROMPT =
+  `Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
 
 [question]: {question}
 
@@ -34,7 +36,7 @@ export async function checkEquality(
   modelAnswer: string,
   correctAnswer: string,
   question?: string,
-  apiKey?: string
+  apiKey?: string,
 ): Promise<boolean> {
   try {
     const prompt = EQUALITY_CHECKER_PROMPT
@@ -43,7 +45,7 @@ export async function checkEquality(
       .replace('{correct_answer}', correctAnswer);
 
     // Use OPENROUTER_API_KEY from environment or provided key
-    const key = apiKey || process.env.OPENROUTER_API_KEY;
+    const key = apiKey || Deno.env.get('OPENROUTER_API_KEY');
     if (!key) {
       console.error('OPENROUTER_API_KEY not found in environment');
       throw new Error('Missing API key for equality checker');
@@ -55,16 +57,16 @@ export async function checkEquality(
         'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://rose-benchmark.app',
-        'X-Title': 'Rose Benchmark Suite - Equality Checker'
+        'X-Title': 'Rose Benchmark Suite - Equality Checker',
       },
       body: JSON.stringify({
         model: 'openai/gpt-4o',
         messages: [
-          { role: 'user', content: prompt }
+          { role: 'user', content: prompt },
         ],
         temperature: 0.0, // Deterministic for evaluation
-        max_tokens: 500
-      })
+        max_tokens: 500,
+      }),
     });
 
     if (!response.ok) {
@@ -85,11 +87,14 @@ export async function checkEquality(
     }
 
     const isCorrect = correctMatch[1].toLowerCase() === 'yes';
-    
-    console.log(`Equality check: "${modelAnswer}" vs "${correctAnswer}" => ${isCorrect ? 'MATCH' : 'NO MATCH'}`);
-    
-    return isCorrect;
 
+    console.log(
+      `Equality check: "${modelAnswer}" vs "${correctAnswer}" => ${
+        isCorrect ? 'MATCH' : 'NO MATCH'
+      }`,
+    );
+
+    return isCorrect;
   } catch (error) {
     console.error('Error in equality checker:', error);
     // Fall back to simple string matching
@@ -104,7 +109,7 @@ export async function checkEqualityDetailed(
   modelAnswer: string,
   correctAnswer: string,
   question?: string,
-  apiKey?: string
+  apiKey?: string,
 ): Promise<EqualityCheckResult> {
   try {
     const prompt = EQUALITY_CHECKER_PROMPT
@@ -112,7 +117,7 @@ export async function checkEqualityDetailed(
       .replace('{response}', modelAnswer)
       .replace('{correct_answer}', correctAnswer);
 
-    const key = apiKey || process.env.OPENROUTER_API_KEY;
+    const key = apiKey || Deno.env.get('OPENROUTER_API_KEY');
     if (!key) {
       throw new Error('Missing API key for equality checker');
     }
@@ -123,16 +128,16 @@ export async function checkEqualityDetailed(
         'Authorization': `Bearer ${key}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://rose-benchmark.app',
-        'X-Title': 'Rose Benchmark Suite - Equality Checker'
+        'X-Title': 'Rose Benchmark Suite - Equality Checker',
       },
       body: JSON.stringify({
         model: 'openai/gpt-4o',
         messages: [
-          { role: 'user', content: prompt }
+          { role: 'user', content: prompt },
         ],
         temperature: 0.0,
-        max_tokens: 500
-      })
+        max_tokens: 500,
+      }),
     });
 
     if (!response.ok) {
@@ -150,9 +155,8 @@ export async function checkEqualityDetailed(
     return {
       isEqual: correctMatch?.[1].toLowerCase() === 'yes',
       reasoning: reasoningMatch?.[1].trim() || 'No reasoning provided',
-      confidence: confidenceMatch ? parseInt(confidenceMatch[1]) : 100
+      confidence: confidenceMatch ? parseInt(confidenceMatch[1]) : 100,
     };
-
   } catch (error) {
     console.error('Error in detailed equality checker:', error);
     // Fall back to simple comparison
@@ -160,8 +164,7 @@ export async function checkEqualityDetailed(
     return {
       isEqual,
       reasoning: 'Fallback to string matching due to API error',
-      confidence: 50
+      confidence: 50,
     };
   }
 }
-

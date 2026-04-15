@@ -18,8 +18,13 @@ const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
 function getConnectionUrl(): string {
   const url = process.env.DATABASE_URL ?? '';
 
+  // Production (Supabase pooler) can handle 250 connections; local Docker Postgres
+  // uses direct connections that each consume ~10MB, so cap at 30 to avoid OOM.
+  const isLocal = url.includes('localhost') || url.includes('127.0.0.1');
+  const defaultPoolSize = isLocal ? 30 : 250;
+
   const params: string[] = [];
-  if (!url.includes('connection_limit')) params.push('connection_limit=250');
+  if (!url.includes('connection_limit')) params.push(`connection_limit=${defaultPoolSize}`);
   if (!url.includes('pool_timeout')) params.push('pool_timeout=30');
 
   if (params.length === 0) return url;

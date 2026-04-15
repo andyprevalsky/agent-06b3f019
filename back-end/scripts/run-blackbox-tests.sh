@@ -28,6 +28,32 @@ for arg in "$@"; do
   fi
 done
 
+# ── Use local Postgres when Conductor provides port info ──
+# run.sh launches a per-workspace Postgres container on CONDUCTOR_PORT+10.
+# Mirror that here so the isolated test backend + test scripts both hit the
+# local DB instead of the remote Supabase pooler (avoids pgbouncer cross-
+# process visibility issues that cause flaky FK / 404 failures).
+if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+  LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 10))
+  # The container may have been recreated on a nearby port; try the expected
+  # port first, then fall back to the container's actual published port.
+  DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
+  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+  if [[ -n "$ACTUAL_PORT" ]]; then
+    LOCAL_DB_PORT="$ACTUAL_PORT"
+  fi
+  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+    export DATABASE_URL="$LOCAL_DB_URL"
+    export DIRECT_URL="$LOCAL_DB_URL"
+    echo "Using local Postgres at localhost:$LOCAL_DB_PORT"
+  else
+    echo "❌ Local Postgres container '$DB_CONTAINER' is not ready (port $LOCAL_DB_PORT)."
+    echo "   Start it with: docker start $DB_CONTAINER"
+    exit 1
+  fi
+fi
+
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
 
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then

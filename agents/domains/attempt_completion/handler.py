@@ -42,11 +42,17 @@ class AttemptCompletionManager(ToolManager):
         The workflow/activity runs the verifier after this to confirm.
         If verification passes the loop exits; otherwise the agent continues.
         """
+        result_text = tool_call.get("result", "")
+        message = (
+            f"{EVENT_MESSAGE}\n\nCompletion result: {result_text}"
+            if result_text
+            else EVENT_MESSAGE
+        )
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=EVENT_TITLE,
-                message=EVENT_MESSAGE,
+                message=message,
                 status=MessageStatus.FINISHED,
             ),
             agent_id=agent_id,

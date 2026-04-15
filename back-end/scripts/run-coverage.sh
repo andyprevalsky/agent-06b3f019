@@ -39,6 +39,24 @@ fi
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"
 
+# ── Use local Postgres when Conductor provides port info ──
+# Mirror the same logic from run-blackbox-tests.sh so the coverage backend
+# and the test runner both hit the same local DB (avoids FK / 404 mismatches).
+if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+  LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 10))
+  DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
+  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+  if [[ -n "$ACTUAL_PORT" ]]; then
+    LOCAL_DB_PORT="$ACTUAL_PORT"
+  fi
+  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+    export DATABASE_URL="$LOCAL_DB_URL"
+    export DIRECT_URL="$LOCAL_DB_URL"
+    echo "Using local Postgres at localhost:$LOCAL_DB_PORT"
+  fi
+fi
+
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 \
   npx tsx src/server.ts >"$COV_LOG" 2>&1 &

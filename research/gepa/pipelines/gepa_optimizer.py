@@ -22,23 +22,28 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from helpers.prompts import build_planner_system_prompt
 from helpers.tool_schemas import PlannerResponse
 from tools.set_plan import _get_planner_tools_description
 
 from ..critic import score_candidates
-from ..scoring import hard_gate, final_score
+from ..scoring import final_score, hard_gate
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 TASKS_DIR = DATA_DIR / 'clarified_tasks'
 
-# Markers for the evolvable strategy section in the planner prompt
-STRATEGY_START = 'TWO-AXIS PLANNING FRAMEWORK'
-STRATEGY_END = 'SPAWN_SUB_AGENT TOOL'
+# Markers for the evolvable strategy section in the planner prompt.
+# The planner prompt may have the original markers or an overridden strategy
+# (via planner_strategy_override_v3.txt). We try each in order.
+STRATEGY_STARTS = ['TWO-AXIS PLANNING FRAMEWORK', 'PLANNING INSTRUCTION']
+STRATEGY_ENDS = ['SPAWN_SUB_AGENT TOOL', 'SELF-CONTAINED GOALS (CRITICAL)']
+# Legacy aliases for backwards compatibility with tests
+STRATEGY_START = STRATEGY_STARTS[0]
+STRATEGY_END = STRATEGY_ENDS[0]
 
 # Default critic model ID on Modal
 DEFAULT_CRITIC_MODEL_ID = 'reward_model'
@@ -48,14 +53,29 @@ DEFAULT_CRITIC_MODEL_ID = 'reward_model'
 # A. Strategy extraction + prompt composition
 # ---------------------------------------------------------------------------
 
+
 def extract_strategy(full_prompt: str) -> str:
     """Extract the evolvable strategy section from the full planner prompt.
 
-    Returns the text from TWO-AXIS PLANNING FRAMEWORK through TASK COUNT LIMITS,
-    stopping before SPAWN_SUB_AGENT TOOL.
+    Handles both original markers (TWO-AXIS PLANNING FRAMEWORK ... SPAWN_SUB_AGENT TOOL)
+    and overridden markers (PLANNING INSTRUCTION ... SELF-CONTAINED GOALS).
     """
-    start = full_prompt.index(STRATEGY_START)
-    end = full_prompt.index(STRATEGY_END)
+    start = -1
+    for marker in STRATEGY_STARTS:
+        start = full_prompt.find(marker)
+        if start >= 0:
+            break
+    if start < 0:
+        raise ValueError(f'Strategy start marker not found. Tried: {STRATEGY_STARTS}')
+
+    end = -1
+    for marker in STRATEGY_ENDS:
+        end = full_prompt.find(marker, start + 1)
+        if end >= 0:
+            break
+    if end < 0:
+        raise ValueError(f'Strategy end marker not found. Tried: {STRATEGY_ENDS}')
+
     return full_prompt[start:end].rstrip()
 
 
@@ -90,6 +110,7 @@ def _build_prompt_skeleton() -> str:
 # B. DSPy Signature + Module (lazy imports to avoid gepa name collision)
 # ---------------------------------------------------------------------------
 
+
 def _make_signature_class():
     """Dynamically create the PlanGoal Signature with the current strategy as docstring."""
     import dspy
@@ -100,16 +121,18 @@ def _make_signature_class():
         __doc__ = initial_strategy
 
         goal: str = dspy.InputField(desc="The user's goal to decompose into tasks")
-        context: str = dspy.InputField(desc="Conversation history (JSON array of user/assistant turns)")
+        context: str = dspy.InputField(
+            desc='Conversation history (JSON array of user/assistant turns)'
+        )
         prompt_skeleton: str = dspy.InputField(
-            desc="Fixed prompt sections: output contract, tool descriptions, examples, and reminders. "
-                 "Follow these structural requirements exactly."
+            desc='Fixed prompt sections: output contract, tool descriptions, examples, and reminders. '
+            'Follow these structural requirements exactly.'
         )
         plan_json: str = dspy.OutputField(
             desc='Valid JSON object with keys: "title" (string), "content" (string), '
-                 '"tasks" (array of {"goal": string, "tool_name": string, "depends_on": [int]}), '
-                 '"dependencies_graph" (array of {"task_idx": string, "depends_on": [string]}), '
-                 '"join" ("all" or "any"). Output ONLY the JSON, no prose.'
+            '"tasks" (array of {"goal": string, "tool_name": string, "depends_on": [int]}), '
+            '"dependencies_graph" (array of {"task_idx": string, "depends_on": [string]}), '
+            '"join" ("all" or "any"). Output ONLY the JSON, no prose.'
         )
 
     return PlanGoal
@@ -122,8 +145,8 @@ def _make_decomposer_module():
     class DecomposerModule(dspy.Module):
         def __init__(self):
             super().__init__()
-            PlanGoal = _make_signature_class()
-            self.planner = dspy.Predict(PlanGoal)
+            plan_goal_sig = _make_signature_class()
+            self.planner = dspy.Predict(plan_goal_sig)
 
         def forward(self, goal, context, prompt_skeleton):
             return self.planner(goal=goal, context=context, prompt_skeleton=prompt_skeleton)
@@ -135,7 +158,8 @@ def _make_decomposer_module():
 # C. Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_plan(plan_json_str: str) -> Optional[PlannerResponse]:
+
+def _parse_plan(plan_json_str: str) -> PlannerResponse | None:
     """Try to parse a JSON string into a PlannerResponse. Returns None on failure."""
     try:
         data = json.loads(plan_json_str)
@@ -155,6 +179,7 @@ RETRY_DELAY_S = 2.0
 def _retry(fn, label: str, max_retries: int = MAX_RETRIES):
     """Call fn() with retries. Raises RuntimeError after max_retries failures."""
     import time
+
     last_err = None
     for attempt in range(max_retries):
         try:
@@ -163,9 +188,13 @@ def _retry(fn, label: str, max_retries: int = MAX_RETRIES):
             last_err = e
             if attempt < max_retries - 1:
                 wait = RETRY_DELAY_S * (attempt + 1)
-                logger.warning(f'{label} retry {attempt + 1}/{max_retries}: {type(e).__name__}: {e} (sleep {wait:.1f}s)')
+                logger.warning(
+                    f'{label} retry {attempt + 1}/{max_retries}: {type(e).__name__}: {e} (sleep {wait:.1f}s)'
+                )
                 time.sleep(wait)
-    raise RuntimeError(f'{label} failed after {max_retries} attempts: {type(last_err).__name__}: {last_err}') from last_err
+    raise RuntimeError(
+        f'{label} failed after {max_retries} attempts: {type(last_err).__name__}: {last_err}'
+    ) from last_err
 
 
 def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
@@ -176,8 +205,10 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
     Raises on persistent failure to pause the run for debugging.
     """
     import asyncio
+
     from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
-    from .benchmark import _eval_me, _eval_ce, _eval_cx
+
+    from .benchmark import _eval_ce, _eval_cx, _eval_me
 
     async def _run_evaluators(goal: str, pr: PlannerResponse, ctx: list):
         """Run ME/CE/CX evaluators concurrently with per-call retries."""
@@ -191,9 +222,13 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
                     last_err = e
                     if attempt < MAX_RETRIES - 1:
                         wait = RETRY_DELAY_S * (attempt + 1)
-                        logger.warning(f'{label} retry {attempt + 1}/{MAX_RETRIES}: {type(e).__name__}: {e} (sleep {wait:.1f}s)')
+                        logger.warning(
+                            f'{label} retry {attempt + 1}/{MAX_RETRIES}: {type(e).__name__}: {e} (sleep {wait:.1f}s)'
+                        )
                         await asyncio.sleep(wait)
-            raise RuntimeError(f'{label} failed after {MAX_RETRIES} attempts: {type(last_err).__name__}: {last_err}') from last_err
+            raise RuntimeError(
+                f'{label} failed after {MAX_RETRIES} attempts: {type(last_err).__name__}: {last_err}'
+            ) from last_err
 
         me_result, ce_result, cx_result = await asyncio.gather(
             _retry_async(lambda: _eval_me(goal, pr, ctx), 'ME'),
@@ -213,12 +248,17 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
         pr = _parse_plan(plan_text)
         if pr is None:
             logger.debug(f'Metric: parse failed for plan_json: {pred.plan_json[:200]}')
-            return ScoreWithFeedback(score=0.0, feedback=f'Could not parse JSON output: {pred.plan_json[:200]}')
+            return ScoreWithFeedback(
+                score=0.0, feedback=f'Could not parse JSON output: {pred.plan_json[:200]}'
+            )
 
         gate = hard_gate(pr)
         if math.isinf(gate):
             logger.debug(f'Metric: hard_gate failed ({len(pr.tasks)} tasks)')
-            return ScoreWithFeedback(score=0.0, feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected')
+            return ScoreWithFeedback(
+                score=0.0,
+                feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected',
+            )
 
         ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
         plan_dict = json.loads(plan_text)
@@ -232,7 +272,9 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
         me, ce, cx = asyncio.run(_run_evaluators(example.goal, pr, ctx))
 
         score = max(0.0, final_score(critic, me, ce, cx))
-        logger.info(f'Metric: critic={critic:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={score:.3f}')
+        logger.info(
+            f'Metric: critic={critic:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={score:.3f}'
+        )
         return ScoreWithFeedback(
             score=score,
             feedback=f'critic={critic:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={score:.3f}',
@@ -245,6 +287,7 @@ def make_gepa_metric(critic_model_id: str = DEFAULT_CRITIC_MODEL_ID):
 # E. Data loader
 # ---------------------------------------------------------------------------
 
+
 def _load_trainset(tasks_dir: Path = TASKS_DIR) -> list:
     """Load ClarifiedTasks as DSPy Examples with fixed prompt skeleton."""
     import dspy
@@ -254,11 +297,13 @@ def _load_trainset(tasks_dir: Path = TASKS_DIR) -> list:
     for path in sorted(tasks_dir.glob('*.json')):
         try:
             data = json.loads(path.read_text())
-            examples.append(dspy.Example(
-                goal=data['raw_seed'],
-                context=json.dumps(data['agent_context']),
-                prompt_skeleton=skeleton,
-            ).with_inputs('goal', 'context', 'prompt_skeleton'))
+            examples.append(
+                dspy.Example(
+                    goal=data['raw_seed'],
+                    context=json.dumps(data['agent_context']),
+                    prompt_skeleton=skeleton,
+                ).with_inputs('goal', 'context', 'prompt_skeleton')
+            )
         except Exception as e:
             logger.warning(f'Skipping {path.name}: {e}')
     logger.info(f'Loaded {len(examples)} training examples from {tasks_dir}')
@@ -268,6 +313,7 @@ def _load_trainset(tasks_dir: Path = TASKS_DIR) -> list:
 # ---------------------------------------------------------------------------
 # F. Main optimization function
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class OptimizationResult:
@@ -322,7 +368,6 @@ def optimize_prompt(
     if metric is None:
         metric = make_gepa_metric(critic_model_id)
 
-    initial_strategy = get_initial_strategy()
     logger.info(f'Starting GEPA optimization (auto={auto}, {len(trainset)} tasks)')
 
     optimizer = dspy.GEPA(

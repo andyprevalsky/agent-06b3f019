@@ -868,27 +868,28 @@ test('GET /:id/ancestors — child agent returns parent', async () => {
   const parentGoal = `Parent agent ${RUN_ID}`;
   const parentId = await createTestAgent(session.user.id, parentGoal);
 
-  // Create child agent directly in DB (cannot spawn via API without Temporal)
-  const childId = randomUUID();
-  trackedAgentIds.add(childId);
-  await withTransientDbRetry('create-child-agent', async () => {
-    await prisma.agent.create({
-      data: {
-        id: childId,
-        userId: session.user.id,
-        goal: 'Child agent',
-        parentAgentId: parentId,
-        busId: parentId,
-      },
-    });
-    await prisma.verifier.create({
-      data: {
-        agentId: childId,
-        type: 'FLOAT_LLM_JUDGE',
-        llmJudgePrompt: 'test',
-      },
-    });
+  // Create child agent via API with parent_agent_id
+  const childCreateRes = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Child agent',
+    parent_agent_id: parentId,
+    bus_id: parentId,
   });
+
+  let childId: string;
+  if (childCreateRes.status === 201) {
+    childId = (childCreateRes.data as { agent_id: string }).agent_id;
+  } else {
+    // Temporal not running: child was written to DB before workflow launch failed.
+    const child = await withTransientDbRetry('find-child-ancestors', async () =>
+      prisma.agent.findFirst({
+        where: { parentAgentId: parentId, userId: session.user.id, deletedAt: null },
+        orderBy: { createdAt: 'desc' },
+      })
+    );
+    if (!child) throw new Error('Child agent not found after sub-agent creation attempt');
+    childId = child.id;
+  }
+  trackedAgentIds.add(childId);
 
   const res = await request(`${BASE_URL}/api/agents/${childId}/ancestors`, {
     headers: apiKeyHeaders(session.user.id),

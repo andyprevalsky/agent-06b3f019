@@ -35,18 +35,23 @@ class BenchmarkRun:
     @property
     def summary(self) -> dict:
         total = len(self.task_results)
+        skipped = sum(1 for r in self.task_results if r.status == "SKIPPED")
         passed = sum(1 for r in self.task_results if r.passed)
-        failed = total - passed
+        failed = total - passed - skipped
+        eligible = total - skipped
         total_cost = sum(r.cost_cents for r in self.task_results)
         total_duration = sum(r.duration_seconds for r in self.task_results)
-        return {
+        result = {
             "total": total,
             "passed": passed,
             "failed": failed,
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
-            "pass_rate": round(passed / total, 2) if total > 0 else 0.0,
+            "pass_rate": round(passed / eligible, 2) if eligible > 0 else 0.0,
         }
+        if skipped > 0:
+            result["skipped"] = skipped
+        return result
 
     def to_dict(self) -> dict:
         return {
@@ -116,8 +121,8 @@ def compare_runs(path_a: str, path_b: str) -> None:
     for name in all_names:
         ra = a_tasks.get(name)
         rb = b_tasks.get(name)
-        a_pass = "PASS" if ra and ra.passed else ("FAIL" if ra else "-")
-        b_pass = "PASS" if rb and rb.passed else ("FAIL" if rb else "-")
+        a_pass = "SKIP" if ra and ra.status == "SKIPPED" else ("PASS" if ra and ra.passed else ("FAIL" if ra else "-"))
+        b_pass = "SKIP" if rb and rb.status == "SKIPPED" else ("PASS" if rb and rb.passed else ("FAIL" if rb else "-"))
         a_cost = f"{ra.cost_cents:.1f}" if ra else "-"
         b_cost = f"{rb.cost_cents:.1f}" if rb else "-"
         a_dur = f"{ra.duration_seconds:.0f}s" if ra else "-"
