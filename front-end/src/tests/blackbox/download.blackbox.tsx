@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
-import Download from '@/pages/Download';
+import Download from '@/features/download';
 
 const DOWNLOAD_URL =
   'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg';
