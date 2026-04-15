@@ -12,6 +12,7 @@ import {
   HERO_PAUSE_BETWEEN_WORDS,
   PRE_ORDER_CHECKOUT_URLS,
 } from './config';
+import type { WaitlistFormState } from './types';
 
 // ---------------------------------------------------------------------------
 // Early access
@@ -121,18 +122,6 @@ export function useMediaQuery(query: string): boolean {
 // Waitlist form
 // ---------------------------------------------------------------------------
 
-interface WaitlistFormState {
-  isExpanded: boolean;
-  isLoading: boolean;
-  isSuccess: boolean;
-  formData: { name: string; email: string };
-  emailError: string;
-  submitError: string;
-  expand: () => void;
-  handleInputChange: (field: 'name' | 'email') => (e: React.ChangeEvent<HTMLInputElement>) => void;
-  handleSubmit: (e: React.FormEvent) => void;
-}
-
 /** Manages the waitlist form expansion, validation, and submission. */
 export function useWaitlistForm(variant?: string, onSuccess?: () => void): WaitlistFormState {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -212,6 +201,3 @@ export function usePreOrder(): (variant: 'black' | 'white') => void {
     window.open(PRE_ORDER_CHECKOUT_URLS[variant], '_blank');
   }, []);
 }
-
-// Re-export color utilities from config (for backward compatibility).
-export { hexToRgb, darkenHex } from './config';
