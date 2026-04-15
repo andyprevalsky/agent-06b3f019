@@ -207,17 +207,28 @@ export async function listModels(): Promise<{
     return { models: cached, cached: true };
   }
 
-  const response = await fetch('https://openrouter.ai/api/v1/models', {
-    signal: AbortSignal.timeout(15_000),
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      'HTTP-Referer': BACKEND_URL,
-      'X-Title': 'Rose AI Agent',
-    },
-  });
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      response = await fetch('https://openrouter.ai/api/v1/models', {
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'HTTP-Referer': BACKEND_URL,
+          'X-Title': 'Rose AI Agent',
+        },
+      });
+      if (response.ok) break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
 
-  if (!response.ok) {
-    throw new Error(`OpenRouter API returned ${response.status}: ${response.statusText}`);
+  if (response === undefined || !response.ok) {
+    const status = response?.status ?? 'unknown';
+    const statusText = response?.statusText ?? 'no response';
+    throw new Error(`OpenRouter API returned ${status}: ${statusText}`);
   }
 
   const data = (await response.json()) as { data?: OpenRouterModel[] };

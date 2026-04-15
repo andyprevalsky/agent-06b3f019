@@ -7,6 +7,7 @@ import {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   IS_DEV,
+  IS_BLACKBOX_TEST,
 } from './config';
 import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 
@@ -14,7 +15,6 @@ import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 // Disabled when BLACKBOX_TEST_CAPTURE_OUTBOUND is set (tests need real Twilio calls)
 const DEV_TEST_PHONE = '+19729777432';
 const DEV_TEST_OTP = '181818';
-const isBlackboxTest = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1';
 
 const log = createLogger('Auth');
 
@@ -25,7 +25,7 @@ export async function sendTwilioVerifyOTP(
   phone: string
 ): Promise<{ success: boolean; error?: string }> {
   // Dev bypass: skip Twilio for test phone (disabled in blackbox tests)
-  if (IS_DEV && !isBlackboxTest && phone === DEV_TEST_PHONE) {
+  if (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE) {
     log.info('Dev bypass: skipping Twilio send for test phone');
     return { success: true };
   }
@@ -91,7 +91,7 @@ export async function checkTwilioVerifyOTP(
   code: string
 ): Promise<{ approved: boolean; error?: string }> {
   // Dev bypass: auto-approve test phone + test OTP (disabled in blackbox tests)
-  if (IS_DEV && !isBlackboxTest && phone === DEV_TEST_PHONE && code === DEV_TEST_OTP) {
+  if (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE && code === DEV_TEST_OTP) {
     log.info('Dev bypass: auto-approving test OTP');
     return { approved: true };
   }
