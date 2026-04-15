@@ -58,6 +58,9 @@ if $LIST; then
   echo ""
   echo "  front-end"
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
+  echo ""
+  echo "  research"
+  echo "    deno-tests  (requires Deno + running Supabase)"
   exit 0
 fi
 
@@ -157,6 +160,14 @@ if should_run "front-end"; then
     run_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
     run_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
+  fi
+fi
+
+if should_run "research"; then
+  if command -v deno &>/dev/null; then
+    run_suite "Research Deno Tests" bash -c "cd research && bash run-tests.sh"
+  else
+    echo "  ⚠️  Skipping research tests (Deno not installed)"
   fi
 fi
 

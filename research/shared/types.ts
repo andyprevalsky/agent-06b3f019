@@ -1,11 +1,11 @@
 // Shared type definitions for the Rose benchmarking suite
 
 export interface ModelWeights {
-  [modelId: string]: number;  // Probability weight (should sum to 1.0)
+  [modelId: string]: number; // Probability weight (should sum to 1.0)
 }
 
 export interface Message {
-  role: 'system' | 'user' | 'assistant';
+  role: "system" | "user" | "assistant";
   content: string;
 }
 
@@ -29,16 +29,5 @@ export type {
   BenchmarkResult,
   BenchmarkConfig,
   BenchmarkSummary,
-  IBenchmarkHarness
-} from '../benchmarks/harnesses/base.ts';
-
-
-
-
-
-
-
-
-
-
-
+  IBenchmarkHarness,
+} from "../benchmarks/harnesses/base.ts";
