@@ -1,8 +1,11 @@
 /**
  * Auth feature — configuration constants.
  *
- * No auth-specific constants are needed at this time.
- * This file exists for structural completeness.
+ * Env reads, defaults, and magic values live here.
+ * May import from own types only.
  */
 
-export const AUTH_CONFIG = Object.freeze({});
+/** Backend API base URL (no trailing slash). */
+export const AUTH_API_BASE_URL = (
+  import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
+).replace(/\/$/, '');

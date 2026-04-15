@@ -8,18 +8,13 @@
 import { storeSession } from '@/lib/supabase';
 import type { Session, User } from '@supabase/supabase-js';
 
-// ── Private helpers ────────────────────────────────────────────────────────
-
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
-  /\/$/,
-  '',
-);
+import { AUTH_API_BASE_URL } from './config';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /** Send OTP to phone number (E.164 format). */
 export async function sendOTP(phone: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+  const response = await fetch(`${AUTH_API_BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone }),
@@ -42,7 +37,7 @@ export async function verifyOTP(
   anonymousUserId?: string,
   userInfo?: { firstName?: string; lastName?: string },
 ): Promise<{ user: User; session: Session }> {
-  const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
+  const response = await fetch(`${AUTH_API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
