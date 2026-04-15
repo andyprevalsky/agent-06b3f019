@@ -1,7 +1,5 @@
 """Web search domain types."""
 
-from __future__ import annotations
-
 from typing import Any, Awaitable, Callable, TypedDict
 
 # Type alias for execute_activity callable

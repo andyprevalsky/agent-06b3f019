@@ -1,7 +1,5 @@
 """Type definitions for the enable-write-permissions domain."""
 
-from __future__ import annotations
-
 from typing import TypedDict
 
 

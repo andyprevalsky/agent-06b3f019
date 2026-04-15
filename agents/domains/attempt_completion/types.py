@@ -1,7 +1,5 @@
 """Attempt-completion domain types — schemas, type aliases, and constants."""
 
-from __future__ import annotations
-
 from typing import Any, Awaitable, Callable, TypedDict
 
 # Type alias for the execute_activity callable used throughout the domain.
