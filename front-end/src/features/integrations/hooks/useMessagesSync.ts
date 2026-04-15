@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 
-import type { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
+import type { useIntegrationHandlers } from '@/features/integration-handlers-context';
 
 import { createLinkedInSyncAgentApi } from '../api';
 import type { MessageSyncType } from '../types';

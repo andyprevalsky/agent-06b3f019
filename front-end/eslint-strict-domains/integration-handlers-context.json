@@ -1,3 +1,9 @@
 [
-  "src/contexts/IntegrationHandlersContext.tsx"
+  "src/features/integration-handlers-context/types.ts",
+  "src/features/integration-handlers-context/config.ts",
+  "src/features/integration-handlers-context/api.ts",
+  "src/features/integration-handlers-context/hooks.ts",
+  "src/features/integration-handlers-context/components/IntegrationHandlersContext.tsx",
+  "src/features/integration-handlers-context/components/index.ts",
+  "src/features/integration-handlers-context/index.ts"
 ]
