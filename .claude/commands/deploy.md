@@ -382,18 +382,20 @@ PR_TITLE=$(gh pr view --json title --jq '.title')
 
 **Persist the PR title to the Conductor workspace (hard record bound to the worktree):**
 
+Store the title in the `pr_title_locked` column — this column is ours and is never touched by Conductor's auto-sync (which only writes to `pr_title` based on branch name). SQLite is dynamically typed, so the INTEGER column accepts text.
+
 ```bash
 # Escape single quotes for SQL
 ESCAPED_TITLE=$(printf "%s" "$PR_TITLE" | sed "s/'/''/g")
 sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "UPDATE workspaces SET pr_title = '$ESCAPED_TITLE', pr_title_locked = 1 WHERE directory_name = '$(basename "$PWD")'"
+  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE directory_name = '$(basename "$PWD")'"
 ```
 
-`pr_title_locked = 1` prevents the auto-sync logic from overwriting it with the branch name. From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
+From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
 
 ```bash
 PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
+  "SELECT pr_title_locked FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
 ```
 
 ## Step 9: Wait for code review
