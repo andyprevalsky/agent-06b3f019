@@ -25,6 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 with workflow.unsafe.imports_passed_through():
     from activities.shared_memory import append_shared_memory, get_shared_memory
     from domains.search_user_network import search_user_network_for_people
+    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/sub_agent/explore
     from helpers import (
         check_user_usage,
         fetch_agent_config,
@@ -39,13 +40,10 @@ with workflow.unsafe.imports_passed_through():
         post_agent_message,
         update_agent_status,
     )
-    from helpers.error_utils import extract_error_message
-    from helpers.format_tool_display import format_tool_display
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import fetch_claude_max_token_activity
     from helpers.messages import update_agent_tree_state
     from helpers.model_pricing import get_anthropic_pricing
-    from helpers.prompts import build_system_prompt, build_verifier_prompt
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
@@ -73,11 +71,13 @@ with workflow.unsafe.imports_passed_through():
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
     from tools.set_plan import set_plan
-    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/sub_agent/explore
     from tools.wait_for import wait_for
     from tools.web_fetch import web_fetch
     from tools.web_search import web_search
     from tools.x402_bazaar import pay_for_x402_bazaar_service, search_x402_bazaar
+    from utils.error_utils import extract_error_message
+    from utils.format_tool_display import format_tool_display
+    from utils.prompts import build_system_prompt, build_verifier_prompt
 
 logger = structlog.get_logger()
 

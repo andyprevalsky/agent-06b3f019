@@ -14,10 +14,11 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from config import load_config
+from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.utils import extract_goal_from_context
+
 from . import repo
 from .service import build_trajectory_blueprint
-from helpers.utils import extract_goal_from_context
-from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 logger = structlog.get_logger()
 

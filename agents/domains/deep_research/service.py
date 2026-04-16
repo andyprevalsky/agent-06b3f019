@@ -6,8 +6,6 @@ No I/O, no framework dependencies.
 
 from typing import Any
 
-from domains.deep_research.repo import deep_research_activity as deep_research_activity
-
 from domains.deep_research.config import (
     PRICE_CITATION_TOKENS_PER_MILLION,
     PRICE_INPUT_TOKENS_PER_MILLION,
@@ -15,6 +13,7 @@ from domains.deep_research.config import (
     PRICE_REASONING_TOKENS_PER_MILLION,
     PRICE_SEARCH_CENTS_PER_THOUSAND,
 )
+from domains.deep_research.repo import deep_research_activity as deep_research_activity
 from domains.deep_research.types import DeepResearchResult
 
 

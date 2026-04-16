@@ -82,8 +82,13 @@ fi
 SUITE_NAMES=()
 SUITE_STATUSES=()
 SUITE_LOGS=()
-TMPDIR_BASE=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_BASE"' EXIT
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_STAMP="$(date +%Y%m%d-%H%M%S)-$$"
+TMPDIR_BASE="$REPO_ROOT/.test-logs/$RUN_STAMP"
+mkdir -p "$TMPDIR_BASE"
+ln -sfn "$RUN_STAMP" "$REPO_ROOT/.test-logs/latest"
+# Prune: keep only the 10 most recent run dirs
+ls -1dt "$REPO_ROOT/.test-logs"/*/ 2>/dev/null | tail -n +11 | xargs -I{} rm -rf {} 2>/dev/null || true
 
 run_suite() {
   local name="$1"
@@ -292,10 +297,14 @@ if [ $FAIL_COUNT -gt 0 ]; then
       echo "── ${SUITE_NAMES[$i]} failures ──"
       # Extract failure summaries: ❌ lines, FAIL lines, assertion diffs (no stack traces)
       grep -E '❌|^--- FAIL|^  FAIL|^FAILURES|Expected.*got|Received|assert.*failed' "${SUITE_LOGS[$i]}" | head -40
+      echo "  → full log: ${SUITE_LOGS[$i]}"
       echo ""
     fi
   done
-  echo "Full logs: $TMPDIR_BASE/"
 fi
+
+echo ""
+echo "All logs for this run: $TMPDIR_BASE/"
+echo "  (latest always at: $REPO_ROOT/.test-logs/latest/)"
 
 [ $FAIL_COUNT -eq 0 ]

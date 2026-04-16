@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import structlog
 from temporalio import activity
 
-from helpers.utils import extract_goal_from_context
+from utils.utils import extract_goal_from_context
 
 logger = structlog.get_logger()
 

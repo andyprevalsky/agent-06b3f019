@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_build_system_prompt_plan():
     """build_system_prompt for PLAN phase returns non-empty string with identity section."""
-    from helpers.prompts import build_system_prompt
+    from utils.prompts import build_system_prompt
 
     result = build_system_prompt(
         phase="PLAN",
@@ -26,7 +26,7 @@ def test_build_system_prompt_plan():
 
 def test_build_system_prompt_execute():
     """build_system_prompt for EXECUTE phase returns string with constraints."""
-    from helpers.prompts import build_system_prompt
+    from utils.prompts import build_system_prompt
 
     result = build_system_prompt(
         phase="EXECUTE",
@@ -40,7 +40,7 @@ def test_build_system_prompt_execute():
 
 def test_build_system_prompt_with_user_context():
     """build_system_prompt includes user context when provided."""
-    from helpers.prompts import build_system_prompt
+    from utils.prompts import build_system_prompt
 
     result = build_system_prompt(
         phase="PLAN",
@@ -54,7 +54,7 @@ def test_build_system_prompt_with_user_context():
 
 def test_build_verifier_prompt():
     """build_verifier_prompt returns string with verifier instructions."""
-    from helpers.prompts import build_verifier_prompt
+    from utils.prompts import build_verifier_prompt
 
     result = build_verifier_prompt(
         phase="EXECUTE",
@@ -69,7 +69,7 @@ def test_build_verifier_prompt():
 
 def test_build_verifier_prompt_with_schema():
     """build_verifier_prompt includes schema info when response_schema is provided."""
-    from helpers.prompts import build_verifier_prompt
+    from utils.prompts import build_verifier_prompt
 
     schema = {
         "fields": [

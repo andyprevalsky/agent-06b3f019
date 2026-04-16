@@ -18,6 +18,8 @@ const log = createLogger('Models');
 // ── Cache ──────────────────────────────────────────────────────────
 
 const modelCache = new NodeCache({ stdTTL: MODEL_CACHE_TTL });
+let inflightFetch: Promise<{ models: SortedModel[]; cached: boolean; count?: number }> | null =
+  null;
 
 export function clearCache(): void {
   modelCache.del('models');
@@ -197,6 +199,9 @@ async function buildRoseModels(allModels: OpenRouterModel[]): Promise<SortedMode
 /**
  * Fetch, filter, sort, and cache available models.
  * Returns `{ models, cached, count? }`.
+ *
+ * Uses request deduplication to prevent cache stampede: when the cache is cold,
+ * only one fetch goes to OpenRouter while concurrent callers await the same promise.
  */
 export async function listModels(): Promise<{
   models: SortedModel[];
@@ -208,6 +213,23 @@ export async function listModels(): Promise<{
     return { models: cached, cached: true };
   }
 
+  if (inflightFetch !== null) {
+    return inflightFetch;
+  }
+
+  inflightFetch = fetchAndCacheModels();
+  try {
+    return await inflightFetch;
+  } finally {
+    inflightFetch = null;
+  }
+}
+
+async function fetchAndCacheModels(): Promise<{
+  models: SortedModel[];
+  cached: boolean;
+  count?: number;
+}> {
   const response = await retryWithBackoff(
     async () => {
       const res = await fetch('https://openrouter.ai/api/v1/models', {

@@ -4,13 +4,12 @@ This is the SINGLE helper for GET /api/agents/{agent_id}.
 Other helpers should import and use _fetch_agent_data_impl directly.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import httpx
 import structlog
 from temporalio import activity
-from typing import Dict, List, Any, Optional
-from urllib.parse import quote
 
 from config import load_config
 

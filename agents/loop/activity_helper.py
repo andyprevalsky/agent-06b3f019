@@ -12,7 +12,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 
 import structlog
 
-from helpers.error_utils import extract_error_message
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 

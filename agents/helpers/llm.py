@@ -26,11 +26,11 @@ from helpers.attachments import (
     get_file_from_pointer,
 )
 from helpers.context_pointers import resolve_pointers_in_messages
-from helpers.error_utils import extract_error_message
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
 from helpers.tool_schemas import (
     create_agent_action_model,
 )
+from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
@@ -2763,8 +2763,8 @@ async def call_planner_llm_activity(
     """
     import time
 
-    from helpers.prompts import build_planner_system_prompt
     from helpers.tool_schemas import PlannerResponse
+    from utils.prompts import build_planner_system_prompt
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")

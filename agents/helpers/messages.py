@@ -3,12 +3,13 @@
 Uses _fetch_agent_data_impl from fetch_config.py (single source for GET /api/agents/{agent_id}).
 """
 
-from temporalio import activity
-from typing import List, Dict, Any, Optional
-from datetime import datetime
 import os
-import structlog
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import httpx
+import structlog
+from temporalio import activity
 
 from config import load_config
 from helpers.fetch_config import _fetch_agent_data_impl
@@ -429,7 +430,7 @@ async def update_agent_tree_state(
                     logger.warning(f"Bus broadcast failed: status={response.status_code}")
                 else:
                     logger.info(
-                        f"Bus broadcast success",
+                        "Bus broadcast success",
                         agent_id=agent_id,
                         bus_id=bus_id,
                         topic=f"bus:{bus_id}",

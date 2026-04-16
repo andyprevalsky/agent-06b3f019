@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_feed_and_display():
     """feed text and verify get_display returns it."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("Hello, world!\n")
@@ -23,7 +23,7 @@ def test_feed_and_display():
 
 def test_reset():
     """feed text, reset, verify display is empty."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("Some content\n")
@@ -36,7 +36,7 @@ def test_reset():
 
 def test_ansi_filtering():
     """feed text with ANSI escape codes, verify they are processed (not in output)."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     # ANSI color code: \033[31m = red, \033[0m = reset
@@ -52,7 +52,7 @@ def test_ansi_filtering():
 
 def test_multiple_feeds():
     """Multiple feed calls accumulate content."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("Line 1\n")
@@ -66,7 +66,7 @@ def test_multiple_feeds():
 
 def test_get_line_count():
     """get_line_count returns correct number of non-empty lines."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("Line 1\nLine 2\nLine 3\n")
@@ -76,7 +76,7 @@ def test_get_line_count():
 
 def test_cursor_position():
     """get_cursor_position returns tuple of (row, col)."""
-    from helpers.terminal_filter import TerminalFilter
+    from utils.terminal_filter import TerminalFilter
 
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("ABC")

@@ -4,11 +4,13 @@ Auto-discovers all domains under domains/ and checks that each layer
 only imports from permitted sources.
 
 Import rules:
-  types.py   -> external packages only
-  config.py  -> own types (+ external)
-  repo.py    -> own types, own config, providers (helpers/, tools/base) (+ external)
-  service.py -> own types, own config, own repo (+ external, NO handler, NO providers)
-  handler.py -> own service, own types, own config, providers (helpers/*, tools/base) (+ external)
+  types.py   -> utils/ (+ external)
+  config.py  -> own types, utils/ (+ external)
+  repo.py    -> own types, own config, utils/, providers (helpers/, tools/base) (+ external)
+  service.py -> own types, own config, own repo, utils/ (+ external, NO handler, NO providers)
+  handler.py -> own service, own types, own config, utils/, providers (helpers/*, tools/base) (+ external)
+
+utils/ (pure functions, zero side effects) is importable from any layer.
 """
 
 import ast
@@ -31,7 +33,11 @@ FIRST_PARTY_PREFIXES = frozenset([
     "activities",
     "workflows",
     "browser_tools",
+    "utils",
 ])
+
+# utils/ contains pure functions with zero side effects — importable from any layer.
+UTILS_PREFIX = "utils."
 
 
 def _is_first_party(module: str) -> bool:
@@ -70,6 +76,10 @@ def _check_layer(
     for mod in _get_imports(path):
         if not _is_first_party(mod):
             continue  # external package, always ok
+
+        # utils/ imports are always allowed (pure functions, zero side effects)
+        if mod.startswith(UTILS_PREFIX) or mod == "utils":
+            continue
 
         # Own domain import?
         if mod.startswith(own_prefix):

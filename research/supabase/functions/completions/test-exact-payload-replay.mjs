@@ -1,14 +1,27 @@
 /**
  * Replay a real worker capture against the Rose completions endpoint.
  *
+ * Invariant: the winning model must be from the Claude family (actual_model
+ * contains "claude"). If Gemini/GPT/etc. wins, that means every Claude token
+ * in the pool failed and Rose fell back — this counts as FAIL, not pass.
+ *
  * Default payload file:
  *   ./test-prod-request-body.json
+ *
+ * Modes:
+ *   # Racing mode (no claude_token): Rose uses its pool and races Claude models.
+ *   node test-exact-payload-replay.mjs
+ *
+ *   # Direct mode: pass claude_token(s); Rose routes each directly to Anthropic.
+ *   # Reads keychain if no tokens supplied; extras via CLAUDE_TOKENS (comma-list).
+ *   CLAUDE_TOKENS="sk-ant-oat01-AAA...,sk-ant-oat01-BBB..." node test-exact-payload-replay.mjs --direct
  *
  * Optional overrides:
  *   PAYLOAD_PATH=./some-other-capture.json node test-exact-payload-replay.mjs
  *   ROSE_API_URL=... ROSE_API_KEY=... SUPABASE_ANON_KEY=... node test-exact-payload-replay.mjs
  */
 
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,9 +103,32 @@ function extractJsonCandidate(text) {
   return "";
 }
 
-async function replayPayload() {
+function getKeychainToken() {
+  try {
+    const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w', {
+      stdio: "pipe",
+      encoding: "utf8",
+    }).trim();
+    return JSON.parse(raw)?.claudeAiOauth?.accessToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveTokensFromEnv() {
+  const raw = process.env.CLAUDE_TOKENS?.trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+async function replayPayload({ claudeToken, label } = {}) {
   const payload = loadPayload(payloadPath);
-  console.log("Replaying payload");
+  if (claudeToken) payload.claude_token = claudeToken;
+  const tag = label ?? (claudeToken ? `direct(${claudeToken.slice(0, 25)}…)` : "racing(pool)");
+  console.log(`Replaying payload [${tag}]`);
   console.log(`- File: ${payloadPath}`);
   console.log(`- Model: ${payload.model}`);
   console.log(`- Messages: ${payload.messages.length}`);
@@ -131,6 +167,7 @@ async function replayPayload() {
   let accumulatedReasoning = "";
   let accumulatedJson = "";
   let selectedModel = "unknown";
+  let claudeTokenError = null;
   let usage = null;
 
   while (true) {
@@ -157,6 +194,9 @@ async function replayPayload() {
       if (parsed.actual_model && selectedModel === "unknown") {
         selectedModel = parsed.actual_model;
       }
+      if (parsed.claude_token_error && !claudeTokenError) {
+        claudeTokenError = parsed.claude_token_error;
+      }
       if (parsed.usage) {
         usage = parsed.usage;
       }
@@ -173,15 +213,26 @@ async function replayPayload() {
     }
   }
 
-  console.log("Replay summary");
+  console.log(`Replay summary [${tag}]`);
   console.log(`- SSE chunks parsed: ${chunkCount}`);
   console.log(`- Content chunks: ${contentChunks}`);
   console.log(`- Reasoning chars: ${accumulatedReasoning.length}`);
   console.log(`- JSON chars: ${accumulatedJson.length}`);
   console.log(`- actual_model: ${selectedModel}`);
+  if (claudeTokenError) {
+    console.log(`- claude_token_error: ${claudeTokenError}`);
+  }
   if (usage) {
     console.log(
       `- usage: prompt=${usage.prompt_tokens ?? 0} completion=${usage.completion_tokens ?? 0} total=${usage.total_tokens ?? 0}`
+    );
+  }
+
+  if (!/claude/i.test(selectedModel)) {
+    throw new Error(
+      `INVARIANT: winning model is not Claude family. actual_model="${selectedModel}"` +
+        (claudeTokenError ? `, claude_token_error="${claudeTokenError}"` : "") +
+        ". This means every Claude pool token failed; Rose fell back to a non-Claude racer."
     );
   }
 
@@ -202,11 +253,48 @@ async function replayPayload() {
   }
 }
 
-replayPayload()
-  .then(() => {
-    console.log("PASS: replay completed and parsed JSON output");
-  })
-  .catch((err) => {
-    console.error(`FAIL: ${err?.message ?? String(err)}`);
-    process.exitCode = 1;
-  });
+async function runAll() {
+  const directMode = process.argv.includes("--direct");
+  const runs = [];
+
+  if (directMode) {
+    const envTokens = resolveTokensFromEnv();
+    const keychain = getKeychainToken();
+    if (keychain) runs.push({ label: `direct(keychain ${keychain.slice(0, 25)}…)`, token: keychain });
+    envTokens.forEach((t, i) => {
+      runs.push({ label: `direct(env#${i} ${t.slice(0, 25)}…)`, token: t });
+    });
+    if (runs.length === 0) {
+      throw new Error("--direct requires CLAUDE_TOKENS env or a keychain token");
+    }
+  } else {
+    runs.push({ label: "racing(pool)", token: undefined });
+  }
+
+  const results = [];
+  for (const run of runs) {
+    console.log("=".repeat(72));
+    try {
+      await replayPayload({ claudeToken: run.token, label: run.label });
+      results.push({ label: run.label, passed: true });
+      console.log(`PASS [${run.label}]`);
+    } catch (err) {
+      results.push({ label: run.label, passed: false, error: err?.message ?? String(err) });
+      console.error(`FAIL [${run.label}]: ${err?.message ?? String(err)}`);
+    }
+    console.log("");
+  }
+
+  const failed = results.filter((r) => !r.passed);
+  console.log("=".repeat(72));
+  console.log(`Summary: ${results.length - failed.length}/${results.length} passed`);
+  for (const r of results) {
+    console.log(`  ${r.passed ? "PASS" : "FAIL"}  ${r.label}${r.error ? ` — ${r.error}` : ""}`);
+  }
+  if (failed.length > 0) process.exitCode = 1;
+}
+
+runAll().catch((err) => {
+  console.error(`FATAL: ${err?.message ?? String(err)}`);
+  process.exitCode = 1;
+});

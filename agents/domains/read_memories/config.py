@@ -1,5 +1,10 @@
 """Read Memories domain config — constants, defaults, env reads."""
 
+import os
+
+# External service keys
+SUPERMEMORY_API_KEY = os.getenv("SUPERMEMORY_API_KEY", "")
+
 # SuperMemory API endpoint
 SUPERMEMORY_PROFILE_URL = "https://api.supermemory.ai/v4/profile"
 

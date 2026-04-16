@@ -13,14 +13,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.message_person.service import (
-    fetch_recent_messages_activity,
-    generate_message_activity,
     build_cold_outreach_person,
     build_conversation_summary,
     classify_person_id,
     extract_user_name,
+    fetch_recent_messages_activity,
     format_messages_for_context,
     format_person_display,
+    generate_message_activity,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, extract_root_error
 from tools.people_search import people_search_activity

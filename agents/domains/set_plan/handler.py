@@ -100,7 +100,7 @@ class SetPlanManager(ToolManager):
             except BaseException as e:
                 if isinstance(e, GeneratorExit):
                     raise
-                from helpers.error_utils import extract_error_message
+                from utils.error_utils import extract_error_message
 
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

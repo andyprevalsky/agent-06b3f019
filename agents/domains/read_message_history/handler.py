@@ -24,9 +24,9 @@ from domains.read_message_history.config import (
     TOOL_NAME,
 )
 from domains.read_message_history.service import (
-    fetch_message_history,
     build_person_identifier,
     build_read_metadata,
+    fetch_message_history,
     post_error_event,
     post_in_progress,
     post_result_event,

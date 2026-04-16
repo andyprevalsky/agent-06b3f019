@@ -22,6 +22,14 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from config import load_config
+from helpers.attachments import extract_attachments_from_context, upload_to_storage
+from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.model_pricing import get_model_pricing_with_fallback
+from loop.activity_helper import call_temporal_activity_from_activity
+from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
+from utils.error_utils import extract_error_message
+from utils.prompts import build_verifier_prompt
+
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -71,13 +79,6 @@ from .service_crypto import (
     fetch_recent_otps,
 )
 from .types import ClaudeTokenState
-from helpers.attachments import extract_attachments_from_context, upload_to_storage
-from helpers.error_utils import extract_error_message
-from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.model_pricing import get_model_pricing_with_fallback
-from helpers.prompts import build_verifier_prompt
-from loop.activity_helper import call_temporal_activity_from_activity
-from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 
 logger = structlog.get_logger()
 

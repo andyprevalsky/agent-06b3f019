@@ -3,6 +3,11 @@
 Constants, defaults, and environment reads.
 """
 
+import os
+
+# External service keys
+STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
+
 # Agent loop limits
 MAX_ITERATIONS = 30
 MAX_CONSECUTIVE_API_FAILURES = 5
