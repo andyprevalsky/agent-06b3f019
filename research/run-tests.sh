@@ -28,8 +28,12 @@ else
     echo -e "${YELLOW}⚠️  No .env file found${NC}"
 fi
 
-# Set default BASE_URL if not provided
-if [ -z "$BASE_URL" ]; then
+# When RESEARCH_PORT is set (Conductor workspace), always use local endpoint
+# (overrides .env which may point to prod)
+if [ -n "${RESEARCH_PORT:-}" ]; then
+    export BASE_URL="http://localhost:${RESEARCH_PORT}/functions/v1"
+    echo -e "${GREEN}Using BASE_URL from RESEARCH_PORT: $BASE_URL${NC}"
+elif [ -z "$BASE_URL" ]; then
     export BASE_URL="http://localhost:54321/functions/v1"
     echo -e "${YELLOW}Using default BASE_URL: $BASE_URL${NC}"
 else

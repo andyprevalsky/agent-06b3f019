@@ -8,7 +8,7 @@
  *   [0] browser-use  (bu-1-0)
  *   [1] yutori/n1    (vision-only, needs screenshot)
  *   [2] openai/gpt-5.2  (DOM-only, via OpenRouter)
- *   [3] anthropic/claude-opus-4.6  (DOM-only, direct Anthropic)
+ *   [3] anthropic/claude-opus-4.7  (DOM-only, direct Anthropic)
  *
  * Run: node test-browser-use-racing.mjs
  * Run single: node test-browser-use-racing.mjs --only=gpt-5.2
@@ -273,7 +273,7 @@ async function runAllTests() {
 
   console.log('rose-1-browser-use Model Validation + Racing Tests');
   console.log(`Endpoint: ${SUPABASE_URL}`);
-  console.log(`Pool: [0] browser-use, [1] yutori/n1, [2] openai/gpt-5.2, [3] anthropic/claude-opus-4.6`);
+  console.log(`Pool: [0] browser-use, [1] yutori/n1, [2] openai/gpt-5.2, [3] anthropic/claude-opus-4.7`);
   if (onlyFilter) console.log(`Filter: --only=${onlyFilter}`);
   console.log('');
 
@@ -293,7 +293,7 @@ async function runAllTests() {
       })
     },
     { name: 'gpt-5.2', fn: () => testModel(2, 'gpt-5.2', 'openai/gpt-5.2 (seed=2)', {}, 90000) },
-    { name: 'opus-4.6', fn: () => testModel(3, 'opus-4.6', 'anthropic/claude-opus-4.6 (seed=3)') },
+    { name: 'opus-4.7', fn: () => testModel(3, 'opus-4.7', 'anthropic/claude-opus-4.7 (seed=3)') },
     { name: 'racing', fn: () => testRacing() },
     { name: 'no-screenshot', fn: () => testNoScreenshotFiltering() },
   ];

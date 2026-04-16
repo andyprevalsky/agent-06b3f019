@@ -53,6 +53,7 @@ from benchmarks.benchmark_tasks import (
     get_tasks_by_tag,
     list_all_tasks,
 )
+from benchmarks.context_validator import validate_context, ContextViolation, format_violations
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.logs import (
     collect_logs, collect_tree_logs, format_tree_diagnostics,
@@ -368,6 +369,7 @@ async def poll_agent(
     last_tree_poll = 0.0  # timestamp of last tree-level poll
     last_progress_print = 0.0  # timestamp of last progress log
     last_tree_stats: dict = {}  # cached tree stats
+    last_violation_count = 0  # track violations to only print new ones
 
     while True:
         elapsed = time.time() - start
@@ -390,6 +392,23 @@ async def poll_agent(
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
         root_msg_count = len(messages)
+
+        # Validate context well-formedness (only print new violations)
+        # Skip tool_result_pairing during polling — tools may still be executing
+        violations = validate_context(messages)
+        poll_violations = [v for v in violations if v.rule != "tool_result_pairing"]
+        if len(poll_violations) > last_violation_count:
+            new_violations = poll_violations[last_violation_count:]
+            errors = [v for v in new_violations if v.severity == "error"]
+            warnings = [v for v in new_violations if v.severity == "warning"]
+            if errors:
+                print(f"    🚨 CONTEXT ERRORS ({len(errors)}):")
+                for v in errors:
+                    print(f"       [{v.rule}] {v.message}")
+            if warnings:
+                for v in warnings[:3]:
+                    print(f"    ⚠ [{v.rule}] {v.message}")
+            last_violation_count = len(poll_violations)
 
         # Chat mode: done when we have ASSISTANT responses
         if task.is_chat_mode:
@@ -719,6 +738,19 @@ async def run_single_task(
         # Evaluate
         passed, failure_reason = evaluate_task(task, data, approvals_triggered)
 
+        # Final context well-formedness check
+        final_violations = validate_context(messages)
+        context_violation_dicts = [v.to_dict() for v in final_violations]
+        context_errors = [v for v in final_violations if v.severity == "error"]
+        if context_errors and passed:
+            # Override pass → fail if context has well-formedness errors
+            passed = False
+            failure_reason = f"Context well-formedness errors: {context_errors[0].message}"
+        if final_violations:
+            error_count = len(context_errors)
+            warn_count = len(final_violations) - error_count
+            print(f"    Context validation: {error_count} errors, {warn_count} warnings")
+
         # Collect prod logs for diagnostics
         print(f"    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
@@ -741,6 +773,7 @@ async def run_single_task(
             failure_reason=failure_reason,
             approvals_triggered=approvals_triggered,
             approvals_resolved=approvals_resolved,
+            context_violations=context_violation_dicts,
             logs=logs,
         )
 

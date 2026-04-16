@@ -24,6 +24,23 @@ if [[ -f "$RESEARCH_DIR/.env" ]]; then
   set +a
 fi
 
+# When RESEARCH_PORT is set (Conductor workspace), always use local endpoint
+# and local Supabase credentials (overrides .env which may point to prod).
+# This ensures test JWT creation/validation happens against the same local
+# Supabase instance that edge functions use.
+if [[ -n "${RESEARCH_PORT:-}" ]]; then
+  export BASE_URL="http://localhost:${RESEARCH_PORT}/functions/v1"
+
+  # Fetch local Supabase keys so helpers.ts creates test users locally
+  LOCAL_SB_ENV=$(cd "$RESEARCH_DIR/supabase" && supabase status -o env 2>/dev/null | grep -E '^(ANON_KEY|SERVICE_ROLE_KEY|API_URL)=' || true)
+  if [[ -n "$LOCAL_SB_ENV" ]]; then
+    eval "$LOCAL_SB_ENV"
+    export SUPABASE_URL="${API_URL:-http://127.0.0.1:${RESEARCH_PORT}}"
+    export SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY}"
+    export SUPABASE_ANON_KEY="${ANON_KEY}"
+  fi
+fi
+
 TESTS_DIR="$RESEARCH_DIR/tests/blackbox"
 
 # ── List mode (skip artifact creation) ──
@@ -55,7 +72,7 @@ DOMAIN="${1:-}"
 
 # ── Write manifest ──
 cat >"$MANIFEST_PATH" <<EOF
-{"run_id":"$RUN_ID","mode":"deno-blackbox","base_url":"${BASE_URL:-https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1}","artifact_dir":"$ARTIFACT_DIR","runner_log":"$RUNNER_LOG","test_environment":"deno"}
+{"run_id":"$RUN_ID","mode":"deno-blackbox","base_url":"${BASE_URL:-http://localhost:${RESEARCH_PORT:-54321}/functions/v1}","artifact_dir":"$ARTIFACT_DIR","runner_log":"$RUNNER_LOG","test_environment":"deno"}
 EOF
 
 echo "Research blackbox tests"
@@ -92,7 +109,7 @@ echo "Running ${#TEST_FILES[@]} test file(s)..."
 # DENO_NO_PACKAGE_JSON prevents Deno from resolving the root npm workspace
 export DENO_NO_PACKAGE_JSON=1
 if ! "$DENO" test \
-  --allow-net --allow-env --allow-read \
+  --allow-net --allow-env --allow-read --allow-run=security \
   --config "$RESEARCH_DIR/deno.json" \
   --parallel \
   "${TEST_FILES[@]}" 2>&1 | tee "$RUNNER_LOG"; then

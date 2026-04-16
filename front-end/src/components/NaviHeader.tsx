@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 import { useState, useEffect } from 'react';
 import ContactModal from './ContactModal';
-import LoginButton from '@/features/auth/components/LoginButton';
+import { LoginButton } from '@/features/auth';
 
 const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);

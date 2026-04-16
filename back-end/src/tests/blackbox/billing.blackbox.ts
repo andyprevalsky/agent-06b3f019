@@ -209,6 +209,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'ip-api.com',
   'supabase.co/realtime',
+  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',

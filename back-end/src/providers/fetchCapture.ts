@@ -148,6 +148,52 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
+    // E2B calls bypass the serialization pipeline entirely — the E2B SDK
+    // uses Request objects with streaming bodies that can't be round-tripped
+    // through our string-based cache layer. We still record the capture entry
+    // (URL + method) so boundary assertion tests can detect the outbound call.
+    if (url.includes('e2b.app')) {
+      const captureId = nextId++;
+      const captureStart = Date.now();
+      const captureMethod = init?.method ?? 'GET';
+      try {
+        const response = await originalFetch(input, init);
+        const entry: CapturedCall = {
+          id: captureId,
+          timestamp: new Date().toISOString(),
+          url,
+          method: captureMethod,
+          requestHeaders: {},
+          requestBody: null,
+          responseStatus: response.status,
+          responseBody: null,
+          durationMs: Date.now() - captureStart,
+          error: null,
+          cached: false,
+          captureToken: captureTokenStore.getStore() ?? null,
+        };
+        captures.push(entry);
+        return response;
+      } catch (err) {
+        const entry: CapturedCall = {
+          id: captureId,
+          timestamp: new Date().toISOString(),
+          url,
+          method: captureMethod,
+          requestHeaders: {},
+          requestBody: null,
+          responseStatus: null,
+          responseBody: null,
+          durationMs: Date.now() - captureStart,
+          error: err instanceof Error ? err.message : String(err),
+          cached: false,
+          captureToken: captureTokenStore.getStore() ?? null,
+        };
+        captures.push(entry);
+        throw err;
+      }
+    }
+
     const id = nextId++;
     const start = Date.now();
     const method = init?.method ?? 'GET';

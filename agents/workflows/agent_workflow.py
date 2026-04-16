@@ -1627,7 +1627,7 @@ class AgentWorkflow:
             # Only invalidate the token for permanent failures (auth errors, rate limits).
             # Transient failures (stalls, server errors) keep the token for retry on next call.
             if self.claude_max_token and actual_model != "unknown" and not actual_model.endswith("-claude"):
-                if claude_token_error in ("auth_error", "rate_limit", "invalid_request"):
+                if claude_token_error in ("auth_error", "rate_limit"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, invalidating cached token"
                     )

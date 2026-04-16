@@ -21,6 +21,7 @@ class TaskResult:
     failure_reason: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
+    context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
 
 

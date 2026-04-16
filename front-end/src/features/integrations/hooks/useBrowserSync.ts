@@ -4,7 +4,7 @@ import type {
   useIntegrationHandlers,
   BrowserType,
   BrowserInfo,
-} from '@/contexts/IntegrationHandlersContext';
+} from '@/features/integration-handlers-context';
 
 export function useBrowserSync(
   handlers: ReturnType<typeof useIntegrationHandlers>,

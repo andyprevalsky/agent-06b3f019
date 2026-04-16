@@ -14,7 +14,7 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
-# Assign ports from a base port. Uses offsets 0-5 and +10 (11 ports total in range base..base+10).
+# Assign ports from a base port. Uses offsets 0-10 (11 ports: 6 services + 4 research sub-ports + 1 DB).
 assign_ports() {
     local base=$1
     export BACKEND_PORT=$base
@@ -23,6 +23,10 @@ assign_ports() {
     export RESEARCH_PORT=$((base + 3))
     export MAC_APP_PORT=$((base + 4))
     export SDK_METRICS_PORT=$((base + 5))
+    export RESEARCH_DB_PORT=$((base + 6))
+    export RESEARCH_ANALYTICS_PORT=$((base + 7))
+    export RESEARCH_VECTOR_PORT=$((base + 8))
+    export RESEARCH_INBUCKET_PORT=$((base + 9))
     export LOCAL_DB_PORT=$((base + 10))
     export BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
@@ -49,7 +53,7 @@ port_held_by_other_worktree() {
     local foreign_container
     foreign_container=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
         | grep ":${port}->" \
-        | grep -v "${CONDUCTOR_WORKSPACE_NAME}" \
+        | grep -vw "${CONDUCTOR_WORKSPACE_NAME}" \
         | head -1 | cut -f1)
     if [ -n "$foreign_container" ]; then
         return 0  # foreign Docker container on our port
@@ -62,7 +66,7 @@ assign_ports "$CONDUCTOR_PORT"
 
 # If any port in our range is held by another worktree, find a safe range
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $RESEARCH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $RESEARCH_DB_PORT $RESEARCH_ANALYTICS_PORT $RESEARCH_VECTOR_PORT $RESEARCH_INBUCKET_PORT $LOCAL_DB_PORT; do
     if port_held_by_other_worktree "$port"; then
         COLLISION=true
         break
@@ -76,8 +80,14 @@ if $COLLISION; then
     FOUND=false
     while [ $CANDIDATE -lt 65500 ]; do
         RANGE_FREE=true
-        for offset in 0 1 2 3 4 5 10; do
-            if lsof -ti :$((CANDIDATE + offset)) >/dev/null 2>&1; then
+        for offset in 0 1 2 3 4 5 6 7 8 9 10; do
+            p=$((CANDIDATE + offset))
+            if lsof -ti :"$p" >/dev/null 2>&1; then
+                RANGE_FREE=false
+                break
+            fi
+            # Also check Docker containers binding to this port
+            if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${p}->"; then
                 RANGE_FREE=false
                 break
             fi
@@ -139,14 +149,17 @@ create_db_container() {
         postgres:16-alpine >/dev/null
 }
 
+DB_OWNED_BY_US=false  # Track whether we started/created the DB (cleanup only stops what we own)
+
 if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
     # Running — check if port mapping matches
-    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | grep -o '[0-9]*$' || true)
+    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)
     if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
         echo "🐘 Local Postgres already running ($DB_CONTAINER on port $LOCAL_DB_PORT)"
     else
         echo "🐘 Postgres container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
         create_db_container
+        DB_OWNED_BY_US=true
     fi
 elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
     # Stopped — check if port mapping matches before starting
@@ -154,13 +167,16 @@ elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep
     if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
         echo "🐘 Starting stopped Postgres container..."
         docker start "$DB_CONTAINER" >/dev/null
+        DB_OWNED_BY_US=true
     else
         echo "🐘 Stopped container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
         create_db_container
+        DB_OWNED_BY_US=true
     fi
 else
     echo "🐘 Creating local Postgres container..."
     create_db_container
+    DB_OWNED_BY_US=true
 fi
 
 # Wait for Postgres to accept connections
@@ -291,22 +307,33 @@ kill_tree() {
     kill "$pid" 2>/dev/null || true
 }
 
+# SIGTERM the tree, wait briefly, then SIGKILL any survivors
+kill_tree_hard() {
+    local pid=$1
+    kill_tree "$pid"
+    sleep 1
+    # Kill any survivors that ignored SIGTERM
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill -9 "$child" 2>/dev/null || true
+    done
+    kill -9 "$pid" 2>/dev/null || true
+}
+
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
-    echo "🛑 Stopping all services..."
-    # Kill only the process trees we spawned
+    echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
+    # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
-        kill_tree "$pid"
+        kill_tree_hard "$pid"
     done
-    # In benchmark mode, keep the DB container alive — a single service crash
-    # shouldn't cascade-kill the database (data persists in named volumes).
-    if ! $BENCHMARK_MODE; then
+    if $DB_OWNED_BY_US; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi
     if command -v supabase &>/dev/null && docker ps &>/dev/null 2>&1; then
         (cd research/supabase && supabase stop 2>/dev/null) || true
     fi
+    [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
 trap cleanup EXIT
@@ -362,12 +389,26 @@ while true; do
             name="${NAMES[$i]}"
             if [ $code -ne 0 ]; then
                 echo ""
-                echo "❌ $name exited with code $code — shutting down all services."
+                echo "❌ $name (PID $pid) exited with code $code — shutting down all services."
+                # Log which services are still alive for traceability
+                for j in "${!PIDS[@]}"; do
+                    other_pid="${PIDS[$j]}"
+                    other_name="${NAMES[$j]}"
+                    if [ "$j" != "$i" ] && [ -n "$other_pid" ]; then
+                        if kill -0 "$other_pid" 2>/dev/null; then
+                            echo "   ├── $other_name (PID $other_pid): still running — will be killed"
+                        else
+                            wait "$other_pid" 2>/dev/null; other_code=$?
+                            echo "   ├── $other_name (PID $other_pid): already dead (code $other_code)"
+                        fi
+                    fi
+                done
                 cleanup
                 rm -rf "$FAIL_DIR"
                 exit $code
             fi
-            # Exited cleanly — remove from tracking
+            # Exited with code 0 — log it and remove from tracking
+            echo "⚠️  $name (PID $pid) exited with code 0 (unexpected for a long-running service)"
             unset "PIDS[$i]"
             unset "NAMES[$i]"
         fi
@@ -378,7 +419,10 @@ while true; do
     for pid in "${PIDS[@]}"; do
         if [ -n "$pid" ]; then remaining=1; break; fi
     done
-    if [ $remaining -eq 0 ]; then break; fi
+    if [ $remaining -eq 0 ]; then
+        echo "⚠️  All services exited (code 0) — nothing left to monitor. Shutting down."
+        break
+    fi
 
     sleep 1
 done

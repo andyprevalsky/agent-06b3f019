@@ -8,7 +8,7 @@
 
 import { Link } from 'react-router-dom';
 import { type BlogPost } from '../types';
-import { formatDate } from '../config';
+import { formatDate } from '../hooks';
 
 interface BlogPostCardProps {
   post: BlogPost;

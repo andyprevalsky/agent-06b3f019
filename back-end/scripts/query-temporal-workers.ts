@@ -16,7 +16,7 @@ const TASK_QUEUES = [
 
 async function queryTemporalWorkers() {
   const address = process.env.TEMPORAL_ADDRESS || 'us-east-1.aws.api.temporal.io:7233';
-  const namespace = process.env.TEMPORAL_NAMESPACE || 'quickstart-navi.lqjlv';
+  const namespace = process.env.TEMPORAL_NAMESPACE || 'rose-labs-us-east-1.tch2n';
   const apiKey = process.env.TEMPORAL_API_KEY;
 
   if (!apiKey) {

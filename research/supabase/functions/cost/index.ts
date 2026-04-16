@@ -26,37 +26,50 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Model pools for Rose variants - sync with research/supabase/functions/completions/index.ts
+// Model pools for Rose variants - source of truth: completions/index.ts MODEL_POOLS
 const MODEL_POOLS: Record<string, string[]> = {
   'rose-1-lite': [
     'google/gemini-3-flash-preview',
     'moonshotai/kimi-k2.5',
   ],
+  // Ultra uses claude_token (claude-sonnet-4-6) first, falls back to same pool as lite
   'rose-1-ultra': [
-    // 'anthropic/claude-opus-4.6',  // Disabled: Anthropic API credits depleted
-    'openai/gpt-5.2',
-    'google/gemini-3-pro-preview',
+    'google/gemini-3-flash-preview',
     'moonshotai/kimi-k2.5',
   ],
-  // Browser automation pool - specialized models for web interaction
-  // browser-use has fixed pricing, yutori/n1 uses OpenRouter
+  // Browser automation pool - completion-based trio racing
   'rose-1-browser-use': [
-    'browser-use', // Fixed: $0.10 input, $0.40 output per 1M tokens
-    'yutori/n1', // Via OpenRouter
-    'openai/gpt-5.2', // Via OpenRouter
+    'browser-use',
+    'yutori/n1',
+    'openai/gpt-5.2',
   ],
 };
 
-// Fixed pricing for models not on OpenRouter (per token).
-// browser-use: $0.10 input, $0.40 output per 1M tokens
+// Fixed pricing for all pool models (per token, sourced from OpenRouter catalog).
+// Having all models here means we never need to call OpenRouter at request time.
 const FIXED_PRICING: Record<string, ResolvedPricing> = {
+  'google/gemini-3-flash-preview': {
+    prompt: 0.50 / 1_000_000,
+    completion: 3.00 / 1_000_000,
+    contextLength: 1_048_576,
+  },
+  'moonshotai/kimi-k2.5': {
+    prompt: 0.38 / 1_000_000,
+    completion: 1.72 / 1_000_000,
+    contextLength: 262_144,
+  },
+  'openai/gpt-5.2': {
+    prompt: 1.75 / 1_000_000,
+    completion: 14.00 / 1_000_000,
+    contextLength: 400_000,
+  },
   'browser-use': {
     prompt: 0.10 / 1_000_000,
     completion: 0.40 / 1_000_000,
     contextLength: 128_000,
   },
-  'moonshotai/kimi-k2.5': {
-    prompt: 0.60 / 1_000_000,
+  'yutori/n1': {
+    prompt: 0.75 / 1_000_000,  // Yutori direct API - not on OpenRouter
     completion: 3.00 / 1_000_000,
     contextLength: 128_000,
   },
@@ -84,20 +97,29 @@ function jsonOk(body: Record<string, unknown>): Response {
   );
 }
 
-/** Fetch model catalog from OpenRouter. */
+/** Fetch model catalog from OpenRouter (with 10s timeout). */
 async function fetchOpenRouterModels(): Promise<OpenRouterModel[]> {
-  const response = await fetch('https://openrouter.ai/api/v1/models', {
-    headers: {
-      'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-      'HTTP-Referer': Deno.env.get('SUPABASE_URL') ?? 'https://rose-benchmark.supabase.co',
-      'X-Title': 'Rose Benchmark Suite',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`OpenRouter API returned ${response.status}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: {
+        'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+        'HTTP-Referer': Deno.env.get('SUPABASE_URL') ?? 'https://rose-benchmark.supabase.co',
+        'X-Title': 'Rose Benchmark Suite',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw new Error(`OpenRouter API returned ${response.status}`);
+    }
+    const data = (await response.json()) as { data?: OpenRouterModel[] };
+    return data.data ?? [];
+  } catch (e) {
+    clearTimeout(timeoutId);
+    throw e;
   }
-  const data = (await response.json()) as { data?: OpenRouterModel[] };
-  return data.data ?? [];
 }
 
 /** Aggregate pricing across a model pool, blending fixed and OpenRouter prices. */
@@ -171,7 +193,9 @@ serve(async (req) => {
       return jsonError(`Model not found: ${modelName}`, 404);
     }
 
-    const catalog = await fetchOpenRouterModels();
+    // Skip OpenRouter fetch if all models in pool have fixed pricing
+    const needsCatalog = pool.some((id) => !FIXED_PRICING[id]);
+    const catalog = needsCatalog ? await fetchOpenRouterModels() : [];
     const pricing = aggregatePricing(pool, catalog);
     if (!pricing) {
       return jsonError('No pricing information available for models in pool', 500);

@@ -3,8 +3,6 @@
 Schemas, type aliases, and data classes used across layers.
 """
 
-from __future__ import annotations
-
 from typing import List, Optional
 
 

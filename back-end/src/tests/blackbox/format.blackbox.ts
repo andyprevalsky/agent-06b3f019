@@ -151,6 +151,7 @@ const INFRA_URL_PATTERNS = [
   'api.openai.com',
   'ip-api.com',
   'supabase.co/realtime',
+  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',

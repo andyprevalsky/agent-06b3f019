@@ -1,6 +1,6 @@
 """Spawn-sub-agents domain types — TypedDicts and type aliases."""
 
-from typing import Any, Dict, List, TypedDict
+from typing import Any, TypedDict
 
 
 class SpawnResult(TypedDict):
@@ -9,4 +9,4 @@ class SpawnResult(TypedDict):
     spawned: int
     completed: int
     failed: int
-    agents: List[Dict[str, Any]]
+    agents: list[dict[str, Any]]

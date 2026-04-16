@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 
-import type { BrowserType } from '@/contexts/IntegrationHandlersContext';
+import type { BrowserType } from '@/features/integration-handlers-context';
 
 import { fetchIntegrationsApi } from '../api';
 import { VALID_BROWSER_TYPES } from '../config';

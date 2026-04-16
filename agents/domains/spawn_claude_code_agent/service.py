@@ -808,7 +808,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             title="Claude Code Started",
             task_id=task_id,
             message=f"Goal: {goal}",
-            status=MessageStatus.FINISHED,
+            status=MessageStatus.IN_PROGRESS,
             action_type="claude_code_started",
             tool_call_id=tool_call_id,
             is_init_message=True,

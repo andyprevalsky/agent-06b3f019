@@ -121,19 +121,56 @@ export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
 export SMOKE_RESEARCH_URL="http://localhost:$((CONDUCTOR_PORT + 3))"
 
 cd "$(git rev-parse --show-toplevel)"
-DISABLE_GMAIL_SYNC=1 bash scripts/run.sh --benchmark 2>&1 | tee .context/deploy-smoke.log &
-RUN_SH_PID=$!
+```
 
+**CRITICAL: Start the DB container BEFORE `run.sh` so that `run.sh` treats it as pre-existing and won't stop it on cleanup.** `run.sh` has an EXIT trap that stops all services it started — including the DB container. By pre-starting the DB, `run.sh` sees it as already running and skips DB cleanup, which prevents the DB from dying if `run.sh` exits for any reason (signal, child process exit, timeout, etc.).
+
+```bash
+# Step 1: Ensure DB is running BEFORE run.sh starts (so run.sh won't own/stop it)
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
+LOCAL_DB_PORT=$((CONDUCTOR_PORT + 10))
+
+if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+  if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+    docker start "$DB_CONTAINER" >/dev/null
+  else
+    docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
+      -p "$LOCAL_DB_PORT:5432" -v "victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}:/var/lib/postgresql/data" \
+      postgres:16-alpine >/dev/null
+    # Wait + push schema + seed for fresh containers
+    for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
+    (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+      DIRECT_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+      npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+    (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+      DIRECT_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+      npx tsx scripts/seed-local.ts)
+  fi
+  for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
+fi
+echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
+```
+
+```bash
+# Step 2: Launch run.sh using the Bash tool's run_in_background parameter.
+# run.sh will detect the DB as already-running and won't stop it on cleanup.
+# Use run_in_background=true for this command:
+DISABLE_GMAIL_SYNC=1 bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
+```
+
+Then, in separate (foreground) Bash calls, wait for each service:
+
+```bash
 # Wait for backend, worker health, and research to be ready
 for i in $(seq 1 60); do curl -s "$SMOKE_BASE_URL/health" > /dev/null 2>&1 && break; sleep 2; done
 for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && break; sleep 2; done
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
-**Teardown helper** (use after Step 5 failures or after Step 6 completes):
+**Teardown helper** (use after Step 5 failures or after Step 6 completes). Note: this does NOT stop the DB — it stays alive for subsequent test runs. Use `scripts/teardown.sh` for full workspace cleanup.
 ```bash
-kill $RUN_SH_PID 2>/dev/null || true
-wait $RUN_SH_PID 2>/dev/null || true
+pkill -f "scripts/run.sh --benchmark" 2>/dev/null || true
+sleep 2
 (cd research/supabase && supabase stop 2>/dev/null) || true
 ```
 
@@ -155,9 +192,12 @@ BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/
 With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
 
 ```bash
-# Run smoke benchmarks against local backend
+# Run smoke benchmarks against local backend.
+# TEMPORAL_TASK_QUEUE must match the queue run.sh's worker listens on.
+# ALLOW_TEMPORAL_CLEANUP=true lets the benchmark pre-flight terminate stale workflows
+# from previous runs on Temporal Cloud (otherwise cleanup is skipped for non-local Temporal).
 cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
+TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
 ```
 
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
@@ -253,18 +293,33 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 
 ---
 
-# HARD GATE: Do NOT enter Phase 2 unless ALL of the following are true:
-# 1. Prettier: 0 formatting changes remaining
-# 2. ESLint: 0 errors
-# 3. TypeScript: 0 errors
-# 4. Structural tests: 100% pass
-# 4a. Code coverage: meets thresholds in .c8rc.json (if back-end/ changed)
-# 5. Blackbox API tests: 100% pass (ALL domains, not just "your" domains)
-# 6. Smoke benchmarks: 100% pass (all 5)
-#
-# If ANY test has ANY failure, you are BLOCKED. Fix it or escalate to the user.
-# "Pre-existing", "not my code", "flaky", "resource contention" = NOT VALID EXCUSES.
-# Merging with failures is a CRITICAL ERROR. Do not do it. Ever.
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║                    HARD GATE — PHASE 2 BLOCKED                     ║
+# ║                                                                    ║
+# ║  Do NOT enter Phase 2 unless ALL of the following are true:        ║
+# ║                                                                    ║
+# ║  1. Prettier: 0 formatting changes remaining                      ║
+# ║  2. ESLint: 0 errors                                              ║
+# ║  3. TypeScript: 0 errors                                          ║
+# ║  4. Structural tests: 100% pass                                   ║
+# ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
+# ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
+# ║  6. Smoke benchmarks: 5/5 pass — ALL FIVE, NO EXCEPTIONS          ║
+# ║                                                                    ║
+# ║  If ANY test has ANY failure, you are BLOCKED.                     ║
+# ║  Fix it or escalate to the user. Do NOT proceed.                   ║
+# ║                                                                    ║
+# ║  INVALID EXCUSES (do NOT use these to justify proceeding):         ║
+# ║  - "Pre-existing" / "not related to my changes"                   ║
+# ║  - "Infrastructure issue" / "flaky" / "resource contention"       ║
+# ║  - "The code changes don't touch agent/Temporal code"             ║
+# ║  - "Expired tokens" (re-run seed script or escalate to user)      ║
+# ║  - "Temporal connectivity" (restart workers, fix it)              ║
+# ║  - "Agents timing out" (investigate and fix)                      ║
+# ║                                                                    ║
+# ║  Merging or creating a PR with known failures is a CRITICAL       ║
+# ║  ERROR. The user has explicitly and repeatedly stated this.        ║
+# ╚══════════════════════════════════════════════════════════════════════╝
 
 # Phase 2: CI/CD Loop
 
@@ -323,18 +378,41 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 9: Wait for code review
 
-Wait for all PR checks to complete:
+**CRITICAL — avoid the stale-check race.** `gh pr checks --watch` watches a single check entry. If CodeRabbit hasn't yet flipped the check to PENDING for your newest push, `--watch` will see the prior SUCCESS from the previous commit and return instantly — you'd proceed to merge on a stale review.
+
+Use this **poll-until-re-armed, then watch** sequence:
 
 ```bash
+# 1. Capture the HEAD SHA you just pushed.
+HEAD_SHA=$(git rev-parse HEAD)
+
+# 2. Poll until the CodeRabbit check is either PENDING (re-armed for HEAD) or
+#    a terminal state whose startedAt is after your push (i.e. it already finished
+#    reviewing the new commit). This guarantees we are not looking at a stale
+#    SUCCESS from a prior commit.
+PUSH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+for i in $(seq 1 40); do  # up to ~10 min at 15s
+  read -r STATE STARTED < <(gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>" \
+    --jq '[.statusCheckRollup[]? | select(.context=="CodeRabbit")][-1] | "\(.state // "NONE") \(.startedAt // "")"')
+  # Re-armed for new commit (PENDING) OR already finished past our push timestamp.
+  if [ "$STATE" = "PENDING" ] || { [ -n "$STARTED" ] && [[ "$STARTED" > "$PUSH_TS" ]]; }; then
+    break
+  fi
+  sleep 15
+done
+
+# 3. Now safe to block on --watch (it will wait for PENDING → terminal).
 gh pr checks <PR_NUMBER> --watch
 ```
 
-This blocks until all checks finish (including CodeRabbit). Once it returns, read reviews from ALL three comment locations:
+This blocks until CodeRabbit actually reviews the current HEAD. Once it returns, read reviews from ALL three comment locations:
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
 gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 ```
+
+Filter reviews/comments by `submitted_at > PUSH_TS` (or `commit_id == HEAD_SHA` for inline comments) so you only act on findings for the newest commit.
 
 ## Step 10: Handle review results
 

@@ -169,7 +169,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-haiku-4.5": {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     "claude-haiku-4-5": {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     # Claude token passthrough — billed to user's Claude subscription, $0 to Rose
-    "claude-opus-4-6-claude": {"input_cents_per_1k": 0, "output_cents_per_1k": 0},
+    "claude-opus-4-7-claude": {"input_cents_per_1k": 0, "output_cents_per_1k": 0},
     "claude-sonnet-4-6-claude": {"input_cents_per_1k": 0, "output_cents_per_1k": 0},
 }
 

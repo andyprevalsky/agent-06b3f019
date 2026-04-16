@@ -9,7 +9,7 @@
  * If not in Electron, shows "Desktop Only" fallback.
  */
 
-import type { BrowserType, BrowserInfo } from '@/contexts/IntegrationHandlersContext';
+import type { BrowserType, BrowserInfo } from '@/features/integration-handlers-context';
 import { Button } from '@/components/ui/button';
 
 import BrowserIcon from './BrowserIcon';

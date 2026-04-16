@@ -55,7 +55,6 @@
  *
  * Usage:
  *   npx tsx src/tests/blackbox/claude-code.blackbox.ts
- *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/claude-code.blackbox.ts
  */
 
 import { config } from 'dotenv';
@@ -65,7 +64,7 @@ config();
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
-const SMOKE_ENABLED = process.env.BLACKBOX_SMOKE === '1';
+// Smoke tests always enabled — E2B sandbox validation runs by default.
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -126,6 +125,7 @@ const ctx: TestContext = { captureAvailable: false };
 
 const FAKE_UUID = '00000000-0000-0000-0000-000000000000';
 const FAKE_UUID_2 = '11111111-1111-1111-1111-111111111111';
+const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 async function request(
   url: string,
@@ -192,6 +192,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'ip-api.com',
   'supabase.co/realtime',
+  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
@@ -756,23 +757,27 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
 // These tests create real E2B sandboxes (expensive, slow). Gated behind BLACKBOX_SMOKE=1.
 
 /**
- * Smoke test: create a real Claude Code session and verify it gets past
- * the trust dialog. Connects to the WebSocket and waits for output that
- * indicates Claude Code is running (not stuck on a prompt).
+ * Smoke test: create a real Claude Code session, ask "what is 2+2?",
+ * and verify the output contains "4". This validates the full pipeline:
+ * sandbox creation, credential injection, trust dialog dismissal,
+ * Claude Code authentication, LLM round-trip, and WebSocket streaming.
  *
  * Fails if:
  *  - Session creation returns non-200
  *  - WebSocket never connects
- *  - Output never progresses past the trust dialog within 60s
+ *  - Claude Code output never contains "4" within 90s
  */
-async function testSmoke_trustDialogDismissed() {
-  // 1. Create a real session with a trivial goal
+async function testSmoke_claudeCodeAnswersQuestion() {
+  // 1. Create a real session with a simple math question.
+  // Pass user_id so the backend resolves per-user Claude Code credentials
+  // (ANTHROPIC_API_KEY fallback uses a stale key that won't authenticate).
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
       agent_id: FAKE_UUID,
-      goal: 'echo "hello from sandbox" && echo DONE',
+      goal: 'What is 2+2? Reply with just the number.',
+      user_id: DEV_USER_ID,
     }),
   });
   assertStatus(res.status, 200, res.data);
@@ -784,10 +789,16 @@ async function testSmoke_trustDialogDismissed() {
 
   const taskId = body.task_id;
 
-  // 2. Connect to WebSocket and collect output
+  // 2. Connect to WebSocket and wait for Claude Code to answer
   let wsOutput = '';
   let wsConnected = false;
   let wsError: string | null = null;
+
+  // eslint-disable-next-line no-control-regex
+  const ANSI_CURSOR_FWD = /\x1b\[\d*C/g;
+  const ANSI_OTHER =
+    // eslint-disable-next-line no-control-regex
+    /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
 
   const ws = new (await import('ws')).default(body.ws_url);
 
@@ -796,11 +807,11 @@ async function testSmoke_trustDialogDismissed() {
       ws.close();
       reject(
         new Error(
-          `Timed out after 60s waiting for Claude Code to start. ` +
-            `Output so far (${wsOutput.length} chars): ${wsOutput.slice(-500)}`
+          `Timed out after 90s waiting for Claude Code to answer "2+2". ` +
+            `Output so far (${wsOutput.length} chars): ${wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '').slice(-500)}`
         )
       );
-    }, 60_000);
+    }, 90_000);
 
     ws.on('open', () => {
       wsConnected = true;
@@ -812,35 +823,10 @@ async function testSmoke_trustDialogDismissed() {
         if (msg.type === 'stdout' && msg.data) {
           wsOutput += msg.data;
         }
-        if (msg.type === 'trust_dismissed') {
-          // ws-server.mjs broadcasts this when it auto-dismisses the dialog
-          clearTimeout(timeout);
-          ws.close();
-          resolve('trust_dismissed');
-          return;
-        }
-        // Strip ANSI: replace cursor-forward (\x1b[<n>C) with space, then
-        // remove remaining escape sequences.
-        // eslint-disable-next-line no-control-regex
-        const ansiCursorFwd = /\x1b\[\d*C/g;
-        const ansiOther =
-          // eslint-disable-next-line no-control-regex
-          /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
-        const clean = wsOutput.replace(ansiCursorFwd, ' ').replace(ansiOther, '');
-        // Claude Code is past the trust dialog if we see post-dialog content:
-        // - The startup banner (model/context info like "context", "pricing")
-        // - Tool execution (tool names followed by parens)
-        // - The goal output ("hello from sandbox")
-        // Trust dialog text stays in the buffer, so we detect POST-dialog content.
-        const pastDialog =
-          clean.includes('hello from sandbox') ||
-          clean.includes('DONE') ||
-          clean.includes('context') || // "1M context" from startup banner
-          clean.includes('pricing') || // "same pricing" from startup banner
-          clean.includes('Bash(') || // tool execution
-          clean.includes('Read(') ||
-          clean.includes('Write(');
-        if (pastDialog) {
+        // Strip ANSI codes to get clean text
+        const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
+        // Check if Claude Code has answered with "4"
+        if (clean.includes('4')) {
           clearTimeout(timeout);
           ws.close();
           resolve(clean);
@@ -863,10 +849,10 @@ async function testSmoke_trustDialogDismissed() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
-    // If we got here, we detected post-trust-dialog content (startup banner,
-    // tool execution, or the trust_dismissed event from ws-server.mjs).
-    // The trust dialog text stays in the buffer — that's expected.
-    assert(finalOutput.length > 0, `No output received from Claude Code sandbox`);
+    assert(
+      finalOutput.includes('4'),
+      `Claude Code output does not contain "4": ${finalOutput.slice(-300)}`
+    );
   } finally {
     // 3. Clean up: close the session
     try {
@@ -1068,27 +1054,21 @@ async function runAll() {
     );
   }
 
-  // Phase 4: Smoke tests (expensive, require real E2B sandbox)
+  // Phase 4: Smoke tests (real E2B sandbox)
+  const smokeTests = [
+    {
+      name: 'smoke -- Claude Code answers 2+2 (real E2B sandbox)',
+      fn: testSmoke_claudeCodeAnswersQuestion,
+    },
+  ];
+  console.log(`\nRunning ${smokeTests.length} smoke tests...`);
   const smokeResults: TestResult[] = [];
-  if (SMOKE_ENABLED) {
-    const smokeTests = [
-      {
-        name: 'smoke -- trust dialog auto-dismissed (real E2B sandbox)',
-        fn: testSmoke_trustDialogDismissed,
-      },
-    ];
-    console.log(`\nRunning ${smokeTests.length} smoke tests (BLACKBOX_SMOKE=1)...`);
-    for (const test of smokeTests) {
-      const result = await runTest(test.name, test.fn);
-      smokeResults.push(result);
-      const icon = result.passed ? '  PASS' : '  FAIL';
-      console.log(
-        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-      );
-    }
-  } else {
+  for (const test of smokeTests) {
+    const result = await runTest(test.name, test.fn);
+    smokeResults.push(result);
+    const icon = result.passed ? '  PASS' : '  FAIL';
     console.log(
-      '\n  [info] Smoke tests disabled (BLACKBOX_SMOKE!=1) -- skipping E2B sandbox tests'
+      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
     );
   }
 

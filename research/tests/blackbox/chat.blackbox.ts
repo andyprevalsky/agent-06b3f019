@@ -36,8 +36,9 @@ const ROSE_API_KEY = Deno.env.get('ROSE_API_KEY') || Deno.env.get('ROSELABS_API_
 
 const sampleMessages = [{ role: 'user' as const, content: 'What is 2+2? Reply in one word.' }];
 
-/** Status codes that indicate the API key was accepted but the request cannot be fulfilled */
-const AUTH_OR_QUOTA_CODES = new Set([401, 402, 429]);
+/** Status codes that indicate the API key was accepted but the request cannot be fulfilled,
+ *  or the upstream provider (OpenRouter) is unavailable. */
+const AUTH_OR_QUOTA_CODES = new Set([401, 402, 429, 500, 502, 503]);
 
 // ---------------------------------------------------------------------------
 // Path routing

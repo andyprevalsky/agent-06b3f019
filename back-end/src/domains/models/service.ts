@@ -11,6 +11,7 @@ import {
   FEATURED_MODELS,
 } from './config';
 import { createLogger } from '../../providers/logger';
+import { retryWithBackoff } from '../../providers/retry';
 
 const log = createLogger('Models');
 
@@ -229,18 +230,23 @@ async function fetchAndCacheModels(): Promise<{
   cached: boolean;
   count?: number;
 }> {
-  const response = await fetch('https://openrouter.ai/api/v1/models', {
-    signal: AbortSignal.timeout(15_000),
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      'HTTP-Referer': BACKEND_URL,
-      'X-Title': 'Rose AI Agent',
+  const response = await retryWithBackoff(
+    async () => {
+      const res = await fetch('https://openrouter.ai/api/v1/models', {
+        signal: AbortSignal.timeout(15_000),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'HTTP-Referer': BACKEND_URL,
+          'X-Title': 'Rose AI Agent',
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`OpenRouter API returned ${res.status}: ${res.statusText}`);
+      }
+      return res;
     },
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter API returned ${response.status}: ${response.statusText}`);
-  }
+    { maxRetries: 3, component: 'Models' }
+  );
 
   const data = (await response.json()) as { data?: OpenRouterModel[] };
   const allModels: OpenRouterModel[] = data.data ?? [];

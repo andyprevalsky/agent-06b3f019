@@ -1057,7 +1057,7 @@ function testSpawnSubAgentDeepNesting() {
 function testApplyNativeToolMode() {
   console.log('\n=== Test: applyAnthropicToolConfig — native tool mode from response_format ===');
 
-  const body = { model: 'claude-opus-4-6', messages: [], max_tokens: 4096 };
+  const body = { model: 'claude-opus-4-7', messages: [], max_tokens: 4096 };
   const result = applyAnthropicToolConfig(body, FULL_EXECUTE_PHASE_SCHEMA, true);
 
   assert(result === true, 'Should return true for native tool mode');
@@ -1071,7 +1071,7 @@ function testApplyNativeToolMode() {
 function testApplyExplicitTools() {
   console.log('\n=== Test: applyAnthropicToolConfig — explicit OpenAI-format tools ===');
 
-  const body = { model: 'claude-opus-4-6', messages: [], max_tokens: 4096 };
+  const body = { model: 'claude-opus-4-7', messages: [], max_tokens: 4096 };
   const explicitTools = [
     { function: { name: 'get_weather', description: 'Get weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } } },
     { name: 'calculator', description: 'Do math', input_schema: { type: 'object', properties: { expr: { type: 'string' } } } }
@@ -1157,11 +1157,11 @@ function testApplyStreamingVsNonStreamingParity() {
   console.log('\n=== Test: Streaming and non-streaming produce identical tool config ===');
 
   // Simulate streaming path
-  const streamBody = { model: 'claude-opus-4-6', messages: [], max_tokens: 4096, stream: true };
+  const streamBody = { model: 'claude-opus-4-7', messages: [], max_tokens: 4096, stream: true };
   const streamNative = applyAnthropicToolConfig(streamBody, FULL_EXECUTE_PHASE_SCHEMA, true);
 
   // Simulate non-streaming path
-  const nonStreamBody = { model: 'claude-opus-4-6', messages: [], max_tokens: 4096 };
+  const nonStreamBody = { model: 'claude-opus-4-7', messages: [], max_tokens: 4096 };
   const nonStreamNative = applyAnthropicToolConfig(nonStreamBody, FULL_EXECUTE_PHASE_SCHEMA, true);
 
   assert(streamNative === nonStreamNative, 'Both should return same nativeToolMode');

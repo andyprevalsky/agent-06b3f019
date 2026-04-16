@@ -4,7 +4,7 @@ Schemas, type aliases, and data structures.
 Imports: external packages only.
 """
 
-from typing import Any, Awaitable, Callable, Optional, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 
 # Type alias for execute_activity callable
 ExecuteActivityCallable = Callable[..., Awaitable[Any]]

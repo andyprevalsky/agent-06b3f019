@@ -1,15 +1,20 @@
+// Source of truth: research/supabase/functions/completions/index.ts MODEL_POOLS
+// Keep in sync — completions endpoint is the actual routing engine.
 export const ROSE_MODEL_POOLS = {
   'rose-1-lite': [
-    'moonshotai/kimi-k2-0905',
-    'openai/gpt-5.2',
-    'google/gemini-2.5-flash',
-    'x-ai/grok-4-fast',
-  ],
-  'rose-1-ultra': [
-    'anthropic/claude-opus-4.6',
-    'openai/gpt-5.2',
-    'google/gemini-3-pro-preview',
+    'google/gemini-3-flash-preview',
     'moonshotai/kimi-k2.5',
+  ],
+  // Ultra uses claude_token (claude-sonnet-4-6) first, falls back to same pool as lite
+  'rose-1-ultra': [
+    'google/gemini-3-flash-preview',
+    'moonshotai/kimi-k2.5',
+  ],
+  // Browser automation pool - completion-based trio racing
+  'rose-1-browser-use': [
+    'browser-use',
+    'yutori/n1',
+    'openai/gpt-5.2',
   ],
   // Cerebras-powered hyper model - direct API calls for ultra-fast inference
   'rose-hyper': [
@@ -21,6 +26,7 @@ export const ROSE_MODEL_POOLS = {
 export const ROSE_ALIAS_TO_POOL: Record<string, keyof typeof ROSE_MODEL_POOLS> = {
   'rose-labs/rose-1-lite': 'rose-1-lite',
   'rose-labs/rose-1-ultra': 'rose-1-ultra',
+  'rose-labs/rose-1-browser-use': 'rose-1-browser-use',
   'rose-labs/rose-hyper': 'rose-hyper',
 };
 
