@@ -352,7 +352,8 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 Create a PR targeting `main`:
 
 ```bash
-gh pr create --title "<concise title>" --body "$(cat <<'EOF'
+PR_TITLE="<concise title>"
+gh pr create --title "$PR_TITLE" --body "$(cat <<'EOF'
 ## Summary
 <1-3 bullet points describing the changes>
 
@@ -374,7 +375,26 @@ EOF
 )"
 ```
 
-If a PR already exists for this branch, skip creation and use the existing one.
+If a PR already exists for this branch, skip creation and read its title:
+```bash
+PR_TITLE=$(gh pr view --json title --jq '.title')
+```
+
+**Persist the PR title to the Conductor workspace (hard record bound to the worktree):**
+
+```bash
+# Escape single quotes for SQL
+ESCAPED_TITLE=$(printf "%s" "$PR_TITLE" | sed "s/'/''/g")
+sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
+  "UPDATE workspaces SET pr_title = '$ESCAPED_TITLE', pr_title_locked = 1 WHERE directory_name = '$(basename "$PWD")'"
+```
+
+`pr_title_locked = 1` prevents the auto-sync logic from overwriting it with the branch name. From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
+
+```bash
+PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
+  "SELECT pr_title FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
+```
 
 ## Step 9: Wait for code review
 
