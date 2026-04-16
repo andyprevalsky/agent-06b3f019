@@ -32,7 +32,7 @@ export class TestClient {
   constructor(baseUrl?: string) {
     this.baseUrl = baseUrl ||
       Deno.env.get('BASE_URL') ||
-      'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1';
+      `http://localhost:${Deno.env.get('RESEARCH_PORT') || '54321'}/functions/v1`;
   }
 
   async request(path: string, options: RequestOptions = {}): Promise<TestResponse> {

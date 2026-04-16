@@ -4,8 +4,6 @@ Schemas, type aliases, and data structures.
 Imports: external packages only.
 """
 
-from __future__ import annotations
-
 from typing import Any, Awaitable, Callable, TypedDict
 
 # Type alias for execute_activity callable

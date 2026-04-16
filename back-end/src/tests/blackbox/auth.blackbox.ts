@@ -701,8 +701,10 @@ async function testBoundary_sendOtpTwilioCall() {
 
   // Assert the outbound call was captured regardless of Twilio's response status.
   // Even if Twilio rate-limits us (400 "Max send attempts"), the call params are still recorded.
-  const calls = await readCapturesAfter(cursor);
-  assert(calls.length === 1, `Expected exactly 1 outbound call, got ${calls.length}`);
+  // Filter to Twilio Verify calls only — other domain tests running concurrently may produce captures.
+  const allCalls = await readCapturesAfter(cursor);
+  const calls = allCalls.filter((c) => c.url.includes('verify.twilio.com'));
+  assert(calls.length === 1, `Expected exactly 1 Twilio Verify call, got ${calls.length} (${allCalls.length} total captures)`);
 
   const call = calls[0];
 

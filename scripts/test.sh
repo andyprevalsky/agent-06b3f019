@@ -5,7 +5,8 @@ set -euo pipefail
 #
 # Usage:
 #   bash scripts/test.sh                              # all offline tests
-#   bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks
+#   bash scripts/test.sh --smoke                       # + smoke benchmarks (auto-derives port from CONDUCTOR_PORT)
+#   bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks (explicit port)
 #   bash scripts/test.sh agents                        # single repo
 #   bash scripts/test.sh agents web-search             # single domain
 #   bash scripts/test.sh back-end                      # backend tests only
@@ -58,15 +59,21 @@ if $LIST; then
   echo ""
   echo "  front-end"
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
+  echo "    (semantic — requires --smoke):"
+  (cd front-end && bash scripts/run-semantic-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo ""
   echo "  research"
-  echo "    deno-tests  (requires Deno + running Supabase)"
+  (cd research && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   exit 0
 fi
 
 # ── Smoke validation ──
+# Auto-derive port from CONDUCTOR_PORT if --port not explicitly passed
+if $SMOKE && [ -z "$PORT" ] && [ -n "${CONDUCTOR_PORT:-}" ]; then
+  PORT="$CONDUCTOR_PORT"
+fi
 if $SMOKE && [ -z "$PORT" ]; then
-  echo "ERROR: --port=N is required when using --smoke."
+  echo "ERROR: --port=N is required when using --smoke (or set CONDUCTOR_PORT)."
   echo "Example: bash scripts/test.sh --smoke --port=3001"
   exit 1
 fi
@@ -108,6 +115,44 @@ run_suite() {
   fi
 }
 
+# Launch a suite in the background — collect with collect_bg_suites later
+BG_PIDS=()
+BG_NAMES=()
+BG_LOGS=()
+
+bg_suite() {
+  local name="$1"
+  shift
+  local logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
+
+  if $VERBOSE; then
+    # Use pipefail so tee doesn't mask the command's exit code
+    bash -c 'set -o pipefail; "$@" 2>&1 | tee "'"$logfile"'"' _ "$@" &
+  else
+    "$@" > "$logfile" 2>&1 &
+  fi
+  BG_PIDS+=($!)
+  BG_NAMES+=("$name")
+  BG_LOGS+=("$logfile")
+}
+
+collect_bg_suites() {
+  for i in "${!BG_PIDS[@]}"; do
+    if wait "${BG_PIDS[$i]}"; then
+      SUITE_NAMES+=("${BG_NAMES[$i]}")
+      SUITE_STATUSES+=("pass")
+      SUITE_LOGS+=("${BG_LOGS[$i]}")
+    else
+      SUITE_NAMES+=("${BG_NAMES[$i]}")
+      SUITE_STATUSES+=("fail")
+      SUITE_LOGS+=("${BG_LOGS[$i]}")
+    fi
+  done
+  BG_PIDS=()
+  BG_NAMES=()
+  BG_LOGS=()
+}
+
 # ── Run suites ──
 
 should_run() {
@@ -135,45 +180,77 @@ if should_run "mac-app"; then
   BUILD_LOGS+=("$MAC_BUILD_LOG")
 fi
 
-# ── Blackbox tests (sequential) ──
+# ── Blackbox tests (parallel) ──
 
 if should_run "agents"; then
   if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
-    run_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
+    bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
   else
-    run_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
+    bg_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
   fi
 fi
 
 if should_run "back-end"; then
-  run_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+  bg_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
 
   if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
-    run_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+    bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
-    run_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
+    bg_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 
 if should_run "front-end"; then
   if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
-    run_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+    bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
-    run_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
+    bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 
 if should_run "research"; then
-  if command -v deno &>/dev/null; then
-    run_suite "Research Deno Tests" bash -c "cd research && bash run-tests.sh"
+  if ! command -v deno &>/dev/null && ! [ -x "${DENO_BIN:-$HOME/.deno/bin/deno}" ]; then
+    echo "ERROR: Deno is not installed. Research blackbox tests require Deno."
+    echo "  Install: curl -fsSL https://deno.land/install.sh | sh"
+    exit 1
+  fi
+
+  # Derive RESEARCH_PORT from --port if available (port + 3 matches run.sh fan-out)
+  RESEARCH_PORT_EXPORT=""
+  if [ -n "$PORT" ]; then
+    RESEARCH_PORT_EXPORT="RESEARCH_PORT=$((PORT + 3))"
+  fi
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "research" ]; then
+    bg_suite "Research Blackbox ($DOMAIN)" bash -c "cd research && $RESEARCH_PORT_EXPORT bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
-    echo "  ⚠️  Skipping research tests (Deno not installed)"
+    bg_suite "Research Blackbox" bash -c "cd research && $RESEARCH_PORT_EXPORT bash scripts/run-blackbox-tests.sh"
   fi
 fi
 
-# ── Smoke benchmarks (only if --smoke --port=N) ──
+# ── Wait for all blackbox suites ──
+collect_bg_suites
+
+# ── Smoke tests (parallel, only if --smoke --port=N) ──
 if $SMOKE; then
-  run_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
+  # Derive TEMPORAL_TASK_QUEUE from CONDUCTOR_WORKSPACE_NAME so the benchmark's
+  # stale-workflow cleanup targets the correct Temporal Cloud task queue.
+  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME:-local}"
+  bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
+
+  # Frontend semantic tests (Chrome CDP, requires running frontend)
+  SEMANTIC_BACKEND_PORT="$PORT"
+  SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
+  if curl -s "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
+    for f in front-end/src/tests/semantic/*.semantic.md; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f" .semantic.md)
+      bg_suite "Frontend Semantic ($name)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh $name"
+    done
+  else
+    echo "  ℹ Skipping semantic tests — frontend not running on port $SEMANTIC_FRONTEND_PORT"
+  fi
+
+  collect_bg_suites
 fi
 
 # ── Collect build results (waited until blackbox tests finish) ──

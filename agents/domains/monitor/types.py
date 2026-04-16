@@ -1,7 +1,5 @@
 """Monitor domain types — type aliases and typed dictionaries."""
 
-from __future__ import annotations
-
 from typing import Any, Awaitable, Callable, Dict, List, TypedDict
 
 # Type alias for the execute_activity callable passed through from workflows

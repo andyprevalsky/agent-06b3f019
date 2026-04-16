@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
+import { useIntegrationHandlers } from '@/features/integration-handlers-context';
 import { Check, Loader2 } from 'lucide-react';
 import { getStoredSession } from '@/lib/supabase';
 

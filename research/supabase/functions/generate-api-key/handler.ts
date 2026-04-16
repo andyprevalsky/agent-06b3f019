@@ -77,8 +77,9 @@ export function createHandler(
         );
       }
 
-      // Parse request body
-      const { name } = await req.json().catch(() => ({ name: null }));
+      // Parse request body (handles empty body, null, and non-JSON gracefully)
+      const body = await req.json().catch(() => null);
+      const name = body?.name ?? null;
 
       // Generate 32-character API key
       const apiKey = crypto.randomUUID().replace(/-/g, '');

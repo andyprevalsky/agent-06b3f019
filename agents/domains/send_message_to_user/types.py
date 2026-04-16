@@ -3,8 +3,6 @@
 Schemas, TypedDicts, and type aliases used across all layers.
 """
 
-from __future__ import annotations
-
 from typing import Any, TypedDict
 
 

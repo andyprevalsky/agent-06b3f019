@@ -11,6 +11,7 @@ import {
   FEATURED_MODELS,
 } from './config';
 import { createLogger } from '../../providers/logger';
+import { retryWithBackoff } from '../../providers/retry';
 
 const log = createLogger('Models');
 
@@ -207,10 +208,9 @@ export async function listModels(): Promise<{
     return { models: cached, cached: true };
   }
 
-  let response: Response | undefined;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      response = await fetch('https://openrouter.ai/api/v1/models', {
+  const response = await retryWithBackoff(
+    async () => {
+      const res = await fetch('https://openrouter.ai/api/v1/models', {
         signal: AbortSignal.timeout(15_000),
         headers: {
           Authorization: `Bearer ${OPENROUTER_API_KEY}`,
@@ -218,18 +218,13 @@ export async function listModels(): Promise<{
           'X-Title': 'Rose AI Agent',
         },
       });
-      if (response.ok) break;
-    } catch (err) {
-      if (attempt === 2) throw err;
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-    }
-  }
-
-  if (response === undefined || !response.ok) {
-    const status = response?.status ?? 'unknown';
-    const statusText = response?.statusText ?? 'no response';
-    throw new Error(`OpenRouter API returned ${status}: ${statusText}`);
-  }
+      if (!res.ok) {
+        throw new Error(`OpenRouter API returned ${res.status}: ${res.statusText}`);
+      }
+      return res;
+    },
+    { maxRetries: 3, component: 'Models' }
+  );
 
   const data = (await response.json()) as { data?: OpenRouterModel[] };
   const allModels: OpenRouterModel[] = data.data ?? [];

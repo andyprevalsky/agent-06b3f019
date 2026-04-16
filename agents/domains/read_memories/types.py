@@ -1,7 +1,5 @@
 """Read Memories domain types — schemas, type aliases, and typed dicts."""
 
-from __future__ import annotations
-
 from typing import Any, Awaitable, Callable, Dict, List, TypedDict
 
 # Type alias for execute_activity callable used by tool managers

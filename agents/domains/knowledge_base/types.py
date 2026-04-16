@@ -1,7 +1,5 @@
 """Type definitions for the knowledge-base domain."""
 
-from __future__ import annotations
-
 from typing import Any, Dict, List, Optional, TypedDict
 
 

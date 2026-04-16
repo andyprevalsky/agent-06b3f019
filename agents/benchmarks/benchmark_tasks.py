@@ -31,10 +31,32 @@ class BenchmarkTask:
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
 
 
+# Smoke test timeout caps — keep these as low as practical.
+# If smoke tests hit these limits, diagnose and fix the bottleneck first;
+# only raise limits when the underlying latency is genuinely irreducible.
+_SMOKE_TIMEOUT_CAPS: dict[str, int] = {
+    "chat-mode": 120,
+    "spawn-sub-agents": 300,
+    "parallel-tool-calls": 300,
+    "claude-code-agent": 300,
+    "browser-smoke": 300,
+}
+
+
 def _load_tasks() -> List[BenchmarkTask]:
     with open(_TASKS_FILE) as f:
         raw = json.load(f)
-    return [BenchmarkTask(**t) for t in raw]
+    tasks = [BenchmarkTask(**t) for t in raw]
+    for t in tasks:
+        if t.name in _SMOKE_TIMEOUT_CAPS:
+            cap = _SMOKE_TIMEOUT_CAPS[t.name]
+            if t.timeout_seconds > cap:
+                raise ValueError(
+                    f"Smoke test '{t.name}' timeout_seconds={t.timeout_seconds} exceeds "
+                    f"immutable cap of {cap}s. Do NOT increase the timeout — speed up "
+                    f"the underlying code instead."
+                )
+    return tasks
 
 
 _cached_tasks: Optional[List[BenchmarkTask]] = None

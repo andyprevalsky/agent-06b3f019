@@ -137,6 +137,9 @@ async def run_agent(  # noqa: C901
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
+    verifier_plateau_count = 0  # Track consecutive verifier calls with same score
+    last_verifier_score: Optional[float] = None  # Last verifier score for plateau detection
+    VERIFIER_PLATEAU_LIMIT = 3  # Exit after N consecutive identical verifier scores (> 0.0)
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -889,6 +892,33 @@ async def run_agent(  # noqa: C901
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
+                    return {
+                        "status": "completed",
+                        "context": context,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "token_count": token_count,
+                        "context_size": context_size,
+                        "message": v_reasoning,
+                        "score": score,
+                        "structured_response": structured_response,
+                    }
+
+                # Plateau detection: if verifier keeps returning the same score,
+                # the agent is stuck and can't improve further. Accept the result
+                # to avoid burning tokens in an infinite retry loop.
+                if last_verifier_score is not None and abs(score - last_verifier_score) < 0.01:
+                    verifier_plateau_count += 1
+                else:
+                    verifier_plateau_count = 1  # Reset on score change (count current as first)
+                last_verifier_score = score
+
+                if verifier_plateau_count >= VERIFIER_PLATEAU_LIMIT and score > 0.0:
+                    logger.warning(
+                        f"Verifier plateau: score stuck at {score * 100:.0f}% for "
+                        f"{verifier_plateau_count} consecutive attempts — accepting as complete"
+                    )
+                    _log_cache_summary("completed-plateau")
                     return {
                         "status": "completed",
                         "context": context,

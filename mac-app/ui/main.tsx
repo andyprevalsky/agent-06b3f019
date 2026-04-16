@@ -3,7 +3,7 @@ import ElectronApp from './ElectronApp';
 import UpdateIndicator from './UpdateIndicator';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
-import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext';
+import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
 import './fonts.css';
 import '@/index.css';
