@@ -378,18 +378,41 @@ If a PR already exists for this branch, skip creation and use the existing one.
 
 ## Step 9: Wait for code review
 
-Wait for all PR checks to complete:
+**CRITICAL — avoid the stale-check race.** `gh pr checks --watch` watches a single check entry. If CodeRabbit hasn't yet flipped the check to PENDING for your newest push, `--watch` will see the prior SUCCESS from the previous commit and return instantly — you'd proceed to merge on a stale review.
+
+Use this **poll-until-re-armed, then watch** sequence:
 
 ```bash
+# 1. Capture the HEAD SHA you just pushed.
+HEAD_SHA=$(git rev-parse HEAD)
+
+# 2. Poll until the CodeRabbit check is either PENDING (re-armed for HEAD) or
+#    a terminal state whose startedAt is after your push (i.e. it already finished
+#    reviewing the new commit). This guarantees we are not looking at a stale
+#    SUCCESS from a prior commit.
+PUSH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+for i in $(seq 1 40); do  # up to ~10 min at 15s
+  read -r STATE STARTED < <(gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>" \
+    --jq '[.statusCheckRollup[]? | select(.context=="CodeRabbit")][-1] | "\(.state // "NONE") \(.startedAt // "")"')
+  # Re-armed for new commit (PENDING) OR already finished past our push timestamp.
+  if [ "$STATE" = "PENDING" ] || { [ -n "$STARTED" ] && [[ "$STARTED" > "$PUSH_TS" ]]; }; then
+    break
+  fi
+  sleep 15
+done
+
+# 3. Now safe to block on --watch (it will wait for PENDING → terminal).
 gh pr checks <PR_NUMBER> --watch
 ```
 
-This blocks until all checks finish (including CodeRabbit). Once it returns, read reviews from ALL three comment locations:
+This blocks until CodeRabbit actually reviews the current HEAD. Once it returns, read reviews from ALL three comment locations:
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
 gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 ```
+
+Filter reviews/comments by `submitted_at > PUSH_TS` (or `commit_id == HEAD_SHA` for inline comments) so you only act on findings for the newest commit.
 
 ## Step 10: Handle review results
 
