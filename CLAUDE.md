@@ -86,7 +86,7 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 4. **Zod schema changes require approval** - Propose changes before implementing
 
-5. **Defensive fixes are a red flag** - Fix root causes, not symptoms
+5. **Follow RCA methodology for every bug** - Before diagnosing any bug, read `docs/root-cause-analysis.md` and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, and never rationalize a failure as "pre-existing"
 
 6. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
 
@@ -117,7 +117,7 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 15. **ALL test failures must be fixed — no exceptions** - Never rationalize test failures as "pre-existing", "not related to my changes", or "infrastructure issues." This applies to EVERY test tier: Prettier, ESLint, TypeScript, structural tests, coverage, blackbox tests, AND smoke benchmarks. If a test fails, you MUST fix it before proceeding. Do NOT skip, do NOT rationalize, do NOT merge with known failures. If smoke benchmarks fail due to expired tokens, fix the tokens. If they fail due to Temporal issues, fix Temporal. If they fail due to slow LLM responses, investigate and fix timeouts. "Infrastructure issue" is a diagnosis, not an excuse to skip. The local DB (Docker Postgres) must be running for blackbox tests — `run-blackbox-tests.sh` auto-detects the container via `CONDUCTOR_PORT`/`CONDUCTOR_WORKSPACE_NAME`. If the container isn't running, start it: `docker start victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}`.
 
-16. **Verify root causes before fixing** - When you diagnose an issue, confirm it is actually the root cause before writing a fix. Reproduce the problem, trace the execution path, and prove the causal link between the suspected cause and the observed symptom. A plausible theory is not enough — if you can't demonstrate that changing X will fix Y, keep investigating. Fixing the wrong thing wastes time and leaves the real bug in place.
+16. **Bug diagnosis guidelines** - When diagnosing issues found while running any tests, follow `docs/root-cause-analysis.md` exactly. Gather evidence first, trace the critical path, classify the failure, and state what/where/why/proof before writing any fix.
 
 ## Plans
 
