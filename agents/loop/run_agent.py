@@ -137,9 +137,6 @@ async def run_agent(  # noqa: C901
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
-    verifier_plateau_count = 0  # Track consecutive verifier calls with same score
-    last_verifier_score: Optional[float] = None  # Last verifier score for plateau detection
-    VERIFIER_PLATEAU_LIMIT = 3  # Exit after N consecutive identical verifier scores (> 0.0)
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -636,16 +633,20 @@ async def run_agent(  # noqa: C901
 
         # 10. Persist assistant message (including tool-only declaration turns)
         assistant_metadata = {"tool_calls": assistant_tool_calls} if assistant_tool_calls else None
-        if (response_text or assistant_tool_calls) and post_message:
-            await post_message(response_text, "ASSISTANT", assistant_metadata)
-            new_assistant_msg = {
-                "role": "ASSISTANT",
-                "text": response_text,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            if assistant_metadata:
-                new_assistant_msg["metadata"] = assistant_metadata
-            context.append(new_assistant_msg)
+        if response_text or assistant_tool_calls:
+            if post_message:
+                await post_message(response_text, "ASSISTANT", assistant_metadata)
+            # When no poll_messages (explore/browser agents in activities, or
+            # fully in-memory callers with no post_message), locally append so
+            # subsequent TOOL results have their declaring assistant row and
+            # the LLM sees its own prior responses.
+            if not poll_messages:
+                context.append({
+                    "role": "ASSISTANT",
+                    "text": response_text or "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "metadata": assistant_metadata or {},
+                })
 
         # 11. Execute tool calls (tool_calls is always List[dict] at this point)
         # Execute regular tools in parallel
@@ -689,10 +690,12 @@ async def run_agent(  # noqa: C901
                                 "subAgentId": task_id,
                             },
                         )
-                    context.append(
-                        {
+                    # When no poll_messages, locally append error so agent sees it
+                    # (omit subAgentId so convert_context_to_messages doesn't filter it)
+                    if not poll_messages:
+                        context.append({
                             "role": "TOOL",
-                            "text": f"Error executing {tool_name}: {str(error)}",
+                            "text": f"Error: {error}",
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
@@ -700,8 +703,7 @@ async def run_agent(  # noqa: C901
                                 "toolStatus": "ERROR",
                                 "error": True,
                             },
-                        }
-                    )
+                        })
                     continue
 
                 # Check for special status returns (used by browser agent)
@@ -762,12 +764,14 @@ async def run_agent(  # noqa: C901
                             "toolStatus": "FINISHED",
                         },
                     }
-                context.append(new_msg)
                 logger.debug(
-                    "Added tool result to context",
+                    "Tool result posted to DB (will be picked up by poll)",
                     tool_name=tool_name,
                     context_len=len(context),
                 )
+                # When no poll_messages, locally append so agent sees tool results
+                if not poll_messages:
+                    context.append(new_msg)
 
                 # Track set_plan success (only if no error)
                 if tool_name == "set_plan" and not is_error:
@@ -809,6 +813,24 @@ async def run_agent(  # noqa: C901
                     except Exception as e:
                         logger.warning(f"attempt_completion tool error (non-fatal): {e}")
 
+                # When no poll_messages, locally append the attempt_completion
+                # result so the verifier sees the current iteration's artifact.
+                # Uses "text"/"timestamp" — build_llm_messages and check_progress
+                # both read "text" and depend on "timestamp" for ordering.
+                if not poll_messages:
+                    context.append(
+                        {
+                            "role": "TOOL",
+                            "text": tool_args.get("result", "") or response_text or "",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "metadata": {
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "FINISHED",
+                            },
+                        }
+                    )
+
                 # PLAN phase: complete immediately after attempt_completion
                 if is_plan_loop:
                     logger.info("✅ PLAN phase complete")
@@ -841,6 +863,12 @@ async def run_agent(  # noqa: C901
                         "message": "",
                         "final_response": completion_result,
                     }
+
+                # Poll DB to pick up messages posted this iteration (ASSISTANT + TOOL results)
+                # before the verifier reads context. Without this, the verifier would see
+                # stale context missing the current iteration's tool results.
+                if poll_messages:
+                    last_checked = await poll_and_update_context(poll_messages, context, last_checked)
 
                 # Run verifier
 
@@ -892,33 +920,6 @@ async def run_agent(  # noqa: C901
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
-                    return {
-                        "status": "completed",
-                        "context": context,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "token_count": token_count,
-                        "context_size": context_size,
-                        "message": v_reasoning,
-                        "score": score,
-                        "structured_response": structured_response,
-                    }
-
-                # Plateau detection: if verifier keeps returning the same score,
-                # the agent is stuck and can't improve further. Accept the result
-                # to avoid burning tokens in an infinite retry loop.
-                if last_verifier_score is not None and abs(score - last_verifier_score) < 0.01:
-                    verifier_plateau_count += 1
-                else:
-                    verifier_plateau_count = 1  # Reset on score change (count current as first)
-                last_verifier_score = score
-
-                if verifier_plateau_count >= VERIFIER_PLATEAU_LIMIT and score > 0.0:
-                    logger.warning(
-                        f"Verifier plateau: score stuck at {score * 100:.0f}% for "
-                        f"{verifier_plateau_count} consecutive attempts — accepting as complete"
-                    )
-                    _log_cache_summary("completed-plateau")
                     return {
                         "status": "completed",
                         "context": context,
@@ -991,6 +992,9 @@ async def run_agent(  # noqa: C901
 
     if verifier_prompt_generator and not skip_verification:
         try:
+            # Final poll to ensure context has all messages before verifier
+            if poll_messages:
+                last_checked = await poll_and_update_context(poll_messages, context, last_checked)
             logger.info("Running final verifier to capture failure context...")
             final_verifier_claude_token = get_claude_token() if get_claude_token else claude_token
             final_verifier_result = await _run_verifier(

@@ -48,6 +48,16 @@ async def _run_single_iteration(tool_calls, detected_tools_ordered):
             "tool_args": tool_args,
             "tool_call_id": tool_call_id,
         })
+        # Simulate production tool handlers which persist a FINISHED TOOL row to DB.
+        posted_messages.append({
+            "text": f"{tool_name} complete",
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "toolStatus": "FINISHED",
+            },
+        })
         return {"message": f"{tool_name} complete"}
 
     async def mock_call_llm_structured_streaming(**kwargs):
@@ -57,9 +67,9 @@ async def _run_single_iteration(tool_calls, detected_tools_ordered):
             detected_tools_ordered,
         )
 
-    with (
-        patch("loop.run_agent.call_llm_structured_streaming", new=AsyncMock(side_effect=mock_call_llm_structured_streaming)),
-        patch("loop.run_agent.handle_tool_event", new=AsyncMock()),
+    with patch(
+        "loop.run_agent.call_llm_structured_streaming",
+        new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
     ):
         result = await run_agent(
             agent_id="agent-test",
@@ -128,12 +138,11 @@ async def test_assistant_tool_call_ids_match_execution_and_context_results():
     assert persisted_ids == ["tc-web-search-1", "tc-web-search-2"]
     assert executed_ids == ["tc-web-search-1", "tc-web-search-2"]
 
-    terminal_tool_msgs = [
-        m for m in result["context"]
-        if m.get("role") == "TOOL" and (m.get("metadata") or {}).get("toolStatus") == "FINISHED"
-    ]
-    context_ids = [(m.get("metadata") or {}).get("toolCallId") for m in terminal_tool_msgs]
-    assert context_ids == ["tc-web-search-1", "tc-web-search-2"]
+    # Tool handlers persist TOOL rows to DB in production; mock_execute_tool
+    # simulates that. Persisted TOOL IDs must match executed and declared IDs.
+    tool_posts = [m for m in posted if m["role"] == "TOOL"]
+    tool_post_ids = [m["metadata"]["toolCallId"] for m in tool_posts]
+    assert set(tool_post_ids) == set(executed_ids) == set(persisted_ids)
 
 
 async def run_all_tests():

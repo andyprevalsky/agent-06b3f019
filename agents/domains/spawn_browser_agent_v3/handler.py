@@ -299,7 +299,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     title="Browser Ready",
                     task_id=task_id,
                     message="",
-                    status=MessageStatus.FINISHED,
+                    status=MessageStatus.IN_PROGRESS,
                     browser_url=browser_url,
                     action_type="browser",
                     tool_call_id=tool_call_id,

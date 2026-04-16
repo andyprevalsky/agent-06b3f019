@@ -222,8 +222,8 @@ async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
     assert "Found 3 recent updates" in tool_msg["content"]
 
 
-async def test_build_llm_messages_unmatched_terminal_tool_raises():
-    """Terminal TOOL message without matching assistant declaration should hard-fail."""
+async def test_build_llm_messages_unmatched_terminal_tool_becomes_user():
+    """Terminal TOOL message without matching assistant declaration should become a user message."""
     from helpers.llm import build_llm_messages
 
     context = [
@@ -251,11 +251,11 @@ async def test_build_llm_messages_unmatched_terminal_tool_raises():
     ]
 
     with patch("helpers.llm.activity.in_activity", return_value=False):
-        try:
-            await build_llm_messages(context, "System prompt")
-            raise AssertionError("Expected ValueError for unmatched terminal TOOL message")
-        except ValueError as e:
-            assert "unmatched toolCallId" in str(e)
+        msgs = await build_llm_messages(context, "System prompt")
+        # Unmatched TOOL becomes a user message with tool result label
+        user_msgs = [m for m in msgs if m["role"] == "user" and "[web_search result]" in m.get("content", "")]
+        assert len(user_msgs) == 1, f"Expected 1 user message with tool result label, got {len(user_msgs)}"
+        assert "Found alpha" in user_msgs[0]["content"]
 
 
 async def test_build_llm_messages_terminal_tool_missing_id_raises():
@@ -306,7 +306,7 @@ async def run_all_tests():
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
     await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
-    await r.record_async("build_llm_messages_unmatched_terminal_tool_raises", test_build_llm_messages_unmatched_terminal_tool_raises)
+    await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)
     await r.record_async("build_llm_messages_terminal_tool_missing_id_raises", test_build_llm_messages_terminal_tool_missing_id_raises)
     teardown_mock()
     return r.summary()

@@ -206,6 +206,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'ip-api.com',
   'supabase.co/realtime',
+  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
@@ -704,7 +705,10 @@ async function testBoundary_sendOtpTwilioCall() {
   // Filter to Twilio Verify calls only — other domain tests running concurrently may produce captures.
   const allCalls = await readCapturesAfter(cursor);
   const calls = allCalls.filter((c) => c.url.includes('verify.twilio.com'));
-  assert(calls.length === 1, `Expected exactly 1 Twilio Verify call, got ${calls.length} (${allCalls.length} total captures)`);
+  assert(
+    calls.length === 1,
+    `Expected exactly 1 Twilio Verify call, got ${calls.length} (${allCalls.length} total captures)`
+  );
 
   const call = calls[0];
 

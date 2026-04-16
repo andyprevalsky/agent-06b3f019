@@ -192,6 +192,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'ip-api.com',
   'supabase.co/realtime',
+  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
@@ -848,7 +849,10 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
-    assert(finalOutput.includes('4'), `Claude Code output does not contain "4": ${finalOutput.slice(-300)}`);
+    assert(
+      finalOutput.includes('4'),
+      `Claude Code output does not contain "4": ${finalOutput.slice(-300)}`
+    );
   } finally {
     // 3. Clean up: close the session
     try {

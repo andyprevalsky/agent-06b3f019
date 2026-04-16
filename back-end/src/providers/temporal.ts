@@ -14,8 +14,12 @@ export async function getTemporalClient(): Promise<Client> {
   }
 
   const address = process.env.TEMPORAL_ADDRESS || 'us-east-1.aws.api.temporal.io:7233';
-  const namespace = process.env.TEMPORAL_NAMESPACE || 'quickstart-navi.lqjlv';
+  const namespace = process.env.TEMPORAL_NAMESPACE;
   const apiKey = process.env.TEMPORAL_API_KEY;
+
+  if (!namespace) {
+    throw new Error('Missing TEMPORAL_NAMESPACE environment variable');
+  }
 
   if (!apiKey) {
     throw new Error('Missing TEMPORAL_API_KEY environment variable');

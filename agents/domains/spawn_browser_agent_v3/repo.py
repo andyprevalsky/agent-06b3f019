@@ -419,7 +419,7 @@ async def call_rose_browser_use(
         browser_state: Current browser state (url, dom_tree, screenshot, viewport, scroll_position)
         action_history: List of previous action entries
         config: App config with Rose API credentials
-        mode: Optional mode ('claude' for direct Opus 4.6 with user's Claude subscription)
+        mode: Optional mode ('claude' for direct Opus 4.7 with user's Claude subscription)
         user_id: Real user ID for claude-mode credential lookup
         oauth_token: Pre-fetched Claude OAuth token
 

@@ -262,6 +262,10 @@ def convert_context_to_messages(  # noqa: C901
         content = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
 
+        # Skip ALL sub-agent internal messages regardless of role
+        if metadata.get("subAgentId"):
+            continue
+
         if role == "SYSTEM":
             if include_system:
                 messages.append({"role": "system", "content": content})
@@ -305,10 +309,6 @@ def convert_context_to_messages(  # noqa: C901
             messages.append(assistant_msg)
 
         elif role == "TOOL":
-            # Skip sub-agent internal messages (browser steps, explore greps, etc.)
-            if metadata.get("subAgentId"):
-                continue
-
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
@@ -410,14 +410,13 @@ async def build_llm_messages(  # noqa: C901
         role = msg.get("role", "").upper()
         metadata = msg.get("metadata", {}) or {}
 
+        # Skip ALL sub-agent internal messages regardless of role
+        if metadata.get("subAgentId"):
+            continue
+
         if role == "TOOL":
             tool_status = metadata.get("toolStatus")
             tool_call_id = metadata.get("toolCallId")
-
-            # Skip sub-agent internal messages (browser steps, explore greps, etc.)
-            # These are tagged with subAgentId; only init/completion messages omit it
-            if metadata.get("subAgentId"):
-                continue
 
             # Skip IN_PROGRESS messages
             if tool_status == "IN_PROGRESS":
@@ -619,17 +618,37 @@ async def build_llm_messages(  # noqa: C901
             tool_call_id = metadata.get("toolCallId")
             tool_name = metadata.get("toolName")
 
-            # Strict invariant: all terminal tool messages must match a declared assistant tool_call_id
+            # Terminal tool messages should match a declared assistant tool_call_id.
+            # DAG-created tasks (spawn_agent, reasoning) produce TOOL results with
+            # toolCallIds that no ASSISTANT message declares — these are converted to
+            # user messages to preserve context without breaking tool_result pairing.
             if tool_status in ("FINISHED", "ERROR"):
                 if not tool_call_id:
                     raise ValueError(
                         f"Terminal TOOL message missing toolCallId (toolName={tool_name}, message_id={msg.get('message_id')})"
                     )
                 if str(tool_call_id) not in declared_tool_call_ids:
-                    raise ValueError(
-                        f"Terminal TOOL message has unmatched toolCallId '{tool_call_id}' "
-                        f"(toolName={tool_name}, message_id={msg.get('message_id')})"
-                    )
+                    # DAG-created tool result — include as user message for context
+                    tool_content = text
+                    if metadata.get("title"):
+                        tool_content = f"{metadata['title']}: {tool_content}"
+                    if metadata.get("structured_response"):
+                        tool_content += (
+                            "\n\nStructured Response: "
+                            + json.dumps(metadata["structured_response"])
+                        )
+                    if metadata_texts:
+                        tool_content = tool_content + "\n\n" + "\n\n".join(metadata_texts)
+                    if content:
+                        for block in content:
+                            if block.get("type") == "image_url":
+                                tool_content += "\n\n[Attached image]"
+                            elif block.get("type") == "file":
+                                fname = block.get("file", {}).get("filename", "file")
+                                tool_content += f"\n\n[Attached file: {fname}]"
+                    label = tool_name or "tool"
+                    messages.append({"role": "user", "content": f"[{label} result]: {tool_content}"})
+                    continue
 
                 tool_content = text
                 if metadata.get("title"):
@@ -682,6 +701,35 @@ async def build_llm_messages(  # noqa: C901
             messages.append({"role": llm_role, "content": content})
         else:
             messages.append({"role": llm_role, "content": full_text})
+
+    # Merge consecutive assistant messages.  This can happen when the LLM
+    # returns bare text (no tool_calls) in one iteration, then tool_calls in the
+    # next — both get posted as separate ASSISTANT rows in the DB.
+    i = 1
+    while i < len(messages):
+        if messages[i].get("role") == "assistant" and messages[i - 1].get("role") == "assistant":
+            prev = messages[i - 1]
+            curr = messages[i]
+            merged = (prev.get("content", "") + "\n\n" + curr.get("content", "")).strip()
+            prev["content"] = merged
+            # Carry forward tool_calls, de-duplicating by ID to protect against
+            # dual-write corruption (same tool_call_id in both rows → Anthropic 400).
+            prev_tc = prev.get("tool_calls", [])
+            curr_tc = curr.get("tool_calls", [])
+            if prev_tc or curr_tc:
+                seen_ids: set = set()
+                merged_tc: list = []
+                for tc in prev_tc + curr_tc:
+                    tc_id = tc.get("id")
+                    if tc_id and tc_id in seen_ids:
+                        continue
+                    if tc_id:
+                        seen_ids.add(tc_id)
+                    merged_tc.append(tc)
+                prev["tool_calls"] = merged_tc
+            messages.pop(i)
+        else:
+            i += 1
 
     # Resolve context pointers to <resolved-ref> blocks
     messages = await resolve_pointers_in_messages(messages, local_context=context)
@@ -2420,7 +2468,7 @@ async def call_llm_activity(  # noqa: C901
 
         def on_model_detected(actual_model: str):
             # "-claude" suffix = user's own Claude token ($0, skipped racing)
-            # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-6-claude"
+            # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
             _is_claude[0] = is_user_claude
             logger.info(f"🎨 Claude detection: actual_model={actual_model}, is_claude={is_user_claude}")
@@ -2790,7 +2838,7 @@ async def call_planner_llm_activity(
         )
 
         # Return plan with usage for cost tracking
-        # Use actual_model from Rose response (may be "claude-opus-4-6-claude" for $0 pricing)
+        # Use actual_model from Rose response (may be "claude-opus-4-7-claude" for $0 pricing)
         actual_model = usage.get("actual_model", model)
         return {
             "result": result.model_dump(),
