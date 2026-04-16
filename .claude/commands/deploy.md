@@ -206,17 +206,19 @@ Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total c
 
 ### Monitoring agent progress during smoke tests
 
-**Do NOT fire-and-forget.** While benchmarks run, actively monitor agent progress by polling each agent's detail endpoint (`GET /api/agents/{id}`). Use this schedule:
+**Do NOT fire-and-forget.** While benchmarks run, actively monitor agent progress by polling each agent's detail endpoint (`GET /api/agents/{id}`) AND tailing the smoke log file.
 
-```
-5s, 5s, 5s, 15s, 30s, 60s, 60s, 60s, ... (repeat 60s until all agents finish)
-```
+**Universal background-task cadence (applies here AND to every background task in this repo):**
+- **First 60 seconds:** poll every **10 seconds** (catches silent early deaths — 0-byte logs, missing-env crashes, queue-routing bugs)
+- **After 60 seconds:** poll every **60 seconds**
+- **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (exit code, "RESULTS:" line, PID no longer running), stop polling and move on.
 
 At each poll, check:
 - Agent status (ACTIVE, COMPLETED, FAILED, ERROR)
 - Message count and latest messages
 - Progress score
 - Any error messages
+- Background PID is still alive (`ps -p <pid>`) — a 0-byte log + dead PID means the task died silently
 
 **If any agent shows signs of trouble** (stuck at 0 messages for 30s+, ERROR status, backend 500s in logs), immediately:
 1. Kill ALL running benchmark agents (DELETE each agent)
@@ -461,6 +463,16 @@ If a related plan exists in `docs/plans/active/`:
    ```bash
    git add docs/plans/completed/ && git commit -m "docs: archive plan to completed" && git push
    ```
+
+## Step 11a: Cleanup stale workspaces
+
+Terminate orphaned Temporal workflows and processes from archived Conductor workspaces. This only kills resources from **archived** workspaces — prod and all active workspaces are untouched.
+
+```bash
+cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-workspaces.ts
+```
+
+This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
 
 ## Step 12: Merge
 

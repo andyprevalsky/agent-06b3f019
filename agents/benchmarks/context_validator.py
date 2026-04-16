@@ -147,6 +147,20 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
                         },
                     })
                 assistant_msg["tool_calls"] = tool_calls
+            # DAG reasoning output is posted as a standalone ASSISTANT row by
+            # dag_executor.py. It's distinct content (not a duplicate turn), so
+            # tag it so the role-alternation check can distinguish it from the
+            # dual-write bug it's meant to detect.
+            if metadata.get("reasoning") or "dagTaskIndex" in metadata:
+                assistant_msg["_reasoning"] = True
+            # Sub-agent output files are posted as standalone ASSISTANT rows
+            # with empty text + file_pointer (see handle_tool_event → AssistantEvent).
+            # The real LLM pipeline merges these into the neighbouring assistant
+            # turn, so they never reach Anthropic as two messages — not a
+            # dual-write bug.
+            file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+            if file_pointer and not content and not metadata.get("tool_calls"):
+                assistant_msg["_file_output"] = True
             result.append(assistant_msg)
 
         elif role == "TOOL":
@@ -230,6 +244,8 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
                 prev["tool_calls"] = merged_tc
             if curr.get("_verifier"):
                 prev["_verifier"] = True
+            if curr.get("_reasoning"):
+                prev["_reasoning"] = True
             result.pop(i)
         else:
             i += 1
@@ -374,22 +390,28 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
     OAI format allows consecutive tool/user/system messages (parallel tools, multi-turn),
     but two consecutive assistant messages means the dual-write bug duplicated a turn.
 
-    Exception: verifier messages are TOOL messages converted to assistant role for context.
-    A [verifier→assistant, LLM→assistant] pair is expected, not corruption.
+    Exceptions:
+    - Verifier TOOL messages converted to assistant role for context.
+    - DAG reasoning output posted as a standalone ASSISTANT row by dag_executor.
+      A [dag-reasoning→assistant, LLM→assistant] pair is expected, not corruption.
     """
     violations: List[ContextViolation] = []
     prev_role = None
-    prev_is_verifier = False
+    prev_exempt = False
     prev_idx = 0
 
     for idx, msg in enumerate(openai_msgs):
         role = msg.get("role")
         if role == "system":
             continue  # system messages don't affect alternation
-        is_verifier = msg.get("_verifier", False)
+        is_exempt = (
+            msg.get("_verifier", False)
+            or msg.get("_reasoning", False)
+            or msg.get("_file_output", False)
+        )
         if role == "assistant" and prev_role == "assistant":
-            # Skip if either message is a verifier (expected consecutive pattern)
-            if not is_verifier and not prev_is_verifier:
+            # Skip if either message is a known non-dual-write pattern
+            if not is_exempt and not prev_exempt:
                 violations.append(ContextViolation(
                     rule="role_alternation",
                     severity="error",
@@ -400,7 +422,7 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
                     message_index=idx,
                 ))
         prev_role = role
-        prev_is_verifier = is_verifier
+        prev_exempt = is_exempt
         prev_idx = idx
 
     return violations
