@@ -1,7 +1,5 @@
 """Find All domain types — Pydantic models, TypedDicts, and type aliases."""
 
-from __future__ import annotations
-
 from typing import Any, TypedDict
 
 

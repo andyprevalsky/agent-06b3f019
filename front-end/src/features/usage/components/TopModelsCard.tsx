@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
-import type { ModelStats } from '../types';
+import { type ModelStats } from '../types';
 
 interface TopModelsCardProps {
   topModels: ModelStats[];

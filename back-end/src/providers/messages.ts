@@ -46,7 +46,9 @@ export async function createMessage(params: CreateMessageParams) {
     role: message.role,
     metadata: params.metadata as Record<string, unknown> | undefined,
     filePointer: params.filePointer,
-  }).catch((err: unknown) => log.error('broadcast failed', { err: err instanceof Error ? err.message : String(err) }));
+  }).catch((err: unknown) =>
+    log.error('broadcast failed', { err: err instanceof Error ? err.message : String(err) })
+  );
 
   return message;
 }

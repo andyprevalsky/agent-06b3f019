@@ -111,3 +111,19 @@ export interface WaitlistResponse {
   success: boolean;
   message: string;
 }
+
+// ---------------------------------------------------------------------------
+// Waitlist form hook
+// ---------------------------------------------------------------------------
+
+export interface WaitlistFormState {
+  isExpanded: boolean;
+  isLoading: boolean;
+  isSuccess: boolean;
+  formData: { name: string; email: string };
+  emailError: string;
+  submitError: string;
+  expand: () => void;
+  handleInputChange: (field: 'name' | 'email') => (e: React.ChangeEvent<HTMLInputElement>) => void;
+  handleSubmit: (e: React.FormEvent) => void;
+}

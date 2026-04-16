@@ -1,7 +1,5 @@
 """Wait-for domain types: Pydantic models and type aliases."""
 
-from __future__ import annotations
-
 from pydantic import BaseModel, Field
 
 

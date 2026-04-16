@@ -1,5 +1,6 @@
 export type { BlogCategory, BlogSection, BlogImage, BlogPost } from './types';
-export { blogPosts, formatDate } from './config';
+export { blogPosts } from './config';
+export { formatDate } from './hooks';
 export { getBlogPost, getBlogPostsByCategory } from './api';
 export { default as BlogBreadcrumb } from './components/BlogBreadcrumb';
 export { default as BlogContent } from './components/BlogContent';

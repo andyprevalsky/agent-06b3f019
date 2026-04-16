@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 
-import type { BrowserType } from '@/contexts/IntegrationHandlersContext';
+import type { BrowserType } from '@/features/integration-handlers-context';
 
 interface SyncHandlers {
   handleBrowserSync: (browserType: BrowserType) => Promise<void>;

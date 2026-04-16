@@ -13,7 +13,7 @@ import {
 import { cleanupTestData, getTestJwt, getTestUserId, seedApiKey } from './helpers.ts';
 
 const BASE_URL = Deno.env.get('BASE_URL') ||
-  'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1';
+  `http://localhost:${Deno.env.get('RESEARCH_PORT') || '54321'}/functions/v1`;
 const COMPLETIONS_URL = `${BASE_URL}/completions`;
 const sampleMessages = [{ role: 'user' as const, content: 'What is 2+2? Just the number.' }];
 

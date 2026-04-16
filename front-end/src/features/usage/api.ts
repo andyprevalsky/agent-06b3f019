@@ -1,10 +1,7 @@
 import { getStoredSession } from '@/lib/supabase';
 
-import type { UsageData, ModelStats } from './types';
-
-function getBackendUrl(): string {
-  return (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
-}
+import { type UsageData, type ModelStats } from './types';
+import { API_URL } from './config';
 
 /** Fetches credit usage and model stats from the backend. */
 export async function fetchUsageData(): Promise<{
@@ -18,15 +15,14 @@ export async function fetchUsageData(): Promise<{
     return { usage: null, topModels: [], totalTokens: 0 };
   }
 
-  const backendUrl = getBackendUrl();
   const headers = {
     Authorization: `Bearer ${session.access_token}`,
     'Content-Type': 'application/json',
   };
 
   const [usageResponse, statsResponse] = await Promise.all([
-    fetch(`${backendUrl}/api/credits/usage`, { headers }),
-    fetch(`${backendUrl}/api/credits/stats`, { headers }),
+    fetch(`${API_URL}/api/credits/usage`, { headers }),
+    fetch(`${API_URL}/api/credits/stats`, { headers }),
   ]);
 
   let usage: UsageData | null = null;
@@ -34,10 +30,13 @@ export async function fetchUsageData(): Promise<{
   let totalTokens = 0;
 
   if (usageResponse.ok) {
-    usage = await usageResponse.json();
+    usage = (await usageResponse.json()) as UsageData;
   }
   if (statsResponse.ok) {
-    const statsData = await statsResponse.json();
+    const statsData = (await statsResponse.json()) as {
+      totalTokens: number;
+      topModels: ModelStats[];
+    };
     totalTokens = statsData.totalTokens;
     topModels = statsData.topModels;
   }

@@ -4,12 +4,12 @@ import { CookieSync } from '../cookieSync';
 import { BrowserStateSync } from '../browserStateSync';
 import { TelegramSync } from '../messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../messaging/platforms/whatsapp/WhatsAppSync';
-import { ClaudeCredentialSync } from '../claudeCredentialSync';
+// import { ClaudeCredentialSync } from '../claudeCredentialSync';
 import { IMessageQueueService } from '../IMessageQueueService';
 import { IntegrationCache } from './IntegrationCache';
 import { logConsole, logConsoleError } from '../../base/logger';
 
-type Platform = 'imessage' | 'telegram' | 'whatsapp' | 'cookies' | 'browserState' | 'claudeCode';
+type Platform = 'imessage' | 'telegram' | 'whatsapp' | 'cookies' | 'browserState';
 
 interface SyncConfig {
   /** Periodic sync interval in ms (0 to disable) */
@@ -53,12 +53,13 @@ const CONFIG: Record<Platform, SyncConfig> = {
     syncOnStartup: true,
     integrationNames: ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'],
   },
-  claudeCode: {
-    interval: 5 * 60 * 1000,
-    enableRealTime: false,
-    syncOnStartup: true,
-    integrationNames: ['claude_code'],
-  },
+  // claudeCode sync disabled — token is managed manually via update-claude-token.ts
+  // claudeCode: {
+  //   interval: 5 * 60 * 1000,
+  //   enableRealTime: false,
+  //   syncOnStartup: true,
+  //   integrationNames: ['claude_code'],
+  // },
 };
 
 /**
@@ -324,11 +325,12 @@ export class SyncManager {
         await BrowserStateSync.sync();
         break;
 
-      case 'claudeCode':
-        if (ClaudeCredentialSync.hasCredentials()) {
-          await ClaudeCredentialSync.syncCredentials();
-        }
-        break;
+      // claudeCode sync disabled — token is managed manually
+      // case 'claudeCode':
+      //   if (ClaudeCredentialSync.hasCredentials()) {
+      //     await ClaudeCredentialSync.syncCredentials();
+      //   }
+      //   break;
     }
   }
 

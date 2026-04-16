@@ -8,9 +8,6 @@ export const TERMS_LAST_UPDATED = 'February 1, 2026';
 
 export const TERMS_CONTACT_EMAIL = 'andy@roselabs.ai';
 
-export const TERMS_INTRO =
-  'Welcome to https://roselabs.ai ("Rose Labs", "we", "us", or "our"). By using our website or joining our waitlist, you agree to these Terms of Service. Please read them carefully.';
-
 export const TERMS_CLOSING = 'By using this website, you agree to these Terms of Service.';
 
 export const TERMS_SECTIONS: readonly TermsSection[] = [

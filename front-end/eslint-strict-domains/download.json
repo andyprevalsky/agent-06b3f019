@@ -1,3 +1,9 @@
 [
-  "src/pages/Download.tsx"
+  "src/features/download/types.ts",
+  "src/features/download/config.ts",
+  "src/features/download/api.ts",
+  "src/features/download/hooks.ts",
+  "src/features/download/components/Download.tsx",
+  "src/features/download/components/index.ts",
+  "src/features/download/index.ts"
 ]

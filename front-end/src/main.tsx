@@ -12,7 +12,7 @@
 import { createRoot } from 'react-dom/client';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
-import { IntegrationHandlersProvider } from '@/contexts/IntegrationHandlersContext';
+import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import AppShell, { initDevLogging, initAmplitude, initViewportHeight } from '@/features/app-wiring';
 import './index.css';
 

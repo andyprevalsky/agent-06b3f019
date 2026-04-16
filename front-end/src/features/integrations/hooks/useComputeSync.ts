@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 
-import type { useIntegrationHandlers } from '@/contexts/IntegrationHandlersContext';
+import type { useIntegrationHandlers } from '@/features/integration-handlers-context';
 
 export function useComputeSync(
   handlers: ReturnType<typeof useIntegrationHandlers>,

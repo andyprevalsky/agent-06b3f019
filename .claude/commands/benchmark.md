@@ -135,7 +135,11 @@ Then re-run the monitor script to continue watching.
 
 **If the monitor script times out** (bash timeout), just re-run it — it's stateless and will pick up where it left off.
 
-## Step 4: On error — Pause and diagnose
+## Step 3.5: Compact after monitor
+
+Run `/compact` to flush the monitor's polling output. Only carry forward: the exit code, agent_id, task config, MODE, BASE_URL, and iteration count.
+
+## Step 4: On error — Pause and diagnose via sub-agent
 
 When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across polls, or the agent reaches a terminal status:
 
@@ -146,55 +150,32 @@ When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across po
      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
    ```
 
-2. **Get full diagnostics:**
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url $BASE_URL
-   ```
+2. **Delegate diagnosis to a general-purpose sub-agent.** Do NOT read logs yourself — spawn an Agent to do it. This keeps raw log output out of your context.
 
-3. **Drill into raw logs with grep** — raw log sources are noisy. ALWAYS pipe through grep to extract signal:
+   Launch an Agent (subagent_type: general-purpose) with a prompt like:
 
-   **Worker logs** (Fly.io) — raw structlog JSON. Grep for errors:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'
-   ```
-   If you need full context around a specific error, grep for a keyword from the error:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source worker --url $BASE_URL 2>&1 | grep -i '<keyword>'
-   ```
+   > Diagnose why benchmark agent `<agent_id>` failed. The agent was running task `<task_name>`.
+   > MODE=`<local|prod>`, BASE_URL=`<url>`.
+   > Working directory: `<cwd>/agents`
+   >
+   > **Do this:**
+   > 1. Run: `python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url <BASE_URL>`
+   > 2. Grep worker logs for errors: `python benchmarks/agent_logs.py <agent_id> --tree --source worker --url <BASE_URL> 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'`
+   > 3. Grep backend logs (filter out 200/201/204): `python benchmarks/agent_logs.py <agent_id> --tree --source backend --url <BASE_URL> 2>&1 | grep -v '"status":200' | grep -v '"status":204' | grep -v '"status":201'`
+   > 4. Grep messages for errors: `python benchmarks/agent_logs.py <agent_id> --tree --source messages --url <BASE_URL> 2>&1 | grep -i 'ERROR\|FAILED'`
+   > 5. If local mode, also grep local log files:
+   >    - `agents/navi-worker-log.txt` for `ERROR\|Traceback\|Exception`
+   >    - `back-end/backend-logs.log` for `"level":"error"\|status":5`
+   >    - `research/research-logs.log` for `error\|failed\|429`
+   > 6. If the error involves LLM calls, 429s, or auth failures, read `research/supabase/functions/completions/index.ts` and trace through the research layer.
+   >
+   > **Return a concise report (under 300 words) with exactly:**
+   > - **Diagnosis:** What went wrong
+   > - **Root cause:** The specific code path that failed (file + line if possible)
+   > - **Evidence:** Key log lines that prove the diagnosis (max 5 lines)
+   > - **Suggested fix:** What code change would resolve it
 
-   **Backend logs** (Render) — raw JSON HTTP logs, mostly 200s from poll requests. Filter out the noise:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source backend --url $BASE_URL 2>&1 | grep -v '"status":200' | grep -v '"status":204' | grep -v '"status":201'
-   ```
-
-   **Messages** — already well-formatted. Grep for errors or a specific tool:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL 2>&1 | grep -i 'ERROR\|FAILED'
-   ```
-   Or to see only a specific tool's lifecycle:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source messages --url $BASE_URL 2>&1 | grep '<tool_name>'
-   ```
-
-   **Research logs** (Supabase) — gateway HTTP logs only (the Supabase Management API does NOT expose edge function console output via REST). Only useful for spotting 4xx/5xx responses:
-   ```bash
-   python benchmarks/agent_logs.py <agent_id> --tree --source research --url $BASE_URL 2>&1 | grep -v '| 200 \|| 201 \|| 202 '
-   ```
-
-   **IMPORTANT:** Do NOT dump an entire `--source` without grep. The raw output burns tokens for very little signal. Always grep first, then broaden the filter if the initial grep returns nothing.
-
-4. **Check local log files (local mode only):**
-   - `agents/navi-worker-log.txt` — worker tracebacks (grep for `ERROR\|Traceback\|Exception`)
-   - `back-end/backend-logs.log` — backend HTTP errors (grep for `"level":"error"\|status":5`)
-   - `research/research-logs.log` — research edge function console output including slog() calls (grep for `error\|failed\|429`)
-   - **If prod mode:** Local log files are NOT available. Use the grep commands above for all log inspection. Note: edge function console.log output (the `slog()` calls in `completions/index.ts`) is NOT available via the Supabase Management API in prod. If you need to debug LLM racing, token auth, or model selection issues in prod, the evidence will be in worker logs (which log the response from the completions endpoint) rather than research logs.
-
-5. **If the error involves LLM calls, 429s, or auth failures**, trace through the research layer:
-   - Read `research/supabase/functions/completions/index.ts` — the Rose completions endpoint handling Claude token auth, rate limiting (429), and racing fallback
-   - In local mode: grep `research/research-logs.log` for the `request_id` or `agent_id`
-   - In prod mode: research console logs are NOT available via API. Instead, grep worker logs for the error response from the completions endpoint (the worker logs the HTTP status and error body it receives back)
-   - Common issues: Claude OAuth token expired/rate-limited (429 from Anthropic), Supabase auth disabled (`phone_provider_disabled`), missing API keys in `.env` files
-   - The benchmark harness loads `BACKEND_API_KEY` from `agents/.env` then `back-end/.env` — if both are missing, auth fails entirely
+   The sub-agent's report is your diagnosis. Do NOT re-read the same logs yourself.
 
 ## Step 5: Propose fix to user
 
@@ -223,6 +204,10 @@ After user approves:
 ## Step 7: Deploy
 
 Run `/deploy` to push the fix, create a PR, wait for review, merge, and wait for deploys to complete. The deploy skill handles the full PR → review → merge → deploy loop, and its local smoke step must use `bash scripts/run.sh --benchmark`.
+
+## Step 7.5: Compact after deploy
+
+Run `/compact` to flush deploy output, PR review, and code diffs. Only carry forward: task config, MODE, BASE_URL, iteration count, and a one-line summary of what was fixed (e.g., "Fixed 429 retry logic in completions/index.ts").
 
 ## Step 8: Rerun benchmark
 

@@ -1,14 +1,13 @@
 /**
  * Hooks layer for the terminal-component-group domain.
  *
- * Re-exports hooks consumed by terminal UI components. Components import from
- * this file instead of reaching into shared hooks directly.
- *
- * Also re-exports imperative API functions used by components in event handlers.
- * This keeps the dependency chain forward-only: components -> hooks -> api.
+ * Re-exports hooks and imperative API functions consumed by terminal UI
+ * components. Components import from this file (hooks + API functions) and
+ * from types.ts (domain-specific types). This keeps the dependency chain
+ * forward-only: components -> hooks -> api -> shared.
  */
 
-// ── Hooks ─────────────────────────────────────────────────────────────────
+// ── React Hooks ───────────────────────────────────────────────────────────
 export { useToast } from '@/hooks/use-toast';
 export { useAuth } from '@/hooks/useAuth';
 export { useAppData } from '@/hooks/useAppData';
@@ -24,7 +23,7 @@ export {
 } from '@/hooks/useAgentTree';
 export { useAgentContext, type StreamingBubble } from '@/contexts/AgentContext';
 
-// ── Imperative API functions used by components in event handlers ──────────
+// ── Imperative API functions (used by components in event handlers) ───────
 export {
   respondToAttentionRequest,
   rejectAttentionRequest,
@@ -47,6 +46,7 @@ export {
   getStoredSession,
 } from './api';
 
+// ── API types (used by components alongside the functions above) ──────────
 export type {
   Agent,
   AgentDetail,

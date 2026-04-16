@@ -7,7 +7,7 @@
  */
 
 import { type BlogPost } from '../types';
-import { formatDate } from '../config';
+import { formatDate } from '../hooks';
 
 interface BlogHeaderProps {
   post: BlogPost;

@@ -1,7 +1,5 @@
 """set-plan domain types -- schemas, typed dicts, and type aliases."""
 
-from __future__ import annotations
-
 from typing import TypedDict
 
 
