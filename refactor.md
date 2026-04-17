@@ -108,7 +108,7 @@ Build behavioral safety net for each domain. Make sure all tests are passing on 
 
 #### 4.A.2 Setup Formatter + Linter
 `/batch /setup-formatter-and-linter` (all domains in this repo)
-Configure fmt + lint rules for each domain. Auto-fix what's fixable. **DO NOT** enforce passing all rules yet — remaining violations get resolved during `/refactor-domain` in step 4.C.
+Configure fmt + lint rules for each domain. **DO NOT** auto-run the formatter across the codebase at this stage — 4.C will rewrite these files anyway, so mass reformatting now just creates a huge throwaway diff. Install configs, wire up the `lint-check.sh` script, add cleaned domains to the strict ratchet, and leave violations to be resolved during `/refactor-domain` in step 4.C.
 
 ### Step 4.B — Deploy (first checkpoint)
 `/deploy` — ✅ lint ✅ fmt ✅ blackbox 🔴 E2E 🔴 structural 🔴 types
