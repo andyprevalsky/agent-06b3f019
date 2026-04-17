@@ -19,7 +19,7 @@ from domains.param_populator.config import (
 )
 from domains.param_populator.repo import fetch_agent_context
 from helpers.llm import build_llm_messages, call_llm_structured_streaming
-from helpers.tool_schemas import TOOL_MODELS, create_agent_action_model
+from utils.tool_schemas import TOOL_MODELS, create_agent_action_model
 
 if TYPE_CHECKING:
     from domains.param_populator.types import PopulatedParams

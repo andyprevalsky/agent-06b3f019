@@ -11,7 +11,7 @@ import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers.llm import prepare_schema_for_openai
-from helpers.tool_schemas import PLAN_PHASE_TOOLS, create_agent_action_model
+from utils.tool_schemas import PLAN_PHASE_TOOLS, create_agent_action_model
 
 
 def get_claude_token() -> str:

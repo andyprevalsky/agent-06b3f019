@@ -7,9 +7,9 @@ INDEX-BASED APPROACH: Elements are referenced by their index in the DOM tree.
 The DOM tree is serialized with indices like [1] button "Submit", [2] input[type=text], etc.
 """
 
-from typing import List, Literal, Optional, Union, Type
-from pydantic import BaseModel, Field, create_model
+from typing import List, Literal, Optional, Type
 
+from pydantic import BaseModel, Field
 
 # ============================================================================
 # OBSERVATION TOOLS
@@ -309,7 +309,7 @@ def create_browser_agent_action_model(
     """
     Dynamically create a BrowserAgentAction Pydantic model.
     
-    Uses the unified create_agent_action_model from helpers.tool_schemas with
+    Uses the unified create_agent_action_model from utils.tool_schemas with
     the BROWSER_TOOL_MODELS registry.
     
     Args:
@@ -318,7 +318,7 @@ def create_browser_agent_action_model(
     Returns:
         Pydantic model class for BrowserAgentAction with proper tool union
     """
-    from helpers.tool_schemas import create_agent_action_model
+    from utils.tool_schemas import create_agent_action_model
     
     # Default to all browser tools
     if available_tool_names is None:
