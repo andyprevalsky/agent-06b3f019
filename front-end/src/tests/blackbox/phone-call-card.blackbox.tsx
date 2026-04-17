@@ -141,9 +141,8 @@ describe('PhoneCallCard', () => {
       const playBtn = Array.from(playButtons).find(
         (btn) => btn.querySelector('svg.lucide-play') || btn.querySelector('svg.lucide-pause'),
       );
-      if (playBtn) {
-        await u.click(playBtn);
-      }
+      expect(playBtn).toBeDefined();
+      await u.click(playBtn!);
     });
 
     it('omits duration when it is 0 or missing', () => {

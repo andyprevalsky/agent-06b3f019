@@ -139,15 +139,15 @@ describe('ApplePasswordsModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('clicking Import with no file shows validation error', async () => {
+  it('keeps Import disabled until a file is selected', () => {
+    // Rationale: the validation path (handleSync with no file) is UI-gated by
+    // the disabled button — there's no way to trigger handleSync without first
+    // picking a file. The meaningful assertion is the gate itself: the button
+    // MUST start disabled when no file is present.
     renderWithProviders(
       <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />,
     );
     const importBtn = screen.getByRole('button', { name: /import passwords/i });
-    // Button is disabled while !file, so the validation path fires when we
-    // trigger handleSync via keyboard fallback — instead we simulate enabling
-    // by passing a CSV then clearing via state: easier path is to just assert
-    // the disabled state (which prevents the error).
     expect(importBtn).toBeDisabled();
   });
 

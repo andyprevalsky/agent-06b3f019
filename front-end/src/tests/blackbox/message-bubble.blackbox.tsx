@@ -413,7 +413,10 @@ describe('MessageBubble', () => {
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    // ClaudeCodeChip renders an <img alt="Claude Code"> logo — unique to that branch.
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
   });
 
   it('renders phone call tool as PhoneCallCard', async () => {
@@ -448,8 +451,13 @@ describe('MessageBubble', () => {
         },
       },
     });
-    const { container } = renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    renderBubble(<MessageBubble message={msg} />);
+    // PhoneCallCard renders the target phone number as unique text.
+    await waitFor(() =>
+      expect(screen.getByText('+15551234567')).toBeInTheDocument(),
+    );
+    // Duration is formatted as m:ss (42s -> 0:42) — confirms FINISHED branch specifically.
+    expect(screen.getByText('0:42')).toBeInTheDocument();
   });
 
   it('renders set_plan FINISHED with planData producing populated PlanChip', async () => {
@@ -505,7 +513,10 @@ describe('MessageBubble', () => {
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    // claude_code_started must render the ClaudeCodeChip (Claude logo).
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
   });
 
   it('renders task_complete branch for Claude Code tool', async () => {
@@ -520,7 +531,10 @@ describe('MessageBubble', () => {
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    // task_complete must still route through ClaudeCodeChip (Claude logo).
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
   });
 
   it('renders USER message with image file_pointer showing loading placeholder', async () => {
@@ -626,10 +640,13 @@ describe('MessageBubble', () => {
         },
       },
     });
-    const { container } = renderBubble(
+    renderBubble(
       <MessageBubble message={msg} onSubmitFeedback={onSubmitFeedback} />,
     );
-    await waitFor(() => expect(container.textContent).toContain('All'));
+    // FeedbackBanner's initial rating step prompts "How was this result?".
+    await waitFor(() =>
+      expect(screen.getByText(/How was this result\?/i)).toBeInTheDocument(),
+    );
   });
 
   it('iMessage action button shows toast when bridge is missing', async () => {
@@ -679,12 +696,15 @@ describe('MessageBubble', () => {
       metadata: {
         toolCallId: 'tc-wf-done',
         toolName: 'wait_for',
-        title: 'Wait complete',
+        title: 'Waiting for signal',
         toolStatus: 'FINISHED',
       },
     });
-    const { container } = renderBubble(<MessageBubble message={msg} waitForChecks={[]} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    renderBubble(<MessageBubble message={msg} waitForChecks={[]} />);
+    // WaitForChip in FINISHED state renders "Waited for {condition}".
+    await waitFor(() =>
+      expect(screen.getByText(/Waited for/i)).toBeInTheDocument(),
+    );
   });
 
   it('calls onTypingComplete for set_plan IN_PROGRESS when shouldType=true', async () => {
@@ -767,6 +787,17 @@ describe('MessageBubble', () => {
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
     await waitFor(() => expect(container.firstChild).not.toBeNull());
+    // The SubAgentTree branch renders a wrapper <div.flex.gap-3> hosting <SubAgentTree />.
+    // SubAgentTree returns null when useAgentTree has no nodes for the bus, so the wrapper
+    // may be empty in this harness — but the OTHER branches (SubAgentToolBubble chip /
+    // "Spawning sub-agents..." fallback / ERROR red row) all emit distinctive text.
+    // Assert none of those alternate branches fired, proving we went through the tree branch.
+    expect(screen.queryByText(/Spawning cluster/)).toBeNull(); // SubAgentToolBubble title
+    expect(screen.queryByText(/Spawning sub-agents\.\.\./)).toBeNull(); // isSpawningMessage
+    expect(screen.queryByText(/Failed to spawn sub-agent/)).toBeNull(); // error branch
+    // And the tree wrapper is present.
+    const wrapper = container.querySelector('div.flex.gap-3') as HTMLElement | null;
+    expect(wrapper).not.toBeNull();
   });
 
   it('compact prop removes gap-3 container class in completion summary', async () => {
@@ -785,7 +816,23 @@ describe('MessageBubble', () => {
         },
       },
     });
-    const { container } = renderBubble(<MessageBubble message={msg} compact={true} />);
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    const { container: compactContainer } = renderBubble(
+      <MessageBubble message={msg} compact={true} />,
+    );
+    // Control render without compact — must have gap-3.
+    const { container: defaultContainer } = renderBubble(
+      <MessageBubble message={msg} compact={false} />,
+    );
+    await waitFor(() =>
+      expect(compactContainer.querySelector('.flex')).not.toBeNull(),
+    );
+    // The compact outer flex wrapper must NOT contain gap-3.
+    const compactFlex = compactContainer.querySelector('.flex') as HTMLElement | null;
+    expect(compactFlex).not.toBeNull();
+    expect(compactFlex!.classList.contains('gap-3')).toBe(false);
+    // Sanity: default render DOES include gap-3.
+    const defaultFlex = defaultContainer.querySelector('.flex') as HTMLElement | null;
+    expect(defaultFlex).not.toBeNull();
+    expect(defaultFlex!.classList.contains('gap-3')).toBe(true);
   });
 });

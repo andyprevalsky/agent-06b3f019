@@ -148,7 +148,7 @@ cd back-end && npx tsx src/tests/blackbox/integration-health.blackbox.ts
 
 This same file is also part of the full blackbox suite (Step 5a), so it will run again there when the backend-change path fires. Running it twice is harmless (~3s).
 
-## Step 4b: Push PR early, start CodeRabbit in parallel with runtime tests
+## Step 4d: Push PR early, start CodeRabbit in parallel with runtime tests
 
 Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
 

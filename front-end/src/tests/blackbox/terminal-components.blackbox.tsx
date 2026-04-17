@@ -331,10 +331,16 @@ describe('QueryInput (blackbox)', () => {
 
   it('shows COMPLETED agent still renders (paperclip still present)', () => {
     const agent = makeAgentDetail({ status: 'COMPLETED' });
-    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
-    // Should still render; paperclip button exists but disabled
-    const paperclipBtn = document.querySelector('button[disabled]');
-    expect(paperclipBtn).toBeTruthy();
+    const { container } = renderWithProviders(
+      <QueryInput {...defaultProps} agentDetail={agent} />,
+    );
+    // Target the paperclip button specifically: the <Paperclip> lucide icon
+    // (class lucide-paperclip) is unique to the attachment trigger.
+    const paperclipIcon = container.querySelector('svg.lucide-paperclip');
+    expect(paperclipIcon).not.toBeNull();
+    const paperclipBtn = paperclipIcon!.closest('button');
+    expect(paperclipBtn).not.toBeNull();
+    expect(paperclipBtn).toBeDisabled();
   });
 
   it('opens model picker popover and renders model names + descriptions', async () => {
@@ -384,13 +390,14 @@ describe('QueryInput (blackbox)', () => {
   });
 
   it('renders attachment paperclip button and it is enabled for running agent', () => {
-    renderWithProviders(<QueryInput {...defaultProps} />);
-    // paperclip button has Paperclip icon — find by its only disabled-insensitive rendering:
-    // paperclip is not disabled when agent not completed, so look for a button containing svg
-    const buttons = screen.getAllByRole('button');
-    // Just assert that at least one button is not disabled (the paperclip)
-    const enabled = buttons.filter((b) => !(b as HTMLButtonElement).disabled);
-    expect(enabled.length).toBeGreaterThan(0);
+    const { container } = renderWithProviders(<QueryInput {...defaultProps} />);
+    // Target the paperclip button by its lucide-paperclip icon — unique to the
+    // attachment trigger. Button must NOT be disabled when no completed agent.
+    const paperclipIcon = container.querySelector('svg.lucide-paperclip');
+    expect(paperclipIcon).not.toBeNull();
+    const paperclipBtn = paperclipIcon!.closest('button');
+    expect(paperclipBtn).not.toBeNull();
+    expect(paperclipBtn).not.toBeDisabled();
   });
 
   it('clicking the paperclip button triggers the hidden file input click', async () => {
@@ -1159,6 +1166,11 @@ describe('AttentionInbox (blackbox)', () => {
 
     await user.click(screen.getByText('View agent →'));
     expect(onSelectAgent).toHaveBeenCalledWith('agent-xyz');
+    // Clicking "View agent →" must also dismiss the inbox popover — the question
+    // text ("View?") should no longer be visible once the inbox closes.
+    await waitFor(() => {
+      expect(screen.queryByText('View?')).toBeNull();
+    });
   });
 
   it('shows "N more requests waiting" indicator when multiple unanswered', async () => {

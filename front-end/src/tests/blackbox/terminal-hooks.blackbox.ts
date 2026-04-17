@@ -316,10 +316,12 @@ describe('useAgentActions', () => {
 
   it('handleSubmitFeedback re-throws API errors', async () => {
     server.use(
-      http.get(`${API_BASE}/blueprints/by-goal`, () =>
-        HttpResponse.json({ blueprint: { id: 'bp-1' } }),
-      ),
-      http.post(`${API_BASE}/blueprints/:id/feedback`, () =>
+      // findBlueprintByGoal returns `response.json()` directly, so the shape
+      // must be `{ id }` at top level — the same as api.blackbox.ts uses.
+      // Wrapping it as `{ blueprint: { id } }` would leave `blueprint.id`
+      // undefined and route the feedback POST to /blueprints/undefined/feedback.
+      http.get(`${API_BASE}/blueprints/by-goal`, () => HttpResponse.json({ id: 'bp-1' })),
+      http.patch(`${API_BASE}/blueprints/:id/feedback`, () =>
         HttpResponse.json({ error: 'bad' }, { status: 500 }),
       ),
     );

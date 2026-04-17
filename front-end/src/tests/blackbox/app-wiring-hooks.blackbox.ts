@@ -53,6 +53,9 @@ describe('app-wiring/hooks', () => {
     warn: console.warn,
     error: console.error,
     userAgent: navigator.userAgent,
+    innerHeight: window.innerHeight,
+    visualViewport: Object.getOwnPropertyDescriptor(window, 'visualViewport'),
+    hidden: Object.getOwnPropertyDescriptor(Document.prototype, 'hidden'),
   };
 
   beforeEach(() => {
@@ -70,6 +73,20 @@ describe('app-wiring/hooks', () => {
       value: originals.userAgent,
       configurable: true,
     });
+    Object.defineProperty(window, 'innerHeight', {
+      value: originals.innerHeight,
+      configurable: true,
+      writable: true,
+    });
+    if (originals.visualViewport) {
+      Object.defineProperty(window, 'visualViewport', originals.visualViewport);
+    } else {
+      // jsdom default: delete any override the test installed
+      delete (window as { visualViewport?: unknown }).visualViewport;
+    }
+    if (originals.hidden) {
+      Object.defineProperty(Document.prototype, 'hidden', originals.hidden);
+    }
     document.documentElement.style.removeProperty('--vh');
   });
 

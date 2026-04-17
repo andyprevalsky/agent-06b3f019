@@ -345,11 +345,15 @@ describe('MessageList', () => {
         }),
       ],
     });
-    const { container } = renderList(ctx);
-    // Only one explore chip should render; the internal web_search step is collapsed inside it.
+    renderList(ctx);
+    // Only ONE explore chip should render for taskId=task-X — confirm a single
+    // "Explore thing" title node rather than two separate rows.
     await waitFor(() =>
-      expect(container.textContent).toMatch(/Explore thing/),
+      expect(screen.getAllByText(/Explore thing/)).toHaveLength(1),
     );
+    // The internal web_search step must NOT render as its own chip — the grouping
+    // collapses it inside the explore agent bubble.
+    expect(screen.queryByText('Searching')).not.toBeInTheDocument();
   });
 
   it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {
@@ -429,9 +433,10 @@ describe('MessageList', () => {
             toolCallId: 'wf-many',
             toolName: 'wait_for',
             title: 'Check 1',
-            toolStatus: 'IN_PROGRESS',
+            toolStatus: 'FINISHED',
             checkNum: 1,
             maxChecks: 5,
+            conditionMet: false,
           },
         }),
         msg('wf-check-2', {
@@ -456,6 +461,11 @@ describe('MessageList', () => {
     await waitFor(() => expect(container.firstChild).not.toBeNull());
     // Latest title should render (Check 2 done wins dedup)
     expect(container.textContent).toMatch(/Check 2 done|Check 2|condition met/i);
+    // Reconstructed history must include the earlier check. WaitForChip's header
+    // shows the completed check count ("X checks" or "X check"). Both raw events
+    // are FINISHED ⇒ waitForCheckMap must contain 2 entries ⇒ header renders "2 checks".
+    // If reconstruction breaks (map empty), the count falls back to 0 or vanishes.
+    expect(container.textContent).toMatch(/2\s*checks/i);
   });
 
   it('renders chat-mode Copy + Start Agent when last msg is FINISHED send_message_to_user (ACTIVE)', async () => {
@@ -595,5 +605,22 @@ describe('MessageList', () => {
     const { container } = renderList(ctx);
     // Tree rendered once. Text content should include merged header.
     await waitFor(() => expect(container.firstChild).not.toBeNull());
+    // Two messages share busId=bus-1; MessageList collapses them into a single
+    // SubAgentTree render. The "Cluster" title text must only appear once (or
+    // not at all if SubAgentTree strips it) — it must NOT appear twice.
+    const clusterMatches = screen.queryAllByText(/Cluster/);
+    expect(clusterMatches.length).toBeLessThanOrEqual(1);
+    // And the summary must reference both sub-agent IDs in the merged tree data.
+    // Both tree messages have distinct toolCallIds ('spawn-a' and 'spawn-b') but the
+    // merged render should NOT produce two separate SubAgentToolBubble chips.
+    // Individual SubAgentToolBubble rows each emit an `aria-live` or chip title
+    // — here we verify only one top-level wrapper class is rendered.
+    const treeWrappers = container.querySelectorAll('div.flex.gap-3.animate-in');
+    // Other messages render in their own wrappers, but we expect the spawn_sub_agent
+    // messages to produce at most a single tree wrapper (merged), not two.
+    // Count wrappers that originate from the spawn_sub_agent branch specifically:
+    // this branch puts SubAgentTree as a direct child. A collapsed "Cluster" row
+    // would produce two such wrappers if the merge regressed.
+    expect(treeWrappers.length).toBeLessThanOrEqual(1);
   });
 });

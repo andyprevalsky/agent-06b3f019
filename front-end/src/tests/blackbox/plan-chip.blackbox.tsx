@@ -5,7 +5,7 @@
  * topological sort of tasks, formatDeps, tool-name formatting, expand/collapse.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PlanChip } from '@/features/terminal-component-group/components/PlanChip';
 import type { PlanTask } from '@/lib/realtime-types';
@@ -184,8 +184,12 @@ describe('PlanChip', () => {
     await u.click(screen.getByText('Expandable plan'));
     expect(screen.getByTestId('md').textContent).toBe('Detailed plan description');
 
-    // Collapse back
+    // Collapse back — AnimatePresence exit animation removes the node asynchronously.
     await u.click(screen.getByText('Expandable plan'));
+    await waitFor(
+      () => expect(screen.queryByTestId('md')).not.toBeInTheDocument(),
+      { timeout: 2000 },
+    );
   });
 
   it('does not toggle expansion when plan has no content', async () => {
@@ -220,8 +224,13 @@ describe('PlanChip', () => {
         }}
       />,
     );
-    // All three rendered, in original order
-    const items = document.querySelectorAll('ul li');
-    expect(items.length).toBe(3);
+    // All three rendered, in ORIGINAL task order (t0, t1, t2) — not in some
+    // cycle-mangled permutation. Assert both count and sequence.
+    const items = Array.from(document.querySelectorAll('ul li'));
+    expect(items).toHaveLength(3);
+    const texts = items.map((it) => it.textContent ?? '');
+    expect(texts[0]).toContain('t0');
+    expect(texts[1]).toContain('t1');
+    expect(texts[2]).toContain('t2');
   });
 });

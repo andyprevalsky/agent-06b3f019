@@ -601,13 +601,26 @@ describe('FeedbackBanner', () => {
     errSpy.mockRestore();
   });
 
-  it('Submit is disabled when rating is 0', async () => {
+  it('Submit is enabled after star click (rating > 0)', async () => {
+    // The `disabled={selectedRating === 0}` branch on Submit is effectively
+    // unreachable through UI flow: clicking any star sets rating>=1 AND opens
+    // the panel in the same handler, and Cancel both collapses the panel and
+    // resets rating to 0. So we can't assert disabled=true via blackbox without
+    // reaching into internal state. We CAN assert the inverse: once the panel
+    // is open (by any legal user path), Submit must be ENABLED. This catches
+    // a regression that made Submit always-disabled.
+    const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    // Without any star click, Submit is not rendered — but test that the
-    // guard triggers. Click star, then cancel to force panel open+rating=0
-    // is not possible because cancel collapses panel; instead, we just assert
-    // the panel-closed state.
+    // Before opening, Submit is not in the DOM.
     expect(screen.queryByText('Submit')).not.toBeInTheDocument();
+    // Click the first star — sets rating=1 AND expands the panel.
+    const stars = screen
+      .getAllByRole('button')
+      .filter((b) => b.querySelector('.lucide-star'));
+    await user.click(stars[0]);
+    // Submit now renders and is enabled (rating > 0).
+    const submitBtn = await screen.findByRole('button', { name: 'Submit' });
+    expect(submitBtn).not.toBeDisabled();
   });
 
   it('toggles helpImprove checkbox', async () => {
