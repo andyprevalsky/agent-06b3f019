@@ -37,3 +37,11 @@ export const VH_REMEASURE_DELAY_MS = 100;
 
 /** Dev log endpoint path (appended to VITE_BACKEND_API_URL). */
 export const DEV_LOG_ENDPOINT = '/api/dev/log';
+
+/** Whether the app is running in Vite dev mode. */
+export const IS_DEV = import.meta.env.DEV;
+
+/** Backend API base URL, with any trailing slash stripped. */
+export const BACKEND_URL = (
+  import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
+).replace(/\/$/, '');

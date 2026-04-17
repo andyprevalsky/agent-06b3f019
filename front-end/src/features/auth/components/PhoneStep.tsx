@@ -13,9 +13,32 @@
 import { X } from 'lucide-react';
 
 import type { PhoneStepProps } from '../types';
-import { formatPhoneNumber } from '../phoneUtils';
 
 import AuthLogo from './AuthLogo';
+
+function appendUSFormatted(prefix: string, digits: string): string {
+  let out = prefix + '(' + digits.slice(0, 3);
+  if (digits.length >= 3) {
+    out += ')';
+    if (digits.length > 3) {
+      out += '-' + digits.slice(3, 6);
+      if (digits.length > 6) out += '-' + digits.slice(6, 10);
+    }
+  }
+  return out;
+}
+
+/** Formats a raw digit string into a display phone number: +1 (XXX)-XXX-XXXX. */
+function formatPhoneNumber(value: string): string {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 0) return '';
+  if (digits[0] === '1') {
+    const rest = digits.slice(1);
+    return rest.length === 0 ? '+1' : appendUSFormatted('+1 ', rest);
+  }
+  if (digits.length <= 10) return appendUSFormatted('+1 ', digits);
+  return '+' + digits;
+}
 
 function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneStepProps) {
   const handleSubmit = (e: React.FormEvent) => {

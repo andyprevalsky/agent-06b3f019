@@ -1,5 +1,7 @@
 import { useState, useCallback } from 'react';
 
+import { copyToClipboard as copyToClipboardLib } from '@/lib/clipboard';
+
 import { generateApiKeyApi, deleteApiKeyApi } from '../api';
 
 interface ApiKeysResult {
@@ -72,7 +74,7 @@ export function useApiKeys(
   );
 
   const copyToClipboard = useCallback((text: string) => {
-    void navigator.clipboard.writeText(text);
+    void copyToClipboardLib(text);
   }, []);
 
   return {

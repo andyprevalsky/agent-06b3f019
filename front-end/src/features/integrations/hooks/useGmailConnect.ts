@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 
-import { getAuthHeaders, startGmailOAuthApi } from '../api';
-import { API_BASE_WITH_PATH, GMAIL_POLL_TIMEOUT_MS, GMAIL_POLL_INTERVAL_MS } from '../config';
+import { fetchIntegrationsApi, startGmailOAuthApi } from '../api';
+import { GMAIL_POLL_TIMEOUT_MS, GMAIL_POLL_INTERVAL_MS } from '../config';
 
 export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
   const [connectingProvider, setConnectingProvider] = useState<'gmail' | null>(null);
@@ -23,16 +23,11 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           await (window as any).api.openExternal(payload.authUrl);
 
-          const headers = getAuthHeaders();
           const pollForConnection = setInterval(() => {
             void (async () => {
               try {
-                const res = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });
-                if (!res.ok) return;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const data: any = await res.json();
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const gmail = (data.integrations || []).find((i: any) => i.name === provider);
+                const integrations = await fetchIntegrationsApi();
+                const gmail = integrations.find((i) => i.name === provider);
                 if (gmail) {
                   clearInterval(pollForConnection);
                   setConnectingProvider(null);
