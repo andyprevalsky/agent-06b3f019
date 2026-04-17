@@ -7,6 +7,8 @@
 
 import { useState, useEffect, useMemo } from 'react';
 
+import { getItem, setItem } from '@/lib/storage';
+
 import { DEFAULT_BG_COLORS, DEFAULT_BLUR, DEFAULT_SHADOW, DEFAULT_BORDER } from '../config';
 import type { DripStyles } from '../types';
 
@@ -40,34 +42,33 @@ function mapShadowSlider(slider: number): number {
 
 export function useDrippiness() {
   const [backgroundColors, setBackgroundColors] = useState(() => {
-    const saved = localStorage.getItem('drippiness-bg-colors');
+    const saved = getItem('drippiness-bg-colors');
     return saved ? Number(saved) : DEFAULT_BG_COLORS;
   });
   const [blur, setBlur] = useState(() => {
-    const saved = localStorage.getItem('drippiness-blur');
+    const saved = getItem('drippiness-blur');
     return saved ? Number(saved) : DEFAULT_BLUR;
   });
   const [shadowIntensity, setShadowIntensity] = useState(() => {
-    const saved = localStorage.getItem('drippiness-shadow');
+    const saved = getItem('drippiness-shadow');
     return saved ? Number(saved) : DEFAULT_SHADOW;
   });
   const [borderColor, setBorderColor] = useState(() => {
-    const saved = localStorage.getItem('drippiness-border');
+    const saved = getItem('drippiness-border');
     return saved ? Number(saved) : DEFAULT_BORDER;
   });
 
-  // Persist to localStorage
   useEffect(() => {
-    localStorage.setItem('drippiness-bg-colors', backgroundColors.toString());
+    setItem('drippiness-bg-colors', backgroundColors.toString());
   }, [backgroundColors]);
   useEffect(() => {
-    localStorage.setItem('drippiness-blur', blur.toString());
+    setItem('drippiness-blur', blur.toString());
   }, [blur]);
   useEffect(() => {
-    localStorage.setItem('drippiness-shadow', shadowIntensity.toString());
+    setItem('drippiness-shadow', shadowIntensity.toString());
   }, [shadowIntensity]);
   useEffect(() => {
-    localStorage.setItem('drippiness-border', borderColor.toString());
+    setItem('drippiness-border', borderColor.toString());
   }, [borderColor]);
 
   const dripStyles: DripStyles = useMemo(() => {

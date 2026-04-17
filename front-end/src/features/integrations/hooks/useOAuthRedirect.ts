@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 
+import { getQueryParams } from '@/lib/url';
+
 export function useOAuthRedirect(fetchIntegrations: () => Promise<void>) {
   const [oauthSuccess, setOauthSuccess] = useState<string | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params = getQueryParams();
     const oauthResult = params.get('oauth_result');
     if (oauthResult) {
       const cleanUrl = window.location.pathname;

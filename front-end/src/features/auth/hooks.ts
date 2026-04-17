@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { User, Session } from '@supabase/supabase-js';
 import { useToast } from '@/hooks/use-toast';
-import * as amplitude from '@amplitude/analytics-browser';
+import * as analytics from '@/lib/analytics';
 import {
   getSession,
   clearSession,
@@ -14,8 +14,13 @@ import {
 import { checkNeedsInviteCode } from '@/lib/api';
 
 import { sendOTP, verifyOTP } from './api';
-import { stripPhoneNumber } from './phoneUtils';
+import { IS_DEV_AUTO_LOGIN } from './config';
 import type { AuthStep } from './types';
+
+/** Strips a formatted phone number to E.164: +19729777432. */
+function stripPhoneNumber(formatted: string): string {
+  return '+' + formatted.replace(/\D/g, '');
+}
 
 /** Module-level logger for the auth feature. */
 function logAuth(message: string, payload?: Record<string, unknown>): void {
@@ -35,7 +40,7 @@ async function initAuthSession(
     return;
   }
 
-  if (import.meta.env.DEV && !import.meta.env.VITEST) {
+  if (IS_DEV_AUTO_LOGIN) {
     logAuth('Dev mode: auto-logging in with test credentials...');
     try {
       await sendOTP('+19729777432');
@@ -133,7 +138,7 @@ export function usePhoneAuth(
       form.setLoading(true);
       try {
         await sendOTP(stripPhoneNumber(form.phone));
-        amplitude.track('phone_entered');
+        analytics.track('phone_entered');
         form.setStep('otp');
         toast({ title: 'Code sent!', description: 'Check your phone for the 6-digit code.' });
       } catch (error: unknown) {
@@ -152,8 +157,8 @@ export function usePhoneAuth(
       try {
         const strippedPhone = stripPhoneNumber(form.phone);
         await verifyOTP(strippedPhone, form.otp, anonymousUserId);
-        amplitude.track('otp_code_submitted');
-        amplitude.setUserId(strippedPhone);
+        analytics.track('otp_code_submitted');
+        analytics.setUserId(strippedPhone);
         completeAuth();
       } catch (error: unknown) {
         toastError(toast, 'Invalid code', error, 'Please check the code and try again.');

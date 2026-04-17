@@ -7,6 +7,8 @@
 
 import type {
   Agent,
+  AgentDetail,
+  Message,
   BlueprintFeedback,
   AncestorNode,
   FilePointer,
@@ -104,6 +106,46 @@ export interface TerminalUIState {
   isAnyBrowserFullscreen: boolean;
   setIsAnyBrowserFullscreen: (value: boolean) => void;
   ancestors: AncestorNode[];
+}
+
+// ── AgentChatArea slices ──────────────────────────────────────────────────
+
+export interface AgentSlice {
+  selectedAgentId: string | null;
+  agentDetail: AgentDetail | null;
+  messages: Message[];
+  isLoadingAgent: boolean;
+  isLoadingNetwork: boolean;
+  loadingDots: string;
+  messageInput: string;
+  setMessageInput: (v: string) => void;
+  isSendingMessage: boolean;
+  selectedModel: string;
+  setSelectedModel: (m: string) => void;
+  pendingPriceLimitCents: number;
+  setPendingPriceLimitCents: (c: number) => void;
+  isChatMode: boolean;
+  isPausing: boolean;
+  ancestors: AncestorNode[];
+  handleSelectAgent: (id: string | null) => void;
+  handleSendMessage: (attachments?: FilePointer[]) => Promise<void>;
+  handlePauseAgent: () => Promise<void>;
+  handleSubmitFeedback: (f: BlueprintFeedback) => Promise<void>;
+  refreshAgentDetail: (id: string) => Promise<void>;
+  cleanupAgentState: () => void;
+  resetAnimationState?: () => void;
+  setShowCreditModal: (v: boolean) => void;
+  setShowCostLimitModal: (v: boolean) => void;
+  loadAgents: () => Promise<void>;
+  forceResubscribeContext: () => void;
+}
+
+export interface DripSlice {
+  dripStyles: DripStyles;
+  blur: number;
+  backgroundColors: number;
+  borderColor: number;
+  shadowIntensity: number;
 }
 
 // ── Re-exports for convenience ────────────────────────────────────────────

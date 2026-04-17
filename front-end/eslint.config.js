@@ -156,12 +156,90 @@ export default tseslint.config(
             // No side-effect leaks
             'no-console': ['error', { allow: ['warn', 'error'] }],
 
+            // Canonical utility enforcement
+            'no-restricted-imports': [
+              'error',
+              {
+                paths: [
+                  {
+                    name: '@amplitude/analytics-browser',
+                    message: 'Import from @/lib/analytics instead of @amplitude/analytics-browser.',
+                  },
+                ],
+              },
+            ],
+            'no-restricted-syntax': [
+              'error',
+              {
+                selector:
+                  "MemberExpression[object.name='localStorage'], MemberExpression[object.name='sessionStorage']",
+                message:
+                  'Use @/lib/storage (getItem/setItem/removeItem) instead of localStorage/sessionStorage directly.',
+              },
+              {
+                selector: "CallExpression[callee.name='fetch']",
+                message:
+                  "Don't call fetch() directly in domain code. Put the call in the feature's api.ts layer.",
+              },
+              {
+                selector:
+                  "MemberExpression[object.type='MetaProperty'][object.meta.name='import'][object.property.name='meta'], MemberExpression[object.object.type='MetaProperty'][object.object.meta.name='import'][object.object.property.name='meta'][property.name='env']",
+                message:
+                  "Don't read import.meta.env in domain code. Centralize env access in the feature's config.ts.",
+              },
+              {
+                selector:
+                  "AssignmentExpression[left.type='MemberExpression'][left.object.name='document'][left.property.name='title']",
+                message: 'Use useDocumentSeo from @/lib/seo instead of assigning document.title.',
+              },
+              {
+                selector:
+                  "CallExpression[callee.object.name='document'][callee.property.name='createElement'][arguments.0.value=/^(meta|link)$/]",
+                message:
+                  "Use useDocumentSeo from @/lib/seo instead of creating meta/link tags directly.",
+              },
+              {
+                selector:
+                  "MemberExpression[object.name='navigator'][property.name='clipboard']",
+                message:
+                  'Use copyToClipboard from @/lib/clipboard instead of navigator.clipboard directly.',
+              },
+              {
+                selector:
+                  "NewExpression[callee.name='URLSearchParams'][arguments.0.type='MemberExpression'][arguments.0.object.property.name='location'][arguments.0.property.name='search']",
+                message:
+                  "Use getQueryParams from @/lib/url instead of `new URLSearchParams(window.location.search)`.",
+              },
+            ],
+
             // React-specific strict
             'react/no-unstable-nested-components': ['error', { allowAsProps: true }],
           },
         },
       ]
     : []),
+
+  // ── Carve-outs for api.ts / config.ts (allowed to use fetch / import.meta.env) ──
+  {
+    files: ['src/features/**/api.ts', 'src/lib/api.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "MemberExpression[object.name='localStorage'], MemberExpression[object.name='sessionStorage']",
+          message:
+            'Use @/lib/storage (getItem/setItem/removeItem) instead of localStorage/sessionStorage directly.',
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/features/**/config.ts', 'src/lib/api.ts'],
+    rules: {
+      'no-restricted-syntax': 'off',
+    },
+  },
 
   // ── Legacy strict exemptions (temporary, refactor targets) ─────────────
   ...(LEGACY_STRICT_EXEMPT_FILES.length > 0
@@ -178,6 +256,8 @@ export default tseslint.config(
             'no-console': 'off',
             'no-useless-catch': 'off',
             'no-empty': 'off',
+            'no-restricted-imports': 'off',
+            'no-restricted-syntax': 'off',
           },
         },
       ]
