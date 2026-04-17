@@ -14,6 +14,7 @@ import {
 import { checkNeedsInviteCode } from '@/lib/api';
 
 import { sendOTP, verifyOTP } from './api';
+import { stripPhoneNumber } from './phoneUtils';
 import type { AuthStep } from './types';
 
 /** Module-level logger for the auth feature. */
@@ -60,6 +61,7 @@ async function initAuthSession(
     await applySession('init-anonymous', anonSession);
   } catch (error) {
     console.error('[Auth] Failed to create anonymous session:', error);
+    await applySession('init-anonymous-failed', null);
   }
 }
 
@@ -67,36 +69,6 @@ async function initAuthSession(
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   return fallback;
-}
-
-/** Appends area-code / exchange / subscriber formatting to a prefix. */
-function appendUSFormatted(prefix: string, digits: string): string {
-  let out = prefix + '(' + digits.slice(0, 3);
-  if (digits.length >= 3) {
-    out += ')';
-    if (digits.length > 3) {
-      out += '-' + digits.slice(3, 6);
-      if (digits.length > 6) out += '-' + digits.slice(6, 10);
-    }
-  }
-  return out;
-}
-
-/** Formats a raw digit string into a display phone number: +1 (XXX)-XXX-XXXX. */
-export function formatPhoneNumber(value: string): string {
-  const digits = value.replace(/\D/g, '');
-  if (digits.length === 0) return '';
-  if (digits[0] === '1') {
-    const rest = digits.slice(1);
-    return rest.length === 0 ? '+1' : appendUSFormatted('+1 ', rest);
-  }
-  if (digits.length <= 10) return appendUSFormatted('+1 ', digits);
-  return '+' + digits;
-}
-
-/** Strips a formatted phone number to E.164: +19729777432. */
-export function stripPhoneNumber(formatted: string): string {
-  return '+' + formatted.replace(/\D/g, '');
 }
 
 /** Show an error toast from an unknown thrown value. */
@@ -274,13 +246,15 @@ function useAuthActions(setters: AuthStateSetters) {
     setUser(null);
     persistCachedUser(null);
     setIsFullySignedIn(false);
+    setRealtimeReady(false);
+    await setRealtimeAuth(null);
     try {
       const { session: anonSession } = await createAnonymousSession();
       await applySession('post-signout-anonymous', anonSession);
     } catch (error) {
       console.error('[Auth] Failed to create anonymous session after signout:', error);
     }
-  }, [applySession, setSession, setUser, setIsFullySignedIn]);
+  }, [applySession, setSession, setUser, setIsFullySignedIn, setRealtimeReady]);
 
   return { applySession, refreshAuthState, signOut };
 }
@@ -311,7 +285,10 @@ export function useAuth() {
     if (initRef.current) return;
     initRef.current = true;
     let mounted = true;
-    void initAuthSession(applySession).finally(() => {
+    const guardedApply = async (origin: string, sess: Session | null) => {
+      if (mounted) await applySession(origin, sess);
+    };
+    void initAuthSession(guardedApply).finally(() => {
       if (mounted) setLoading(false);
     });
     return () => {

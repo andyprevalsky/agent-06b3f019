@@ -13,7 +13,7 @@
 import { X } from 'lucide-react';
 
 import type { PhoneStepProps } from '../types';
-import { formatPhoneNumber } from '../hooks';
+import { formatPhoneNumber } from '../phoneUtils';
 
 import AuthLogo from './AuthLogo';
 

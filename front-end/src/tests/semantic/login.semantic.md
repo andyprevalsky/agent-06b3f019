@@ -94,7 +94,7 @@ After Verify:
 ### Step 5: Verify login survives navigation
 
 1. Click the Login button again (same element as Step 1)
-2. **PASS**: Because the user is now authenticated, the handler must navigate to `/terminal` — verify the URL path is `/terminal` within 3s
+2. **PASS**: Because the user is now authenticated, the handler must navigate to `/` — verify the URL path is `/` within 3s
 3. **FAIL**: If the auth modal re-opens instead, FAIL with "Login button does not detect authenticated state"
 
 ## Invariants (check continuously)
@@ -113,7 +113,7 @@ All of these must hold:
 - Step 2 `send-otp` returned 2xx and modal advanced to OTP step
 - Step 3 `verify-otp` returned 2xx with a session
 - Step 4 session persisted in localStorage and auth state is `isAuthenticated: true, isAnonymous: false`
-- Step 5 clicking Login redirects to `/terminal`
+- Step 5 clicking Login redirects to `/` (the authenticated Terminal surface)
 - No invariants violated
 
 ### FAILURE (any one triggers immediate failure)

@@ -266,7 +266,7 @@ async function handleQuickQuery(
   d.setCurrentView('agents');
   d.setMessageInput(trimmed);
   amplitude.track('goal_submitted', {
-    goal: trimmed,
+    goal_length: trimmed.length,
     model: d.selectedModel,
     source: 'quick_launcher',
   });
