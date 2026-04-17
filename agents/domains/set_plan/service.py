@@ -26,7 +26,7 @@ from domains.set_plan.config import (
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
-from helpers.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, TOOL_MODELS
 
 
 def _validate_dep_indices(deps: dict[str, list[str]], n: int) -> str | None:
