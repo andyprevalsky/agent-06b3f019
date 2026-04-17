@@ -138,7 +138,6 @@ describe('LoginButton', () => {
 // ---------------------------------------------------------------------------
 
 describe('PhoneAuthModal', () => {
-  const triggerRef = { current: document.createElement('div') };
   const onOpenChange = vi.fn();
   const onAuthComplete = vi.fn();
 
@@ -156,9 +155,7 @@ describe('PhoneAuthModal', () => {
   // -- Phone step --
 
   it('renders phone input step when open', async () => {
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     expect(screen.getByText('Start Building.')).toBeInTheDocument();
     expect(screen.getByText('Create free account')).toBeInTheDocument();
@@ -167,17 +164,13 @@ describe('PhoneAuthModal', () => {
   });
 
   it('does not render when closed', () => {
-    renderWithProviders(
-      <PhoneAuthModal open={false} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={false} onOpenChange={onOpenChange} />);
 
     expect(screen.queryByText('Start Building.')).not.toBeInTheDocument();
   });
 
   it('disables Continue button when phone is empty', async () => {
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const continueBtn = screen.getByRole('button', { name: /continue/i });
     expect(continueBtn).toBeDisabled();
@@ -185,9 +178,7 @@ describe('PhoneAuthModal', () => {
 
   it('formats phone number as user types (US format)', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '9729777432');
@@ -198,9 +189,7 @@ describe('PhoneAuthModal', () => {
 
   it('enables Continue button after entering a phone number', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '9729777432');
@@ -211,9 +200,7 @@ describe('PhoneAuthModal', () => {
 
   it('submits phone and transitions to OTP step', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '9729777432');
@@ -230,9 +217,7 @@ describe('PhoneAuthModal', () => {
   it('captures POST /api/auth/send-otp with phone in E.164 format', async () => {
     clearCaptures();
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '9729777432');
@@ -256,9 +241,7 @@ describe('PhoneAuthModal', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '9729777432');
@@ -277,9 +260,7 @@ describe('PhoneAuthModal', () => {
 
   it('shows OTP input with max length 6 and numeric-only input', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     // Navigate to OTP step
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
@@ -296,9 +277,7 @@ describe('PhoneAuthModal', () => {
 
   it('shows SMS authorization checkbox on OTP step', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -310,9 +289,7 @@ describe('PhoneAuthModal', () => {
 
   it('disables Verify button until OTP is 6 digits and SMS is authorized', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -345,12 +322,7 @@ describe('PhoneAuthModal', () => {
     clearCaptures();
     const user = userEvent.setup();
     renderWithProviders(
-      <PhoneAuthModal
-        open={true}
-        onOpenChange={onOpenChange}
-        triggerRef={triggerRef}
-        onAuthComplete={onAuthComplete}
-      />,
+      <PhoneAuthModal open={true} onOpenChange={onOpenChange} onAuthComplete={onAuthComplete} />,
     );
 
     // Phone step
@@ -379,12 +351,7 @@ describe('PhoneAuthModal', () => {
   it('calls onAuthComplete and closes modal after successful OTP verification', async () => {
     const user = userEvent.setup();
     renderWithProviders(
-      <PhoneAuthModal
-        open={true}
-        onOpenChange={onOpenChange}
-        triggerRef={triggerRef}
-        onAuthComplete={onAuthComplete}
-      />,
+      <PhoneAuthModal open={true} onOpenChange={onOpenChange} onAuthComplete={onAuthComplete} />,
     );
 
     // Phone step
@@ -424,9 +391,7 @@ describe('PhoneAuthModal', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -446,9 +411,7 @@ describe('PhoneAuthModal', () => {
 
   it('allows going back from OTP step to phone step', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     // Navigate to OTP step
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
@@ -469,9 +432,7 @@ describe('PhoneAuthModal', () => {
   });
 
   it('shows terms and privacy links on phone step', () => {
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const termsLink = screen.getByRole('link', { name: /terms/i });
     expect(termsLink).toHaveAttribute('href', 'https://roselabs.ai/terms');
@@ -487,7 +448,6 @@ describe('PhoneAuthModal', () => {
       <PhoneAuthModal
         open={true}
         onOpenChange={onOpenChange}
-        triggerRef={triggerRef}
         anonymousUserId="anon-merge-user-123"
       />,
     );
@@ -523,9 +483,7 @@ describe('PhoneAuthModal', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -546,9 +504,7 @@ describe('PhoneAuthModal', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -572,9 +528,7 @@ describe('PhoneAuthModal', () => {
 
   it('formats phone with country code prefix (starting with 1)', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     const phoneInput = screen.getByLabelText('Phone Number');
     await user.type(phoneInput, '19729777432');
@@ -584,9 +538,7 @@ describe('PhoneAuthModal', () => {
 
   it('strips non-digit characters from OTP input', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -741,11 +693,8 @@ describe('Auth state (localStorage session)', () => {
   it('stores verified session in localStorage after successful OTP verification', async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
-    const triggerRef = { current: document.createElement('div') };
 
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={onOpenChange} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
 
     // Complete the full auth flow
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
@@ -799,11 +748,8 @@ describe('API boundary capture', () => {
   it('sends POST /api/auth/send-otp with E.164 phone', async () => {
     clearCaptures();
     const user = userEvent.setup();
-    const triggerRef = { current: document.createElement('div') };
 
-    renderWithProviders(
-      <PhoneAuthModal open={true} onOpenChange={vi.fn()} triggerRef={triggerRef} />,
-    );
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={vi.fn()} />);
 
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -820,15 +766,9 @@ describe('API boundary capture', () => {
   it('sends POST /api/auth/verify-otp with phone, token, and anonymousUserId', async () => {
     clearCaptures();
     const user = userEvent.setup();
-    const triggerRef = { current: document.createElement('div') };
 
     renderWithProviders(
-      <PhoneAuthModal
-        open={true}
-        onOpenChange={vi.fn()}
-        triggerRef={triggerRef}
-        anonymousUserId="anon-user-to-merge"
-      />,
+      <PhoneAuthModal open={true} onOpenChange={vi.fn()} anonymousUserId="anon-user-to-merge" />,
     );
 
     // Phone step

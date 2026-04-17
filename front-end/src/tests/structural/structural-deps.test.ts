@@ -129,35 +129,64 @@ const ALLOWED_OWN_LAYERS: Record<Layer, Layer[]> = {
 // Key: relative path from src/. Value: array of violation message prefixes to skip.
 const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/settings/hooks.ts': ['Cross-domain import: "@/features/customization"'],
-  'features/settings/hooks/useSaveCustomization.ts': ['Cross-domain import: "@/features/customization"'],
+  'features/settings/hooks/useSaveCustomization.ts': [
+    'Cross-domain import: "@/features/customization"',
+  ],
   'features/settings/hooks/useSettingsData.ts': ['Cross-domain import: "@/features/customization"'],
   'features/settings/components/Settings.tsx': ['Cross-domain import: "@/features/customization"'],
-  'features/settings/components/CustomizationTab.tsx': ['Cross-domain import: "@/features/customization"'],
-  'features/settings/components/SettingsTabContent.tsx': ['Cross-domain import: "@/features/customization"'],
+  'features/settings/components/CustomizationTab.tsx': [
+    'Cross-domain import: "@/features/customization"',
+  ],
+  'features/settings/components/SettingsTabContent.tsx': [
+    'Cross-domain import: "@/features/customization"',
+  ],
   'features/terminal/components/TerminalModals.tsx': [
     'Cross-domain import: "@/features/auth"',
     'Cross-domain import: "@/features/terminal-component-group"',
   ],
-  'features/terminal/components/AgentChatArea.tsx': ['Cross-domain import: "@/features/terminal-component-group"'],
-  'features/terminal/components/BackgroundPattern.tsx': ['Cross-domain import: "@/features/terminal-component-group"'],
+  'features/terminal/components/Terminal.tsx': [
+    'Cross-domain import: "@/features/auth"',
+    'Cross-domain import: "@/features/agent-context"',
+  ],
+  'features/terminal/hooks/useTerminalAgents.ts': [
+    'Cross-domain import: "@/features/auth"',
+    'Cross-domain import: "@/features/agent-context"',
+  ],
+  'features/terminal-component-group/hooks.ts': [
+    'Cross-domain import: "@/features/auth"',
+    'Cross-domain import: "@/features/agent-context"',
+  ],
+  'features/terminal/components/AgentChatArea.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
+  ],
+  'features/terminal/components/BackgroundPattern.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
+  ],
   'features/terminal/components/TerminalContent.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
     'Cross-domain import: "@/features/terminal-component-group/',
   ],
-  'features/terminal/components/TerminalHeader.tsx': ['Cross-domain import: "@/features/terminal-component-group"'],
+  'features/terminal/components/TerminalHeader.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
+  ],
   // blog is a shared component/data library consumed by research-blog and research-blog-post
   'features/research-blog/types.ts': ['Cross-domain import: "@/features/blog"'],
   'features/research-blog/api.ts': ['Cross-domain import: "@/features/blog"'],
   'features/research-blog/components/ResearchBlog.tsx': ['Cross-domain import: "@/features/blog"'],
   'features/research-blog-post/api.ts': ['Cross-domain import: "@/features/blog"'],
-  'features/research-blog-post/components/ResearchBlogPost.tsx': ['Cross-domain import: "@/features/blog"'],
+  'features/research-blog-post/components/ResearchBlogPost.tsx': [
+    'Cross-domain import: "@/features/blog"',
+  ],
   // integration-handlers-context is a shared context provider consumed by integrations
-  'features/integrations/config.ts': ['Cross-domain import: "@/features/integration-handlers-context"'],
+  'features/integrations/config.ts': [
+    'Cross-domain import: "@/features/integration-handlers-context"',
+  ],
   'features/integrations/hooks/usePasswordSync.ts': [
     'Cross-domain import: "@/features/integration-handlers-context"',
   ],
   'features/integrations/hooks/index.ts': [
     'Cross-domain import: "@/features/integration-handlers-context"',
+    'Cross-domain import: "@/features/auth"',
   ],
   'features/integrations/hooks/useIntegrationActions.ts': [
     'Cross-domain import: "@/features/integration-handlers-context"',

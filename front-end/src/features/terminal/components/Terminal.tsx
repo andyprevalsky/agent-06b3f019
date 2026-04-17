@@ -48,8 +48,8 @@
 
 import { useRef, useCallback } from 'react';
 
-import { useAuth } from '@/hooks/useAuth';
-import { AgentProvider } from '@/contexts/AgentContext';
+import { useAuth } from '@/features/auth';
+import { AgentProvider } from '@/features/agent-context';
 
 import { TerminalContent } from './TerminalContent';
 

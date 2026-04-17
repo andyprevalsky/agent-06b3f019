@@ -12,4 +12,4 @@ export { useIntegrationActions } from './useIntegrationActions';
 
 // Re-export shared hooks for consumers
 export { useIntegrationHandlers } from '@/features/integration-handlers-context';
-export { useAuth } from '@/hooks/useAuth';
+export { useAuth } from '@/features/auth';

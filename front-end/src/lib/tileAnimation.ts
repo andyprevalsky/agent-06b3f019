@@ -268,10 +268,10 @@ export function getTileColorsForFrame(
   // Grid col 3-5 → largeTileCol to +2 (large tile) <- T markers here
   // Grid col 6-8 → largeTileCol + 3 to +5 (right of large tile)
 
-  grid.forEach((row: any[], rowIdx: number) => {
+  grid.forEach((row: (number | string)[], rowIdx: number) => {
     const actualRow = largeTileRow + rowIdx - 1;
 
-    row.forEach((val: any, colIdx: number) => {
+    row.forEach((val: number | string, colIdx: number) => {
       if (val !== 'T') {
         const actualCol = largeTileCol + colIdx - 3;
         colors.set(`${actualRow},${actualCol}`, val as number);

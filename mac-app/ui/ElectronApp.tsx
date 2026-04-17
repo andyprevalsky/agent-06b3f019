@@ -3,7 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { AppDataProvider } from "@/hooks/useAppData";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth } from "@/features/auth";
 import { getSession } from "@/lib/supabase";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import Terminal from "@/pages/Terminal";

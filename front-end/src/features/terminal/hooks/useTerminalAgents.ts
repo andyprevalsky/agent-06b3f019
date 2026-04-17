@@ -9,10 +9,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '@/features/auth';
 import { signOut, clearStoredSession } from '@/lib/supabase';
 import { getClientSource } from '@/lib/clientSource';
-import { useAgentContext } from '@/contexts/AgentContext';
+import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 
@@ -50,8 +50,21 @@ export function useTerminalAgents(
   // Ancestors
   const [ancestors, setAncestors] = useState<AncestorNode[]>([]);
   useEffect(() => {
-    if (!ctx.selectedAgentId) { setAncestors([]); return; }
-    fetchAncestorsAPI(ctx.selectedAgentId).then(setAncestors).catch(() => setAncestors([]));
+    if (!ctx.selectedAgentId) {
+      setAncestors([]);
+      return;
+    }
+    let active = true;
+    fetchAncestorsAPI(ctx.selectedAgentId)
+      .then((result) => {
+        if (active) setAncestors(result);
+      })
+      .catch(() => {
+        if (active) setAncestors([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [ctx.selectedAgentId]);
 
   // Amplitude
@@ -146,31 +159,58 @@ export function useTerminalAgents(
   });
 
   return {
-    user, authUser: auth.user, isFullySignedIn: auth.isFullySignedIn,
-    isAuthenticated: auth.isAuthenticated, isAnonymous: auth.isAnonymous,
-    refreshAuthState: auth.refreshAuthState, realtimeReady: auth.realtimeReady, canSubmitGoals,
-    agentDetail: ctx.agent, selectedAgentId: ctx.selectedAgentId,
-    messages: ctx.messages, contextStreamingBubbles: ctx.streamingBubbles,
-    contextStreamingPlan: ctx.streamingPlan, contextStreamingAttention: ctx.streamingAttention,
-    isLoadingAgent: ctx.isLoadingAgent, forceResubscribeContext: ctx.forceResubscribe,
+    user,
+    authUser: auth.user,
+    isFullySignedIn: auth.isFullySignedIn,
+    isAuthenticated: auth.isAuthenticated,
+    isAnonymous: auth.isAnonymous,
+    refreshAuthState: auth.refreshAuthState,
+    realtimeReady: auth.realtimeReady,
+    canSubmitGoals,
+    agentDetail: ctx.agent,
+    selectedAgentId: ctx.selectedAgentId,
+    messages: ctx.messages,
+    contextStreamingBubbles: ctx.streamingBubbles,
+    contextStreamingPlan: ctx.streamingPlan,
+    contextStreamingAttention: ctx.streamingAttention,
+    isLoadingAgent: ctx.isLoadingAgent,
+    forceResubscribeContext: ctx.forceResubscribe,
     isChatMode: ctx.isChatMode,
-    agents: agentList.agents, isLoadingAgents: agentList.isLoadingAgents,
-    resumingAgentId: actions.resumingAgentId, isPausing: actions.isPausing,
-    ancestors, clientSource,
-    messageInput: messaging.messageInput, setMessageInput: messaging.setMessageInput,
+    agents: agentList.agents,
+    isLoadingAgents: agentList.isLoadingAgents,
+    resumingAgentId: actions.resumingAgentId,
+    isPausing: actions.isPausing,
+    ancestors,
+    clientSource,
+    messageInput: messaging.messageInput,
+    setMessageInput: messaging.setMessageInput,
     isSendingMessage: messaging.isSendingMessage,
-    selectedModel: messaging.selectedModel, setSelectedModel: messaging.setSelectedModel,
+    selectedModel: messaging.selectedModel,
+    setSelectedModel: messaging.setSelectedModel,
     pendingPriceLimitCents: messaging.pendingPriceLimitCents,
     setPendingPriceLimitCents: messaging.setPendingPriceLimitCents,
-    createModalOpen, setCreateModalOpen, loginModalOpen, setLoginModalOpen,
-    showCreditModal, setShowCreditModal, showCostLimitModal, setShowCostLimitModal,
-    isLoadingNetwork: loading.isLoadingNetwork, loadingDots: loading.loadingDots,
+    createModalOpen,
+    setCreateModalOpen,
+    loginModalOpen,
+    setLoginModalOpen,
+    showCreditModal,
+    setShowCreditModal,
+    showCostLimitModal,
+    setShowCostLimitModal,
+    isLoadingNetwork: loading.isLoadingNetwork,
+    loadingDots: loading.loadingDots,
     isInitialLoadRef,
-    loadAgents: agentList.loadAgents, refreshAgentDetail: actions.refreshAgentDetail,
-    cleanupAgentState, handleSelectAgent: actions.handleSelectAgent,
-    handleCreateAgent: actions.handleCreateAgent, handleResumeAgent: actions.handleResumeAgent,
-    handlePauseAgent: actions.handlePauseAgent, handleSendMessage: messaging.handleSendMessage,
-    handleLogout, handleLoginClick, handleCreateNewAgent,
+    loadAgents: agentList.loadAgents,
+    refreshAgentDetail: actions.refreshAgentDetail,
+    cleanupAgentState,
+    handleSelectAgent: actions.handleSelectAgent,
+    handleCreateAgent: actions.handleCreateAgent,
+    handleResumeAgent: actions.handleResumeAgent,
+    handlePauseAgent: actions.handlePauseAgent,
+    handleSendMessage: messaging.handleSendMessage,
+    handleLogout,
+    handleLoginClick,
+    handleCreateNewAgent,
     handleSubmitFeedback: actions.handleSubmitFeedback,
     resetAnimationState,
   };
@@ -208,10 +248,15 @@ function useQuickQueryListener(deps: {
 
 async function handleQuickQuery(
   d: {
-    selectedModel: string; canSubmitGoals: boolean; clientSource: string;
-    pendingPriceLimitCents: number; setCurrentView: (v: TerminalView) => void;
-    setMessageInput: (v: string) => void; setIsSendingMessage: (v: boolean) => void;
-    setIsLoadingNetwork: (v: boolean) => void; setLoginModalOpen: (v: boolean) => void;
+    selectedModel: string;
+    canSubmitGoals: boolean;
+    clientSource: string;
+    pendingPriceLimitCents: number;
+    setCurrentView: (v: TerminalView) => void;
+    setMessageInput: (v: string) => void;
+    setIsSendingMessage: (v: boolean) => void;
+    setIsLoadingNetwork: (v: boolean) => void;
+    setLoginModalOpen: (v: boolean) => void;
     setSelectedAgentIdContext: (id: string | null) => void;
     loadAgents: () => Promise<void>;
     toast: ReturnType<typeof useToast>['toast'];
@@ -220,7 +265,11 @@ async function handleQuickQuery(
 ) {
   d.setCurrentView('agents');
   d.setMessageInput(trimmed);
-  amplitude.track('goal_submitted', { goal: trimmed, model: d.selectedModel, source: 'quick_launcher' });
+  amplitude.track('goal_submitted', {
+    goal_length: trimmed.length,
+    model: d.selectedModel,
+    source: 'quick_launcher',
+  });
 
   if (!d.canSubmitGoals) {
     d.setLoginModalOpen(true);
@@ -232,14 +281,19 @@ async function handleQuickQuery(
     d.setIsSendingMessage(true);
     d.setIsLoadingNetwork(true);
     const newAgent = await createAgent({
-      goal: trimmed, model: d.selectedModel, source: d.clientSource,
+      goal: trimmed,
+      model: d.selectedModel,
+      source: d.clientSource,
       price_limit_cents: d.pendingPriceLimitCents,
     });
     await d.loadAgents();
     d.setCurrentView('agents');
     d.setSelectedAgentIdContext(newAgent.agent_id);
     d.setMessageInput('');
-    d.toast({ title: 'Agent created', description: 'Your new agent has been created and is starting' });
+    d.toast({
+      title: 'Agent created',
+      description: 'Your new agent has been created and is starting',
+    });
   } catch (error: unknown) {
     d.toast({
       title: 'Error',
@@ -248,5 +302,6 @@ async function handleQuickQuery(
     });
   } finally {
     d.setIsSendingMessage(false);
+    d.setIsLoadingNetwork(false);
   }
 }

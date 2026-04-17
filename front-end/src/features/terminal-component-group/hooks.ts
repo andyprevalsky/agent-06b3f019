@@ -9,7 +9,7 @@
 
 // ── React Hooks ───────────────────────────────────────────────────────────
 export { useToast } from '@/hooks/use-toast';
-export { useAuth } from '@/hooks/useAuth';
+export { useAuth } from '@/features/auth';
 export { useAppData } from '@/hooks/useAppData';
 export type { Model } from '@/hooks/useAppData';
 export { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
@@ -21,7 +21,7 @@ export {
   getStatusText,
   type TreeNode,
 } from '@/hooks/useAgentTree';
-export { useAgentContext, type StreamingBubble } from '@/contexts/AgentContext';
+export { useAgentContext, type StreamingBubble } from '@/features/agent-context';
 
 // ── Imperative API functions (used by components in event handlers) ───────
 export {

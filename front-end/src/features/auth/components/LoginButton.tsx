@@ -19,9 +19,9 @@
  * [CLOSED]
  */
 
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '../hooks';
 
 import PhoneAuthModal from './PhoneAuthModal';
 
@@ -29,14 +29,11 @@ const LoginButton = () => {
   const [modalOpen, setModalOpen] = useState(false);
   const { user, loading } = useAuth();
   const navigate = useNavigate();
-  const buttonRef = useRef<HTMLButtonElement>(null);
 
   const handleClick = () => {
-    // If already authenticated, redirect to terminal
     if (user) {
       navigate('/terminal');
     } else {
-      // Otherwise, open the auth modal
       setModalOpen(true);
     }
   };
@@ -48,14 +45,13 @@ const LoginButton = () => {
   return (
     <>
       <button
-        ref={buttonRef}
         className="hidden md:flex items-center justify-center px-4 py-2 rounded-md text-sm font-medium bg-white/5 backdrop-blur-xl text-black hover:bg-white/10 transition-colors border border-white/20"
         onClick={handleClick}
       >
         Login
       </button>
 
-      <PhoneAuthModal open={modalOpen} onOpenChange={setModalOpen} triggerRef={buttonRef} />
+      <PhoneAuthModal open={modalOpen} onOpenChange={setModalOpen} />
     </>
   );
 };

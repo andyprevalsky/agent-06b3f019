@@ -123,7 +123,7 @@ export interface Message {
     progress?: number;
     progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
     error?: boolean;
-    [key: string]: any;
+    [key: string]: unknown;
   };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)
 }
@@ -438,10 +438,10 @@ export interface Person {
   estimatedNetWorthUsd?: number | null;
   estimatedWorldPowerRanking?: number | null;
   notes?: string | null;
-  skills?: any;
-  interests?: any;
-  embedding?: any;
-  emailAddresses?: any;
+  skills?: unknown;
+  interests?: unknown;
+  embedding?: unknown;
+  emailAddresses?: unknown;
   createdAt: string;
   updatedAt: string;
 }
@@ -462,8 +462,8 @@ export interface AttentionRequest {
   agent_id: string;
   workflow_id: string;
   question: string;
-  context?: any;
-  metadata?: Record<string, any> | null;
+  context?: unknown;
+  metadata?: Record<string, unknown> | null;
   user_response?: string | null;
   created_at: string;
   updated_at: string;
