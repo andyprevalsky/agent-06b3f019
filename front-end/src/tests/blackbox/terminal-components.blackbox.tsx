@@ -1,0 +1,1878 @@
+/**
+ * Blackbox tests for four terminal-component-group components.
+ *
+ * Components covered:
+ *  - QueryInput: textarea, model selector, price-limit edit, submit/pause button
+ *  - AttentionInbox: empty vs populated, accept / reject / skip actions
+ *  - BrowserStatusBar: minimized / expanded / fullscreen + write-lock approval
+ *  - BrowserViewPanel: active / disconnected browser + completion view
+ *
+ * The tests lean on the shared `renderWithProviders` wrapper from
+ * `test-wrapper.tsx` (QueryClient, TooltipProvider, MemoryRouter, AppDataProvider)
+ * and, for BrowserStatusBar/BrowserViewPanel, also wrap the tree in an
+ * `AgentContext.Provider` with a manually-constructed mock value so the
+ * components can read `messages`/etc without standing up a live realtime
+ * subscription.
+ */
+import React from 'react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { screen, waitFor, within, act, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import { server } from './msw/server';
+import { renderWithProviders } from './test-wrapper';
+
+import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
+import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+import BrowserViewPanel from '@/features/terminal-component-group/components/BrowserViewPanel';
+import { AgentContext } from '@/features/agent-context';
+import type { AgentContextValue } from '@/features/agent-context/types';
+import type { AgentDetail, Message } from '@/lib/api';
+
+const API_BASE = 'http://localhost:3001/api';
+
+// ─── Child stubs for components whose rendering pulls in heavy extras ─────
+// MessageList is used by BrowserStatusBar/BrowserViewPanel and mounts a
+// framer-motion tree keyed to the full AgentContext. Stubbing it keeps the
+// tests focused on the parent's own DOM contract.
+vi.mock('@/features/terminal-component-group/components/MessageList', () => ({
+  MessageList: ({ subAgentId }: { subAgentId?: string }) => (
+    <div data-testid="message-list-stub" data-subagent-id={subAgentId || ''} />
+  ),
+}));
+
+vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () => ({
+  default: () => <div data-testid="browser-border-glow" />,
+}));
+
+vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', () => ({
+  default: () => <div data-testid="browser-cursor-overlay" />,
+}));
+
+vi.mock('@/components/ThinkingAnimation', () => ({
+  default: () => <div data-testid="thinking-animation" />,
+}));
+
+// The MarkdownText component in AttentionInbox is heavy (react-markdown +
+// remark plugins) and not the subject of these tests — stub to plain text.
+vi.mock('@/features/terminal-component-group/components/MarkdownText', () => ({
+  MarkdownText: ({ text }: { text: string }) => (
+    <div data-testid="markdown-text">{text}</div>
+  ),
+}));
+
+// Polyfill Element.prototype.scrollIntoView (used by cmdk inside the Popover)
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function () {};
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+function mockSession() {
+  const session = {
+    access_token: 'test-token',
+    refresh_token: 'test-refresh',
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    token_type: 'bearer',
+    user: { id: 'test-user', is_anonymous: false },
+  };
+  localStorage.setItem('rose-session', JSON.stringify(session));
+  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
+}
+
+function makeAgentDetail(overrides: Partial<AgentDetail> = {}): AgentDetail {
+  return {
+    agent_id: 'agent-123',
+    goal: 'Test goal',
+    model: 'rose-labs/rose-1-lite',
+    source: 'WEB',
+    reasoning_effort: 'medium',
+    progress: 0,
+    status: 'ACTIVE',
+    status_message: null,
+    temporal_workflow_id: 'wf-abc',
+    token_count: 0,
+    tokens_in: 0,
+    tokens_out: 0,
+    tool_tokens_in: 0,
+    tool_tokens_out: 0,
+    tool_cost_cents: 0,
+    context_size: 0,
+    message_count: 0,
+    price_limit_cents: 500,
+    tree_cost_cents: 100,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    write_lock_enabled: true,
+    parent_agent_id: null,
+    parent_goal: null,
+    verifier: null,
+    tools: [],
+    ...overrides,
+  } as unknown as AgentDetail;
+}
+
+function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
+  return {
+    agent: null,
+    setAgent: vi.fn(),
+    selectedAgentId: null,
+    setSelectedAgentId: vi.fn(),
+    messages,
+    setMessages: vi.fn(),
+    streamingBubbles: new Map(),
+    streamingPlan: null,
+    streamingAttention: null,
+    streamingTools: new Map(),
+    streamedTextsRef: { current: new Set<string>() },
+    registerMessageHandler: vi.fn(() => () => {}),
+    sendMessage: vi.fn(async () => {}),
+    isLoadingAgent: false,
+    forceResubscribe: vi.fn(),
+    isChatMode: false,
+  };
+}
+
+function withAgentCtx(messages: Message[], children: React.ReactNode) {
+  return (
+    <AgentContext.Provider value={makeMockAgentContext(messages)}>
+      {children}
+    </AgentContext.Provider>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QueryInput
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('QueryInput (blackbox)', () => {
+  beforeEach(() => {
+    mockSession();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  const defaultProps = {
+    value: '',
+    onChange: vi.fn(),
+    onSubmit: vi.fn(),
+    availableModels: [
+      {
+        id: 'rose-labs/rose-1-lite',
+        name: 'rose-1-lite',
+        provider: 'rose-labs',
+        description: 'fast',
+      },
+      {
+        id: 'rose-labs/rose-1-ultra',
+        name: 'rose-1-ultra',
+        provider: 'rose-labs',
+        description: 'powerful',
+      },
+    ],
+  };
+
+  it('renders placeholder and shows selected model in footer', () => {
+    renderWithProviders(<QueryInput {...defaultProps} placeholder="Enter any goal" />);
+
+    expect(screen.getByPlaceholderText('Enter any goal')).toBeInTheDocument();
+    expect(screen.getByText('rose-labs/rose-1-lite')).toBeInTheDocument();
+  });
+
+  it('typing updates value via onChange (controlled)', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} onChange={onChange} placeholder="type here" />,
+    );
+
+    const textarea = screen.getByPlaceholderText('type here');
+    await user.type(textarea, 'abc');
+    // onChange fired once per keystroke with the incremental text
+    expect(onChange).toHaveBeenCalled();
+    expect(onChange.mock.calls.some((c) => c[0] === 'a')).toBe(true);
+  });
+
+  it('Cmd+Enter submits (handleSubmitWithAttachments path)', async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />,
+    );
+
+    const textarea = screen.getByPlaceholderText('Type your message...');
+    textarea.focus();
+    await user.keyboard('{Meta>}{Enter}{/Meta}');
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('plain Enter does NOT submit (multi-line textarea behavior)', async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />,
+    );
+
+    const textarea = screen.getByPlaceholderText('Type your message...');
+    textarea.focus();
+    await user.keyboard('{Enter}');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('disabled prop disables the textarea', () => {
+    renderWithProviders(<QueryInput {...defaultProps} disabled />);
+    const textarea = screen.getByPlaceholderText('Type your message...');
+    expect(textarea).toBeDisabled();
+  });
+
+  it('clicking the send button invokes onSubmit', async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} value="query" onSubmit={onSubmit} />,
+    );
+    // Submit button is the only button whose icon renders inside a LiquidWhiteButton,
+    // but we can target by the SVG arrow's parent button more loosely — use
+    // the very last <button> in the form (ArrowUp icon).
+    const buttons = screen.getAllByRole('button');
+    // Grab the final button — the send button
+    await user.click(buttons[buttons.length - 1]);
+    expect(onSubmit).toHaveBeenCalled();
+  });
+
+  it('when canSubmit=false renders Stop button wired to onPause', async () => {
+    const onPause = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} canSubmit={false} onPause={onPause} />,
+    );
+    const buttons = screen.getAllByRole('button');
+    await user.click(buttons[buttons.length - 1]);
+    expect(onPause).toHaveBeenCalled();
+  });
+
+  it('isPausing disables the stop button', () => {
+    renderWithProviders(
+      <QueryInput {...defaultProps} canSubmit={false} onPause={vi.fn()} isPausing />,
+    );
+    const buttons = screen.getAllByRole('button');
+    const stop = buttons[buttons.length - 1];
+    expect(stop).toBeDisabled();
+  });
+
+  it('renders cost-limit chip with default pending limit when no agent', () => {
+    renderWithProviders(
+      <QueryInput {...defaultProps} pendingPriceLimitCents={250} />,
+    );
+    expect(screen.getByText('0.00 / 2.50')).toBeInTheDocument();
+  });
+
+  it('clicking cost chip (no agent) enters edit mode and shows an input', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} pendingPriceLimitCents={100} />,
+    );
+    const chip = screen.getByText('0.00 / 1.00');
+    await user.click(chip.closest('button')!);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement | null;
+    expect(input).not.toBeNull();
+  });
+
+  it('renders cost chip for root agent (with price limit) and allows clicking to edit', async () => {
+    const agent = makeAgentDetail({ tree_cost_cents: 50, price_limit_cents: 500 });
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+
+    // root agent shows "cost / limit" with dollar formatting
+    expect(screen.getByText('0.50 / 5.00')).toBeInTheDocument();
+
+    // clicking opens the input
+    const chip = screen.getByText('0.50 / 5.00').closest('button')!;
+    await user.click(chip);
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement | null;
+    expect(input).not.toBeNull();
+  });
+
+  it('renders cost chip for child agent (disabled, only cost visible)', () => {
+    const agent = makeAgentDetail({
+      parent_agent_id: 'parent-1',
+      tree_cost_cents: 250,
+    });
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+    // Just the cost, no slash — spans render inline, content match is loose
+    expect(screen.getByText('2.50')).toBeInTheDocument();
+    // The button should be disabled for child agents
+    const btn = screen.getByText('2.50').closest('button')!;
+    expect(btn).toBeDisabled();
+  });
+
+  it('context percentage badge shows numeric value', () => {
+    renderWithProviders(
+      <QueryInput {...defaultProps} contextPercentage={42} />,
+    );
+    expect(screen.getByText('42%')).toBeInTheDocument();
+  });
+
+  it('shows "rose-labs/rose-1-ultra" in the model-selector when selectedModel switches', () => {
+    renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />,
+    );
+    expect(screen.getByText('rose-labs/rose-1-ultra')).toBeInTheDocument();
+  });
+
+  it('shows COMPLETED agent still renders (paperclip still present)', () => {
+    const agent = makeAgentDetail({ status: 'COMPLETED' });
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+    // Should still render; paperclip button exists but disabled
+    const paperclipBtn = document.querySelector('button[disabled]');
+    expect(paperclipBtn).toBeTruthy();
+  });
+
+  it('opens model picker popover and renders model names + descriptions', async () => {
+    const onModelChange = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} onModelChange={onModelChange} showModelSelector />,
+    );
+
+    // Click the model chip button to open the popover
+    const chip = screen.getByText('rose-labs/rose-1-lite').closest('button')!;
+    await user.click(chip);
+
+    // Model picker shows both model options with their descriptions
+    await waitFor(() => {
+      expect(
+        screen.getByText('Fast and cost-effective for everyday tasks'),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText('Most capable for complex reasoning'),
+    ).toBeInTheDocument();
+  });
+
+  it('selecting an unknown-provider model fallbacks to provider description', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        availableModels={[
+          {
+            id: 'other/alpha',
+            name: 'alpha',
+            provider: 'other-provider',
+          },
+          ...defaultProps.availableModels,
+        ]}
+      />,
+    );
+
+    const chip = screen.getByText('rose-labs/rose-1-lite').closest('button')!;
+    await user.click(chip);
+
+    await waitFor(() => {
+      expect(screen.getByText('other-provider')).toBeInTheDocument();
+    });
+  });
+
+  it('renders attachment paperclip button and it is enabled for running agent', () => {
+    renderWithProviders(<QueryInput {...defaultProps} />);
+    // paperclip button has Paperclip icon — find by its only disabled-insensitive rendering:
+    // paperclip is not disabled when agent not completed, so look for a button containing svg
+    const buttons = screen.getAllByRole('button');
+    // Just assert that at least one button is not disabled (the paperclip)
+    const enabled = buttons.filter((b) => !(b as HTMLButtonElement).disabled);
+    expect(enabled.length).toBeGreaterThan(0);
+  });
+
+  it('clicking the paperclip button triggers the hidden file input click', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} />);
+
+    // The hidden file input is the only <input type="file">
+    const fileInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+    const spy = vi.spyOn(fileInput, 'click');
+
+    // Find the paperclip — it's the first icon-only button after the settings cluster.
+    // Simpler: spy then click any button that renders a Paperclip SVG by querying for svg.lucide-paperclip parent.
+    const paperclipSvg = document.querySelector('.lucide-paperclip');
+    expect(paperclipSvg).toBeTruthy();
+    const paperclipBtn = paperclipSvg!.closest('button')!;
+    await user.click(paperclipBtn);
+
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('tooltip toggle button next to rose-1-lite is clickable', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-lite" />,
+    );
+    // The info-circle tooltip button renders an inline svg with stroke path
+    // for the "i" info icon — target by the svg path d attribute.
+    const infoSvg = document.querySelector('svg path[d*="M13 16h-1v-4h-1"]');
+    expect(infoSvg).toBeTruthy();
+    const btn = (infoSvg as SVGElement)!.closest('button')!;
+    // Click toggles state — just assert it does not throw
+    await user.click(btn);
+  });
+
+  it('drag over + drag leave cycle toggles the drop overlay class', async () => {
+    const { container } = renderWithProviders(<QueryInput {...defaultProps} />);
+    // The outer wrap is the first div under max-w-4xl — trigger drag events on its child
+    const dragWrapper = container.querySelector(
+      '[class*="rounded-xl"]',
+    ) as HTMLElement;
+    expect(dragWrapper).toBeTruthy();
+
+    // Use fireEvent.dragOver / dragLeave — they sidestep jsdom's missing DragEvent
+    fireEvent.dragOver(dragWrapper);
+    await waitFor(() => {
+      expect(screen.getByText('Drop files here')).toBeInTheDocument();
+    });
+
+    fireEvent.dragLeave(dragWrapper);
+    await waitFor(() => {
+      expect(screen.queryByText('Drop files here')).toBeNull();
+    });
+  });
+
+  it('price-limit edit for pending (no agent) saves new limit via onPendingPriceLimitChange', async () => {
+    const onPendingPriceLimitChange = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        pendingPriceLimitCents={100}
+        onPendingPriceLimitChange={onPendingPriceLimitChange}
+      />,
+    );
+
+    // Click chip to enter edit mode
+    const chip = screen.getByText('0.00 / 1.00').closest('button')!;
+    await user.click(chip);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+
+    // Update value + press Enter to save
+    await user.clear(input);
+    await user.type(input, '3.25');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(onPendingPriceLimitChange).toHaveBeenCalledWith(325);
+    });
+  });
+
+  it('price-limit input sanitizes to digits + one decimal only', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput {...defaultProps} pendingPriceLimitCents={100} />,
+    );
+    const chip = screen.getByText('0.00 / 1.00').closest('button')!;
+    await user.click(chip);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement;
+    await user.clear(input);
+    await user.type(input, '1.2.3abc');
+    // Should end up with only digits and one decimal point
+    expect(input.value).toBe('1.23');
+  });
+
+  it('cost chip shows amber when tree cost is >= 80% of limit (root agent)', () => {
+    const agent = makeAgentDetail({ tree_cost_cents: 85, price_limit_cents: 100 });
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+    const btn = screen.getByText('0.85 / 1.00').closest('button')!;
+    expect(btn.className).toMatch(/amber/);
+  });
+
+  it('cost chip shows red when tree cost reaches/exceeds the limit (root agent)', () => {
+    const agent = makeAgentDetail({ tree_cost_cents: 150, price_limit_cents: 100 });
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+    const btn = screen.getByText('1.50 / 1.00').closest('button')!;
+    expect(btn.className).toMatch(/red/);
+  });
+
+  it('saving price limit for existing agent calls PATCH /api/agents/:id', async () => {
+    let patched = false;
+    let patchedBody: any = null;
+    server.use(
+      http.patch(`${API_BASE}/agents/:agentId`, async ({ request }) => {
+        patched = true;
+        patchedBody = await request.json();
+        return HttpResponse.json({
+          agent: { price_limit_cents: patchedBody.price_limit_cents },
+        });
+      }),
+    );
+
+    const agent = makeAgentDetail({ tree_cost_cents: 50, price_limit_cents: 500 });
+    const onAgentUpdate = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        agentDetail={agent}
+        onAgentUpdate={onAgentUpdate}
+      />,
+    );
+
+    const chip = screen.getByText('0.50 / 5.00').closest('button')!;
+    await user.click(chip);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement;
+    await user.clear(input);
+    await user.type(input, '8.00');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(patched).toBe(true));
+    expect(patchedBody.price_limit_cents).toBe(800);
+  });
+
+  it('rejects saving a limit below current tree cost', async () => {
+    const agent = makeAgentDetail({ tree_cost_cents: 500, price_limit_cents: 1000 });
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
+
+    const chip = screen.getByText('5.00 / 10.00').closest('button')!;
+    await user.click(chip);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement;
+    await user.clear(input);
+    await user.type(input, '1.00'); // Below tree cost of 5.00
+    await user.keyboard('{Enter}');
+
+    // Input is still showing (not saved)
+    await waitFor(() => {
+      const still = document.querySelector(
+        'input[placeholder="1.00"]',
+      ) as HTMLInputElement;
+      expect(still).not.toBeNull();
+    });
+  });
+
+  it('rejects a NaN price-limit value', async () => {
+    const onPendingPriceLimitChange = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <QueryInput
+        {...defaultProps}
+        pendingPriceLimitCents={100}
+        onPendingPriceLimitChange={onPendingPriceLimitChange}
+      />,
+    );
+    const chip = screen.getByText('0.00 / 1.00').closest('button')!;
+    await user.click(chip);
+
+    const input = document.querySelector(
+      'input[placeholder="1.00"]',
+    ) as HTMLInputElement;
+    await user.clear(input); // empty -> NaN
+    await user.keyboard('{Enter}');
+
+    expect(onPendingPriceLimitChange).not.toHaveBeenCalled();
+  });
+
+  it('file input change processes file and adds attachment chip', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} />);
+
+    const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
+    const fileInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByText('hello.txt')).toBeInTheDocument();
+    });
+    // Filesize chip shows "B" for small files
+    expect(screen.getByText('5 B')).toBeInTheDocument();
+  });
+
+  it('rejects files over MAX_FILE_SIZE (>20MB)', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} />);
+
+    // Create a file bigger than 20MB (21MB)
+    const big = new File(['x'.repeat(21 * 1024 * 1024)], 'big.bin', {
+      type: 'application/octet-stream',
+    });
+
+    const fileInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    await user.upload(fileInput, big);
+
+    // No attachment chip should be added
+    await waitFor(() => {
+      expect(screen.queryByText('big.bin')).toBeNull();
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AttentionInbox
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('AttentionInbox (blackbox)', () => {
+  beforeEach(() => {
+    mockSession();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('renders the bell button even with no requests', async () => {
+    renderWithProviders(<AttentionInbox />);
+    // Bell is the single button rendered inline
+    const btn = screen.getByRole('button');
+    expect(btn).toBeInTheDocument();
+    // No badge when unansweredCount is 0
+    expect(screen.queryByText(/^\d+$/)).toBeNull();
+  });
+
+  it('shows unanswered count badge when requests exist', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-1',
+              agent_id: 'agent-1',
+              workflow_id: 'wf-1',
+              question: 'Do you approve?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+            {
+              id: 'req-2',
+              agent_id: 'agent-2',
+              workflow_id: 'wf-2',
+              question: 'Also do you approve?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<AttentionInbox />);
+
+    // Badge with "2" appears next to the bell
+    await waitFor(() => {
+      expect(screen.getByText('2')).toBeInTheDocument();
+    });
+  });
+
+  it('opening the inbox with no requests renders the empty state', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    const bell = screen.getByRole('button');
+    await user.click(bell);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Congrats/)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/All your agents are unblocked/i),
+    ).toBeInTheDocument();
+  });
+
+  it('opening the inbox shows the first unanswered request (Accept/Skip/Reject)', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-1',
+              agent_id: 'agent-1',
+              workflow_id: 'wf-1',
+              question: 'Approve this purchase?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    // Wait for badge showing one request
+    await waitFor(() => {
+      expect(screen.getByText('1')).toBeInTheDocument();
+    });
+
+    const bell = screen.getAllByRole('button')[0];
+    await user.click(bell);
+
+    await waitFor(() => {
+      expect(screen.getByText('Approve this purchase?')).toBeInTheDocument();
+    });
+
+    // Action buttons present
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument();
+  });
+
+  it('clicking Accept calls the respond endpoint', async () => {
+    let respondCalled = false;
+
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-42',
+              agent_id: 'agent-42',
+              workflow_id: 'wf-42',
+              question: 'Ready?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        respondCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('Ready?')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Accept' }));
+    await waitFor(() => expect(respondCalled).toBe(true));
+  });
+
+  it('clicking Reject calls the reject endpoint', async () => {
+    let rejectCalled = false;
+
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-99',
+              agent_id: 'agent-99',
+              workflow_id: 'wf-99',
+              question: 'Reject me',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/reject`, () => {
+        rejectCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('Reject me')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => expect(rejectCalled).toBe(true));
+  });
+
+  it('clicking Skip calls the skip endpoint', async () => {
+    let skipCalled = false;
+
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-9',
+              agent_id: 'agent-9',
+              workflow_id: 'wf-9',
+              question: 'Skip me',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/skip`, () => {
+        skipCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('Skip me')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Skip' }));
+    await waitFor(() => expect(skipCalled).toBe(true));
+  });
+
+  it('shows the image thumbnail when image_url is present', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-img',
+              agent_id: 'agent-img',
+              workflow_id: 'wf-img',
+              question: 'Has image',
+              image_url: 'https://example.com/cat.png',
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+
+    await waitFor(() => {
+      const img = document.querySelector(
+        'img[src="https://example.com/cat.png"]',
+      );
+      expect(img).toBeTruthy();
+    });
+  });
+
+  it('shows the iMessage block when metadata.onSuccess is sendSmsThroughIMessage', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-sms',
+              agent_id: 'agent-sms',
+              workflow_id: 'wf-sms',
+              question: 'Send to Bob?',
+              image_url: null,
+              metadata: {
+                onSuccess: 'sendSmsThroughIMessage',
+                to: '+15555551234',
+                message: 'Hi Bob',
+              },
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Send via iMessage on your Mac')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/\+15555551234/)).toBeInTheDocument();
+    expect(screen.getByText(/Hi Bob/)).toBeInTheDocument();
+    // Button reads the no-bridge label
+    expect(screen.getByText(/Open Mac app to send/)).toBeInTheDocument();
+  });
+
+  it('clicking "Send via iMessage" with a bridge calls window.api.sendIMessage + respond endpoint', async () => {
+    let respondCalled = false;
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-sms-bridge',
+              agent_id: 'agent-sms',
+              workflow_id: 'wf-sms',
+              question: 'Send to Bob?',
+              image_url: null,
+              metadata: {
+                onSuccess: 'sendSmsThroughIMessage',
+                to: '+15555551234',
+                message: 'Hello from bridge',
+              },
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        respondCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    // Stub the Mac-app bridge
+    const sendIMessage = vi.fn(async () => ({ success: true }));
+    (window as any).api = { sendIMessage };
+
+    try {
+      const user = userEvent.setup();
+      renderWithProviders(<AttentionInbox />);
+
+      await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+      await user.click(screen.getAllByRole('button')[0]);
+
+      await waitFor(() => {
+        expect(screen.getByText('Send via iMessage')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: 'Send via iMessage' }));
+
+      await waitFor(() => expect(sendIMessage).toHaveBeenCalled());
+      expect(sendIMessage).toHaveBeenCalledWith({
+        to: '+15555551234',
+        message: 'Hello from bridge',
+      });
+      await waitFor(() => expect(respondCalled).toBe(true));
+    } finally {
+      delete (window as any).api;
+    }
+  });
+
+  it('Cmd+Enter keyboard shortcut submits the first unanswered request', async () => {
+    let respondCalled = false;
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-kbd',
+              agent_id: 'agent-kbd',
+              workflow_id: 'wf-kbd',
+              question: 'via keyboard?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        respondCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('via keyboard?')).toBeInTheDocument());
+
+    // Dispatch Cmd+Enter — the component listens on window
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }),
+      );
+    });
+
+    await waitFor(() => expect(respondCalled).toBe(true));
+  });
+
+  it('Cmd+S keyboard shortcut skips the first unanswered request', async () => {
+    let skipCalled = false;
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-kbd-skip',
+              agent_id: 'agent-kbd',
+              workflow_id: 'wf-kbd',
+              question: 'skip me?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/skip`, () => {
+        skipCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('skip me?')).toBeInTheDocument());
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true }),
+      );
+    });
+
+    await waitFor(() => expect(skipCalled).toBe(true));
+  });
+
+  it('typing in the textarea updates the response input', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-text',
+              agent_id: 'agent-text',
+              workflow_id: 'wf-text',
+              question: 'add context?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('add context?')).toBeInTheDocument());
+
+    const textarea = screen.getByPlaceholderText(
+      'Add context (optional)...',
+    ) as HTMLTextAreaElement;
+    await user.type(textarea, 'yes please');
+    expect(textarea.value).toBe('yes please');
+  });
+
+  it('clicking "View agent" calls onSelectAgent and closes inbox', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-view',
+              agent_id: 'agent-xyz',
+              workflow_id: 'wf-view',
+              question: 'View?',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const onSelectAgent = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox onSelectAgent={onSelectAgent} />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('View?')).toBeInTheDocument());
+
+    await user.click(screen.getByText('View agent →'));
+    expect(onSelectAgent).toHaveBeenCalledWith('agent-xyz');
+  });
+
+  it('shows "N more requests waiting" indicator when multiple unanswered', async () => {
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-a',
+              agent_id: 'a',
+              workflow_id: 'wf',
+              question: 'first',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+            {
+              id: 'req-b',
+              agent_id: 'b',
+              workflow_id: 'wf',
+              question: 'second',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+            {
+              id: 'req-c',
+              agent_id: 'c',
+              workflow_id: 'wf',
+              question: 'third',
+              image_url: null,
+              metadata: null,
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('3')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 more requests waiting/)).toBeInTheDocument();
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BrowserStatusBar
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('BrowserStatusBar (blackbox)', () => {
+  beforeEach(() => {
+    mockSession();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('renders minimized with default title when no messages', () => {
+    renderWithProviders(
+      withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+    expect(screen.getByText('Browser session active')).toBeInTheDocument();
+  });
+
+  it('shows lastActionTitle from the most recent browser message', () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: { task_id: 'task-9', action_type: 'click', title: 'Clicked submit' },
+      },
+    ];
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-9" browserUrl="about:blank" />),
+    );
+    expect(screen.getByText('Clicked submit')).toBeInTheDocument();
+  });
+
+  it('shows "Disconnected" state when a session_paused message is present (expanded view)', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: { task_id: 'task-x', action_type: 'session_paused', title: 'Paused' },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-x" browserUrl="about:blank" />),
+    );
+
+    // Click the outer minimized container to expand
+    const title = screen.getByText('Paused');
+    await user.click(title);
+
+    await waitFor(() => {
+      expect(screen.getByText('Disconnected')).toBeInTheDocument();
+    });
+  });
+
+  it('expand click reveals Task progress panel', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Click the minimized bar to expand
+    await user.click(screen.getByText('Browser session active'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText("Agent's Browser")).toBeInTheDocument();
+  });
+
+  it('step progress bar renders when steps_taken/total_steps metadata is present', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'click',
+          title: 'step msg',
+          steps_taken: 3,
+          total_steps: 10,
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Must expand to see the Task progress block
+    await user.click(screen.getByText('step msg'));
+    await waitFor(() => {
+      expect(screen.getByText(/Steps Taken 3\/10/)).toBeInTheDocument();
+    });
+  });
+
+  it('forceMinimized prop keeps the bar minimized and non-clickable', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        [],
+        <BrowserStatusBar taskId="task-1" browserUrl="about:blank" forceMinimized />,
+      ),
+    );
+    await user.click(screen.getByText('Browser session active'));
+    // Task progress should NOT show — still minimized
+    expect(screen.queryByText(/Task progress/i)).toBeNull();
+  });
+
+  it('renders BrowserWriteLockApproval when pending approval message exists (fullscreen)', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'approval-1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'Approve my write?',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'click',
+          title: 'doing stuff',
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'attention-1',
+          },
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Expand first
+    await user.click(screen.getByText('doing stuff'));
+
+    // Click Maximize button to go fullscreen
+    await waitFor(() => {
+      expect(screen.getByText("Agent's Browser")).toBeInTheDocument();
+    });
+    // Fullscreen toggle button has the Maximize2 icon — find by looking for the Maximize2 title
+    // Trigger fullscreen by clicking thumbnail which is an iframe container
+    // The expanded header has a "Maximize2" button; find all buttons and click the 2nd to last
+    // before the Collapse (ChevronDown) button.
+    const expandedHeader = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const buttons = within(expandedHeader).getAllByRole('button');
+    // There are 2 buttons in the controls cluster: Maximize then Collapse
+    await user.click(buttons[buttons.length - 2]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Approval Required')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Approve my write?')).toBeInTheDocument();
+  });
+
+  it('clicking Accept in fullscreen BrowserWriteLockApproval calls respond endpoint', async () => {
+    let respondCalled = false;
+    server.use(
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        respondCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const messages: Message[] = [
+      {
+        message_id: 'approval-accept',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'Can I write?',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'click',
+          title: 'writing',
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'ar-bar-accept',
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Expand -> go fullscreen
+    await user.click(screen.getByText('writing'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await waitFor(() => expect(screen.getByText('Approval Required')).toBeInTheDocument());
+
+    // Optional: type context
+    const ctx = screen.getByPlaceholderText('Add context (optional)...');
+    await user.type(ctx, 'looks good');
+
+    // Click the Accept button
+    await user.click(screen.getByRole('button', { name: /Accept/i }));
+    await waitFor(() => expect(respondCalled).toBe(true));
+  });
+
+  it('clicking Reject in fullscreen BrowserWriteLockApproval calls reject endpoint', async () => {
+    let rejectCalled = false;
+    server.use(
+      http.post(`${API_BASE}/attention-requests/:id/reject`, () => {
+        rejectCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const messages: Message[] = [
+      {
+        message_id: 'approval-reject',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'Can I write?',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'click',
+          title: 'writing',
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'ar-bar-reject',
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    await user.click(screen.getByText('writing'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await waitFor(() => expect(screen.getByText('Approval Required')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: /Reject/i }));
+    await waitFor(() => expect(rejectCalled).toBe(true));
+  });
+
+  it('clicking "Take control" in fullscreen calls browser-session/resume', async () => {
+    let resumeCalled = false;
+    server.use(
+      http.post(`${API_BASE}/browser-session/resume`, async ({ request }) => {
+        resumeCalled = true;
+        const body = (await request.json()) as { task_id?: string };
+        expect(body.task_id).toBe('task-1');
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const messages: Message[] = [
+      {
+        message_id: 'm-taketaketake',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'click',
+          title: 'Clicking around',
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Expand -> fullscreen
+    await user.click(screen.getByText('Clicking around'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    // In fullscreen + not disconnected: "Take control" chip is visible
+    await waitFor(() => expect(screen.getByText('Take control')).toBeInTheDocument());
+    await user.click(screen.getByText('Take control'));
+    await waitFor(() => expect(resumeCalled).toBe(true));
+  });
+
+  it('fullscreen with disconnected session shows Disconnected state + Take Control overlay button', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm-disc',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'session_paused',
+          title: 'Paused',
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // Expand -> fullscreen
+    await user.click(screen.getByText('Paused'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    // Fullscreen "Disconnected" header label + overlay "Take Control" button
+    await waitFor(() => expect(screen.getByText('Disconnected')).toBeInTheDocument());
+    expect(screen.getByText('Take Control')).toBeInTheDocument();
+  });
+
+  it('closing fullscreen via X button returns to expanded view', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    await user.click(screen.getByText('Browser session active'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    // Fullscreen header has "Active" label (green dot label)
+    await waitFor(() => expect(screen.getByText('Active')).toBeInTheDocument());
+
+    // Click the X close button — it's the only button in the top bar of fullscreen
+    // Locate via the Active text's parent header
+    const fsHeader = screen.getByText('Active').closest('div')!.parentElement!;
+    const closeBtn = within(fsHeader).getByRole('button');
+    await user.click(closeBtn);
+
+    // Back to expanded view — Task progress heading is present
+    await waitFor(() => {
+      expect(screen.getByText(/Task progress/i)).toBeInTheDocument();
+    });
+  });
+
+  it('shows SchemaChip with output_schema fields + hovering reveals the tooltip', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'init-msg',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          title: 'booted',
+          output_schema: {
+            fields: [
+              { name: 'title', type: 'str', description: 'The page title' },
+              { name: 'count', type: 'int', description: 'A count' },
+            ],
+          },
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    // The FileJson icon is rendered as an SVG — its closest mouse-region div is the trigger.
+    // Hover to reveal the tooltip rendered into document.body via portal.
+    const svg = document.querySelector('.lucide-file-json');
+    expect(svg).toBeTruthy();
+    const trigger = (svg as SVGElement).closest('div[class*="flex-shrink-0"]') as HTMLElement;
+    expect(trigger).toBeTruthy();
+    await user.hover(trigger);
+
+    await waitFor(() => {
+      expect(screen.getByText('Output Schema')).toBeInTheDocument();
+    });
+    expect(screen.getByText('title')).toBeInTheDocument();
+    expect(screen.getByText('count')).toBeInTheDocument();
+  });
+
+  it('collapse button in expanded view re-minimizes the bar', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx([], <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    await user.click(screen.getByText('Browser session active'));
+    await waitFor(() => expect(screen.getByText(/Task progress/i)).toBeInTheDocument());
+
+    // Click the last button in the expanded header (ChevronDown = collapse)
+    const expandedHeader = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(expandedHeader).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 1]);
+
+    // Back to minimized: Task progress panel is gone
+    await waitFor(() => expect(screen.queryByText(/Task progress/i)).toBeNull());
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BrowserViewPanel
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('BrowserViewPanel (blackbox)', () => {
+  beforeEach(() => {
+    mockSession();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('renders an active browser session header with iframe', () => {
+    renderWithProviders(
+      withAgentCtx(
+        [],
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="https://example.com"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+    expect(screen.getByText('Browser Session Active')).toBeInTheDocument();
+    const iframe = document.querySelector('iframe[title="Browser Session"]');
+    expect(iframe).toBeTruthy();
+    expect((iframe as HTMLIFrameElement).src).toContain('https://example.com');
+  });
+
+  it('shows control-hint text when no pending write lock approval', () => {
+    renderWithProviders(
+      withAgentCtx(
+        [],
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+    expect(
+      screen.getByText(/You can interact with the browser/i),
+    ).toBeInTheDocument();
+  });
+
+  it('clicking fullscreen toggle calls onFullscreenToggle(true)', async () => {
+    const cb = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        [],
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={cb}
+        />,
+      ),
+    );
+    await user.click(screen.getByLabelText('Fullscreen'));
+    expect(cb).toHaveBeenCalledWith(true);
+  });
+
+  it('renders write-lock approval chip when pending approval is present', () => {
+    const messages: Message[] = [
+      {
+        message_id: 'approval-1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'Write approval needed',
+        role: 'TOOL',
+        metadata: {
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'ar-1',
+          },
+        },
+      },
+    ];
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+    expect(screen.getByText('Write Approval Required')).toBeInTheDocument();
+    expect(screen.getByText('Write approval needed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Reject/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Accept/i })).toBeInTheDocument();
+  });
+
+  it('Accept button on write-lock approval calls respond endpoint', async () => {
+    let respondCalled = false;
+    server.use(
+      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
+        respondCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const messages: Message[] = [
+      {
+        message_id: 'approval-x',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'allow?',
+        role: 'TOOL',
+        metadata: {
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'ar-accept-1',
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /Accept/i }));
+    await waitFor(() => expect(respondCalled).toBe(true));
+  });
+
+  it('Reject button on write-lock approval calls reject endpoint', async () => {
+    let rejectCalled = false;
+    server.use(
+      http.post(`${API_BASE}/attention-requests/:id/reject`, () => {
+        rejectCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const messages: Message[] = [
+      {
+        message_id: 'approval-y',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'reject?',
+        role: 'TOOL',
+        metadata: {
+          toolStatus: 'IN_PROGRESS',
+          requestUserApproval: {
+            writePermission: true,
+            attentionRequestId: 'ar-reject-1',
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /Reject/i }));
+    await waitFor(() => expect(rejectCalled).toBe(true));
+  });
+
+  it('renders completion view when last message action_type is task_complete', () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: 'Job done!',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'done',
+        },
+      },
+    ];
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+    expect(screen.getByText('Task Completed')).toBeInTheDocument();
+    expect(screen.getByText('Job done!')).toBeInTheDocument();
+  });
+
+  it('shows disconnected overlay + Take Control button after receiving browserbase-disconnected message', async () => {
+    renderWithProviders(
+      withAgentCtx(
+        [],
+        <BrowserViewPanel
+          taskId="task-1"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', { data: 'browserbase-disconnected' }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Browser Session Disconnected')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Take Control')).toBeInTheDocument();
+  });
+});

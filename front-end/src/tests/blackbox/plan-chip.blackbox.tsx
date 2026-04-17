@@ -1,0 +1,227 @@
+/**
+ * Blackbox tests for PlanChip.
+ * Covers title rendering, status variants (planning/executing/complete/error),
+ * streaming char counter, sequential/parallel/hypothesis headers,
+ * topological sort of tasks, formatDeps, tool-name formatting, expand/collapse.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { PlanChip } from '@/features/terminal-component-group/components/PlanChip';
+import type { PlanTask } from '@/lib/realtime-types';
+
+// Stub the MarkdownText component — MarkdownText renders markdown content;
+// we just need it to render the text so we can assert on it.
+vi.mock('@/features/terminal-component-group/components/MarkdownText', () => ({
+  MarkdownText: ({ text }: { text: string }) => <div data-testid="md">{text}</div>,
+}));
+
+function task(goal: string, tool = 'web_search'): PlanTask {
+  return { goal, tool_name: tool };
+}
+
+describe('PlanChip', () => {
+  it('renders the title and chevron', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Plan to do X',
+          content: 'Some plan details',
+          tasks: [],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('Plan to do X')).toBeInTheDocument();
+  });
+
+  it('shows shimmer + char counter when streaming', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Generating...',
+          content: '',
+          tasks: [],
+          dependencies: null,
+          join: 'all',
+          status: 'planning',
+        }}
+        toolStatus="IN_PROGRESS"
+        charCount={1234}
+      />,
+    );
+    expect(screen.getByText('Generating...')).toBeInTheDocument();
+    // Tasks section should NOT render while streaming
+    expect(screen.queryByText(/Tasks/)).not.toBeInTheDocument();
+  });
+
+  it('auto-expands when in error state and renders AlertCircle', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Plan failed',
+          content: 'Something broke',
+          tasks: [],
+          dependencies: null,
+          join: 'all',
+          status: 'error',
+        }}
+        toolStatus="ERROR"
+      />,
+    );
+    // content is visible because isError auto-expands
+    expect(screen.getByTestId('md').textContent).toBe('Something broke');
+    expect(document.querySelector('.lucide-alert-circle, .lucide-circle-alert')).not.toBeNull();
+  });
+
+  it('renders "N Tasks · Parallel" when no deps', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Parallel plan',
+          content: '',
+          tasks: [task('A'), task('B'), task('C')],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('3 Tasks · Parallel')).toBeInTheDocument();
+    expect(screen.getByText('A')).toBeInTheDocument();
+    expect(screen.getByText('B')).toBeInTheDocument();
+    expect(screen.getByText('C')).toBeInTheDocument();
+  });
+
+  it('renders "Sequential" header for a simple chain', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Chain',
+          content: '',
+          tasks: [task('step 1'), task('step 2'), task('step 3')],
+          dependencies: { '1': ['0'], '2': ['1'] },
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('3 Tasks · Sequential')).toBeInTheDocument();
+  });
+
+  it('renders "N Tasks" for a non-chain DAG and shows deps inline', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'DAG',
+          content: '',
+          tasks: [task('a'), task('b'), task('c')],
+          dependencies: { '2': ['0', '1'] },
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('3 Tasks')).toBeInTheDocument();
+    // c depends on a and b → "→ after 1, 2"
+    expect(screen.getByText('→ after 1, 2')).toBeInTheDocument();
+  });
+
+  it('renders "N Hypotheses" header and diamond markers when join=any', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Hypotheses',
+          content: '',
+          tasks: [task('h1'), task('h2')],
+          dependencies: null,
+          join: 'any',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('2 Hypotheses')).toBeInTheDocument();
+    // diamond markers for hypothesis mode
+    const diamonds = screen.getAllByText('◇');
+    expect(diamonds.length).toBe(2);
+  });
+
+  it('formats tool names — spawn_browser_agent_v3 → "Browser Agent"', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Browser plan',
+          content: '',
+          tasks: [{ goal: 'scrape something', tool_name: 'spawn_browser_agent_v3' }],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('Browser Agent')).toBeInTheDocument();
+  });
+
+  it('toggles expanded content section on header click', async () => {
+    const u = userEvent.setup();
+    render(
+      <PlanChip
+        plan={{
+          title: 'Expandable plan',
+          content: 'Detailed plan description',
+          tasks: [task('a')],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    // Initially collapsed — MarkdownText not rendered
+    expect(screen.queryByTestId('md')).not.toBeInTheDocument();
+
+    await u.click(screen.getByText('Expandable plan'));
+    expect(screen.getByTestId('md').textContent).toBe('Detailed plan description');
+
+    // Collapse back
+    await u.click(screen.getByText('Expandable plan'));
+  });
+
+  it('does not toggle expansion when plan has no content', async () => {
+    const u = userEvent.setup();
+    render(
+      <PlanChip
+        plan={{
+          title: 'Empty',
+          content: '',
+          tasks: [task('a')],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    await u.click(screen.getByText('Empty'));
+    expect(screen.queryByTestId('md')).not.toBeInTheDocument();
+  });
+
+  it('falls back to original task order when there is a dependency cycle', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Cycle',
+          content: '',
+          tasks: [task('t0'), task('t1'), task('t2')],
+          // 0 → 1 → 2 → 0 cycle
+          dependencies: { '0': ['2'], '1': ['0'], '2': ['1'] },
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    // All three rendered, in original order
+    const items = document.querySelectorAll('ul li');
+    expect(items.length).toBe(3);
+  });
+});

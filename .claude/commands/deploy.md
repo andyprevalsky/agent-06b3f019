@@ -61,9 +61,10 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
-   - Step 4a: coverage (skip if `CHANGED_BACKEND` is empty)
+   - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
+   - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
 
-If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all four verifiers are green.
+If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
 ## Step 1: Prettier format
 
@@ -126,6 +127,14 @@ cd back-end && npm run test:coverage
 ```
 
 Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
+
+## Step 4b: Front-end code coverage check (skip if no front-end/ changes)
+
+```bash
+cd front-end && npm run test:coverage
+```
+
+Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
 
 ## Step 4c: Credential health check (no skip — always runs)
 

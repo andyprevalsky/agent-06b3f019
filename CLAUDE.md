@@ -45,11 +45,17 @@ bash scripts/test.sh --list                        # list available repos/domain
 cd back-end && npm run test:api         # Backend API tests
 cd back-end && npm run test:coverage    # Backend coverage check (enforces thresholds)
 cd back-end && npm run test:coverage:report  # Coverage report without threshold enforcement
+cd front-end && npm run test            # Front-end blackbox + structural tests
+cd front-end && npm run test:coverage   # Front-end coverage check (enforces thresholds)
+cd front-end && npm run test:coverage:report  # Front-end detailed coverage report
 cd agents && python tests/run_all_tests.py  # Agent tool tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 ```
 
-**Code coverage:** Backend requires minimum 88% line/statement, 87% function, and 76% branch coverage (see `back-end/.c8rc.json`). Thresholds are a ratchet — only increase, never decrease. Bump after adding tests.
+**Code coverage:**
+- **Backend** requires minimum 88% line/statement, 87% function, 76% branch (see `back-end/.c8rc.json`).
+- **Front-end** requires 80% lines, 75% statements/functions, 70% branches (see `front-end/vitest.config.ts` → `coverage.thresholds`). Current: ~80% lines, ~79% statements, ~77% functions, ~72% branches. Target: 80% across all four.
+- Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
 **Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
 
