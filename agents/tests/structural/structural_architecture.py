@@ -269,31 +269,101 @@ def _resolve_to_first_party(module: str) -> str | None:
     return module
 
 
-def _build_module_graph() -> dict[str, set[str]]:
-    """Build directed graph: module -> set of first-party modules it imports."""
-    graph: dict[str, set[str]] = {}
+def _collect_first_party_modules() -> dict[Path, str]:
+    """Map each first-party .py file path to its dotted module name."""
+    mapping: dict[Path, str] = {}
     for package in FIRST_PARTY_PACKAGES:
         pkg_path = AGENTS_ROOT / package
         # Packages may be either a directory or a single .py file (config, health_server)
         if pkg_path.is_dir():
-            py_files = pkg_path.rglob("*.py")
+            py_files = list(pkg_path.rglob("*.py"))
         else:
             py_file = AGENTS_ROOT / f"{package}.py"
             py_files = [py_file] if py_file.exists() else []
         for py_file in py_files:
-            # Skip venv, __pycache__, tests
             if any(p in py_file.parts for p in ("__pycache__", "venv", "tests")):
                 continue
             mod_name = _module_name_for_path(py_file)
             if mod_name is None:
                 continue
-            edges: set[str] = set()
-            for imported in _parse_imports(py_file):
-                resolved = _resolve_to_first_party(imported)
-                if resolved is None or resolved == mod_name:
+            mapping[py_file] = mod_name
+    return mapping
+
+
+def _extract_first_party_edges(
+    file_path: Path, mod_name: str, known_modules: set[str]
+) -> set[str]:
+    """Return first-party modules imported by this file.
+
+    Resolves relative imports against the importing module's path and expands
+    ``from pkg import sub`` to ``pkg.sub`` when ``sub`` is a known submodule
+    (so the circular-import graph sees the real target, not just ``pkg``).
+    """
+    if not file_path.exists():
+        return set()
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(file_path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+
+    mod_parts = mod_name.split(".")
+    is_package = file_path.name == "__init__.py"
+
+    edges: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level > 0:
+                # Relative import: resolve against importer's package.
+                # For a package __init__.py, level=1 references the package itself;
+                # for a regular module.py, level=1 references the parent package.
+                base_parts = list(mod_parts) if is_package else mod_parts[:-1]
+                up = node.level - 1
+                if up > 0:
+                    if up > len(base_parts):
+                        continue
+                    base_parts = base_parts[:-up]
+                if node.module:
+                    base_parts = base_parts + node.module.split(".")
+                base = ".".join(base_parts)
+            elif node.module:
+                base = node.module
+            else:
+                continue
+
+            if not base:
+                continue
+
+            # For each imported name, prefer the submodule target when it
+            # exists (`from pkg import sub` → edge to `pkg.sub`); otherwise
+            # the name is a symbol from `base`, so edge to `base`.
+            for alias in node.names:
+                if alias.name == "*":
+                    target = base
+                else:
+                    expanded = f"{base}.{alias.name}"
+                    target = expanded if expanded in known_modules else base
+                if target == mod_name:
                     continue
-                edges.add(resolved)
-            graph[mod_name] = edges
+                if target in known_modules:
+                    edges.add(target)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == mod_name:
+                    continue
+                if alias.name in known_modules:
+                    edges.add(alias.name)
+    return edges
+
+
+def _build_module_graph() -> dict[str, set[str]]:
+    """Build directed graph: module -> set of first-party modules it imports."""
+    file_to_module = _collect_first_party_modules()
+    known_modules = set(file_to_module.values())
+    graph: dict[str, set[str]] = {}
+    for path, mod_name in file_to_module.items():
+        graph[mod_name] = _extract_first_party_edges(path, mod_name, known_modules)
     return graph
 
 

@@ -252,4 +252,5 @@ async def run_all_tests():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    passed = asyncio.run(run_all_tests())
+    sys.exit(0 if passed else 1)
