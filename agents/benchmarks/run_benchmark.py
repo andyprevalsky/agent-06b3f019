@@ -59,6 +59,11 @@ from benchmarks.logs import (
     collect_logs, collect_tree_logs, format_tree_diagnostics,
     load_env_var, start_fly_log_collector, stop_fly_log_collector,
 )
+from benchmarks.timeout_history import (
+    InsufficientHistoryError,
+    get_timeout as _history_get_timeout,
+    summary as _history_summary,
+)
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get(
@@ -69,6 +74,11 @@ POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
 # Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
 # producing messages. Only flag stalls after 3 minutes of zero activity across ALL agents.
+AGENT_STALL_SECONDS = 120  # per-agent early-fail threshold — see poll_agent
+# 60s was too tight: a single claude-code file write or a slow browser
+# screenshot+judge cycle routinely takes 60-90s of wall-time with no new
+# messages emitted. 120s catches real silent deaths while letting one step
+# finish. Tree-level STALL_THRESHOLD (180s) catches total silence above this.
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
@@ -323,6 +333,15 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
                 "active_count": 0, "failed_count": 0, "error_agents": [], "all_agents": []}
 
 
+def suite_name_for_error(args) -> str:
+    """Best-effort suite label for error messages — mirrors what the user ran."""
+    if args.suite:
+        return args.suite
+    if args.task:
+        return f"--task {args.task}"
+    return "smoke"
+
+
 def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     """
     Scan Fly.io streaming logs for infrastructure-level errors across all agents.
@@ -350,12 +369,15 @@ async def poll_agent(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
-) -> Tuple[dict, int, int]:
+) -> Tuple[dict, int, int, Optional[str]]:
     """
-    Poll agent until terminal state or timeout.
+    Poll agent until terminal state, timeout, or early-failure.
     Monitors the ENTIRE agent tree for stall detection, not just the root.
 
-    Returns: (final_agent_data, approvals_triggered, approvals_resolved)
+    Returns: (final_agent_data, approvals_triggered, approvals_resolved, early_fail_reason)
+    early_fail_reason is non-None when a fail-fast condition tripped (per-agent
+    stall, context validation error, dynamic timeout). The caller overrides
+    pass→fail based on this.
     """
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
@@ -370,19 +392,40 @@ async def poll_agent(
     last_progress_print = 0.0  # timestamp of last progress log
     last_tree_stats: dict = {}  # cached tree stats
     last_violation_count = 0  # track violations to only print new ones
+    # Per-agent stall tracking: agent_id → {count, last_change_time, status}.
+    # Includes the root plus every descendant appearing in the tree endpoint.
+    per_agent_state: Dict[str, dict] = {}
+
+    resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
 
     while True:
         elapsed = time.time() - start
-        if elapsed > task.timeout_seconds:
-            print(f"    ⏰ Timeout after {elapsed:.0f}s")
+        if elapsed > resolved_timeout:
+            reason = f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+            print(f"    ⏰ {reason}")
             data = await get_agent(base_url, agent_id)
-            return data, approvals_triggered, approvals_resolved
+            return data, approvals_triggered, approvals_resolved, reason
 
+        # Hot-path HTTP — fetch root agent and (if the task handles approvals)
+        # attention-requests in parallel. Saves ~150ms per poll.
+        fetch_approvals_now = task.approval_handling in ("auto_approve", "ignore", "prompt_user")
         try:
-            data = await get_agent(base_url, agent_id)
+            if fetch_approvals_now:
+                data, _pending_attention = await asyncio.gather(
+                    get_agent(base_url, agent_id),
+                    get_attention_requests(base_url),
+                    return_exceptions=False,
+                )
+            else:
+                data = await get_agent(base_url, agent_id)
+                _pending_attention = []
         except AgentNotFoundError:
             print(f"    ⚠ Agent {agent_id[:12]} returned 404 — deleted or expired")
-            return {"agent": {"status": "DELETED"}, "messages": []}, approvals_triggered, approvals_resolved
+            return (
+                {"agent": {"status": "DELETED"}, "messages": []},
+                approvals_triggered, approvals_resolved,
+                "Agent returned 404",
+            )
         except Exception as e:
             print(f"    ⚠ Poll error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
@@ -393,8 +436,9 @@ async def poll_agent(
         messages = data.get("messages", [])
         root_msg_count = len(messages)
 
-        # Validate context well-formedness (only print new violations)
-        # Skip tool_result_pairing during polling — tools may still be executing
+        # Validate context well-formedness. Any error-severity violation is an
+        # instant fail — don't keep polling, the agent will not recover.
+        # Skip tool_result_pairing during polling — tools may still be executing.
         violations = validate_context(messages)
         poll_violations = [v for v in violations if v.rule != "tool_result_pairing"]
         if len(poll_violations) > last_violation_count:
@@ -409,16 +453,19 @@ async def poll_agent(
                 for v in warnings[:3]:
                     print(f"    ⚠ [{v.rule}] {v.message}")
             last_violation_count = len(poll_violations)
+            if errors:
+                reason = f"Context validation error: [{errors[0].rule}] {errors[0].message}"
+                return data, approvals_triggered, approvals_resolved, reason
 
         # Chat mode: done when we have ASSISTANT responses
         if task.is_chat_mode:
             assistant_msgs = [m for m in messages if m.get("role") == "ASSISTANT"]
             if len(assistant_msgs) >= 1:
-                return data, approvals_triggered, approvals_resolved
+                return data, approvals_triggered, approvals_resolved, None
 
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
-            return data, approvals_triggered, approvals_resolved
+            return data, approvals_triggered, approvals_resolved, None
 
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
@@ -456,6 +503,73 @@ async def poll_agent(
             if stall_seconds > STALL_THRESHOLD:
                 print(f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
                       f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)")
+
+            # ── Per-agent stall detection (early fail) ────────────────
+            # For each non-terminal agent in the tree: if its message_count
+            # hasn't advanced in AGENT_STALL_SECONDS, fail now and name the
+            # stuck agent. Finished sub-agents (terminal status) are skipped —
+            # they naturally stop producing messages.
+            # For the ROOT agent, the tree API's message_count lags the detail
+            # API (e.g. in-process browser/claude-code sub-agents emit messages
+            # into root's list but don't increment the tree counter). Use the
+            # detail-API root_msg_count for root tracking so legitimate
+            # progress isn't flagged as a stall.
+            for a in tree_stats.get("all_agents", []):
+                aid = a.get("agent_id", "")
+                if not aid:
+                    continue
+                mc = root_msg_count if aid == agent_id else int(a.get("message_count", 0) or 0)
+                st = a.get("status", "UNKNOWN")
+                cur = per_agent_state.get(aid)
+                if cur is None:
+                    per_agent_state[aid] = {"count": mc, "last_change_time": now, "status": st}
+                    continue
+                if mc > cur["count"]:
+                    cur["count"] = mc
+                    cur["last_change_time"] = now
+                cur["status"] = st
+
+            # Build parent→children map from the tree. An agent with active
+            # descendants that are still advancing is NOT stalled — it's
+            # legitimately idle awaiting its sub-agent's tool result.
+            children_of: Dict[str, List[str]] = {}
+            for a in tree_stats.get("all_agents", []):
+                pid = a.get("parent_agent_id")
+                cid = a.get("agent_id")
+                if pid and cid:
+                    children_of.setdefault(pid, []).append(cid)
+
+            def _subtree_last_change(aid: str, seen: set) -> float:
+                if aid in seen:
+                    return 0.0
+                seen.add(aid)
+                st_local = per_agent_state.get(aid)
+                best = st_local["last_change_time"] if st_local else 0.0
+                for cid in children_of.get(aid, []):
+                    child_st = per_agent_state.get(cid)
+                    if child_st and child_st["status"] in TERMINAL_STATUSES:
+                        continue
+                    best = max(best, _subtree_last_change(cid, seen))
+                return best
+
+            stuck: List[Tuple[str, float, dict]] = []
+            for aid, st in per_agent_state.items():
+                if st["status"] in TERMINAL_STATUSES:
+                    continue
+                effective = _subtree_last_change(aid, set())
+                idle = now - effective
+                if idle > AGENT_STALL_SECONDS:
+                    stuck.append((aid, idle, st))
+            if stuck:
+                aid, idle, st = stuck[0]
+                role = "root" if aid == agent_id else "sub-agent"
+                reason = (
+                    f"{role} {aid[:12]} stalled: no new messages for {idle:.0f}s "
+                    f"(threshold={AGENT_STALL_SECONDS}s, status={st['status']}, "
+                    f"messages={st['count']})"
+                )
+                print(f"    🛑 AGENT STALL — {reason}")
+                return data, approvals_triggered, approvals_resolved, reason
 
             # Check for infrastructure errors in Fly.io logs
             all_agent_ids = [a.get("agent_id", "") for a in tree_stats.get("all_agents", [])]
@@ -511,9 +625,9 @@ async def poll_agent(
             tree_agent_ids.update(
                 a.get("agent_id", "") for a in last_tree_stats["all_agents"] if a.get("agent_id")
             )
-        if task.approval_handling in ("auto_approve", "ignore", "prompt_user"):
+        if fetch_approvals_now:
             try:
-                pending = await get_attention_requests(base_url)
+                pending = _pending_attention
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
                     if req_agent_id in tree_agent_ids and not req.get("response"):
@@ -667,9 +781,10 @@ async def run_single_task(
     task: BenchmarkTask,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
+    resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'='*50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={task.timeout_seconds}s, price_limit={task.price_limit_cents}c")
+    print(f"     timeout={resolved_timeout}s, price_limit={task.price_limit_cents}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")
@@ -716,8 +831,8 @@ async def run_single_task(
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
 
-        # Poll until done
-        data, approvals_triggered, approvals_resolved = await poll_agent(
+        # Poll until done (or early-fail)
+        data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
             base_url, agent_id, task
         )
 
@@ -735,8 +850,16 @@ async def run_single_task(
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
 
-        # Evaluate
+        # Evaluate — early-fail reasons (per-agent stall, context error, timeout)
+        # override a pass. evaluate_task still runs so post-completion checks
+        # (expected tools, progress score) can provide additional diagnostics.
         passed, failure_reason = evaluate_task(task, data, approvals_triggered)
+        if early_fail_reason:
+            passed = False
+            if not failure_reason:
+                failure_reason = early_fail_reason
+            else:
+                failure_reason = f"{early_fail_reason} | {failure_reason}"
 
         # Final context well-formedness check
         final_violations = validate_context(messages)
@@ -1040,6 +1163,39 @@ async def main_async(args):
             skipped_claude_tasks = claude_code_tasks
             tasks = [t for t in tasks if not t.requires_claude_code]
 
+    # Pre-flight: resolve per-task timeout from history corpus.
+    # In bootstrap mode, tasks without history fall back to tasks.json timeout_seconds
+    # (and passes recorded this run will seed the corpus for future runs).
+    # In non-bootstrap mode, any task lacking history is a hard error.
+    missing_history: List[str] = []
+    for t in tasks:
+        try:
+            t._resolved_timeout_seconds = _history_get_timeout(t.name)
+        except InsufficientHistoryError as e:
+            if args.bootstrap:
+                t._resolved_timeout_seconds = t.timeout_seconds
+                s = _history_summary(t.name)
+                print(f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
+                      f"(history has {s['count']}/{e.need} passes)")
+            else:
+                missing_history.append(f"{t.name} ({e.have}/{e.need})")
+        else:
+            s = _history_summary(t.name)
+            print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
+                  f"(p50={s['p50']}s, p95={s['p95']}s, n={s['count']})")
+    if missing_history:
+        print("\n  ❌ Timeout history is insufficient for the following tasks:")
+        for m in missing_history:
+            print(f"      - {m}")
+        print("\n  Bootstrap the corpus by running smoke with --bootstrap until")
+        print(f"  every task has ≥5 passed runs, e.g.:")
+        print(f"    cd agents && for i in 1 2 3 4 5; do \\")
+        print(f"      python benchmarks/run_benchmark.py --suite {suite_name_for_error(args)} \\")
+        print(f"          --port $CONDUCTOR_PORT --ci --parallel --bootstrap; \\")
+        print(f"    done")
+        print(f"  Then commit agents/benchmarks/history/task_durations.jsonl.")
+        sys.exit(1)
+
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()
     print(f"  📡 {fly_status}")
@@ -1148,6 +1304,13 @@ def main():
         "--ci",
         action="store_true",
         help="CI mode: exit with non-zero status if any task fails",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Bootstrap timeout history: use tasks.json timeout_seconds as the "
+             "per-task ceiling even without history. Passed runs still record "
+             "to the corpus. Use until every task has ≥5 passes, then drop this flag.",
     )
     parser.add_argument(
         "--row-start",

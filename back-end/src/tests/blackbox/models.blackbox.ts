@@ -163,12 +163,21 @@ async function testClearCache_responseShape() {
 }
 
 async function testClearCache_thenListNotCached() {
-  await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
-  const res = await request(`${BASE_URL}/api/models`);
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as { cached: boolean };
-  if (body.cached !== false)
-    throw new Error(`Expected cached=false after clearing, got ${body.cached}`);
+  // rose.blackbox.ts runs in parallel (domainConcurrency=6) and also hits
+  // /api/models, so the cache can be re-warmed between our DELETE and GET.
+  // Retry up to 5× to win the race; each cycle re-clears before re-reading.
+  let lastCached: unknown = 'unknown';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
+    const res = await request(`${BASE_URL}/api/models`);
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as { cached: boolean };
+    lastCached = body.cached;
+    if (body.cached === false) return;
+  }
+  throw new Error(
+    `Expected cached=false after clearing; lost race across 5 attempts (last cached=${String(lastCached)})`
+  );
 }
 
 async function testClearCache_idempotent() {

@@ -76,7 +76,35 @@ class BenchmarkRun:
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
 
+        self._record_history()
+
         return path
+
+    def _record_history(self) -> None:
+        """Append every passed task's duration to the timeout-history corpus.
+
+        Best-effort, per-task: history recording must never fail save() after
+        the results JSON has already been written, and one task's failure
+        must not prevent subsequent tasks from being recorded.
+        """
+        try:
+            from benchmarks.timeout_history import record_pass
+        except Exception as e:
+            print(f"⚠️  _record_history import failed (non-fatal): {e}")
+            return
+        for r in self.task_results:
+            if not r.passed or r.status == "SKIPPED":
+                continue
+            try:
+                record_pass(
+                    task_name=r.name,
+                    duration_seconds=r.duration_seconds,
+                    cost_cents=r.cost_cents,
+                    agent_id=r.agent_id,
+                    timestamp=self.timestamp,
+                )
+            except Exception as e:
+                print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
 
     @staticmethod
     def load(path: str) -> "BenchmarkRun":

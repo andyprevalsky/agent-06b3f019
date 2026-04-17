@@ -40,13 +40,32 @@ Build the report as a markdown table:
 
 Carry this report forward into Phase 2 for use in the commit message and PR body.
 
-## Step 1: Prettier format
+## Step 0: Change detection + execution plan
 
-All Phase 1 commands run from the repo root. Compute changed files once:
+All Phase 1 commands run from the repo root. Compute changed paths once and derive skip flags:
 
 ```bash
-CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
+CHANGED=$(git diff --name-only main...HEAD)
+CHANGED_TS=$(echo "$CHANGED" | grep -E '^back-end/src/.*\.ts$' | sed 's|^back-end/||' || true)
+CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
+CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
+CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
+CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/|^mac-app/' || true)
+CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
 ```
+
+**Execution model for Steps 1–4a (run in this order):**
+
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`). Commit any resulting changes once.
+2. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
+   - Step 2b: `eslint` verify (0 errors)
+   - Step 3: `tsc --noEmit`
+   - Step 4: structural tests (skip if `CHANGED_TS` is empty)
+   - Step 4a: coverage (skip if `CHANGED_BACKEND` is empty)
+
+If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all four verifiers are green.
+
+## Step 1: Prettier format
 
 If `$CHANGED_TS` is non-empty, format them:
 
@@ -64,14 +83,15 @@ git commit -m "style: auto-format and lint fixes"
 
 Using the same `$CHANGED_TS` from Step 1 (skip if empty):
 
-1. Auto-fix:
-   ```bash
-   cd back-end && npx eslint --fix $CHANGED_TS
-   ```
-2. Verify zero errors remain:
-   ```bash
-   cd back-end && npx eslint $CHANGED_TS
-   ```
+**Step 2a (mutator — runs before the parallel verifier batch):**
+```bash
+cd back-end && npx eslint --fix $CHANGED_TS
+```
+
+**Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
+```bash
+cd back-end && npx eslint $CHANGED_TS
+```
 
 If there are remaining errors, fix them manually. Loop until `npx eslint` reports 0 errors.
 
@@ -89,6 +109,8 @@ Catches type errors that ESLint misses (wrong argument types, missing properties
 
 ## Step 4: Structural tests + fix
 
+**Skip if `$CHANGED_TS` is empty** (structural invariants only apply to back-end TS changes).
+
 ```bash
 cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 ```
@@ -104,6 +126,34 @@ cd back-end && npm run test:coverage
 ```
 
 Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
+
+## Step 4c: Credential health check (no skip — always runs)
+
+Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
+
+```bash
+cd back-end && npx tsx src/tests/blackbox/integration-health.blackbox.ts
+```
+
+**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately — do NOT proceed to Step 5. Refreshing credentials is a human task; working around auth failures in code is forbidden.
+
+This same file is also part of the full blackbox suite (Step 5a), so it will run again there when the backend-change path fires. Running it twice is harmless (~3s).
+
+## Step 4b: Push PR early, start CodeRabbit in parallel with runtime tests
+
+Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
+
+1. Commit any uncommitted changes from Phase 1a (prettier/eslint fixes, coverage-driven test additions), using the test-report commit format from Step 7.
+2. If on `main`, create a new branch; push with `-u`:
+   ```bash
+   git push -u origin $(git branch --show-current)
+   ```
+3. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
+4. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
+
+**If runtime tests (5/5a/6) fail** after the PR is already open: fix the issue, push the fix commit, and restart the Test Loop from Step 0. The new push re-arms CodeRabbit automatically — Step 9's poll-until-re-armed logic handles that correctly.
+
+**Consequence for Phase 2:** by the time you reach Step 7/8, the push and PR already exist. Treat Steps 7 and 8 as "verify already done" unless an earlier test-loop iteration failed and forced a restart.
 
 ## Step 5: Spin up local services
 
@@ -176,6 +226,8 @@ sleep 2
 
 ## Step 5a: Blackbox API tests + fix
 
+**Skip if `$CHANGED_BACKEND` is empty** (blackbox tests only exercise back-end routes; front-end/mac-app-only PRs don't need them).
+
 With the backend running from Step 5:
 
 ```bash
@@ -247,6 +299,35 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CL
 This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
+
+### Timeout history + bootstrap
+
+Per-task timeouts are **dynamic** — derived from p95 × 1.5 of past passes in `agents/benchmarks/history/task_durations.jsonl` (tracked in git). `run_benchmark.py` refuses to run if any task has fewer than 5 passes in history.
+
+**Two cases:**
+
+1. **First run on a fresh checkout** (or any task shows `InsufficientHistoryError`): bootstrap the corpus with `--bootstrap`. This accepts the tasks.json `timeout_seconds` as a ceiling and still records passes. Run 5×:
+   ```bash
+   cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
+   for i in 1 2 3 4 5; do
+     TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true \
+       python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel --bootstrap
+   done
+   git add agents/benchmarks/history/task_durations.jsonl
+   git commit -m "benchmarks: bootstrap smoke timeout history"
+   ```
+
+2. **Normal run** (history exists): the command at the top of Step 6 runs as-is, without `--bootstrap`. On success, passes auto-append to the JSONL.
+
+**After Step 6 passes: stage and commit the updated history** before Phase 2:
+```bash
+if ! git diff --quiet -- agents/benchmarks/history/task_durations.jsonl; then
+  git add agents/benchmarks/history/task_durations.jsonl
+  git commit -m "benchmarks: record smoke pass durations"
+fi
+```
+
+The JSONL uses `merge=union` (`.gitattributes`) so parallel branches do not conflict on it.
 
 ### Monitoring agent progress during smoke tests
 
@@ -349,6 +430,7 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 # ║  3. TypeScript: 0 errors                                          ║
 # ║  4. Structural tests: 100% pass                                   ║
 # ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
+# ║  4c. Credential health: all integrations authenticate             ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
 # ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
 # ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
