@@ -36,7 +36,17 @@ function ensureCanonical(): void {
 export function useDocumentSeo({ title, description, canonical }: DocumentSeoOptions): void {
   useEffect(() => {
     document.title = title;
-    if (description !== undefined) ensureMeta('description', description);
-    if (canonical) ensureCanonical();
+
+    if (description !== undefined) {
+      ensureMeta('description', description);
+    } else {
+      document.querySelector('meta[name="description"]')?.remove();
+    }
+
+    if (canonical) {
+      ensureCanonical();
+    } else {
+      document.querySelector('link[rel="canonical"]')?.remove();
+    }
   }, [title, description, canonical]);
 }

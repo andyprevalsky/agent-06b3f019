@@ -12,13 +12,25 @@ function getStore(): Storage | null {
 }
 
 export function getItem(key: string): string | null {
-  return getStore()?.getItem(key) ?? null;
+  try {
+    return getStore()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function setItem(key: string, value: string): void {
-  getStore()?.setItem(key, value);
+  try {
+    getStore()?.setItem(key, value);
+  } catch {
+    // Swallow SecurityError / QuotaExceededError — storage is best-effort.
+  }
 }
 
 export function removeItem(key: string): void {
-  getStore()?.removeItem(key);
+  try {
+    getStore()?.removeItem(key);
+  } catch {
+    // Swallow SecurityError — storage is best-effort.
+  }
 }

@@ -177,9 +177,21 @@ export default tseslint.config(
                   'Use @/lib/storage (getItem/setItem/removeItem) instead of localStorage/sessionStorage directly.',
               },
               {
+                selector:
+                  "MemberExpression[object.type='MemberExpression'][object.object.name=/^(window|globalThis)$/][object.property.name=/^(localStorage|sessionStorage)$/]",
+                message:
+                  'Use @/lib/storage (getItem/setItem/removeItem) instead of window.localStorage / globalThis.localStorage.',
+              },
+              {
                 selector: "CallExpression[callee.name='fetch']",
                 message:
                   "Don't call fetch() directly in domain code. Put the call in the feature's api.ts layer.",
+              },
+              {
+                selector:
+                  "CallExpression[callee.type='MemberExpression'][callee.object.name=/^(window|globalThis)$/][callee.property.name='fetch']",
+                message:
+                  "Don't call window.fetch() / globalThis.fetch() directly in domain code. Put the call in the feature's api.ts layer.",
               },
               {
                 selector:
@@ -194,21 +206,38 @@ export default tseslint.config(
               },
               {
                 selector:
-                  "CallExpression[callee.object.name='document'][callee.property.name='createElement'][arguments.0.value=/^(meta|link)$/]",
+                  "AssignmentExpression[left.type='MemberExpression'][left.object.type='MemberExpression'][left.object.object.name=/^(window|globalThis)$/][left.object.property.name='document'][left.property.name='title']",
                 message:
-                  "Use useDocumentSeo from @/lib/seo instead of creating meta/link tags directly.",
+                  'Use useDocumentSeo from @/lib/seo instead of assigning window.document.title / globalThis.document.title.',
               },
               {
                 selector:
-                  "MemberExpression[object.name='navigator'][property.name='clipboard']",
+                  "CallExpression[callee.object.name='document'][callee.property.name='createElement'][arguments.0.value=/^(meta|link)$/]",
+                message:
+                  'Use useDocumentSeo from @/lib/seo instead of creating meta/link tags directly.',
+              },
+              {
+                selector:
+                  "CallExpression[callee.type='MemberExpression'][callee.object.type='MemberExpression'][callee.object.object.name=/^(window|globalThis)$/][callee.object.property.name='document'][callee.property.name='createElement'][arguments.0.value=/^(meta|link)$/]",
+                message:
+                  'Use useDocumentSeo from @/lib/seo instead of creating meta/link tags via window.document / globalThis.document.',
+              },
+              {
+                selector: "MemberExpression[object.name='navigator'][property.name='clipboard']",
                 message:
                   'Use copyToClipboard from @/lib/clipboard instead of navigator.clipboard directly.',
               },
               {
                 selector:
+                  "MemberExpression[object.type='MemberExpression'][object.object.name=/^(window|globalThis)$/][object.property.name='navigator'][property.name='clipboard']",
+                message:
+                  'Use copyToClipboard from @/lib/clipboard instead of window.navigator.clipboard / globalThis.navigator.clipboard.',
+              },
+              {
+                selector:
                   "NewExpression[callee.name='URLSearchParams'][arguments.0.type='MemberExpression'][arguments.0.object.property.name='location'][arguments.0.property.name='search']",
                 message:
-                  "Use getQueryParams from @/lib/url instead of `new URLSearchParams(window.location.search)`.",
+                  'Use getQueryParams from @/lib/url instead of `new URLSearchParams(window.location.search)`.',
               },
             ],
 
@@ -231,11 +260,17 @@ export default tseslint.config(
           message:
             'Use @/lib/storage (getItem/setItem/removeItem) instead of localStorage/sessionStorage directly.',
         },
+        {
+          selector:
+            "MemberExpression[object.type='MemberExpression'][object.object.name=/^(window|globalThis)$/][object.property.name=/^(localStorage|sessionStorage)$/]",
+          message:
+            'Use @/lib/storage (getItem/setItem/removeItem) instead of window.localStorage / globalThis.localStorage.',
+        },
       ],
     },
   },
   {
-    files: ['src/features/**/config.ts', 'src/lib/api.ts'],
+    files: ['src/features/**/config.ts'],
     rules: {
       'no-restricted-syntax': 'off',
     },
