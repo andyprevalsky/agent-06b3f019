@@ -17,7 +17,10 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['src/tests/blackbox/setup.ts'],
-    include: ['src/tests/blackbox/**/*.blackbox.{ts,tsx}'],
+    include: [
+      'src/tests/blackbox/**/*.blackbox.{ts,tsx}',
+      'src/tests/structural/**/*.test.{ts,tsx}',
+    ],
     globals: true,
     css: false,
     maxWorkers: 30,
