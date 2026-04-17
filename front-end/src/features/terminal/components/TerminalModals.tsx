@@ -47,8 +47,8 @@ export function TerminalModals({ agents }: TerminalModalsProps) {
       <PhoneAuthModal
         open={agents.loginModalOpen}
         onOpenChange={agents.setLoginModalOpen}
-        onAuthComplete={(reason) => {
-          void agents.refreshAuthState(reason);
+        onAuthComplete={() => {
+          void agents.refreshAuthState('phone-auth-modal');
         }}
         anonymousUserId={agents.isAnonymous ? agents.authUser?.id : undefined}
       />

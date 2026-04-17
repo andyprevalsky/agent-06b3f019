@@ -37,9 +37,8 @@ async function initAuthSession(
   if (import.meta.env.DEV && !import.meta.env.VITEST) {
     logAuth('Dev mode: auto-logging in with test credentials...');
     try {
-      const phone = '+19729777432';
-      await sendOTP(phone);
-      const { session: devSession } = await verifyOTP(phone, '181818');
+      await sendOTP('+19729777432');
+      const { session: devSession } = await verifyOTP('+19729777432', '181818');
       await applySession('dev-auto-login', devSession);
       logAuth('Dev auto-login complete', { userId: devSession.user.id });
       return;
@@ -183,7 +182,6 @@ export function usePhoneAuth(
         await verifyOTP(strippedPhone, form.otp, anonymousUserId);
         amplitude.track('otp_code_submitted');
         amplitude.setUserId(strippedPhone);
-        await new Promise((resolve) => setTimeout(resolve, 100));
         completeAuth();
       } catch (error: unknown) {
         toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
@@ -312,7 +310,13 @@ export function useAuth() {
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
-    void initAuthSession(applySession).finally(() => setLoading(false));
+    let mounted = true;
+    void initAuthSession(applySession).finally(() => {
+      if (mounted) setLoading(false);
+    });
+    return () => {
+      mounted = false;
+    };
   }, [applySession]);
 
   useEffect(() => {

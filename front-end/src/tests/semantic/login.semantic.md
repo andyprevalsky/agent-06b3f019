@@ -1,9 +1,11 @@
 # Semantic Test: Login via Phone + OTP
 
 ## Summary
+
 Verify a user can log in from the marketing homepage by clicking the Login button, entering their phone number, receiving an OTP, entering the OTP, and reaching an authenticated state with a persisted session.
 
 ## Config
+
 ```
 BACKEND_URL=http://localhost:{BACKEND_PORT}
 FRONTEND_URL=http://localhost:{FRONTEND_PORT}
@@ -14,11 +16,13 @@ TIMEOUT_SECONDS=60
 ```
 
 ## Pre-conditions
+
 1. Backend API is healthy: `GET {BACKEND_URL}/health` returns 200
 2. Frontend is accessible: `GET {FRONTEND_URL}` returns 200
 3. Chrome browser with Claude extension connected (for CDP browser steps)
 
 ## Setup
+
 1. Open a fresh tab with `tabs_create_mcp`
 2. Navigate to `{FRONTEND_URL}/terminal` (marketing/landing page — `/terminal` route is the marketing `Index` page that renders `NaviHeader` with the `Login` button; `/` is the authenticated Terminal surface).
 3. Wait for the page DOM to be ready
@@ -26,8 +30,8 @@ TIMEOUT_SECONDS=60
    ```js
    // Evaluate via javascript_tool
    Object.keys(localStorage)
-     .filter(k => k.startsWith('sb-') || k === 'rose-session' || k === 'app-user')
-     .forEach(k => localStorage.removeItem(k));
+     .filter((k) => k.startsWith('sb-') || k === 'rose-session' || k === 'app-user')
+     .forEach((k) => localStorage.removeItem(k));
    location.reload();
    ```
 5. After reload, read console messages and confirm `[Auth] State changed` shows `isAuthenticated: false` OR the user is anonymous. If `isAuthenticated: true` for a real (non-anonymous) user, FAIL with "Test started from an already-authenticated state — cannot exercise login."
@@ -39,6 +43,7 @@ TIMEOUT_SECONDS=60
 ## Steps
 
 ### Step 1: Click the Login button
+
 1. Use `find` to locate the element "Login button in the page header"
 2. Click it by dispatching a click on the returned ref
 3. **PASS**: The phone auth modal appears AND is fully on-screen. Verify via `javascript_tool`:
@@ -52,6 +57,7 @@ TIMEOUT_SECONDS=60
 5. **FAIL**: If the dialog exists but any edge is off-screen (e.g. top < 0), FAIL with "Modal rendered off-screen — positioning regression"
 
 ### Step 2: Submit phone number
+
 1. `find` the "Phone Number input" and enter `{TEST_PHONE_DIGITS}` using `form_input`
 2. `find` the "Continue button" inside the modal and click it
 3. Watch for:
@@ -62,6 +68,7 @@ TIMEOUT_SECONDS=60
 6. **FAIL**: If modal does not transition within 15s, FAIL with "Send-OTP succeeded but modal did not advance to OTP step"
 
 ### Step 3: Submit OTP
+
 1. `find` the "Verification Code input" (6-digit OTP field) and enter `{TEST_OTP}` via `form_input`
 2. `find` the "I authorize SMS communication checkbox" and check it (set value `true`)
 3. `find` the "Verify button" and click it
@@ -70,22 +77,28 @@ TIMEOUT_SECONDS=60
 6. **FAIL**: If response is non-2xx, FAIL with the error body
 
 ### Step 4: Verify authenticated state
+
 After Verify:
+
 1. Modal should close within 3s (no "Verify Code" heading in DOM)
 2. Console should contain `[Auth] Phone verification complete` with a `userId`
 3. A Supabase session must be persisted in localStorage — verify with:
    ```js
-   Object.keys(localStorage).some(k => k.startsWith('sb-') && localStorage.getItem(k)?.includes('access_token'))
+   Object.keys(localStorage).some(
+     (k) => k.startsWith('sb-') && localStorage.getItem(k)?.includes('access_token'),
+   );
    ```
    Must return `true`.
 4. Console `[Auth] State changed` must subsequently log `isAuthenticated: true` and `isAnonymous: false`
 
 ### Step 5: Verify login survives navigation
+
 1. Click the Login button again (same element as Step 1)
 2. **PASS**: Because the user is now authenticated, the handler must navigate to `/terminal` — verify the URL path is `/terminal` within 3s
 3. **FAIL**: If the auth modal re-opens instead, FAIL with "Login button does not detect authenticated state"
 
 ## Invariants (check continuously)
+
 1. No `Uncaught` errors or `unhandledrejection` in the console at any point
 2. No `POST /api/auth/send-otp` or `/verify-otp` returns 5xx
 3. The Login button element must remain visible until Step 5 navigation (never disappears mid-flow)
@@ -93,7 +106,9 @@ After Verify:
 ## Termination Conditions
 
 ### SUCCESS
+
 All of these must hold:
+
 - Step 1 modal appeared
 - Step 2 `send-otp` returned 2xx and modal advanced to OTP step
 - Step 3 `verify-otp` returned 2xx with a session
@@ -102,6 +117,7 @@ All of these must hold:
 - No invariants violated
 
 ### FAILURE (any one triggers immediate failure)
+
 - Any pre-condition not met
 - Login button click does not open modal
 - `send-otp` or `verify-otp` HTTP error
@@ -110,9 +126,11 @@ All of these must hold:
 - Invariant violation
 
 ## Cleanup
+
 After test (pass or fail), clear the dev session so re-runs start fresh:
+
 ```js
 Object.keys(localStorage)
-  .filter(k => k.startsWith('sb-') || k === 'rose-auth-session')
-  .forEach(k => localStorage.removeItem(k));
+  .filter((k) => k.startsWith('sb-') || k === 'rose-session' || k === 'app-user')
+  .forEach((k) => localStorage.removeItem(k));
 ```

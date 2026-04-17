@@ -54,9 +54,17 @@ export function useTerminalAgents(
       setAncestors([]);
       return;
     }
+    let active = true;
     fetchAncestorsAPI(ctx.selectedAgentId)
-      .then(setAncestors)
-      .catch(() => setAncestors([]));
+      .then((result) => {
+        if (active) setAncestors(result);
+      })
+      .catch(() => {
+        if (active) setAncestors([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [ctx.selectedAgentId]);
 
   // Amplitude
@@ -294,5 +302,6 @@ async function handleQuickQuery(
     });
   } finally {
     d.setIsSendingMessage(false);
+    d.setIsLoadingNetwork(false);
   }
 }
