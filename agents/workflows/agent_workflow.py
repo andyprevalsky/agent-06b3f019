@@ -47,7 +47,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
-    from helpers.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import run_agent
     from tools.add_memory import add_memory
@@ -78,6 +77,7 @@ with workflow.unsafe.imports_passed_through():
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
     from utils.prompts import build_system_prompt, build_verifier_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
 

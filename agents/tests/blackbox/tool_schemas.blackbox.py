@@ -11,7 +11,7 @@ from _test_utils import (
 
 def test_tool_models_has_all_tools():
     """TOOL_MODELS dict has keys for known core tools."""
-    from helpers.tool_schemas import TOOL_MODELS
+    from utils.tool_schemas import TOOL_MODELS
 
     expected_tools = [
         "web_search", "web_fetch", "spawn_agent", "attempt_completion",
@@ -25,7 +25,7 @@ def test_tool_models_has_all_tools():
 
 def test_plan_phase_tools_subset():
     """PLAN_PHASE_TOOLS is a subset of TOOL_MODELS keys."""
-    from helpers.tool_schemas import PLAN_PHASE_TOOLS, TOOL_MODELS
+    from utils.tool_schemas import PLAN_PHASE_TOOLS, TOOL_MODELS
 
     for tool_name in PLAN_PHASE_TOOLS:
         assert tool_name in TOOL_MODELS, (
@@ -35,7 +35,7 @@ def test_plan_phase_tools_subset():
 
 def test_execute_phase_tools_subset():
     """EXECUTE_PHASE_TOOLS is a subset of TOOL_MODELS keys."""
-    from helpers.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
 
     for tool_name in EXECUTE_PHASE_TOOLS:
         assert tool_name in TOOL_MODELS, (
@@ -45,7 +45,7 @@ def test_execute_phase_tools_subset():
 
 def test_create_agent_action_model():
     """create_agent_action_model returns a Pydantic model class."""
-    from helpers.tool_schemas import create_agent_action_model
+    from utils.tool_schemas import create_agent_action_model
 
     Model = create_agent_action_model(["web_search", "attempt_completion"])
 
@@ -61,7 +61,7 @@ def test_create_agent_action_model():
 
 def test_create_agent_action_model_single_tool():
     """create_agent_action_model works with a single tool."""
-    from helpers.tool_schemas import create_agent_action_model
+    from utils.tool_schemas import create_agent_action_model
 
     Model = create_agent_action_model(["attempt_completion"])
 
@@ -73,7 +73,7 @@ def test_create_agent_action_model_single_tool():
 
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
-    from helpers.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
+    from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
 
     assert "spawn_explore_agent" in PLANNER_ASSIGNABLE_TOOLS
     assert "spawn_browser_agent" in PLANNER_ASSIGNABLE_TOOLS
