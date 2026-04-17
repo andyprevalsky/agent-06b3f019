@@ -93,18 +93,25 @@ def _parse_imports(file_path: Path) -> list[str]:
                 base_parts = pkg_parts[: len(pkg_parts) - up] if up > 0 else list(pkg_parts)
                 if node.module:
                     base_parts = base_parts + node.module.split(".")
-                    if base_parts:
-                        modules.append(".".join(base_parts))
+                    base = ".".join(base_parts)
                 else:
-                    # `from . import X` → each alias is a sibling module
-                    for alias in node.names:
-                        if alias.name == "*":
-                            continue
-                        full = base_parts + [alias.name]
-                        if full:
-                            modules.append(".".join(full))
+                    base = ".".join(base_parts)
             elif node.module:
-                modules.append(node.module)
+                base = node.module
+            else:
+                continue
+
+            if not base:
+                continue
+            modules.append(base)
+            # Also record `base.alias` so `from pkg import sub` (where sub is
+            # a submodule) and `from . import sub` surface as `pkg.sub`; the
+            # caller then matches against canonical layer names correctly
+            # instead of skipping checks on the bare package path.
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                modules.append(f"{base}.{alias.name}")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 modules.append(alias.name)
