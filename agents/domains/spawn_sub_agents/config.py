@@ -10,3 +10,6 @@ MAX_PARALLEL_SPAWNS = 10
 MAX_SPAWN_ATTEMPTS = 4
 BASE_BACKOFF_SECONDS = 0.5
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# httpx client timeout for backend spawn requests.
+SPAWN_HTTP_TIMEOUT_SECONDS = 30.0

@@ -29,18 +29,20 @@ UTILS_DIR = AGENTS_ROOT / "utils"
 WORKER_PY = AGENTS_ROOT / "worker.py"
 
 # First-party top-level packages (anything in the project source tree)
-FIRST_PARTY_PACKAGES = frozenset({
-    "config",
-    "domains",
-    "tools",
-    "helpers",
-    "utils",
-    "loop",
-    "activities",
-    "workflows",
-    "browser_tools",
-    "health_server",
-})
+FIRST_PARTY_PACKAGES = frozenset(
+    {
+        "config",
+        "domains",
+        "tools",
+        "helpers",
+        "utils",
+        "loop",
+        "activities",
+        "workflows",
+        "browser_tools",
+        "health_server",
+    }
+)
 
 # Domain layer files
 LAYER_FILES = ("types", "config", "repo", "service", "handler")
@@ -170,21 +172,21 @@ def test_utils_boundary():
 
 # ═══════════════════════════════════════════════════════════════════════
 # Invariant 6: Data access boundary
-# httpx (HTTP client) should only appear in repo*.py files within domains/.
-# types.py and config.py must never import httpx.
-# service*.py importing httpx is flagged as tech debt.
+# httpx (HTTP client) may only appear in repo*.py and handler*.py files
+# within domains/. types.py, config.py, and service.py must never import it —
+# service layer stays pure; I/O belongs in repo.
 # ═══════════════════════════════════════════════════════════════════════
 
 
 def test_data_access_boundary():
-    """httpx must not be imported in domain types.py or config.py files."""
+    """httpx must not be imported in domain types.py, config.py, or service.py files."""
     domains = _discover_domains()
     if not domains:
         return
 
     violations: list[str] = []
     # These layers must NEVER import the HTTP data client
-    forbidden_layers = ("types", "config")
+    forbidden_layers = ("types", "config", "service")
 
     for domain in domains:
         domain_dir = DOMAINS_DIR / domain
@@ -290,9 +292,7 @@ def _collect_first_party_modules() -> dict[Path, str]:
     return mapping
 
 
-def _extract_first_party_edges(
-    file_path: Path, mod_name: str, known_modules: set[str]
-) -> set[str]:
+def _extract_first_party_edges(file_path: Path, mod_name: str, known_modules: set[str]) -> set[str]:
     """Return first-party modules imported by this file.
 
     Resolves relative imports against the importing module's path and expands

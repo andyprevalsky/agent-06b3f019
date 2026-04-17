@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Any, Dict, Tuple
+from typing import Any, AsyncIterator, Dict, Tuple
 
 import httpx
 import structlog
 
+from domains.spawn_sub_agents.config import SPAWN_HTTP_TIMEOUT_SECONDS
 from helpers.attachments import extract_attachments_from_context
 
 logger = structlog.get_logger()
+
+
+@asynccontextmanager
+async def spawn_http_client() -> AsyncIterator[httpx.AsyncClient]:
+    """Yield an httpx client configured for spawn requests.
+
+    Keeps the httpx import confined to the repo layer so service.py stays pure.
+    """
+    async with httpx.AsyncClient(timeout=SPAWN_HTTP_TIMEOUT_SECONDS) as client:
+        yield client
 
 
 async def fetch_parent_attachments(
@@ -27,7 +39,7 @@ async def fetch_parent_attachments(
     all_pointers_by_id: Dict[str, Dict[str, Any]] = {}
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with spawn_http_client() as client:
             response = await client.get(
                 f"{backend_url}/api/agents/{parent_agent_id}",
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},

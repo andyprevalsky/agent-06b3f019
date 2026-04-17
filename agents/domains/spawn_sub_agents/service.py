@@ -6,7 +6,6 @@ import asyncio
 import random
 from typing import Any, Dict, List
 
-import httpx
 import structlog
 import structlog.contextvars
 from temporalio import activity
@@ -18,7 +17,7 @@ from domains.spawn_sub_agents.config import (
     MAX_SPAWN_ATTEMPTS,
     RETRYABLE_STATUS_CODES,
 )
-from domains.spawn_sub_agents.repo import create_sub_agent, fetch_parent_attachments
+from domains.spawn_sub_agents.repo import create_sub_agent, fetch_parent_attachments, spawn_http_client
 from domains.spawn_sub_agents.types import SpawnResult
 
 logger = structlog.get_logger()
@@ -207,7 +206,7 @@ async def spawn_sub_agent_activity(
         filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(backend_url, api_key, parent_agent_id)
 
         # Spawn with bounded concurrency
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with spawn_http_client() as client:
             semaphore = asyncio.Semaphore(MAX_PARALLEL_SPAWNS)
 
             async def spawn_one_with_retry(index: int, agent_cfg: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
