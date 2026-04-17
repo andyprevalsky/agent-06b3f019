@@ -59,7 +59,13 @@ PROVIDER_PREFIXES = ("helpers.", "helpers/")
 
 
 def _parse_imports(file_path: Path) -> list[str]:
-    """Parse top-level import module names from a Python file."""
+    """Parse import module names from a Python file.
+
+    Relative imports are resolved to fully-qualified dotted paths against
+    the importing file's package, so that `from . import service` inside
+    ``domains/foo/repo.py`` surfaces as ``domains.foo.service`` (and can
+    be matched by the layer/domain prefix checks below).
+    """
     if not file_path.exists():
         return []
     try:
@@ -68,14 +74,35 @@ def _parse_imports(file_path: Path) -> list[str]:
     except (SyntaxError, UnicodeDecodeError):
         return []
 
+    try:
+        rel_parts = list(file_path.resolve().relative_to(AGENTS_ROOT.resolve()).with_suffix("").parts)
+    except ValueError:
+        rel_parts = []
+    if rel_parts and rel_parts[-1] == "__init__":
+        pkg_parts = rel_parts[:-1]
+    else:
+        pkg_parts = rel_parts[:-1]
+
     modules: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.level > 0:
-                # Relative import - resolve to domain-relative module
-                # e.g., from .types import X -> types
+                up = node.level - 1
+                if up > len(pkg_parts):
+                    continue
+                base_parts = pkg_parts[: len(pkg_parts) - up] if up > 0 else list(pkg_parts)
                 if node.module:
-                    modules.append(node.module)
+                    base_parts = base_parts + node.module.split(".")
+                    if base_parts:
+                        modules.append(".".join(base_parts))
+                else:
+                    # `from . import X` → each alias is a sibling module
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        full = base_parts + [alias.name]
+                        if full:
+                            modules.append(".".join(full))
             elif node.module:
                 modules.append(node.module)
         elif isinstance(node, ast.Import):
@@ -137,6 +164,7 @@ def _validate_layer_imports(
     violations: list[str] = []
     layer_index = LAYER_ORDER.index(layer_name)
 
+    own_domain_prefix = f"domains.{domain_name}."
     for mod in modules:
         # External packages are always allowed
         if _is_external(mod):
@@ -146,15 +174,18 @@ def _validate_layer_imports(
         if _is_utils(mod):
             continue
 
-        # Check if it's an import from our own domain
-        own_layer = _is_own_domain(mod, domain_name)
-        if own_layer is not None:
-            own_index = LAYER_ORDER.index(own_layer)
-            if own_index >= layer_index:
-                violations.append(
-                    f"{layer_name}.py imports {own_layer}.py "
-                    f"(reverse/same-level import)"
-                )
+        # Same-domain import (canonical or non-canonical layer name)
+        if mod == f"domains.{domain_name}" or mod.startswith(own_domain_prefix):
+            own_layer = _is_own_domain(mod, domain_name)
+            if own_layer is not None:
+                own_index = LAYER_ORDER.index(own_layer)
+                if own_index >= layer_index:
+                    violations.append(
+                        f"{layer_name}.py imports {own_layer}.py "
+                        f"(reverse/same-level import)"
+                    )
+            # Non-canonical same-domain modules (e.g. service_actions) are
+            # allowed — forward-only rules only constrain canonical layers.
             continue
 
         # Provider imports - only allowed in service and handler
