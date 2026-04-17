@@ -16,7 +16,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from _test_utils import BlackboxResult
+from _result import Result as BlackboxResult
 
 AGENTS_ROOT = Path(__file__).resolve().parent.parent.parent
 DOMAINS_DIR = AGENTS_ROOT / "domains"
@@ -243,7 +243,7 @@ def test_no_cross_domain_imports():
 
 
 async def run_all_tests():
-    print("structural blackbox tests:")
+    print("structural tests:")
     r = BlackboxResult()
     r.record("all_domains_have_required_layers", test_all_domains_have_required_layers)
     r.record("forward_only_imports", test_forward_only_imports)

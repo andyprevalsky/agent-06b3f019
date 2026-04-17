@@ -188,6 +188,8 @@ fi
 # ── Blackbox tests (parallel) ──
 
 if should_run "agents"; then
+  bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+
   if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
     bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
   else
@@ -206,6 +208,8 @@ if should_run "back-end"; then
 fi
 
 if should_run "front-end"; then
+  bg_suite "Frontend Structural" bash -c "cd front-end && npx vitest run src/tests/structural"
+
   if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
     bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else

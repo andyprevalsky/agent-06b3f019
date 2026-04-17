@@ -1,38 +1,42 @@
-# Meo Health — Refactor Plan
+# Refactor Plan
+
+A generalizable playbook for taking a single repo (or a set of repos) through a full safety-net → layered-architecture → typed → coverage-gated refactor using Claude Code skills.
 
 ## Reading this DAG
 Nodes at the same level with no arrows between them are **parallel siblings** (run simultaneously in separate Conductor workspaces). Arrows (↓) indicate **causal dependencies** — the child cannot start until the parent completes. Each node names the skill or manual action required.
+
+"Repo" below means the unit of refactor — either a standalone codebase or a subdirectory in a mono-repo. Steps marked "per repo" run once per unit.
 
 ---
 
 ## Level 0 — Unblocking Prerequisite
 
-### 0.1 Create Mono-Repo Scaffold (manual setup)
-- Create `meo-health/` root repo
-- `git subtree add` each repo: `api/`, `mobile/` (from Meohealth), `webflow/` (from Webflow)
-- Add `.gitignore`
-- Add root `package.json` with workspace scripts
-- Clean `dist/` dirs from git (api has `dist/` checked in)
+### 0.1 Create Repo Scaffold (manual setup)
+- Decide scope: single repo vs. mono-repo (use a mono-repo when refactoring multiple related codebases together).
+- For mono-repo: create the root, `git subtree add` each codebase as a subdirectory.
+- Add `.gitignore`.
+- Add root `package.json` (or framework equivalent) with workspace scripts.
+- Remove any build artifacts (`dist/`, `build/`, etc.) that are checked in.
 
-**Output:** mono-repo with all three codebases as subdirs.
+**Output:** scaffold with all target codebases present and buildable.
 
 ---
 
 ## Level 1 — Tooling Foundation (parallel, all depend on 0.1)
 
-### 1.1 `conductor.json` + `run.sh` (manual, modelled on Rose Labs)
-- **conductor.json:** setup, install all deps + post-install + inc build; run → `bash scripts/run.sh`
-- **run.sh services:** API (Express), Webflow (CRA dev), Mobile (React Native), centralized local MongoDB
-- **Optional iOS Simulator:** pre-flight `xcrun` check; boot sim in setup script; `xcrun simctl launch` in run; cleanup in EXIT trap
-- **Log paths:** `api/api-logs.log`, `webflow/webflow-logs.log`, `mobile/mobile-logs.log`
+### 1.1 `conductor.json` + `run.sh` (manual)
+- **conductor.json:** setup (install all deps + post-install + initial build); run → `bash scripts/run.sh`.
+- **run.sh services:** one job per app/service in the repo, plus centralized local dependencies (DB, queue, etc.).
+- **Optional simulators/emulators (iOS, Android, etc.):** pre-flight check, boot in setup, launch in run, cleanup in EXIT trap.
+- **Log paths:** `<repo>/<repo>-logs.log` per service.
 
 **Output:** `conductor.json` + `scripts/run.sh` working.
 
 ### 1.2 Env Documentation (manual)
-Create `.env.example` for each repo (api has this; mobile has it; webflow has it partial).
+Create `.env.example` for each repo, covering every env var the service reads.
 **Output:** one example file committed to each repo.
 
-### 1.3 Port Skills (copy + adapt from Rose Labs)
+### 1.3 Port Skills (copy + adapt)
 Skills to port:
 - `/deploy` (progressive gates) — discover test suites at runtime, run what exists, flag what's missing, proceed
 - `/push`
@@ -48,14 +52,14 @@ Skills to port:
 - `/audit-providers-and-utils`
 - `/enforce-canonical-utility`
 
-**Output:** `.claude/skills/*.md` in mono-repo root.
+**Output:** `.claude/skills/*.md` at the repo (or mono-repo) root.
 
 ### 1.4 CodeRabbit Setup (manual config)
-- Create `.coderabbit.yaml` at mono-repo root
-- Path instructions per subdirectory
-- Skip detection enabled
+- Create `.coderabbit.yaml` at the root.
+- Path instructions per subdirectory.
+- Skip detection enabled.
 
-**Output:** `.coderabbit.yaml` + CodeRabbit app account.
+**Output:** `.coderabbit.yaml` + CodeRabbit app account wired to the repo.
 
 ---
 
@@ -64,42 +68,36 @@ Skills to port:
 ### 2.1 Generate Root CLAUDE.md
 `/generate-claude-md`
 
-Scan all three subdirs and generate a token-efficient table of contents anchoring architecture, entry points, test commands, and coding guidelines. Must include a Log Files section mapping `run.sh` per-job paths and prod log sources (e.g., for mobile; none yet for webflow). Also expand `mobile/CLAUDE.md` and expand webflow's beyond JS architecture and Conductor integration.
+Scan all repos/subdirs and generate a token-efficient table of contents anchoring architecture, entry points, test commands, and coding guidelines. Must include a Log Files section mapping `run.sh` per-job paths and any prod log sources. Also expand each per-repo `CLAUDE.md` beyond skeletal architecture notes.
 
-**Output:** `CLAUDE.md` at root + expanded per-repo CLAUDE.md.
+**Output:** root `CLAUDE.md` + expanded per-repo `CLAUDE.md`.
 
-### 2.2 API CI/CD Improvements (manual + GitHub Actions)
-- Improve existing `deploy.yml`
-- Add CodeRabbit check gate
-- Add test coverage reporting
-- Add `.env.example` validation
+### 2.2 CI/CD Improvements (manual + GitHub Actions)
+For each repo with existing CI:
+- Improve the existing deploy workflow.
+- Add CodeRabbit check gate.
+- Add test coverage reporting.
+- Add `.env.example` validation.
 
-**Output:** API CI/CD hardened.
+**Output:** CI/CD hardened per repo.
 
 ---
 
 ## Level 3 — Domain Discovery (parallel, depend on Level 2)
 
-### 3.1 Map Domains — API
-`/map-domains on api/`
-Discovers Express route domains, controller clusters, model groupings. Outputs prioritized domain list with file mappings.
-**Output:** `domain-map.json`.
+### 3.1 Map Domains (per repo)
+`/map-domains on <repo>/`
 
-### 3.2 Map Domains — Webflow
-`/map-domains on webflow/`
-Discovers React screen domains, hook clusters, Redux slices, service groupings.
-**Output:** `domain-map.json`.
+Discovers domain clusters appropriate to the framework — e.g., Express route + controller + model groupings on the backend; screen + hook + state-slice + service groupings on the frontend. Outputs a prioritized domain list with file mappings.
 
-### 3.3 Map Domains — Mobile (UI)
-`/map-domains on mobile/src/`
-Discovers JS-layer domains (hooks, services, redux, screens).
-**Note:** Swift/ObjC files are NOT in scope for refactoring pipeline — they route to mobile build only.
-**Output:** `domain-map.json`.
+**Note:** native/compiled files (Swift, ObjC, Kotlin, etc.) are typically NOT in scope for a JS/TS refactoring pipeline — they route to native build jobs only.
+
+**Output:** `domain-map.json` per repo.
 
 ---
 
 ## Level 4 — Per-Repo Refactoring Pipeline
-Instantiated per repo (API, Webflow, Mobile — 3 parallel instances). Within each repo, `/batch` parallelizes across all domains discovered in Level 3.
+Instantiated per repo (N parallel instances, one per repo in scope). Within each repo, `/batch` parallelizes across all domains discovered in Level 3.
 
 ### Step 4.A — Parallel siblings
 
@@ -134,7 +132,7 @@ Enforce the layered architecture invariants from 4.C with machine-readable tests
 `/deploy` — ✅ lint ✅ fmt ✅ blackbox ✅ E2E ✅ structural 🔴 types → Push → PR → CodeRabbit → merge
 
 ### Step 4.G — JS → TS Conversion
-`/refactor-domain` (with TS migration flag)
+`/refactor-domain` (with TS migration flag) — **skip this step entirely if the repo is already TypeScript.**
 
 **Step 1 — Setup** (once per repo, first domain only):
 - Add `tsconfig.json` (strict: false initially)
@@ -177,25 +175,21 @@ Add ESLint `no-restricted-syntax` rules to ban hand-rolled patterns for cross-cu
 
 ## Level 4 — Per-Repo Cross-Cutting (after each repo's pipeline completes)
 
-### 4.M Enforce Code Coverage — API
-`/enforce-code-coverage 88` — configure coverage thresholds per domain. Start at current 88. Add coverage gate to CI.
+### 4.M Enforce Code Coverage (per repo)
+`/enforce-code-coverage <starting-threshold>` — configure coverage thresholds per domain. Start at whatever the repo currently hits (ratchet only upward from there). Add coverage gate to CI.
 
-### 4.N Enforce Code Coverage — Webflow
-`/enforce-code-coverage 88` — same as 4.M for webflow.
-
-### 4.O Enforce Code Coverage — Mobile
-`/enforce-code-coverage 88` — same as 4.M for mobile (JS only).
+Run once per repo.
 
 ---
 
 ## Level 5 — Bug Bash + Regenerate (after all Level 4)
 
 ### 5.1 Joint Team Bug Bash + Manual Fix
-Dev team and Rose Labs walk through each refactored domain together. Identify any regressions, broken flows, or architectural inconsistencies the automated pipeline missed. Fix issues manually as a team — this is also a teaching moment for how to use the skills going forward.
+The dev team and the refactor team walk through each refactored domain together. Identify any regressions, broken flows, or architectural inconsistencies the automated pipeline missed. Fix issues manually as a team — this is also a teaching moment for how to use the skills going forward.
 
 ### 5.2 Regenerate CLAUDE.md
 `/generate-claude-md`
-Re-scan all three repos now that they have layered architecture, TS, structural tests, coverage gates, and bug bash fixes applied.
+Re-scan all repos now that they have layered architecture, TS, structural tests, coverage gates, and bug bash fixes applied.
 **Output:** CLAUDE.md reflects the final refactored codebase state.
 
 ---
@@ -203,21 +197,21 @@ Re-scan all three repos now that they have layered architecture, TS, structural 
 ## Level 6 — Handoff (depends on Level 5)
 
 ### 6.1 Live Code Development Session
-Video call with dev team.
-- Demo: pick a Linear ticket, `/new_branch_with_context`, implement feature, `/deploy` end-to-end
+Video call with the dev team.
+- Demo: pick a ticket, `/new_branch_with_context`, implement feature, `/deploy` end-to-end
 - Show: Conductor multi-workspace parallelism
 - Show: CodeRabbit review cycle
 - Walk through CLAUDE.md and how to maintain it
 
-**Output:** team can operate independently with delivered skills.
+**Output:** team can operate independently with the delivered skills.
 
 ### 6.2 Final Deliverables
-Compile and deliver per SOW:
-1. Claude Code skills (deployed to mono-repo `.claude/skills`)
+Compile and deliver:
+1. Claude Code skills (deployed to `.claude/skills`)
 2. Linter/formatter/review config files + recommendations doc
 3. This refactor roadmap (updated with actual results)
 
-**Output:** SOW complete, all deliverables transferred.
+**Output:** all deliverables transferred.
 
 ---
 
@@ -248,8 +242,8 @@ Use `/batch` with pools of 10 agents — one per domain within the repo.
 
 ## Out of Scope
 
-The following are explicitly outside the scope of this engagement. They are natural follow-on work that Meo Health may pursue independently or through a future engagement with Rose Labs.
+The following are explicitly outside the scope of this playbook. They are natural follow-on work once the refactor is complete.
 
-**Cloud-Triggered Agents** — Agents that trigger off Linear tickets, Slack messages, or GitHub issues to drive feature development end-to-end. Requires Linear webhook integration, agent orchestration infrastructure (Temporal or similar), and a hosted agent runtime. This engagement delivers the skills these agents would use (deploy, refactor, test gen) but not the agent infrastructure itself.
+**Cloud-Triggered Agents** — Agents that trigger off ticket-tracker events (Linear, Jira), Slack messages, or GitHub issues to drive feature development end-to-end. Requires webhook integration, agent orchestration infrastructure (Temporal or similar), and a hosted agent runtime. This playbook delivers the skills these agents would use (deploy, refactor, test gen) but not the agent infrastructure itself.
 
-**Background Garbage-Collection Agents** — Continuously running agents that comb the codebase to improve code quality, consistency, documentation, and test coverage without human initiation. Requires a hosted agent runtime with cron scheduling, cost-control (token budgets), and a review/approval workflow for autonomous PRs. The refactored codebase and structural tests from this engagement make GC agents dramatically more effective — they can operate within the enforced architectural boundaries rather than generating drift.
+**Background Garbage-Collection Agents** — Continuously running agents that comb the codebase to improve code quality, consistency, documentation, and test coverage without human initiation. Requires a hosted agent runtime with cron scheduling, cost-control (token budgets), and a review/approval workflow for autonomous PRs. The refactored codebase and structural tests from this playbook make GC agents dramatically more effective — they can operate within the enforced architectural boundaries rather than generating drift.
