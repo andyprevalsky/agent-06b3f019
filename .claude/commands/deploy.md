@@ -189,6 +189,50 @@ BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/
 
 ## Step 6: Smoke benchmarks + fix
 
+### When smoke can be skipped
+
+Smoke benchmarks exercise the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions). Skip them **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
+
+**SAFE TO SKIP** when the diff is limited to paths that don't ship or don't affect agent behavior:
+
+| Path pattern | Why safe |
+|---|---|
+| `**/tests/**` (including structural, blackbox, e2e, semantic) | Test code doesn't run in prod |
+| `**/benchmarks/**` | Benchmarks don't run in prod |
+| `docs/**`, `**/*.md`, `**/README*`, `**/CLAUDE.md` | Documentation only |
+| `front-end/**` | Smoke doesn't exercise the front-end path (covered by FE blackbox + build) |
+| `mac-app/**` | Smoke doesn't exercise mac-app |
+| `.claude/**` | Agent/skill config; local tooling only |
+| `.coderabbit.yaml`, `.eslintrc*`, `eslint.config.*`, `.prettier*`, `*.test.config.*`, `vitest.config.*` | Lint/format/test-runner config only |
+| `scripts/test.sh`, `scripts/run-*-tests.sh`, `**/scripts/run_blackbox_tests.py` | Test harness — doesn't change runtime |
+| `.github/workflows/*.yml` (CI config only) | Deploy/CI config — doesn't change app code |
+| `refactor.md`, `conductor.json` (unless it changes service wiring) | Tooling config |
+| Lock files (`package-lock.json`, `pnpm-lock.yaml`, `uv.lock`) **with no `package.json`/`pyproject.toml` diff** | Pure lock churn |
+
+**MUST RUN SMOKE** when the diff touches any of these (even one line):
+
+| Key path | Why it needs smoke |
+|---|---|
+| `back-end/src/**/*.ts` (excluding `back-end/src/tests/**`) | Any API, middleware, service, route, provider change can affect the request path smoke hits |
+| `back-end/prisma/schema.prisma`, `back-end/prisma/migrations/**` | DB schema / realtime triggers — blast radius across every DB read/write |
+| `agents/activities/**`, `agents/helpers/**`, `agents/loop/**`, `agents/workflows/**` | Core Temporal runtime — workflow/activity code paths executed by every benchmark |
+| `agents/tools/**`, `agents/domains/**`, `agents/browser_tools/**` | Tool implementations smoke depends on (spawn_sub_agents, parallel-tool-calls, browser-smoke) |
+| `agents/worker.py`, `agents/config.py`, `agents/health_server.py` | Composition root / worker wiring |
+| `agents/requirements.txt`, `agents/pyproject.toml` (non-lint sections) | Runtime dep changes can break imports at startup |
+| `agents/Dockerfile`, `agents/fly.toml`, `agents/deploy.sh` | Worker deployment shape |
+| `research/supabase/functions/**` | Rose completions endpoint — all A* / S* LLM calls route through here |
+| `scripts/run.sh` | Service startup and env wiring that smoke depends on |
+| `back-end/.env.example` **when it adds a new required env var** | Runtime config contract change |
+
+**Tie-breaker rule:** if a path touches both safe and must-run buckets, treat the diff as must-run. When in doubt, run smoke — or ask the user.
+
+When skipping, record it explicitly in the Test Report:
+```
+| Smoke Benchmarks | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
+```
+
+### Running smoke
+
 With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
 
 ```bash
@@ -306,7 +350,10 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 # ║  4. Structural tests: 100% pass                                   ║
 # ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
-# ║  6. Smoke benchmarks: 5/5 pass — ALL FIVE, NO EXCEPTIONS          ║
+# ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
+# ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
+# ║     limited to safe paths; if ANY must-run path is touched, smoke ║
+# ║     is required)                                                   ║
 # ║                                                                    ║
 # ║  If ANY test has ANY failure, you are BLOCKED.                     ║
 # ║  Fix it or escalate to the user. Do NOT proceed.                   ║
@@ -314,7 +361,9 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 # ║  INVALID EXCUSES (do NOT use these to justify proceeding):         ║
 # ║  - "Pre-existing" / "not related to my changes"                   ║
 # ║  - "Infrastructure issue" / "flaky" / "resource contention"       ║
-# ║  - "The code changes don't touch agent/Temporal code"             ║
+# ║  - "The code changes don't touch agent/Temporal code" (check the  ║
+# ║     Step 6 table — back-end/ and research/ changes ALSO require   ║
+# ║     smoke, not just agents/)                                      ║
 # ║  - "Expired tokens" (re-run seed script or escalate to user)      ║
 # ║  - "Temporal connectivity" (restart workers, fix it)              ║
 # ║  - "Agents timing out" (investigate and fix)                      ║
