@@ -6,8 +6,6 @@
  * No internal business logic — purely presentation wiring.
  */
 
-import { useRef } from 'react';
-
 import { CreateAgentModal } from '@/features/terminal-component-group';
 import SubscriptionModal from '@/components/SubscriptionModal';
 import { CostLimitModal } from '@/features/terminal-component-group';
@@ -38,8 +36,6 @@ interface TerminalModalsProps {
 }
 
 export function TerminalModals({ agents }: TerminalModalsProps) {
-  const queryInputRef = useRef<HTMLDivElement>(null);
-
   return (
     <>
       <CreateAgentModal
@@ -51,8 +47,9 @@ export function TerminalModals({ agents }: TerminalModalsProps) {
       <PhoneAuthModal
         open={agents.loginModalOpen}
         onOpenChange={agents.setLoginModalOpen}
-        triggerRef={queryInputRef}
-        onAuthComplete={(reason) => { void agents.refreshAuthState(reason); }}
+        onAuthComplete={(reason) => {
+          void agents.refreshAuthState(reason);
+        }}
         anonymousUserId={agents.isAnonymous ? agents.authUser?.id : undefined}
       />
 

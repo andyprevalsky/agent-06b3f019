@@ -29,19 +29,21 @@
  * - phone: string (formatted phone number)
  * - otp: string (6-digit code)
  * - loading: boolean
- * - modalPosition: { top, left } (positioned relative to trigger)
  */
 
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 
 import type { PhoneAuthModalProps } from '../types';
-import { useModalPosition, usePhoneAuth } from '../hooks';
+import { usePhoneAuth } from '../hooks';
 
 import PhoneStep from './PhoneStep';
 import OtpStep from './OtpStep';
 
-const MODAL_STYLE_BASE = {
-  transform: 'translate(-50%, -100%)',
+const MODAL_STYLE = {
+  position: 'fixed',
+  top: '50%',
+  left: '50%',
+  transform: 'translate(-50%, -50%)',
   backgroundColor: 'rgba(238, 239, 242, 0.95)',
   backdropFilter: 'blur(24px)',
   WebkitBackdropFilter: 'blur(12px)',
@@ -50,25 +52,17 @@ const MODAL_STYLE_BASE = {
 const PhoneAuthModal = ({
   open,
   onOpenChange,
-  triggerRef,
   onAuthComplete,
   anonymousUserId,
 }: PhoneAuthModalProps) => {
-  const modalPosition = useModalPosition(open, triggerRef);
   const auth = usePhoneAuth(onOpenChange, onAuthComplete, anonymousUserId);
 
   return (
     <Dialog open={open} onOpenChange={auth.handleClose} modal={false}>
       <DialogContent
         className="p-0 border border-gray-300 shadow-lg [&>button]:hidden overflow-visible z-[100] w-[380px] max-w-[90vw] relative rounded-xl"
-        style={{
-          position: 'fixed',
-          top: `${modalPosition.top}px`,
-          left: `${modalPosition.left}px`,
-          ...MODAL_STYLE_BASE,
-        }}
+        style={MODAL_STYLE}
       >
-        <ModalArrow />
         {auth.step === 'phone' && (
           <PhoneStep
             phone={auth.phone}
@@ -95,32 +89,5 @@ const PhoneAuthModal = ({
     </Dialog>
   );
 };
-
-/** Downward-pointing arrow/nub below the modal. */
-function ModalArrow() {
-  return (
-    <>
-      <div
-        className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
-        style={{
-          bottom: '-12px',
-          borderLeft: '12px solid transparent',
-          borderRight: '12px solid transparent',
-          borderTop: '12px solid rgba(238, 239, 242, 0.95)',
-        }}
-      />
-      <div
-        className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
-        style={{
-          bottom: '-13px',
-          borderLeft: '13px solid transparent',
-          borderRight: '13px solid transparent',
-          borderTop: '13px solid rgb(209, 213, 219)',
-          zIndex: -1,
-        }}
-      />
-    </>
-  );
-}
 
 export default PhoneAuthModal;

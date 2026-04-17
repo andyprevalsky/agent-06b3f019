@@ -252,11 +252,11 @@ export function renderProceduralAnimationSync(
 
   // Disable ALL forms of image smoothing for pixel-perfect rendering
   ctx.imageSmoothingEnabled = false;
-  // @ts-ignore - vendor prefixes for older browsers
+  // @ts-expect-error - vendor prefixes for older browsers
   ctx.mozImageSmoothingEnabled = false;
-  // @ts-ignore
+  // @ts-expect-error - vendor prefixes for older browsers
   ctx.webkitImageSmoothingEnabled = false;
-  // @ts-ignore
+  // @ts-expect-error - vendor prefixes for older browsers
   ctx.msImageSmoothingEnabled = false;
 
   // Add padding (10% on each side = 80% of tile size)

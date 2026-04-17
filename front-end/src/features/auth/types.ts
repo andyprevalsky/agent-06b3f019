@@ -1,11 +1,8 @@
-import type { RefObject } from 'react';
-
 export type AuthStep = 'phone' | 'otp';
 
 export interface PhoneAuthModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  triggerRef: RefObject<HTMLDivElement>;
   onAuthComplete?: () => void;
   anonymousUserId?: string;
 }

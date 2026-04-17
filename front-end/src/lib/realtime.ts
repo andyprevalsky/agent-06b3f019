@@ -102,7 +102,7 @@ export type StreamChunkPayload = AssistantStreamPayload;
 /**
  * Generic event handler type
  */
-type EventHandler = (payload: any) => void;
+type EventHandler = (payload: unknown) => void;
 
 /**
  * Event handlers map: event name -> handler function
@@ -279,9 +279,9 @@ export async function subscribeToAgent(
  * Handlers for attention request channel events
  */
 export interface AttentionRequestHandlers {
-  onInsert?: (payload: any) => void;
-  onUpdate?: (payload: any) => void;
-  onDelete?: (payload: any) => void;
+  onInsert?: (payload: unknown) => void;
+  onUpdate?: (payload: unknown) => void;
+  onDelete?: (payload: unknown) => void;
   onDisconnect?: () => void;
 }
 

@@ -16,7 +16,7 @@
 import { useState, useEffect } from 'react';
 import { Loader2, ArrowRight, Sparkles } from 'lucide-react';
 import { getSession } from '@/lib/supabase';
-import SystemCustomization, { type CustomizationData } from '@/components/customization/SystemCustomization';
+import { SystemCustomization, type CustomizationData } from '@/features/customization';
 
 const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
 

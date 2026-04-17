@@ -8,7 +8,7 @@
 export type { AuthStep, PhoneAuthModalProps, ProtectedRouteProps } from './types';
 
 // Hooks
-export { formatPhoneNumber, stripPhoneNumber, useModalPosition, usePhoneAuth } from './hooks';
+export { formatPhoneNumber, stripPhoneNumber, usePhoneAuth, useAuth } from './hooks';
 
 // Components
 export { default as LoginButton } from './components/LoginButton';
