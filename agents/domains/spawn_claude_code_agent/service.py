@@ -224,6 +224,7 @@ async def _run_agentic_loop(  # noqa: C901
     model: str,
     claude_token: Optional[str],
     action_summary: list[str],
+    tool_call_id: str,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -351,6 +352,7 @@ async def _run_agentic_loop(  # noqa: C901
                             message=fatal_error,
                             status=MessageStatus.ERROR,
                             action_type="system",
+                            tool_call_id=tool_call_id,
                         )
                         raise Exception(fatal_error)
 
@@ -417,6 +419,7 @@ async def _run_agentic_loop(  # noqa: C901
                             message=response_text,
                             status=MessageStatus.FINISHED,
                             action_type="agent_response",
+                            tool_call_id=tool_call_id,
                         )
 
             if safe_time() - last_status_update >= 30:
@@ -428,6 +431,7 @@ async def _run_agentic_loop(  # noqa: C901
                     message=f"Elapsed: {elapsed_int}s, Interactions: {interaction_count}",
                     status=MessageStatus.FINISHED,
                     action_type="agent_observation",
+                    tool_call_id=tool_call_id,
                 )
                 action_summary.append(f"Status update at {elapsed_int}s")
                 last_status_update = safe_time()
@@ -824,6 +828,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             message=goal,
             status=MessageStatus.FINISHED,
             action_type="task_started",
+            tool_call_id=tool_call_id,
         )
         action_summary.append(f"Started task: {goal[:100]}")
 
@@ -848,6 +853,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             model=model,
             claude_token=claude_token,
             action_summary=action_summary,
+            tool_call_id=tool_call_id,
         )
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
@@ -981,6 +987,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                     message="Agent paused by user",
                     status=MessageStatus.FINISHED,
                     action_type="task_complete",
+                    tool_call_id=tool_call_id,
                 )
 
                 await close_e2b_session(task_id=task_id)
@@ -1027,6 +1034,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                     message=error_message,
                     status=MessageStatus.ERROR,
                     action_type="task_complete",
+                    tool_call_id=tool_call_id,
                 )
 
                 await close_e2b_session(task_id=task_id)
