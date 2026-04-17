@@ -18,6 +18,7 @@ All commands run from repo root. Compute changed files once:
 
 ```bash
 CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
+CHANGED_FRONTEND=$(git diff --name-only main...HEAD -- 'front-end/**' || true)
 ```
 
 ### 1a. Prettier (skip if no TS changes)
@@ -45,13 +46,19 @@ cd back-end && npx tsc --noEmit
 cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 ```
 
-### 1e. Code coverage (skip if no back-end/ changes)
+### 1e. Back-end code coverage (skip if no back-end/ changes)
 
 ```bash
 cd back-end && npm run test:coverage
 ```
 
-### 1f. Blackbox API tests (skip if no back-end/ changes)
+### 1f. Front-end code coverage (skip if no front-end/ changes)
+
+```bash
+cd front-end && npm run test:coverage
+```
+
+### 1g. Blackbox API tests (skip if no back-end/ changes)
 
 The blackbox runner auto-starts an isolated backend on a dedicated port:
 

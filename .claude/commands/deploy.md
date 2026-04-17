@@ -61,9 +61,10 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
-   - Step 4a: coverage (skip if `CHANGED_BACKEND` is empty)
+   - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
+   - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
 
-If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all four verifiers are green.
+If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
 ## Step 1: Prettier format
 
@@ -127,6 +128,14 @@ cd back-end && npm run test:coverage
 
 Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
 
+## Step 4b: Front-end code coverage check (skip if no front-end/ changes)
+
+```bash
+cd front-end && npm run test:coverage
+```
+
+Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+
 ## Step 4c: Credential health check (no skip — always runs)
 
 Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
@@ -139,7 +148,7 @@ cd back-end && npx tsx src/tests/blackbox/integration-health.blackbox.ts
 
 This same file is also part of the full blackbox suite (Step 5a), so it will run again there when the backend-change path fires. Running it twice is harmless (~3s).
 
-## Step 4b: Push PR early, start CodeRabbit in parallel with runtime tests
+## Step 4d: Push PR early, start CodeRabbit in parallel with runtime tests
 
 Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
 
