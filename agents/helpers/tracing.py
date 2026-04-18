@@ -148,9 +148,14 @@ def backend_api_headers(api_key: str) -> Dict[str, str]:
     }
 
 
-def bind_request_id(request_id: str) -> None:
-    """Bind a request_id so subsequent HTTP calls and logs inherit it."""
-    structlog.contextvars.bind_contextvars(request_id=request_id)
+def bind_request_id(request_id: str) -> Dict[str, Any]:
+    """Bind a request_id so subsequent HTTP calls and logs inherit it.
+
+    Returns the token dict from structlog so callers can restore the previous
+    context via `structlog.contextvars.reset_contextvars(**token)` in a
+    finally block. Callers that don't need to restore may ignore the return.
+    """
+    return structlog.contextvars.bind_contextvars(request_id=request_id)
 
 
 def _extract_agent_id(sig: inspect.Signature, args: tuple, kwargs: dict) -> Optional[str]:

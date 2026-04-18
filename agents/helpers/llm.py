@@ -27,7 +27,7 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
-from helpers.tracing import traced
+from helpers.tracing import backend_api_headers, traced
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
     create_agent_action_model,
@@ -2640,7 +2640,7 @@ async def set_response_schema_activity(
             api_start = time.perf_counter()
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers=backend_api_headers(api_key),
                 json={"goal": goal},
             )
             schema_response.raise_for_status()
@@ -2668,7 +2668,7 @@ async def set_response_schema_activity(
             save_start = time.perf_counter()
             save_response = await client.patch(
                 f"{backend_url}/api/agents/{agent_id}",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers=backend_api_headers(api_key),
                 json={"response_schema": schema},
             )
             save_elapsed = time.perf_counter() - save_start

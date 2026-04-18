@@ -266,8 +266,10 @@ def _event_agent_id(e: _RawEvent) -> str:
         m = UUID_RE.search(str(path))
         if m:
             return m.group(0)
-    # Backend log lines that have `agent_id=<uuid>` embedded
-    for k in ("workflowId", "agent_id"):
+    # Backend log lines that have `agent_id=<uuid>` embedded. Also pick up
+    # parent_agent_id so legacy spawn POSTs (which only carry the parent id)
+    # attach to the trace — mirrors _discover_sub_agent_ids.
+    for k in ("workflowId", "agent_id", "parent_agent_id", "parentAgentId"):
         v = e.data.get(k)
         if v and UUID_RE.match(str(v)):
             return str(v)
