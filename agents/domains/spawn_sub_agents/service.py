@@ -19,6 +19,7 @@ from domains.spawn_sub_agents.config import (
 )
 from domains.spawn_sub_agents.repo import create_sub_agent, fetch_parent_attachments, spawn_http_client
 from domains.spawn_sub_agents.types import SpawnResult
+from helpers.tracing import traced
 
 logger = structlog.get_logger()
 
@@ -158,6 +159,7 @@ def build_spawn_payload(
 
 
 @activity.defn
+@traced("spawn_sub_agent_activity")
 async def spawn_sub_agent_activity(
     user_id: str,
     sub_agents: List[Dict[str, Any]],

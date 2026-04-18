@@ -116,6 +116,22 @@ export function aggregatePricing(
  * Throws CostError on unknown model / missing pricing.
  */
 export async function computeCost(modelName: string): Promise<CostResponse> {
+  // Underlying-model lookup: when racing falls back to a specific provider (e.g.
+  // `google/gemini-3-flash-preview`), the worker asks for pricing by that raw id
+  // instead of the Rose variant. Resolve it directly from FIXED_PRICING so the
+  // pricing activity doesn't 404 and burn retries.
+  const fixed = FIXED_PRICING[modelName];
+  if (fixed) {
+    return {
+      model: modelName,
+      contextLength: fixed.contextLength,
+      pricing: {
+        costPerMillionInputTokens: roundUpToNearestFiveCents(fixed.prompt),
+        costPerMillionOutputTokens: roundUpToNearestFiveCents(fixed.completion),
+      },
+    };
+  }
+
   const pool = MODEL_POOLS[modelName];
   if (!pool) {
     throw new CostError(`Model not found: ${modelName}`, 404);

@@ -5,6 +5,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
+import { currentTraceContext } from '../tracing';
 
 const log = createLogger('Broadcast');
 
@@ -197,6 +198,8 @@ async function broadcast(params: {
   }
 
   const url = `${SUPABASE_URL}/realtime/v1/api/broadcast`;
+  const trace = currentTraceContext();
+  const started = Date.now();
 
   try {
     const response = await fetch(url, {
@@ -218,10 +221,31 @@ async function broadcast(params: {
       }),
     });
 
+    log.info('broadcast.span', {
+      span_name: 'broadcast',
+      parent_span_id: trace?.span_id,
+      request_id: trace?.request_id,
+      agent_id: trace?.agent_id,
+      topic: params.topic,
+      event: params.event,
+      status: response.status,
+      duration_ms: Date.now() - started,
+    });
+
     if (!response.ok) {
       log.error('Failed', { status: response.status, body: await response.text() });
     }
   } catch (error: unknown) {
+    log.info('broadcast.span', {
+      span_name: 'broadcast',
+      parent_span_id: trace?.span_id,
+      request_id: trace?.request_id,
+      agent_id: trace?.agent_id,
+      topic: params.topic,
+      event: params.event,
+      status: 'error',
+      duration_ms: Date.now() - started,
+    });
     log.error('Error', { err: error instanceof Error ? error.message : String(error) });
   }
 }

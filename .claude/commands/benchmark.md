@@ -159,15 +159,19 @@ When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across po
    > Working directory: `<cwd>/agents`
    >
    > **Do this:**
-   > 1. Run: `python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url <BASE_URL>`
-   > 2. Grep worker logs for errors: `python benchmarks/agent_logs.py <agent_id> --tree --source worker --url <BASE_URL> 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'`
-   > 3. Grep backend logs (filter out 200/201/204): `python benchmarks/agent_logs.py <agent_id> --tree --source backend --url <BASE_URL> 2>&1 | grep -v '"status":200' | grep -v '"status":204' | grep -v '"status":201'`
-   > 4. Grep messages for errors: `python benchmarks/agent_logs.py <agent_id> --tree --source messages --url <BASE_URL> 2>&1 | grep -i 'ERROR\|FAILED'`
-   > 5. If local mode, also grep local log files:
+   > 1. Run BOTH summary commands in parallel (they answer different questions — latency vs. errors):
+   >    - `python benchmarks/agent_latency.py <agent_id>` — span-based waterfall: executive summary, top 10 slowest paths, slowest LLM calls, slowest backend HTTP, deduped errors. Best for "why was it slow/stalled." (Local logs only — skip in prod mode.)
+   >    - `python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url <BASE_URL>` — event-timeline tree across worker/backend/research/messages. Best for raw error context.
+   > 2. Based on which summary points at the smoking gun, expand that tool:
+   >    - `python benchmarks/agent_latency.py <agent_id> -v` for the full span tree (sub-agents, DB, broadcasts, HTTP internals).
+   >    - `python benchmarks/agent_logs.py <agent_id> --tree --source worker --url <BASE_URL> 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'`
+   >    - `python benchmarks/agent_logs.py <agent_id> --tree --source backend --url <BASE_URL> 2>&1 | grep -v '"status":200' | grep -v '"status":204' | grep -v '"status":201'`
+   >    - `python benchmarks/agent_logs.py <agent_id> --tree --source messages --url <BASE_URL> 2>&1 | grep -i 'ERROR\|FAILED'`
+   > 3. If local mode, also grep local log files:
    >    - `agents/navi-worker-log.txt` for `ERROR\|Traceback\|Exception`
    >    - `back-end/backend-logs.log` for `"level":"error"\|status":5`
    >    - `research/research-logs.log` for `error\|failed\|429`
-   > 6. If the error involves LLM calls, 429s, or auth failures, read `research/supabase/functions/completions/index.ts` and trace through the research layer.
+   > 4. If the error involves LLM calls, 429s, or auth failures, read `research/supabase/functions/completions/index.ts` and trace through the research layer.
    >
    > **Return a concise report (under 300 words) with exactly:**
    > - **Diagnosis:** What went wrong

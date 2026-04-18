@@ -77,6 +77,33 @@ Check these when errors occur:
 
 See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippets to inspect these.
 
+## Debugging Slow Agents
+
+Two diagnostic tools. Run **both summaries in parallel** whenever an agent is slow, stalled, or fails — they answer different questions. Then fully expand whichever one points at the smoking gun.
+
+```bash
+cd agents && source venv/bin/activate
+
+# "Why was this slow/stalled?" — span-based cross-log waterfall + hot paths
+python benchmarks/agent_latency.py <agent_id>
+# Flags: -v (verbose/full tree), --speedscope OUT.json, --stall-threshold N,
+#        --slow-threshold MS, --no-color
+
+# "What errors happened where?" — event-timeline tree across worker/backend/research/messages
+python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+# Expand per-source: --source worker|backend|research|messages  (add --url <BASE> for prod)
+```
+
+**`agent_latency.py`** reads `agents/navi-worker-log.txt`, `back-end/backend-logs.log`, and `research/research-logs.log`, builds a span tree from `span.start`/`span.end`/`db.query`/`broadcast.span` events (correlated by `span_id`/`parent_span_id`, falling back to `request_id` + time-window containment), and prints:
+- Executive summary: re-run command, total duration, span count, error count.
+- **Top 10 slowest paths**, **Slowest LLM Calls**, **Slowest Backend HTTP Requests**, **Errors** (deduped with counts).
+- A hierarchical waterfall (`offset | dur | trace`) nesting sub-agents under their spawn call and research-side breakdowns under each LLM call. Inline `IDLE` markers for gaps above `--stall-threshold`.
+- `-v` expands every span (DB, broadcasts, HTTP internals).
+
+**`agent_logs.py`** dumps the cross-source event timeline (including prod via Render/Fly/Supabase APIs with `--url`), grouped into a tree with errors highlighted. Best for reading the exact error message + stack + surrounding context after `agent_latency.py` points at a layer.
+
+Typical signatures to look for: 502/546 from `localhost:55003` (Supabase edge function CPU cap), `peer closed connection` during streaming (same root cause), `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to racing).
+
 ## Critical Rules
 
 1. **TDD loop** - Don't return until tests pass:

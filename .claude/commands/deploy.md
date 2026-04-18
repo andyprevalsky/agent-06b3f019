@@ -397,7 +397,10 @@ At each poll, check:
 
 **Diagnosis process:**
 1. Read the log files (backend, worker, research — see table below)
-2. Use `agent_logs.py` on failed agents to get the full event timeline
+2. Run BOTH diagnostic summaries in parallel on each failed `agent_id`, then fully expand whichever one points at the smoking gun:
+   - `cd agents && python benchmarks/agent_latency.py <agent_id>` — span-based waterfall: executive summary, top 10 slowest paths, slowest LLM calls, slowest backend HTTP, and deduped errors. Best for "why was this slow/stalled."
+   - `cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics` — event-timeline tree across worker/backend/research/messages. Best for raw error context.
+   - Full detail when the summary points at a layer: `agent_latency.py <agent_id> -v` for the expanded span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`.
 3. Identify which part of the agent lifecycle or LLM request is causing the failure (e.g., slow activity, backend crash under load, edge function error)
 4. Fix the root cause in code, restart services, and re-run
 
@@ -453,10 +456,15 @@ When any test or benchmark fails, check these local log files before making code
 | Worker | `agents/navi-worker-log.txt` | Workflow tracebacks, activity failures, LLM call errors |
 | Research | `research/research-logs.log` | Edge function errors, rate limits, auth failures |
 
-For benchmark-specific diagnostics, also use:
+For benchmark-specific diagnostics, run BOTH summaries in parallel — they answer different questions:
 ```bash
+# "Why was this slow/stalled?" — span waterfall + top-10 bad paths
+cd agents && python benchmarks/agent_latency.py <agent_id>
+
+# "What errors happened where?" — event-timeline tree
 cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
+Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
 ---
 

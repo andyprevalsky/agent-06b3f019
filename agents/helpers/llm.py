@@ -27,6 +27,7 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.tracing import traced
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
     create_agent_action_model,
@@ -1765,6 +1766,7 @@ def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
 
 
 @activity.defn
+@traced("call_llm")
 async def call_llm(
     messages: List[Dict[str, Any]],
     model: Optional[str] = None,
@@ -2267,6 +2269,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 
 
 @activity.defn
+@traced("check_progress")
 async def check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
@@ -2275,6 +2278,7 @@ async def check_progress(
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
@@ -2404,6 +2408,7 @@ async def check_progress(
 
 
 @activity.defn
+@traced("call_llm_activity")
 async def call_llm_activity(  # noqa: C901
     messages_or_agent_id: Any,
     model: str,
@@ -2580,6 +2585,7 @@ async def call_llm_activity(  # noqa: C901
 
 
 @activity.defn
+@traced("set_response_schema_activity")
 async def set_response_schema_activity(
     agent_id: str,
     user_messages: List[str],
@@ -2797,6 +2803,7 @@ async def mark_claude_token_rate_limited_activity(
 
 
 @activity.defn
+@traced("call_planner_llm_activity")
 async def call_planner_llm_activity(
     messages: List[Dict[str, Any]],
     model: str,

@@ -11,11 +11,13 @@ import structlog
 from temporalio import activity
 
 from domains.param_populator.service import populate_tool_params
+from helpers.tracing import traced
 
 logger = structlog.get_logger()
 
 
 @activity.defn
+@traced("populate_tool_params_activity")
 async def populate_tool_params_activity(
     tool_name: str,
     goal: str,

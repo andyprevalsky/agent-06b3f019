@@ -11,6 +11,7 @@ import structlog
 
 from domains.spawn_sub_agents.config import SPAWN_HTTP_TIMEOUT_SECONDS
 from helpers.attachments import extract_attachments_from_context
+from helpers.tracing import backend_api_headers
 
 logger = structlog.get_logger()
 
@@ -42,7 +43,7 @@ async def fetch_parent_attachments(
         async with spawn_http_client() as client:
             response = await client.get(
                 f"{backend_url}/api/agents/{parent_agent_id}",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers=backend_api_headers(api_key),
             )
             response.raise_for_status()
             parent_data = response.json()
@@ -80,6 +81,6 @@ async def create_sub_agent(
     """
     return await client.post(
         f"{backend_url}/api/agents",
-        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        headers=backend_api_headers(api_key),
         json=payload,
     )
