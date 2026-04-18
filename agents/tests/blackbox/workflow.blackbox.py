@@ -439,6 +439,7 @@ async def mock_check_progress(
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {"score": 1.0, "reasoning": "Complete", "structured_response": None}
 

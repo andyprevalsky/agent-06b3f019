@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import { createLogger } from './logger';
+import { currentTraceContext } from './tracing';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
 dotenv.config();
@@ -51,9 +52,32 @@ export const prisma =
 
         // eslint-disable-next-line no-restricted-syntax -- Prisma $extends middleware can't use retryWithBackoff (wraps query(args) inside $allOperations)
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          const trace = currentTraceContext();
+          const queryStart = Date.now();
           try {
-            return await query(args);
+            const result = await query(args);
+            log.info('db.query', {
+              span_name: 'db.query',
+              parent_span_id: trace?.span_id,
+              request_id: trace?.request_id,
+              agent_id: trace?.agent_id,
+              model,
+              operation,
+              duration_ms: Date.now() - queryStart,
+              status: 'ok',
+            });
+            return result;
           } catch (error: unknown) {
+            log.info('db.query', {
+              span_name: 'db.query',
+              parent_span_id: trace?.span_id,
+              request_id: trace?.request_id,
+              agent_id: trace?.agent_id,
+              model,
+              operation,
+              duration_ms: Date.now() - queryStart,
+              status: 'error',
+            });
             lastError = error;
             const prismaError = error as { code?: string };
 

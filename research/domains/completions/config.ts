@@ -45,8 +45,8 @@ export const MODEL_POOLS: Record<string, string[]> = {
     'moonshotai/kimi-k2.5',
   ],
   'rose-1-ultra': [
-    'google/gemini-3-flash-preview',
-    'moonshotai/kimi-k2.5',
+    'anthropic/claude-opus-4.7',
+    'google/gemini-3.1-pro-preview',
   ],
   // Browser automation pool - completion-based trio racing
   'rose-1-browser-use': [

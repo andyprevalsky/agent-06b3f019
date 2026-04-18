@@ -19,12 +19,16 @@
  *   service/racing.ts          → trio selection, waterfall, race winners
  *   service/handler.ts         → request-level orchestration (this file's body used to live here)
  *
- * All the edge function does here is hand the incoming `Request` to
- * `handleCompletionsRequest`.
+ * The edge function wraps `handleCompletionsRequest` in a root tracing span so
+ * each request lands in `research-logs.log` with `span.start` / `span.end`
+ * events correlated to the caller via `X-Parent-Span-Id` / `X-Request-Id` /
+ * `X-Agent-Id`. `agents/benchmarks/agent_latency.py` uses those to stitch the
+ * research leg into the cross-service waterfall.
  */
 
 import { serve } from 'https://deno.land/std@0.190.0/http/server.ts';
 
 import { handleCompletionsRequest } from '../../../domains/completions/service/handler.ts';
+import { withRequestSpan } from '../../../utils/tracing.ts';
 
-serve(handleCompletionsRequest);
+serve(withRequestSpan('research.completions', handleCompletionsRequest));

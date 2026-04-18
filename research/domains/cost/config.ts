@@ -40,10 +40,10 @@ export const MODEL_POOLS: Record<string, string[]> = {
     'google/gemini-3-flash-preview',
     'moonshotai/kimi-k2.5',
   ],
-  // Ultra uses claude_token (claude-sonnet-4-6) first, falls back to same pool as lite.
+  // Ultra uses claude_token (claude-sonnet-4-6) first, falls back to Opus 4.7 → Gemini 3.1 Pro.
   'rose-1-ultra': [
-    'google/gemini-3-flash-preview',
-    'moonshotai/kimi-k2.5',
+    'anthropic/claude-opus-4.7',
+    'google/gemini-3.1-pro-preview',
   ],
   // Browser automation pool - completion-based trio racing.
   'rose-1-browser-use': [
@@ -67,6 +67,16 @@ export const FIXED_PRICING: Record<string, ResolvedPricing> = {
     prompt: 0.38 / 1_000_000,
     completion: 1.72 / 1_000_000,
     contextLength: 262_144,
+  },
+  'anthropic/claude-opus-4.7': {
+    prompt: 5.00 / 1_000_000,
+    completion: 25.00 / 1_000_000,
+    contextLength: 1_000_000,
+  },
+  'google/gemini-3.1-pro-preview': {
+    prompt: 2.00 / 1_000_000,
+    completion: 12.00 / 1_000_000,
+    contextLength: 1_048_576,
   },
   'openai/gpt-5.2': {
     prompt: 1.75 / 1_000_000,
