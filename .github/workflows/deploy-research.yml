@@ -5,8 +5,14 @@ on:
     branches: [main]
     paths:
       - 'research/supabase/functions/**'
+      - 'research/domains/**'
+      - 'research/providers/**'
+      - 'research/utils/**'
+      - 'research/shared/**'
       - 'research/deploy.sh'
+      - 'research/deno.json'
       - '.github/workflows/deploy-research.yml'
+  workflow_dispatch:
 
 jobs:
   deploy:
