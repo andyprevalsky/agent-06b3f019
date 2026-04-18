@@ -182,39 +182,6 @@ Run once per repo.
 
 ---
 
-## Level 5 — Bug Bash + Regenerate (after all Level 4)
-
-### 5.1 Joint Team Bug Bash + Manual Fix
-The dev team and the refactor team walk through each refactored domain together. Identify any regressions, broken flows, or architectural inconsistencies the automated pipeline missed. Fix issues manually as a team — this is also a teaching moment for how to use the skills going forward.
-
-### 5.2 Regenerate CLAUDE.md
-`/generate-claude-md`
-Re-scan all repos now that they have layered architecture, TS, structural tests, coverage gates, and bug bash fixes applied.
-**Output:** CLAUDE.md reflects the final refactored codebase state.
-
----
-
-## Level 6 — Handoff (depends on Level 5)
-
-### 6.1 Live Code Development Session
-Video call with the dev team.
-- Demo: pick a ticket, `/new_branch_with_context`, implement feature, `/deploy` end-to-end
-- Show: Conductor multi-workspace parallelism
-- Show: CodeRabbit review cycle
-- Walk through CLAUDE.md and how to maintain it
-
-**Output:** team can operate independently with the delivered skills.
-
-### 6.2 Final Deliverables
-Compile and deliver:
-1. Claude Code skills (deployed to `.claude/skills`)
-2. Linter/formatter/review config files + recommendations doc
-3. This refactor roadmap (updated with actual results)
-
-**Output:** all deliverables transferred.
-
----
-
 ## Skill Execution Guidelines
 
 ### `/batch`
