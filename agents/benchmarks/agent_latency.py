@@ -41,7 +41,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKER_LOG = os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
@@ -203,21 +203,37 @@ def _discover_sub_agent_ids(backend_raw: List[_RawEvent], root_id: str) -> Set[s
     """Transitively discover sub-agent ids spawned under root by scanning
     `POST /api/agents` requests and any log lines that mention
     parent_agent_id=<ancestor>."""
-    parents: Set[str] = {root_id}
     children: Dict[str, Set[str]] = defaultdict(set)
 
     for e in backend_raw:
+        parent: Optional[str] = None
+
+        # Prefer parsed structured key (e.g. from backend JSON log): reliably
+        # present when a request's body has been decoded into e.data already.
+        raw_parent = e.data.get("parent_agent_id")
+        if isinstance(raw_parent, str) and UUID_RE.fullmatch(raw_parent):
+            parent = raw_parent
+        else:
+            body = e.data.get("body", "") or e.data.get("message", "")
+            if body and "parent_agent_id" in body:
+                parent_m = re.search(r'"parent_agent_id"\s*:\s*"([0-9a-f-]{36})"', body)
+                if parent_m:
+                    parent = parent_m.group(1)
+
+        if not parent:
+            continue
+
+        # Any co-occurring UUIDs (either in structured fields or free text) are
+        # candidate child ids for that parent.
+        candidates: Set[str] = set()
         body = e.data.get("body", "") or e.data.get("message", "")
-        if not body or "parent_agent_id" not in body:
-            continue
-        parent_m = re.search(r'"parent_agent_id"\s*:\s*"([0-9a-f-]{36})"', body)
-        if not parent_m:
-            continue
-        parent = parent_m.group(1)
-        # Child id may or may not be in the log line; pick it up when we see
-        # the response id later. For now we just record parent→unknown.
-        # Also capture any UUIDs that co-occur.
-        for uid in UUID_RE.findall(body):
+        if body:
+            candidates.update(UUID_RE.findall(body))
+        for key in ("id", "agent_id"):
+            v = e.data.get(key)
+            if isinstance(v, str) and UUID_RE.fullmatch(v):
+                candidates.add(v)
+        for uid in candidates:
             if uid != parent:
                 children[parent].add(uid)
 
@@ -1034,16 +1050,16 @@ def _render_executive_summary(
     )
     if stats.get("sub_agent_ids"):
         lines.append(
-            f"Sub-agents         "
+            "Sub-agents         "
             + ", ".join(sorted(stats["sub_agent_ids"]))
         )
     lines.append("")
-    lines.append(_c(f"Re-run with full tree:", BOLD, color))
+    lines.append(_c("Re-run with full tree:", BOLD, color))
     lines.append(f"  python agents/benchmarks/agent_latency.py {agent_id} --verbose")
     lines.append("")
 
     bad = _top_bad_paths(roots, code_cache, 10)
-    lines.append(_c(f"TOP 10 SLOW PATHS (root → leaf, worst duration)", BOLD, color))
+    lines.append(_c("TOP 10 SLOW PATHS (root → leaf, worst duration)", BOLD, color))
     lines.append("-" * 100)
     if not bad:
         lines.append("  (no paths recorded)")
@@ -1185,14 +1201,19 @@ def build_trace(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str
 
     spans, leftover = _build_spans_from_events(combined)
 
-    # Legacy fallbacks — only add spans whose name doesn't already exist for
-    # the same agent/time window. In practice, if span.* events are present
-    # we skip these; otherwise they provide backup.
-    has_span_events = any(e.event == "span.start" for e in combined)
-    if not has_span_events:
-        spans.extend(_legacy_worker_llm_spans(leftover))
-        spans.extend(_legacy_worker_spawn_spans(leftover))
-        spans.extend(_legacy_backend_http_spans(leftover))
+    # Legacy fallbacks — apply per source: only reconstruct spans for layers
+    # that didn't emit native span.start events. A partially-traced run (e.g.
+    # a backend mid-rollout) shouldn't disable legacy reconstruction for the
+    # other sources.
+    worker_has_spans = any(e.event == "span.start" for e in worker_raw)
+    backend_has_spans = any(e.event == "span.start" for e in backend_raw)
+    worker_leftover = [e for e in leftover if e.source == "worker"]
+    backend_leftover = [e for e in leftover if e.source == "backend"]
+    if not worker_has_spans:
+        spans.extend(_legacy_worker_llm_spans(worker_leftover))
+        spans.extend(_legacy_worker_spawn_spans(worker_leftover))
+    if not backend_has_spans:
+        spans.extend(_legacy_backend_http_spans(backend_leftover))
 
     # Research events always hang off LLM spans; add them as point-width.
     spans.extend(_research_event_spans(leftover))
@@ -1207,7 +1228,7 @@ def build_trace(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str
         "backend_events": len(backend_raw),
         "research_events": len(research_raw),
         "sub_agent_ids": sub_ids,
-        "has_span_events": has_span_events,
+        "has_span_events": worker_has_spans or backend_has_spans,
     }
     return roots, t0, t1, stats
 
@@ -1234,7 +1255,7 @@ def main() -> int:
         with open(args.speedscope, "w") as f:
             json.dump(payload, f)
         print(f"Wrote speedscope profile → {args.speedscope}")
-        print(f"  Open at https://www.speedscope.app (drag-drop the file)")
+        print("  Open at https://www.speedscope.app (drag-drop the file)")
         return 0
 
     color = _use_color(args.no_color)

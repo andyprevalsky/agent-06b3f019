@@ -1964,6 +1964,7 @@ async def _call_llm_verifier(  # noqa: C901
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
+    agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Simple LLM call for verifier - no streaming UI, no tool detection.
@@ -2010,6 +2011,8 @@ async def _call_llm_verifier(  # noqa: C901
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {config.rose.supabase_anon_key}",
                     "x-api-key": config.rose.api_key,
+                    "x-agent-id": agent_id or "",
+                    "x-call-site": call_site,
                 },
             ) as stream_response,
         ):
@@ -2352,7 +2355,13 @@ async def check_progress(
         for attempt in range(max_retries + 1):
             try:
                 result, usage = await _call_llm_verifier(
-                    messages, model, config, response_schema, claude_token=claude_token, call_site=call_site
+                    messages,
+                    model,
+                    config,
+                    response_schema,
+                    claude_token=claude_token,
+                    call_site=call_site,
+                    agent_id=agent_id,
                 )
                 break
             except Exception as e:
@@ -2892,6 +2901,7 @@ async def call_planner_llm_activity(
             response_model=PlannerResponse,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
+            agent_id=agent_id,
             claude_token=claude_max_token,
             skip_cache=True,  # Plan is generated once per iteration — no cache reuse
             call_site="planner",

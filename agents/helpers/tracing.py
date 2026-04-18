@@ -192,12 +192,17 @@ def traced(name: str) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., A
 
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> T:
+            tokens: Dict[str, Any] = {}
             if not current_agent_id():
                 aid = _extract_agent_id(sig, args, kwargs)
                 if aid:
-                    structlog.contextvars.bind_contextvars(agent_id=aid)
-            async with span(name):
-                return await fn(*args, **kwargs)
+                    tokens = structlog.contextvars.bind_contextvars(agent_id=aid)
+            try:
+                async with span(name):
+                    return await fn(*args, **kwargs)
+            finally:
+                if tokens:
+                    structlog.contextvars.reset_contextvars(**tokens)
 
         return wrapper
 
