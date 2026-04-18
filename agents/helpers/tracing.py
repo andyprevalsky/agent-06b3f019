@@ -148,6 +148,34 @@ def backend_api_headers(api_key: str) -> Dict[str, str]:
     }
 
 
+def rose_api_headers(
+    api_key: str,
+    anon_key: str,
+    call_site: str,
+    fallback_request_id: str,
+    fallback_agent_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Headers for Rose/Research calls with trace propagation.
+
+    Prefers the active trace context (X-Parent-Span-Id / X-Request-Id /
+    X-Agent-Id from `tracing_headers()`) so research spans nest under the
+    agent caller. Falls back to the provided request_id / agent_id when no
+    trace context is bound (e.g. tests, ad-hoc scripts).
+    """
+    h: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {anon_key}",
+        "x-api-key": api_key,
+        "x-call-site": call_site,
+        **tracing_headers(),
+    }
+    if "X-Request-Id" not in h:
+        h["X-Request-Id"] = fallback_request_id
+    if "X-Agent-Id" not in h and fallback_agent_id:
+        h["X-Agent-Id"] = fallback_agent_id
+    return h
+
+
 def bind_request_id(request_id: str) -> Dict[str, Any]:
     """Bind a request_id so subsequent HTTP calls and logs inherit it.
 
