@@ -1,20 +1,23 @@
-"""Runner script: generate all remaining synthetic labels via LLM judge.
+"""Runtime entry point for the `gepa-judge` pipeline.
 
-Usage:
-    PYTHONPATH=agents python research/gepa/run_judge.py
+Runs ``judge_all_tasks`` to generate synthetic preference labels via an LLM
+judge. Mirrors the historical ``research/gepa/run_judge.py`` script.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'agents'))
-
-from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / 'agents' / '.env')
 
@@ -26,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def main():
+async def main() -> None:
     from research.gepa.pipelines.synthetic_pairs import judge_all_tasks
 
     start = time.time()
@@ -35,13 +38,10 @@ async def main():
     new_labels = await judge_all_tasks()
 
     elapsed = time.time() - start
-    logger.info(f'Done! Generated {len(new_labels)} new labels in {elapsed:.1f}s')
+    logger.info('Done! Generated %d new labels in %.1fs', len(new_labels), elapsed)
 
-    # Quick summary
-    from collections import Counter
-
-    prefs = Counter(l['preference'] for l in new_labels)
-    logger.info(f'New label distribution: {dict(prefs)}')
+    prefs = Counter(label['preference'] for label in new_labels)
+    logger.info('New label distribution: %s', dict(prefs))
 
 
 if __name__ == '__main__':

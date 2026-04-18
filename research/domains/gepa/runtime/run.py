@@ -1,15 +1,21 @@
-"""Main entry point for GEPA task decomposer."""
+"""Runtime entry point for the `gepa` pipeline.
+
+Delegates to ``research.gepa.pipelines.gepa_optimizer.optimize_prompt`` via the
+service layer. The CLI keeps the same surface as the historical entry point.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import sys
 
-from .pipelines.gepa_optimizer import optimize_prompt
+from research.domains.gepa.service import optimize_prompt
 
 logger = logging.getLogger(__name__)
 
 
-async def main():
+async def main() -> None:
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     logger.info('GEPA Task Decomposer')
     logger.info('=' * 40)
