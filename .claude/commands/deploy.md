@@ -10,6 +10,21 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 ---
 
+# Step 0: Capture original Conductor workspace title
+
+Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
+
+```bash
+WORKSPACE_DIR="$(basename "$PWD")"
+ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
+  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 14a rename.
+
+---
+
 # Phase 1: Test Loop
 
 **ABSOLUTE RULE: 100% of tests must pass before proceeding to Phase 2. There are ZERO exceptions.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", "flaky test" — NONE of these are valid excuses. If a test fails, you fix it or you stop and ask the user. You NEVER skip, rationalize, or proceed with failing tests. A deploy with failing tests is a critical failure on your part.
@@ -734,6 +749,18 @@ If a deploy fails:
 ## Step 14: New branch
 
 Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
+
+## Step 14a: Restore original workspace title
+
+After `/new_branch_with_context` finishes, restore the workspace title captured in Step 0 so the Conductor workspace returns to the pre-deploy name (and not the PR title or the new branch's auto-synced name):
+
+```bash
+if [ -n "$ORIGINAL_WORKSPACE_TITLE" ]; then
+  /rename $ORIGINAL_WORKSPACE_TITLE
+fi
+```
+
+If `ORIGINAL_WORKSPACE_TITLE` was empty in Step 0, skip this step.
 
 ## Step 15: Done
 
