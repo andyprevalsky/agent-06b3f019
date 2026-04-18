@@ -41,7 +41,7 @@ with workflow.unsafe.imports_passed_through():
         update_agent_status,
     )
     from helpers.handle_tool_event import handle_tool_event
-    from helpers.llm import fetch_claude_max_token_activity
+    from helpers.llm import fetch_claude_max_token_activity, mark_claude_token_rate_limited_activity
     from helpers.messages import update_agent_tree_state
     from helpers.model_pricing import get_anthropic_pricing
     from helpers.query_parent_state import query_parent_state_activity
@@ -199,6 +199,8 @@ class AgentWorkflow:
         # Claude token (passed to Rose endpoint for direct Anthropic calls)
         self.claude_max_token: Optional[str] = None
         self.claude_max_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
+        self.claude_max_token_source: Optional[str] = None  # 'user' or 'pool' — used for rotation on rate_limit
+        self.claude_max_token_pool_id: Optional[str] = None  # Integration ID when source='pool'
 
         # Model pricing (fetched at workflow start for cost calculation)
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
@@ -977,15 +979,25 @@ class AgentWorkflow:
             workflow.logger.info(f"🔑 Claude token expired ({age.total_seconds():.0f}s old), refreshing")
 
         try:
-            self.claude_max_token = await workflow.execute_activity(
+            result = await workflow.execute_activity(
                 fetch_claude_max_token_activity,
                 args=[user_id],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            if result:
+                self.claude_max_token = result.get("accessToken")
+                self.claude_max_token_source = result.get("source")
+                self.claude_max_token_pool_id = result.get("poolTokenId")
+            else:
+                self.claude_max_token = None
+                self.claude_max_token_source = None
+                self.claude_max_token_pool_id = None
             self.claude_max_token_fetched_at = now
             if self.claude_max_token:
-                workflow.logger.info("🔑 Claude token available for planner")
+                workflow.logger.info(
+                    f"🔑 Claude token available for planner (source={self.claude_max_token_source})"
+                )
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch Claude token: {e}")
 
@@ -1629,10 +1641,44 @@ class AgentWorkflow:
             if self.claude_max_token and actual_model != "unknown" and not actual_model.endswith("-claude"):
                 if claude_token_error in ("auth_error", "rate_limit"):
                     workflow.logger.warning(
-                        f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, invalidating cached token"
+                        f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
+                        f"marking {self.claude_max_token_source} token rate-limited and rotating"
                     )
+                    # Mark the offending token rate-limited in DB so the next fetch rotates:
+                    #   source='user' → next fetch falls back to pool
+                    #   source='pool' → fetchPoolToken skips this ID and returns a different pool token
+                    # The cooldown is time-windowed (5 min); token auto-heals after rateLimitedUntil.
+                    if self.claude_max_token_source and self.user_id:
+                        try:
+                            await workflow.execute_activity(
+                                mark_claude_token_rate_limited_activity,
+                                args=[
+                                    self.claude_max_token_source,
+                                    self.user_id,
+                                    self.claude_max_token_pool_id,
+                                ],
+                                start_to_close_timeout=timedelta(seconds=10),
+                                retry_policy=RetryPolicy(maximum_attempts=2),
+                            )
+                        except Exception as mark_error:
+                            workflow.logger.warning(
+                                f"Failed to mark Claude token rate-limited: {mark_error}"
+                            )
+                    # Clear cache to force refetch on next call → rotation kicks in
                     self.claude_max_token = None
                     self.claude_max_token_fetched_at = None
+                    self.claude_max_token_source = None
+                    self.claude_max_token_pool_id = None
+                    # Proactively refetch so subsequent LLM calls in this phase use the
+                    # rotated token (otherwise they'd fall back to racing until the next
+                    # phase boundary calls _refresh_claude_token).
+                    if self.user_id:
+                        try:
+                            await self._refresh_claude_token(self.user_id)
+                        except Exception as refresh_error:
+                            workflow.logger.warning(
+                                f"Rotation refetch failed: {refresh_error}"
+                            )
                 else:
                     workflow.logger.info(
                         f"ℹ️ Claude token fallback (transient: {claude_token_error}): "

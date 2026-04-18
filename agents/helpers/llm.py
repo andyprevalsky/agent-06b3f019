@@ -8,7 +8,7 @@ import random
 import re
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
 import httpx  # Used with instructor
@@ -2693,11 +2693,13 @@ async def set_response_schema_activity(
 
 
 @activity.defn
-async def fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
+async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
     """
     Fetch Claude Max OAuth token for a user from the backend.
 
-    Returns the access token string, or None if unavailable.
+    Returns dict with {accessToken, source, poolTokenId} on success, None otherwise.
+    - source: 'user' (personal token) or 'pool' (shared pool token)
+    - poolTokenId: integration ID for pool tokens (used to mark rate-limited on failure)
     """
     config = load_config()
     _safe_heartbeat("Fetching Claude Max token")
@@ -2713,10 +2715,19 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
                 timeout=15.0,
             )
             if response.status_code == 200:
-                token = response.json().get("accessToken")
+                data = response.json()
+                token = data.get("accessToken")
                 if token:
-                    logger.info(f"✅ Claude Max token fetched for user {user_id}")
-                    return token
+                    source = data.get("source", "user")
+                    pool_token_id = data.get("poolTokenId")
+                    logger.info(
+                        f"✅ Claude Max token fetched for user {user_id} (source={source})"
+                    )
+                    return {
+                        "accessToken": token,
+                        "source": source,
+                        "poolTokenId": pool_token_id,
+                    }
             elif response.status_code == 404:
                 logger.info(f"Claude Max credentials not found for user {user_id}")
             else:
@@ -2725,6 +2736,64 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
         logger.warning(f"Failed to fetch Claude Max token: {e}")
 
     return None
+
+
+@activity.defn
+async def mark_claude_token_rate_limited_activity(
+    source: str,
+    user_id: str,
+    pool_token_id: Optional[str] = None,
+    cooldown_seconds: int = 5 * 60,
+) -> bool:
+    """
+    Mark the current Claude token as rate-limited in the backend for a cooldown period.
+
+    This is the CRITICAL step that makes token rotation work. Without it, the next
+    fetch returns the same rate-limited token and we loop forever. After this call:
+      - If source='user': next getClaudeCodeToken falls back to the shared pool.
+      - If source='pool': fetchPoolToken excludes this token (LRU rotates to next).
+
+    The cooldown is time-windowed (default 5 min); the token auto-heals once
+    rateLimitedUntil passes. This is NOT a permanent disable.
+    """
+    config = load_config()
+    rate_limited_until = (
+        datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+    ).isoformat().replace("+00:00", "Z")
+
+    body: Dict[str, Any] = {
+        "source": source,
+        "rateLimitedUntil": rate_limited_until,
+    }
+    if source == "pool" and pool_token_id:
+        body["poolTokenId"] = pool_token_id
+    if source == "user":
+        body["userId"] = user_id
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/integrations/claude-code/token/rate-limited",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                logger.info(
+                    f"✅ Marked {source} Claude token rate-limited until {rate_limited_until}"
+                )
+                return True
+            logger.warning(
+                f"Failed to mark token rate-limited: {response.status_code} {response.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Error marking token rate-limited: {e}")
+
+    return False
 
 
 @activity.defn
