@@ -7,22 +7,28 @@ Behavioral tests (xfail) define contracts for Phase B.
 import pytest
 
 from research.gepa.pipelines.data_generation import generate_candidates
-from research.gepa.pipelines.expansion import expand_tasks, expand_candidates
-from research.gepa.pipelines.synthetic_pairs import judge_preference, JudgeVerdict as PreferenceJudgment
-from research.gepa.pipelines.gepa_optimizer import optimize_prompt, OptimizationResult
+from research.gepa.pipelines.expansion import expand_candidates, expand_tasks
+from research.gepa.pipelines.gepa_optimizer import OptimizationResult
 from research.gepa.pipelines.simulate_user import simulate_user
+from research.gepa.pipelines.synthetic_pairs import (
+    JudgeVerdict as PreferenceJudgment,
+)
+from research.gepa.pipelines.synthetic_pairs import (
+    judge_preference,
+)
 from research.gepa.types import ClarifiedTask, DecompositionCandidate
 
 
 def _make_stub_task() -> ClarifiedTask:
     return ClarifiedTask(
-        id='test-1', raw_seed='Book a flight',
-        agent_context=[], set_plan_args={},
+        id='test-1',
+        raw_seed='Book a flight',
+        agent_context=[],
+        set_plan_args={},
     )
 
 
 class TestSimulateUser:
-
     @pytest.mark.asyncio
     async def test_returns_string(self):
         result = await simulate_user('What dates?', 'Book a flight')
@@ -31,7 +37,6 @@ class TestSimulateUser:
 
 
 class TestDataGeneration:
-
     @pytest.mark.asyncio
     async def test_stub_returns_list(self):
         result = await generate_candidates(_make_stub_task(), k=2)
@@ -47,7 +52,6 @@ class TestDataGeneration:
 
 
 class TestExpansion:
-
     @pytest.mark.asyncio
     async def test_expand_tasks_stub(self):
         result = await expand_tasks([_make_stub_task()], n=5)
@@ -60,7 +64,6 @@ class TestExpansion:
 
 
 class TestSyntheticPairs:
-
     @pytest.mark.asyncio
     async def test_judge_returns_verdict(self):
         """judge_preference with dict candidates returns JudgeVerdict."""
@@ -91,10 +94,26 @@ class TestSyntheticPairs:
             'title': 'Comprehensive Travel Plan',
             'content': 'Multi-step plan with research, comparison, and booking',
             'tasks': [
-                {'goal': 'Search for flights to destination', 'tool_name': 'web_search', 'depends_on': []},
-                {'goal': 'Compare prices across airlines', 'tool_name': 'reasoning', 'depends_on': [0]},
-                {'goal': 'Book the best option', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-                {'goal': 'Confirm booking and save details', 'tool_name': 'reasoning', 'depends_on': [2]},
+                {
+                    'goal': 'Search for flights to destination',
+                    'tool_name': 'web_search',
+                    'depends_on': [],
+                },
+                {
+                    'goal': 'Compare prices across airlines',
+                    'tool_name': 'reasoning',
+                    'depends_on': [0],
+                },
+                {
+                    'goal': 'Book the best option',
+                    'tool_name': 'spawn_browser_agent',
+                    'depends_on': [1],
+                },
+                {
+                    'goal': 'Confirm booking and save details',
+                    'tool_name': 'reasoning',
+                    'depends_on': [2],
+                },
             ],
         }
         bad_cand = {
@@ -105,13 +124,14 @@ class TestSyntheticPairs:
                 {'goal': 'Maybe do something', 'tool_name': 'reasoning', 'depends_on': []},
             ],
         }
-        result = await judge_preference('Complex multi-step travel booking with budget constraints', good_cand, bad_cand)
+        result = await judge_preference(
+            'Complex multi-step travel booking with budget constraints', good_cand, bad_cand
+        )
         assert 'STUB' not in result.overall_reasoning
         assert result.confidence > 50
 
 
 class TestGEPAOptimizer:
-
     def test_optimization_result_shape(self):
         """Verify OptimizationResult dataclass has expected fields."""
         result = OptimizationResult(

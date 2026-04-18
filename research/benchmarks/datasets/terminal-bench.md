@@ -5,7 +5,7 @@ Terminal-Bench is a benchmark for AI agents in terminal environments from [tbenc
 ## Overview
 
 - **Total Tasks**: 47 (Terminal-Bench Hard)
-- **Categories**: 
+- **Categories**:
   - System Administration
   - Security
   - Data Processing
@@ -32,6 +32,7 @@ Terminal-Bench is a benchmark for AI agents in terminal environments from [tbenc
 ## Evaluation
 
 Terminal-Bench tasks are evaluated by:
+
 1. Executing agent's commands in sandboxed environment
 2. Running test suites to verify completion
 3. Checking for repetition loops (stuck agents)
@@ -42,6 +43,7 @@ The Terminal-Bench harness is implemented at:
 `/research/benchmarks/harnesses/terminal-bench.ts`
 
 To run Terminal-Bench:
+
 ```bash
 deno run --allow-net --allow-env test-runner.ts \
   --url https://your-model-url.com \

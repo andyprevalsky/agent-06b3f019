@@ -14,6 +14,7 @@
  * Run single: node test-browser-use-racing.mjs --only=gpt-5.2
  */
 
+import process from 'node:process';
 const ROSE_API_KEY = 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 const SUPABASE_URL = process.env.SUPABASE_URL || 'http://localhost:54321/functions/v1/completions';
 
@@ -34,10 +35,24 @@ function assert(condition, message) {
 
 // Production available_actions (from agents/browser_tools/schemas.py BROWSER_TOOL_MODELS)
 const AVAILABLE_ACTIONS = [
-  'screenshot', 'extract', 'click', 'input_text', 'press_key',
-  'click_coordinates', 'dropdown_options', 'select_dropdown', 'evaluate',
-  'goto', 'navback', 'scroll', 'wait', 'switch_tab', 'close_tab',
-  'open_new_tab', 'upload_file', 'attempt_completion'
+  'screenshot',
+  'extract',
+  'click',
+  'input_text',
+  'press_key',
+  'click_coordinates',
+  'dropdown_options',
+  'select_dropdown',
+  'evaluate',
+  'goto',
+  'navback',
+  'scroll',
+  'wait',
+  'switch_tab',
+  'close_tab',
+  'open_new_tab',
+  'upload_file',
+  'attempt_completion',
 ];
 
 // Realistic DOM tree matching production format (dom_service.py output)
@@ -82,7 +97,8 @@ const REALISTIC_DOM_TREE = `[Start of page]
 [End of page]`;
 
 // Minimal 1x1 white PNG (valid base64 screenshot for yutori)
-const TINY_SCREENSHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+const TINY_SCREENSHOT =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
 
 function makeRequest(overrides = {}) {
   return {
@@ -94,12 +110,17 @@ function makeRequest(overrides = {}) {
       dom_tree: REALISTIC_DOM_TREE,
       viewport: { width: 1280, height: 720 },
       scroll_position: { x: 0, y: 0, pages_above: 0, pages_below: 0, total_pages: 1.0 },
-      tabs: [{ id: 0, url: 'https://example.com', title: 'Example - Build faster with AI agents', active: true }],
-      page_stats: { links: 7, interactive: 8, total: 37 }
+      tabs: [{
+        id: 0,
+        url: 'https://example.com',
+        title: 'Example - Build faster with AI agents',
+        active: true,
+      }],
+      page_stats: { links: 7, interactive: 8, total: 37 },
     },
     action_history: [],
     available_actions: AVAILABLE_ACTIONS,
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -113,17 +134,22 @@ async function callAPI(request, timeoutMs = 60000) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': ROSE_API_KEY
+        'x-api-key': ROSE_API_KEY,
       },
       body: JSON.stringify(request),
-      signal: controller.signal
+      signal: controller.signal,
     });
     const elapsed = Date.now() - startTime;
     const data = await response.json();
     return { data, elapsed, status: response.status, error: null };
   } catch (e) {
     const elapsed = Date.now() - startTime;
-    return { data: null, elapsed, status: 0, error: e.name === 'AbortError' ? `Timeout after ${timeoutMs}ms` : e.message };
+    return {
+      data: null,
+      elapsed,
+      status: 0,
+      error: e.name === 'AbortError' ? `Timeout after ${timeoutMs}ms` : e.message,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -138,7 +164,7 @@ function validateAction(data, label) {
   if (actionType) {
     assert(
       AVAILABLE_ACTIONS.includes(actionType),
-      `${label}: action type "${actionType}" is valid (in AVAILABLE_ACTIONS)`
+      `${label}: action type "${actionType}" is valid (in AVAILABLE_ACTIONS)`,
     );
   }
 
@@ -151,8 +177,14 @@ function validateAction(data, label) {
   assert(data.ttft_ms > 0, `${label}: ttft_ms > 0: ${data.ttft_ms}ms`);
   assert(data.usage, `${label}: usage present`);
   if (data.usage) {
-    assert(data.usage.prompt_tokens > 0, `${label}: prompt_tokens > 0: ${data.usage.prompt_tokens}`);
-    assert(data.usage.completion_tokens > 0, `${label}: completion_tokens > 0: ${data.usage.completion_tokens}`);
+    assert(
+      data.usage.prompt_tokens > 0,
+      `${label}: prompt_tokens > 0: ${data.usage.prompt_tokens}`,
+    );
+    assert(
+      data.usage.completion_tokens > 0,
+      `${label}: completion_tokens > 0: ${data.usage.completion_tokens}`,
+    );
   }
 }
 
@@ -166,7 +198,7 @@ async function testModel(seed, expectedModel, label, extraOverrides = {}, timeou
 
   const { data, elapsed, status, error } = await callAPI(
     makeRequest({ model_seed: seed, ...extraOverrides }),
-    timeoutMs
+    timeoutMs,
   );
 
   if (error) {
@@ -186,8 +218,10 @@ async function testModel(seed, expectedModel, label, extraOverrides = {}, timeou
   }
 
   assert(status === 200, `${label}: HTTP 200`);
-  assert(data.actual_model?.includes(expectedModel) || data.actual_model === expectedModel,
-    `${label}: actual_model contains "${expectedModel}" (got "${data.actual_model}")`);
+  assert(
+    data.actual_model?.includes(expectedModel) || data.actual_model === expectedModel,
+    `${label}: actual_model contains "${expectedModel}" (got "${data.actual_model}")`,
+  );
   assert(!data.racing, `${label}: no racing metadata (seeded)`);
 
   validateAction(data, label);
@@ -221,12 +255,24 @@ async function testRacing() {
   assert(status === 200, 'Racing: HTTP 200');
   validateAction(data, 'Racing');
 
-  assert(data.pool_name === 'rose-1-browser-use', `Racing: pool_name correct (got ${data.pool_name})`);
+  assert(
+    data.pool_name === 'rose-1-browser-use',
+    `Racing: pool_name correct (got ${data.pool_name})`,
+  );
   assert(data.pool_size === 4, `Racing: pool_size is 4 (got ${data.pool_size})`);
   assert(data.racing, 'Racing: racing metadata present');
-  assert(data.racing?.models_raced >= 2, `Racing: models_raced >= 2 (got ${data.racing?.models_raced})`);
-  assert(data.racing?.racing_type === 'completion_trio', `Racing: racing_type correct (got ${data.racing?.racing_type})`);
-  assert(data.racing?.trio?.length >= 2, `Racing: trio array present (${data.racing?.trio?.length} models)`);
+  assert(
+    data.racing?.models_raced >= 2,
+    `Racing: models_raced >= 2 (got ${data.racing?.models_raced})`,
+  );
+  assert(
+    data.racing?.racing_type === 'completion_trio',
+    `Racing: racing_type correct (got ${data.racing?.racing_type})`,
+  );
+  assert(
+    data.racing?.trio?.length >= 2,
+    `Racing: trio array present (${data.racing?.trio?.length} models)`,
+  );
 
   if (data.racing?.trio) {
     for (const entry of data.racing.trio) {
@@ -256,9 +302,12 @@ async function testNoScreenshotFiltering() {
   console.log(`\nStatus: ${status}, Time: ${elapsed}ms`);
 
   if (data.racing?.trio) {
-    const trioModels = data.racing.trio.map(t => t.model);
+    const trioModels = data.racing.trio.map((t) => t.model);
     console.log(`Trio: ${trioModels.join(', ')}`);
-    assert(!trioModels.includes('yutori/n1'), `No-screenshot: yutori NOT in trio [${trioModels.join(', ')}]`);
+    assert(
+      !trioModels.includes('yutori/n1'),
+      `No-screenshot: yutori NOT in trio [${trioModels.join(', ')}]`,
+    );
   } else {
     console.log('No trio metadata - checking winner is not yutori');
     assert(data.actual_model !== 'yutori/n1', 'No-screenshot: winner is not yutori');
@@ -269,28 +318,33 @@ async function testNoScreenshotFiltering() {
 // RUN
 // ============================================================
 async function runAllTests() {
-  const onlyFilter = process.argv.find(a => a.startsWith('--only='))?.split('=')[1];
+  const onlyFilter = process.argv.find((a) => a.startsWith('--only='))?.split('=')[1];
 
   console.log('rose-1-browser-use Model Validation + Racing Tests');
   console.log(`Endpoint: ${SUPABASE_URL}`);
-  console.log(`Pool: [0] browser-use, [1] yutori/n1, [2] openai/gpt-5.2, [3] anthropic/claude-opus-4.7`);
+  console.log(
+    `Pool: [0] browser-use, [1] yutori/n1, [2] openai/gpt-5.2, [3] anthropic/claude-opus-4.7`,
+  );
   if (onlyFilter) console.log(`Filter: --only=${onlyFilter}`);
   console.log('');
 
   const tests = [
     { name: 'browser-use', fn: () => testModel(0, 'browser-use', 'browser-use (seed=0)') },
-    { name: 'yutori', fn: () => testModel(1, 'yutori', 'yutori/n1 (seed=1)', {
-        browser_state: {
-          url: 'https://example.com',
-          title: 'Example - Build faster with AI agents',
-          dom_tree: REALISTIC_DOM_TREE,
-          screenshot: TINY_SCREENSHOT,
-          viewport: { width: 1280, height: 720 },
-          scroll_position: { x: 0, y: 0, pages_above: 0, pages_below: 0, total_pages: 1.0 },
-          tabs: [{ id: 0, url: 'https://example.com', title: 'Example', active: true }],
-          page_stats: { links: 7, interactive: 8, total: 37 }
-        }
-      })
+    {
+      name: 'yutori',
+      fn: () =>
+        testModel(1, 'yutori', 'yutori/n1 (seed=1)', {
+          browser_state: {
+            url: 'https://example.com',
+            title: 'Example - Build faster with AI agents',
+            dom_tree: REALISTIC_DOM_TREE,
+            screenshot: TINY_SCREENSHOT,
+            viewport: { width: 1280, height: 720 },
+            scroll_position: { x: 0, y: 0, pages_above: 0, pages_below: 0, total_pages: 1.0 },
+            tabs: [{ id: 0, url: 'https://example.com', title: 'Example', active: true }],
+            page_stats: { links: 7, interactive: 8, total: 37 },
+          },
+        }),
     },
     { name: 'gpt-5.2', fn: () => testModel(2, 'gpt-5.2', 'openai/gpt-5.2 (seed=2)', {}, 90000) },
     { name: 'opus-4.7', fn: () => testModel(3, 'opus-4.7', 'anthropic/claude-opus-4.7 (seed=3)') },
@@ -305,7 +359,7 @@ async function runAllTests() {
     }
     await test.fn();
     // Brief pause between tests
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   // Summary
@@ -316,7 +370,7 @@ async function runAllTests() {
   console.log(`Failed: ${failed}`);
   if (failures.length > 0) {
     console.log('\nFailures:');
-    failures.forEach(f => console.log(`  - ${f}`));
+    failures.forEach((f) => console.log(`  - ${f}`));
   }
   console.log('\n' + (failed === 0 ? 'ALL TESTS PASSED' : `${failed} TESTS FAILED`));
   console.log('='.repeat(60));
@@ -324,7 +378,7 @@ async function runAllTests() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-runAllTests().catch(e => {
+runAllTests().catch((e) => {
   console.error('Fatal error:', e);
   process.exit(1);
 });

@@ -8,18 +8,19 @@ A running list of benchmarks we want to test our system against.
 
 ### Summary Table
 
-| Benchmark | SOTA | Popularity | Cost/Run | Integration |
-|-----------|------|------------|----------|-------------|
-| Online-Mind2Web | 83.6% (Lux) | ★★★★☆ | $9-$1,600 | MEDIUM |
-| WebArena | 61.7% (IBM CUGA) | ★★★★★ | $500-$2,000 | HARD |
-| VisualWebArena | 16.4% (GPT-4V+SoM) | ★★★★☆ | $1,000-$3,000 | HARD |
-| RLI | 2.5% (Manus) | ★★★☆☆ | ~$7,200 | VERY HARD |
+| Benchmark       | SOTA               | Popularity | Cost/Run      | Integration |
+| --------------- | ------------------ | ---------- | ------------- | ----------- |
+| Online-Mind2Web | 83.6% (Lux)        | ★★★★☆      | $9-$1,600     | MEDIUM      |
+| WebArena        | 61.7% (IBM CUGA)   | ★★★★★      | $500-$2,000   | HARD        |
+| VisualWebArena  | 16.4% (GPT-4V+SoM) | ★★★★☆      | $1,000-$3,000 | HARD        |
+| RLI             | 2.5% (Manus)       | ★★★☆☆      | ~$7,200       | VERY HARD   |
 
 **Integration Priority**: Online-Mind2Web → WebArena → VisualWebArena → RLI
 
 ---
 
 ### Mind2Web / Online-Mind2Web
+
 - **URL**: https://osu-nlp-group.github.io/Mind2Web/
 - **Paper**: https://arxiv.org/abs/2306.06070
 - **GitHub**: https://github.com/OSU-NLP-Group/Mind2Web
@@ -45,6 +46,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### WebArena
+
 - **URL**: https://webarena.dev/
 - **GitHub**: https://github.com/web-arena-x/webarena
 - **Leaderboard**: [Google Sheets](https://docs.google.com/spreadsheets/d/1M801lEpBbKSNwP-vDBkC_pF7LdyGU1f_ufZb_NWNBZQ)
@@ -66,6 +68,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### VisualWebArena
+
 - **URL**: https://jykoh.com/vwa
 - **GitHub**: https://github.com/web-arena-x/visualwebarena
 - **Leaderboard**: [Project Page](https://jykoh.com/vwa)
@@ -87,6 +90,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### Remote Labor Index (RLI)
+
 - **URL**: https://www.remotelabor.ai
 - **Paper**: https://arxiv.org/abs/2510.26787
 - **GitHub**: https://github.com/centerforaisafety/rli_evaluation_platform
@@ -113,6 +117,7 @@ A running list of benchmarks we want to test our system against.
 ## Terminal / CLI Benchmarks
 
 ### Terminal-Bench Hard
+
 - **URL**: https://www.tbench.ai
 - **GitHub**: https://github.com/terminal-bench/terminal-bench
 - **Description**: AI agents in terminal environments. 47 tasks covering system administration, security, data processing.
@@ -127,6 +132,7 @@ A running list of benchmarks we want to test our system against.
 ## Coding Benchmarks
 
 ### SWE-Bench Verified
+
 - **URL**: https://www.swebench.com/
 - **GitHub**: https://github.com/princeton-nlp/SWE-bench
 - **Description**: 300 verified GitHub issues for testing real-world software engineering capabilities.
@@ -135,6 +141,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### LiveCodeBench
+
 - **GitHub**: https://github.com/LiveCodeBench/LiveCodeBench
 - **Description**: 315 competitive programming problems.
 - **Enum**: `LIVECODEBENCH = "livecodebench"`
@@ -142,6 +149,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### SciCode
+
 - **GitHub**: https://github.com/scicode-bench/SciCode
 - **Description**: 338 scientific computing subproblems.
 - **Enum**: `SCICODE = "scicode"`
@@ -153,6 +161,7 @@ A running list of benchmarks we want to test our system against.
 ## Knowledge / Reasoning Benchmarks
 
 ### MMLU-Pro
+
 - **Source**: HuggingFace `TIGER-Lab/MMLU-Pro`
 - **URL**: https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro
 - **Description**: 12,032 graduate-level multiple choice questions (10 options each) across 14 subjects.
@@ -166,12 +175,14 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [x] Implemented
 
 ### GPQA Diamond
+
 - **GitHub**: https://github.com/idavidrein/gpqa
 - **Description**: 198 graduate-level science questions (physics, chemistry, biology).
 - **Enum**: `GPQA_DIAMOND = "gpqa-diamond"`
 - **Status**: [ ] Not started
 
 ### Humanity's Last Exam (HLE)
+
 - **GitHub**: https://github.com/centerforaisafety/HLE
 - **Description**: 2,684 extremely difficult questions designed by domain experts.
 - **Enum**: `HLE = "hle"`
@@ -179,6 +190,7 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### AIME 2025
+
 - **URL**: https://artofproblemsolving.com/wiki/index.php/2025_AIME_Problems
 - **Description**: 30 math competition problems from American Invitational Mathematics Examination.
 - **Enum**: `AIME_2025 = "aime-2025"`
@@ -187,12 +199,14 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### IFBench (Instruction Following)
+
 - **GitHub**: https://github.com/Instruction-Following-Eval/IFBench
 - **Description**: 294 instruction following evaluation questions.
 - **Enum**: `IFBENCH = "ifbench"`
 - **Status**: [ ] Not started
 
 ### AA-LCR (Artificial Analysis Long Context Reasoning)
+
 - **URL**: https://artificialanalysis.ai
 - **Description**: 100 long-context reasoning questions.
 - **Enum**: `AA_LCR = "aa-lcr"`
@@ -205,6 +219,7 @@ A running list of benchmarks we want to test our system against.
 ## Other Agent Benchmarks
 
 ### τ²-Bench (Tau-Bench) Telecom
+
 - **GitHub**: https://github.com/tau2-bench/tau2-bench
 - **Description**: 114 telecom agent tasks.
 - **Enum**: `TAU2_BENCH = "tau2-bench"`
@@ -212,11 +227,13 @@ A running list of benchmarks we want to test our system against.
 - **Status**: [ ] Not started
 
 ### AgentBench
+
 - **URL**: https://llmbench.ai/agent
 - **Description**: Multi-dimensional agent evaluation across 8 environments.
 - **Status**: [ ] Not started
 
 ### GAIA
+
 - **URL**: https://huggingface.co/gaia-benchmark
 - **Description**: General AI Assistants benchmark - real-world questions requiring multi-step reasoning.
 - **Status**: [ ] Not started
@@ -228,24 +245,24 @@ A running list of benchmarks we want to test our system against.
 ```typescript
 // From ROSE_BENCHMARK_PLAN_V2.md
 enum BenchmarkType {
-  MMLU_PRO = "mmlu-pro",           // 12,032 questions - Multiple choice
-  TERMINAL_BENCH = "terminal-bench", // 47 tasks - Terminal commands
-  GPQA_DIAMOND = "gpqa-diamond",   // Graduate-level science
-  AIME_2025 = "aime-2025",         // Math competition (requires MathEvaluator)
-  HLE = "hle",                     // Human-like evaluation (requires EqualityChecker)
-  IFBENCH = "ifbench",             // Instruction following
-  SCICODE = "scicode",             // Scientific code (requires CodeEvaluator)
-  LIVECODEBENCH = "livecodebench", // Live code bench (requires CodeEvaluator)
-  SWE_BENCH = "swe-bench",         // Software engineering (requires CodeEvaluator)
-  TAU2_BENCH = "tau2-bench",       // Telecom (requires RepetitionChecker)
-  AA_LCR = "aa-lcr",               // AA Long-context recall (requires EqualityChecker)
-  FULL = "full"                    // Run all benchmarks sequentially
+  MMLU_PRO = 'mmlu-pro', // 12,032 questions - Multiple choice
+  TERMINAL_BENCH = 'terminal-bench', // 47 tasks - Terminal commands
+  GPQA_DIAMOND = 'gpqa-diamond', // Graduate-level science
+  AIME_2025 = 'aime-2025', // Math competition (requires MathEvaluator)
+  HLE = 'hle', // Human-like evaluation (requires EqualityChecker)
+  IFBENCH = 'ifbench', // Instruction following
+  SCICODE = 'scicode', // Scientific code (requires CodeEvaluator)
+  LIVECODEBENCH = 'livecodebench', // Live code bench (requires CodeEvaluator)
+  SWE_BENCH = 'swe-bench', // Software engineering (requires CodeEvaluator)
+  TAU2_BENCH = 'tau2-bench', // Telecom (requires RepetitionChecker)
+  AA_LCR = 'aa-lcr', // AA Long-context recall (requires EqualityChecker)
+  FULL = 'full', // Run all benchmarks sequentially
 }
 
 // Implementation status
 const IMPLEMENTED_BENCHMARKS = [
   BenchmarkType.MMLU_PRO,
-  BenchmarkType.TERMINAL_BENCH
+  BenchmarkType.TERMINAL_BENCH,
 ];
 ```
 

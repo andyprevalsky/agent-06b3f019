@@ -6,16 +6,15 @@ Stub-compatible tests (test_stub_*) verify the stub interface works now.
 
 import pytest
 
-from research.gepa.evaluators.mutual_exclusivity import evaluate_me
 from research.gepa.evaluators.collective_exhaustiveness import evaluate_ce
 from research.gepa.evaluators.complexity_invariant import evaluate_complexity
-from research.gepa.tests.fixtures import VALID_LINEAR_2, VALID_DIAMOND_4
-
+from research.gepa.evaluators.mutual_exclusivity import evaluate_me
+from research.gepa.tests.fixtures import VALID_DIAMOND_4, VALID_LINEAR_2
 
 # --- Stub interface tests (pass now) ---
 
-class TestMEStub:
 
+class TestMEStub:
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
         result, _ = await evaluate_me('Book a flight', VALID_LINEAR_2)
@@ -26,7 +25,6 @@ class TestMEStub:
 
 
 class TestCEStub:
-
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
         result, _ = await evaluate_ce('Book a flight', VALID_LINEAR_2)
@@ -37,7 +35,6 @@ class TestCEStub:
 
 
 class TestComplexityStub:
-
     @pytest.mark.asyncio
     async def test_stub_returns_eval_result(self):
         result, _ = await evaluate_complexity('Book a flight', VALID_LINEAR_2)
@@ -50,8 +47,8 @@ class TestComplexityStub:
 # --- Behavioral tests (will fail until LLM evaluators implemented) ---
 # All check 'STUB' not in reasoning to ensure they properly fail against stubs.
 
-class TestMEBehavioral:
 
+class TestMEBehavioral:
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_independent_tasks_pass(self):
@@ -66,10 +63,21 @@ class TestMEBehavioral:
     async def test_duplicate_tasks_fail(self):
         """Duplicate tasks should NOT be mutually exclusive."""
         from research.gepa.tests.fixtures import make_planner_response
-        duplicate = make_planner_response(tasks=[
-            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
-            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
-        ])
+
+        duplicate = make_planner_response(
+            tasks=[
+                {
+                    'goal': 'Search for flights',
+                    'tool_name': 'spawn_explore_agent',
+                    'depends_on': [],
+                },
+                {
+                    'goal': 'Search for flights',
+                    'tool_name': 'spawn_explore_agent',
+                    'depends_on': [],
+                },
+            ]
+        )
         result, _ = await evaluate_me('Book a flight', duplicate)
         assert 'STUB' not in result.reasoning
         assert result.passed is False
@@ -77,7 +85,6 @@ class TestMEBehavioral:
 
 
 class TestCEBehavioral:
-
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_full_coverage(self):
@@ -91,10 +98,17 @@ class TestCEBehavioral:
     async def test_missing_step(self):
         """Single search step doesn't cover 'compare and book'."""
         from research.gepa.tests.fixtures import make_planner_response
-        incomplete = make_planner_response(tasks=[
-            {'goal': 'Search for flights', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
-            {'goal': 'Search again', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
-        ])
+
+        incomplete = make_planner_response(
+            tasks=[
+                {
+                    'goal': 'Search for flights',
+                    'tool_name': 'spawn_explore_agent',
+                    'depends_on': [],
+                },
+                {'goal': 'Search again', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
+            ]
+        )
         result, _ = await evaluate_ce('Search, compare, and book the cheapest flight', incomplete)
         assert 'STUB' not in result.reasoning
         assert result.passed is False
@@ -102,7 +116,6 @@ class TestCEBehavioral:
 
 
 class TestComplexityBehavioral:
-
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_simple_children_pass(self):
@@ -117,10 +130,17 @@ class TestComplexityBehavioral:
     @pytest.mark.xfail(reason='STUB: awaiting LLM evaluator implementation')
     async def test_complex_child_fails(self):
         from research.gepa.tests.fixtures import make_planner_response
-        complex_child = make_planner_response(tasks=[
-            {'goal': 'Plan entire international trip with flights hotels activities and dining', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
-            {'goal': 'Confirm booking', 'tool_name': 'spawn_explore_agent', 'depends_on': [0]},
-        ])
+
+        complex_child = make_planner_response(
+            tasks=[
+                {
+                    'goal': 'Plan entire international trip with flights hotels activities and dining',
+                    'tool_name': 'spawn_explore_agent',
+                    'depends_on': [],
+                },
+                {'goal': 'Confirm booking', 'tool_name': 'spawn_explore_agent', 'depends_on': [0]},
+            ]
+        )
         result, _ = await evaluate_complexity('Book a hotel', complex_child)
         assert 'STUB' not in result.reasoning
         assert result.passed is False

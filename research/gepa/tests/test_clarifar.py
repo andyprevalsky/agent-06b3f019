@@ -6,12 +6,11 @@ behavior once run_agent is wired up in Phase B.
 
 import pytest
 
-from research.gepa.pipelines.clarifar import clarifar, SetPlanTrap
+from research.gepa.pipelines.clarifar import SetPlanTrap, clarifar
 from research.gepa.types import ClarifiedTask
 
 
 class TestSetPlanTrap:
-
     def test_trap_stores_plan_args(self):
         plan_args = {'title': 'Test', 'tasks': []}
         trap = SetPlanTrap(plan_args)
@@ -22,7 +21,6 @@ class TestSetPlanTrap:
 
 
 class TestClarifarStub:
-
     @pytest.mark.asyncio
     async def test_returns_clarified_task(self):
         result = await clarifar('Book a flight')
@@ -45,7 +43,6 @@ class TestClarifarStub:
 
 
 class TestClarifarBehavioral:
-
     @pytest.mark.asyncio
     @pytest.mark.xfail(reason='STUB: awaiting run_agent integration')
     async def test_captures_set_plan_args(self):

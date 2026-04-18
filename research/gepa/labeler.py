@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
 # Setup paths before any agents imports
@@ -26,29 +26,36 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 sys.path.insert(0, 'agents')
 sys.path.insert(0, '.')
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv('agents/.env')
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-import uvicorn
+import uvicorn  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import HTMLResponse  # noqa: E402
 
-from research.gepa.types import ClarifiedTask, DecompositionCandidate, EvalResult
-from research.gepa.validators import validate_decomposition
-from research.gepa.pipelines.decomposer import decompose_once, TEMPERATURES, MODEL, K_CANDIDATES
-from research.gepa.evaluators import evaluate_me, evaluate_ce, evaluate_complexity
+from research.gepa.evaluators import evaluate_ce, evaluate_complexity, evaluate_me  # noqa: E402
+from research.gepa.pipelines.decomposer import (  # noqa: E402
+    K_CANDIDATES,
+    MODEL,
+    TEMPERATURES,
+    decompose_once,
+)
+from research.gepa.types import ClarifiedTask, DecompositionCandidate  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # ─── COST ─────────────────────────────────────────────────────────
 
-COST_INPUT = 2.35 / 1_000_000   # $2.35/M tokens (Rose Ultra avg: Opus4.6+GPT5.2+Gemini3+Kimi)
-COST_OUTPUT = 13.50 / 1_000_000 # $13.50/M tokens (Rose Ultra avg)
+COST_INPUT = 2.35 / 1_000_000  # $2.35/M tokens (Rose Ultra avg: Opus4.6+GPT5.2+Gemini3+Kimi)
+COST_OUTPUT = 13.50 / 1_000_000  # $13.50/M tokens (Rose Ultra avg)
 
 
 def _calc_cost(usage: dict) -> float:
-    return usage.get('prompt_tokens', 0) * COST_INPUT + usage.get('completion_tokens', 0) * COST_OUTPUT
+    return (
+        usage.get('prompt_tokens', 0) * COST_INPUT + usage.get('completion_tokens', 0) * COST_OUTPUT
+    )
 
 
 # ─── PATHS ───────────────────────────────────────────────────────
@@ -60,14 +67,15 @@ LABELS_PATH = DATA_DIR / 'preference_labels.json'
 
 # ─── STATE ───────────────────────────────────────────────────────
 
+
 @dataclass
 class LabelerState:
-    task_files: List[str] = field(default_factory=list)
+    task_files: list[str] = field(default_factory=list)
     current_task_idx: int = 0
     current_pair_idx: int = 0
-    candidates_cache: Dict[str, List[Optional[Dict]]] = field(default_factory=dict)
-    task_costs: Dict[str, float] = field(default_factory=dict)  # task_file -> $ cost
-    labels: List[Dict] = field(default_factory=list)
+    candidates_cache: dict[str, list[dict | None]] = field(default_factory=dict)
+    task_costs: dict[str, float] = field(default_factory=dict)  # task_file -> $ cost
+    labels: list[dict] = field(default_factory=list)
     session_start: float = 0.0
     session_label_count: int = 0
     total_label_count: int = 0
@@ -85,12 +93,16 @@ def _reconcile_labels(s: LabelerState):
     logger.info(f'Reconciling: {len(disk_labels)} labels on disk vs {len(s.labels)} in state')
     s.labels = disk_labels
     s.total_label_count = len(disk_labels)
-    s.total_label_time = sum(l.get('label_time_s', 0) for l in disk_labels if l.get('preference') != 'SKIP')
+    s.total_label_time = sum(
+        l.get('label_time_s', 0) for l in disk_labels if l.get('preference') != 'SKIP'
+    )
 
     # Build set of already-labeled (task_id, frozenset(a_idx, b_idx)) — order-independent
     labeled = set()
     for label in disk_labels:
-        labeled.add((label['task_id'], frozenset((label['candidate_a_idx'], label['candidate_b_idx']))))
+        labeled.add(
+            (label['task_id'], frozenset((label['candidate_a_idx'], label['candidate_b_idx'])))
+        )
 
     # Walk tasks to find first unlabeled pair
     for task_idx, task_file in enumerate(s.task_files):
@@ -139,13 +151,22 @@ def _load_task(filename: str) -> ClarifiedTask:
     return ClarifiedTask(**data)
 
 
-def _serialize_candidate(c: DecompositionCandidate) -> Dict:
+def _serialize_candidate(c: DecompositionCandidate) -> dict:
     pr = c.planner_response
     return {
         'title': pr.title,
         'content': pr.content,
-        'tasks': [{'goal': t.goal, 'tool_name': t.tool_name.value if hasattr(t.tool_name, 'value') else t.tool_name, 'depends_on': t.depends_on} for t in pr.tasks],
-        'dependencies_graph': [{'task_idx': d.task_idx, 'depends_on': d.depends_on} for d in pr.dependencies_graph],
+        'tasks': [
+            {
+                'goal': t.goal,
+                'tool_name': t.tool_name.value if hasattr(t.tool_name, 'value') else t.tool_name,
+                'depends_on': t.depends_on,
+            }
+            for t in pr.tasks
+        ],
+        'dependencies_graph': [
+            {'task_idx': d.task_idx, 'depends_on': d.depends_on} for d in pr.dependencies_graph
+        ],
         'join': pr.join,
         'validation_errors': [{'type': e.type, 'detail': e.detail} for e in c.validation_errors],
         'me': asdict(c.me) if c.me else None,
@@ -162,7 +183,7 @@ def _canonicalize(a_idx: int, b_idx: int, preference: str) -> tuple:
     return b_idx, a_idx, flip[preference]
 
 
-def _get_pairs(n: int) -> List[tuple]:
+def _get_pairs(n: int) -> list[tuple]:
     """Return pairs in chain order so consecutive pairs share one element.
 
     Side-stable: if a candidate appears in consecutive pairs, it stays on
@@ -190,9 +211,9 @@ def _get_pairs(n: int) -> List[tuple]:
 # ─── PROGRESSIVE GENERATION ──────────────────────────────────────
 
 # In-flight generation tracking: task_file -> True if generation running
-_generating: Dict[str, bool] = {}
+_generating: dict[str, bool] = {}
 # Generation version: incremented on edit to invalidate stale generation runs
-_gen_version: Dict[str, int] = {}
+_gen_version: dict[str, int] = {}
 
 
 def _is_ready(task_file: str) -> bool:
@@ -204,7 +225,9 @@ def _is_ready(task_file: str) -> bool:
         if c is None:
             return False
         # If structurally valid, evals must be done
-        if not c.get('validation_errors') and (c.get('me') is None or c.get('ce') is None or c.get('complexity') is None):
+        if not c.get('validation_errors') and (
+            c.get('me') is None or c.get('ce') is None or c.get('complexity') is None
+        ):
             return False
     return True
 
@@ -228,7 +251,10 @@ async def _generate_for_task(task_file: str):
         task_cost = state.task_costs.get(task_file, 0.0)
 
         # Initialize slots
-        if task_file not in state.candidates_cache or len(state.candidates_cache[task_file]) < K_CANDIDATES:
+        if (
+            task_file not in state.candidates_cache
+            or len(state.candidates_cache[task_file]) < K_CANDIDATES
+        ):
             state.candidates_cache[task_file] = [None] * K_CANDIDATES
 
         slots = state.candidates_cache[task_file]
@@ -236,30 +262,43 @@ async def _generate_for_task(task_file: str):
         # Phase 1: Generate candidates (parallel, store each as it lands)
         temps = TEMPERATURES[:K_CANDIDATES]
 
-        MAX_RETRIES = 3
+        max_retries = 3
 
         async def gen_one(idx: int, temp: float):
             nonlocal task_cost
             if slots[idx] is not None and not slots[idx].get('_failed'):
                 return  # Already cached (resume)
-            for attempt in range(MAX_RETRIES):
+            for attempt in range(max_retries):
                 try:
-                    logger.info(f'  [{task_file}] Generating candidate {idx} (seed={idx}, temp={temp}) attempt {attempt+1}/{MAX_RETRIES}')
+                    logger.info(
+                        f'  [{task_file}] Generating candidate {idx} (seed={idx}, temp={temp}) attempt {attempt + 1}/{max_retries}'
+                    )
                     candidate, usage = await decompose_once(task, MODEL, temp, model_seed=idx)
                     task_cost += _calc_cost(usage)
                     slots[idx] = _serialize_candidate(candidate)
-                    logger.info(f'  [{task_file}] Candidate {idx} done: {candidate.planner_response.title[:60]}')
+                    logger.info(
+                        f'  [{task_file}] Candidate {idx} done: {candidate.planner_response.title[:60]}'
+                    )
                     return
                 except Exception as e:
-                    logger.error(f'  [{task_file}] Candidate {idx} attempt {attempt+1} failed: {e}')
-                    if attempt < MAX_RETRIES - 1:
+                    logger.error(
+                        f'  [{task_file}] Candidate {idx} attempt {attempt + 1} failed: {e}'
+                    )
+                    if attempt < max_retries - 1:
                         await asyncio.sleep(1)
             # All retries exhausted
             slots[idx] = {
-                'title': 'Generation failed', 'content': 'All retries exhausted',
-                'tasks': [], 'dependencies_graph': [], 'join': 'all',
-                'validation_errors': [{'type': 'GENERATION_ERROR', 'detail': 'Failed after 3 retries'}],
-                'me': None, 'ce': None, 'complexity': None,
+                'title': 'Generation failed',
+                'content': 'All retries exhausted',
+                'tasks': [],
+                'dependencies_graph': [],
+                'join': 'all',
+                'validation_errors': [
+                    {'type': 'GENERATION_ERROR', 'detail': 'Failed after 3 retries'}
+                ],
+                'me': None,
+                'ce': None,
+                'complexity': None,
                 '_failed': True,
             }
 
@@ -275,18 +314,27 @@ async def _generate_for_task(task_file: str):
             c = slots[idx]
             if c is None or c.get('validation_errors'):
                 return  # Skip invalid
-            if c.get('me') is not None and c.get('ce') is not None and c.get('complexity') is not None:
+            if (
+                c.get('me') is not None
+                and c.get('ce') is not None
+                and c.get('complexity') is not None
+            ):
                 return  # Already evaluated (resume)
 
             goal = task.raw_seed
             context = task.agent_context
             # Reconstruct PlannerResponse for evaluators
             from helpers.tool_schemas import PlannerResponse
-            pr = PlannerResponse.model_validate({
-                'title': c['title'], 'content': c['content'],
-                'tasks': c['tasks'], 'dependencies_graph': c['dependencies_graph'],
-                'join': c['join'],
-            })
+
+            pr = PlannerResponse.model_validate(
+                {
+                    'title': c['title'],
+                    'content': c['content'],
+                    'tasks': c['tasks'],
+                    'dependencies_graph': c['dependencies_graph'],
+                    'join': c['join'],
+                }
+            )
 
             async def run_eval(name, fn):
                 nonlocal task_cost
@@ -295,7 +343,9 @@ async def _generate_for_task(task_file: str):
                     result, usage = await fn(goal, pr, agent_context=context)
                     task_cost += _calc_cost(usage)
                     c[name] = asdict(result)
-                    logger.info(f'  [{task_file}] Eval {name} candidate {idx}: passed={result.passed}')
+                    logger.info(
+                        f'  [{task_file}] Eval {name} candidate {idx}: passed={result.passed}'
+                    )
                 except Exception as e:
                     logger.error(f'  [{task_file}] Eval {name} candidate {idx} failed: {e}')
                     c[name] = {'passed': False, 'score': 0.0, 'reasoning': f'Error: {e}'}
@@ -326,7 +376,7 @@ async def _generate_for_task(task_file: str):
 
 app = FastAPI(title='GEPA Labeler')
 state: LabelerState = _load_state()
-_bg_tasks: Dict[str, asyncio.Task] = {}
+_bg_tasks: dict[str, asyncio.Task] = {}
 
 
 def _kick_generation(task_file: str):
@@ -349,7 +399,9 @@ async def get_state():
     total_pairs = total_tasks * 6
     session_time = time.time() - state.session_start if state.session_start else 0
     session_avg = session_time / state.session_label_count if state.session_label_count > 0 else 0
-    overall_avg = state.total_label_time / state.total_label_count if state.total_label_count > 0 else 0
+    overall_avg = (
+        state.total_label_time / state.total_label_count if state.total_label_count > 0 else 0
+    )
     total_cost = sum(state.task_costs.values())
     return {
         'total_tasks': total_tasks,
@@ -387,8 +439,7 @@ async def get_current():
     ready_count = sum(1 for s in slots if s is not None)
     all_ready = _is_ready(task_file)
 
-    # Compute pairs from non-None candidates
-    non_none = [i for i, s in enumerate(slots) if s is not None]
+    # Compute pairs from candidate slots
     pairs = _get_pairs(len(slots)) if all_ready else []
 
     # Current pair info
@@ -456,7 +507,7 @@ def _advance_pair():
 
 
 @app.post('/api/label')
-async def submit_label(body: Dict[str, Any]):
+async def submit_label(body: dict[str, Any]):
     preference = body.get('preference')
     label_time = body.get('label_time_s', 0)
     if preference not in ('A', 'B', 'TIE', 'SKIP'):
@@ -472,16 +523,18 @@ async def submit_label(body: Dict[str, Any]):
     # Canonicalize: always store (min, max) and flip preference if swapped
     store_a, store_b, store_pref = _canonicalize(a_idx, b_idx, preference)
 
-    state.labels.append({
-        'pair_id': str(uuid4()),
-        'task_id': task.id,
-        'task_seed': task.raw_seed,
-        'candidate_a_idx': store_a,
-        'candidate_b_idx': store_b,
-        'preference': store_pref,
-        'label_time_s': label_time,
-        'timestamp': time.time(),
-    })
+    state.labels.append(
+        {
+            'pair_id': str(uuid4()),
+            'task_id': task.id,
+            'task_seed': task.raw_seed,
+            'candidate_a_idx': store_a,
+            'candidate_b_idx': store_b,
+            'preference': store_pref,
+            'label_time_s': label_time,
+            'timestamp': time.time(),
+        }
+    )
     state.total_label_count += 1
     state.session_label_count += 1
     if preference != 'SKIP':
@@ -494,7 +547,7 @@ async def submit_label(body: Dict[str, Any]):
 
 
 @app.post('/api/toggle-eval')
-async def toggle_eval(body: Dict[str, Any]):
+async def toggle_eval(body: dict[str, Any]):
     eval_type = body.get('eval_type')
     side = body.get('side')
     new_passed = body.get('passed')
@@ -542,16 +595,18 @@ async def skip_task():
     for pi in range(state.current_pair_idx, len(pairs)):
         a_idx, b_idx = pairs[pi]
         store_a, store_b, _ = _canonicalize(a_idx, b_idx, 'SKIP_TASK')
-        state.labels.append({
-            'pair_id': str(uuid4()),
-            'task_id': task.id,
-            'task_seed': task.raw_seed,
-            'candidate_a_idx': store_a,
-            'candidate_b_idx': store_b,
-            'preference': 'SKIP_TASK',
-            'label_time_s': 0,
-            'timestamp': time.time(),
-        })
+        state.labels.append(
+            {
+                'pair_id': str(uuid4()),
+                'task_id': task.id,
+                'task_seed': task.raw_seed,
+                'candidate_a_idx': store_a,
+                'candidate_b_idx': store_b,
+                'preference': 'SKIP_TASK',
+                'label_time_s': 0,
+                'timestamp': time.time(),
+            }
+        )
         state.total_label_count += 1
         state.session_label_count += 1
 
@@ -564,7 +619,7 @@ async def skip_task():
 
 
 @app.post('/api/edit-task')
-async def edit_task(body: Dict[str, Any]):
+async def edit_task(body: dict[str, Any]):
     """Edit current task's raw_seed and/or agent_context, persist to disk, and regenerate decompositions."""
     if state.current_task_idx >= len(state.task_files):
         raise HTTPException(400, 'No task to edit')
@@ -582,7 +637,9 @@ async def edit_task(body: Dict[str, Any]):
         task_data['agent_context'] = new_context
 
     task_path.write_text(json.dumps(task_data, indent=2))
-    logger.info(f'Edited task {task_file}: seed={new_seed is not None}, context={new_context is not None}')
+    logger.info(
+        f'Edited task {task_file}: seed={new_seed is not None}, context={new_context is not None}'
+    )
 
     # Invalidate any in-flight generation and clear cache
     _gen_version[task_file] = _gen_version.get(task_file, 0) + 1
@@ -1097,11 +1154,11 @@ updateStats();
 
 
 if __name__ == '__main__':
-    print(f'\\nGEPA Labeler')
+    print('\\nGEPA Labeler')
     print(f'  Tasks: {len(state.task_files)}')
-    print(f'  Pairs per task: 6 (C(4,2))')
+    print('  Pairs per task: 6 (C(4,2))')
     print(f'  Total pairs: {len(state.task_files) * 6}')
     print(f'  Already labeled: {state.total_label_count}')
     print(f'  Resume at: task {state.current_task_idx}, pair {state.current_pair_idx}')
-    print(f'\\n  Open: http://localhost:8765\\n')
+    print('\\n  Open: http://localhost:8765\\n')
     uvicorn.run(app, host='0.0.0.0', port=8765, log_level='info')

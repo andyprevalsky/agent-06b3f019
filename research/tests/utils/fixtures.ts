@@ -4,40 +4,40 @@
  */
 
 export const sampleMessages = [
-  { role: "user" as const, content: "What is 2+2?" },
+  { role: 'user' as const, content: 'What is 2+2?' },
 ];
 
 export const sampleToolDefinition = {
-  type: "function" as const,
+  type: 'function' as const,
   function: {
-    name: "get_weather",
-    description: "Get current weather for a location",
+    name: 'get_weather',
+    description: 'Get current weather for a location',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        location: { type: "string", description: "City name" },
+        location: { type: 'string', description: 'City name' },
       },
-      required: ["location"],
+      required: ['location'],
     },
   },
 };
 
 // Get API key from environment (generate via /rose/generate-api-key)
-const ROSE_API_KEY = Deno.env.get("ROSE_API_KEY") || "";
+const ROSE_API_KEY = Deno.env.get('ROSE_API_KEY') || '';
 
 export const sampleBenchmarkConfig = {
-  url: "/completions",
+  url: '/completions',
   headers: {
-    "x-api-key": ROSE_API_KEY,
+    'x-api-key': ROSE_API_KEY,
   },
   modelConfig: {
-    model: "rose-labs/rose-1-lite",
+    model: 'rose-labs/rose-1-lite',
     temperature: 0.7,
     maxTokens: 100,
     seed: 42,
     cotSteps: 1,
   },
-  benchmark: "mmlu-pro",
+  benchmark: 'mmlu-pro',
   seed: 12345,
 };
 
@@ -53,7 +53,7 @@ export function assertStatusCode(
   const validCodes = [expected, ...additionalValid];
   if (!validCodes.includes(actual)) {
     throw new Error(
-      `Expected status ${validCodes.join(" or ")}, got ${actual}`,
+      `Expected status ${validCodes.join(' or ')}, got ${actual}`,
     );
   }
 }

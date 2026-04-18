@@ -1,33 +1,29 @@
 // deno-lint-ignore-file no-console no-await-in-loop -- CLI benchmark runner; sequential execution is intentional (rate limits)
 /**
- * Test Runner for Rose Benchmarks
+ * Service layer — benchmark suite orchestration.
  *
- * Run any benchmark against any model URL with authentication
+ * Layer boundaries (import rules):
+ *   - May import from own types, own config, and sibling service files within
+ *     this domain.
+ *   - Holds the registry of available benchmarks and the suite runner.
  */
 
-import { MMLUProHarness } from './harnesses/mmlu-pro.ts';
-import { TerminalBenchHarness } from './harnesses/terminal-bench.ts';
-import type { BenchmarkConfig, BenchmarkSummary, IBenchmarkHarness } from './harnesses/base.ts';
+import type {
+  BenchmarkConfig,
+  BenchmarkSuiteResults,
+  IBenchmarkHarness,
+  TestConfig,
+} from './types.ts';
+import { DEFAULT_COT_STEPS, DEFAULT_SAMPLE_SIZE, DEFAULT_SEED } from './config.ts';
+import { MMLUProHarness } from './service-mmlu-pro.ts';
+import { TerminalBenchHarness } from './service-terminal-bench.ts';
 
-// Registry of available benchmarks
 const BENCHMARK_REGISTRY: Record<string, () => IBenchmarkHarness> = {
   'MMLU-Pro': () => new MMLUProHarness(),
   'Terminal-Bench': () => new TerminalBenchHarness(),
-  // More benchmarks will be added here as they're implemented
 };
 
-export interface TestConfig {
-  modelUrl: string;
-  authHeaders: Record<string, string>;
-  benchmarks: string[]; // e.g., ["MMLU-Pro", "GPQA-Diamond"]
-  sampleSize?: number; // Default: 100
-  seed?: number; // Default: 42
-  cotSteps?: number; // Default: 1
-  temperature?: number;
-  maxTokens?: number;
-}
-
-function createHarness(benchmarkName: string): IBenchmarkHarness {
+export function createHarness(benchmarkName: string): IBenchmarkHarness {
   const factory = BENCHMARK_REGISTRY[benchmarkName];
   if (!factory) {
     throw new Error(
@@ -41,16 +37,16 @@ function createHarness(benchmarkName: string): IBenchmarkHarness {
 
 export async function runBenchmarkSuite(
   config: TestConfig,
-): Promise<Record<string, BenchmarkSummary | { error: string }>> {
+): Promise<BenchmarkSuiteResults> {
   console.log('\n🚀 Rose Benchmark Suite');
   console.log('========================\n');
   console.log(`Model URL: ${config.modelUrl}`);
   console.log(`Benchmarks: ${config.benchmarks.join(', ')}`);
-  console.log(`Sample size: ${config.sampleSize ?? 100}`);
-  console.log(`CoT steps: ${config.cotSteps ?? 1}`);
-  console.log(`Sample seed: ${config.seed ?? 42}\n`);
+  console.log(`Sample size: ${config.sampleSize ?? DEFAULT_SAMPLE_SIZE}`);
+  console.log(`CoT steps: ${config.cotSteps ?? DEFAULT_COT_STEPS}`);
+  console.log(`Sample seed: ${config.seed ?? DEFAULT_SEED}\n`);
 
-  const results: Record<string, BenchmarkSummary | { error: string }> = {};
+  const results: BenchmarkSuiteResults = {};
 
   for (const benchmarkName of config.benchmarks) {
     console.log(`\n${'='.repeat(60)}`);
@@ -62,7 +58,7 @@ export async function runBenchmarkSuite(
 
       const benchmarkConfig: BenchmarkConfig = {
         modelUrl: config.modelUrl,
-        apiKey: config.authHeaders['x-api-key'] || '',
+        apiKey: config.authHeaders['x-api-key'] ?? '',
         sampleSize: config.sampleSize,
         seed: config.seed,
         cotSteps: config.cotSteps,
@@ -77,7 +73,7 @@ export async function runBenchmarkSuite(
       console.log(`\n✅ ${benchmarkName} Complete:`);
       console.log(
         `   Accuracy: ${summary.accuracy.toFixed(2)}% (${summary.correctAnswers}/${
-          summary.sampledQuestions * (benchmarkConfig.repeats || harness.defaultRepeats)
+          summary.sampledQuestions * (benchmarkConfig.repeats ?? harness.defaultRepeats)
         })`,
       );
       console.log(`   Cost: $${(summary.totalCostCents / 100).toFixed(2)}`);
@@ -119,28 +115,4 @@ export async function runBenchmarkSuite(
   console.log('='.repeat(60) + '\n');
 
   return results;
-}
-
-// Example usage (can be run from command line)
-if (import.meta.main) {
-  const config: TestConfig = {
-    modelUrl: Deno.env.get('MODEL_URL') || 'http://localhost:3001/v1/chat/completions',
-    authHeaders: {
-      'x-api-key': Deno.env.get('API_KEY') || '',
-    },
-    benchmarks: ['MMLU-Pro'],
-    sampleSize: 10, // Small sample for testing
-    seed: 42,
-    cotSteps: 1,
-  };
-
-  if (!config.authHeaders['x-api-key']) {
-    console.error('Error: API_KEY environment variable not set');
-    console.error(
-      'Usage: API_KEY=<your-key> MODEL_URL=<url> deno run --allow-net --allow-env test-runner.ts',
-    );
-    Deno.exit(1);
-  }
-
-  await runBenchmarkSuite(config);
 }

@@ -11,7 +11,6 @@ from research.gepa.pipelines.synthetic_pairs import (
 
 
 class TestJudgeVerdict:
-
     def test_valid_verdict(self):
         v = JudgeVerdict(overall_winner='A', overall_reasoning='test', confidence=85.0)
         assert v.overall_winner == 'A'
@@ -22,12 +21,11 @@ class TestJudgeVerdict:
         assert v.overall_winner == 'TIE'
 
     def test_invalid_winner_rejected(self):
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             JudgeVerdict(overall_winner='C', overall_reasoning='bad', confidence=50.0)
 
 
 class TestFlipWinner:
-
     def test_a_to_b(self):
         assert _flip_winner('A') == 'B'
 
@@ -42,7 +40,6 @@ class TestFlipWinner:
 
 
 class TestFormatCandidateForJudge:
-
     def test_includes_label(self):
         candidate = {
             'title': 'My Plan',
@@ -62,22 +59,43 @@ class TestFormatCandidateForJudge:
 
 
 class TestFormatFewShotExample:
-
     def test_returns_none_when_missing_task(self):
-        label = {'task_id': 'missing', 'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A', 'task_seed': 'test'}
+        label = {
+            'task_id': 'missing',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'test',
+        }
         result = format_few_shot_example(label, {}, {})
         assert result is None
 
     def test_returns_none_when_candidate_out_of_range(self):
-        label = {'task_id': 't1', 'candidate_a_idx': 10, 'candidate_b_idx': 1, 'preference': 'A', 'task_seed': 'test'}
+        label = {
+            'task_id': 't1',
+            'candidate_a_idx': 10,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'test',
+        }
         cache = {'file.json': [{'title': 'T', 'content': 'C', 'tasks': []}]}
         id_to_file = {'t1': 'file.json'}
         result = format_few_shot_example(label, cache, id_to_file)
         assert result is None
 
     def test_formats_valid_example(self):
-        cand = {'title': 'Plan A', 'content': 'Content', 'tasks': [{'goal': 'Do X', 'tool_name': 'web_search', 'depends_on': []}]}
-        label = {'task_id': 't1', 'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A', 'task_seed': 'Book flight'}
+        cand = {
+            'title': 'Plan A',
+            'content': 'Content',
+            'tasks': [{'goal': 'Do X', 'tool_name': 'web_search', 'depends_on': []}],
+        }
+        label = {
+            'task_id': 't1',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'Book flight',
+        }
         cache = {'file.json': [cand, cand]}
         id_to_file = {'t1': 'file.json'}
         result = format_few_shot_example(label, cache, id_to_file)
@@ -86,7 +104,13 @@ class TestFormatFewShotExample:
         assert 'Verdict: A' in result
 
     def test_returns_none_for_null_candidate(self):
-        label = {'task_id': 't1', 'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A', 'task_seed': 'test'}
+        label = {
+            'task_id': 't1',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'test',
+        }
         cache = {'file.json': [None, {'title': 'T', 'content': 'C', 'tasks': []}]}
         id_to_file = {'t1': 'file.json'}
         result = format_few_shot_example(label, cache, id_to_file)
@@ -99,6 +123,7 @@ class TestDebiasedAggregation:
     def test_agree_returns_winner(self):
         # Simulating: AB→A, BA(flipped)→A → agree on A
         from research.gepa.pipelines.synthetic_pairs import _flip_winner
+
         ab_winner = 'A'
         ba_winner = 'B'  # B in flipped orientation = A in original
         ba_flipped = _flip_winner(ba_winner)
@@ -118,23 +143,27 @@ class TestEmbeddingIntegration:
 
     def test_cosine_similarity_identical(self):
         from research.gepa.embeddings import cosine_similarity
+
         v = [1.0, 0.0, 0.0]
         assert cosine_similarity(v, v) == pytest.approx(1.0)
 
     def test_cosine_similarity_orthogonal(self):
         from research.gepa.embeddings import cosine_similarity
+
         a = [1.0, 0.0]
         b = [0.0, 1.0]
         assert cosine_similarity(a, b) == pytest.approx(0.0)
 
     def test_cosine_similarity_opposite(self):
         from research.gepa.embeddings import cosine_similarity
+
         a = [1.0, 0.0]
         b = [-1.0, 0.0]
         assert cosine_similarity(a, b) == pytest.approx(-1.0)
 
     def test_retrieve_similar_pairs_returns_n(self):
         from research.gepa.embeddings import retrieve_similar_pairs
+
         labels = [
             {'task_seed': 'Book a flight', 'preference': 'A'},
             {'task_seed': 'Order food', 'preference': 'B'},
@@ -153,6 +182,7 @@ class TestEmbeddingIntegration:
 
     def test_embedding_cache_roundtrip(self, tmp_path):
         from research.gepa.embeddings import EmbeddingCache
+
         cache_path = tmp_path / 'cache.json'
         cache = EmbeddingCache(cache_path)
         cache.put('hello', [1.0, 2.0, 3.0])

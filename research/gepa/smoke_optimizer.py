@@ -15,19 +15,20 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'agents'))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(ROOT / 'agents' / '.env')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-from research.gepa.critic import prepare_reward_pairs, train_reward_model
-from research.gepa.pipelines.gepa_optimizer import (
-    get_initial_strategy,
+from research.gepa.critic import prepare_reward_pairs, train_reward_model  # noqa: E402
+from research.gepa.pipelines.gepa_optimizer import (  # noqa: E402
+    TASKS_DIR,
     _load_trainset,
     _make_decomposer_module,
+    get_initial_strategy,
     optimize_prompt,
-    TASKS_DIR,
 )
 
 
@@ -44,13 +45,15 @@ def main():
 
     # Use a small non-gated model for smoke testing (Gemma requires HF gated access).
     # Switch to 'google/gemma-2-9b-it' for production once HF access is granted.
-    SMOKE_BASE_MODEL = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
-    SMOKE_MODEL_ID = 'smoke_reward_model'
+    smoke_base_model = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
+    smoke_model_id = 'smoke_reward_model'
 
-    logger.info(f'  Training on Modal GPU with {SMOKE_BASE_MODEL} (this may take a few minutes)...')
-    train_result = train_reward_model(rows, base_model=SMOKE_BASE_MODEL, model_id=SMOKE_MODEL_ID)
-    logger.info(f'  Training complete: loss={train_result.get("train_loss", "N/A")}, '
-                f'model_id={train_result["model_id"]}')
+    logger.info(f'  Training on Modal GPU with {smoke_base_model} (this may take a few minutes)...')
+    train_result = train_reward_model(rows, base_model=smoke_base_model, model_id=smoke_model_id)
+    logger.info(
+        f'  Training complete: loss={train_result.get("train_loss", "N/A")}, '
+        f'model_id={train_result["model_id"]}'
+    )
 
     # 2. Verify strategy extraction
     logger.info('=== Step 2: Strategy extraction ===')
@@ -67,8 +70,10 @@ def main():
     # 4. Verify module creation
     logger.info('=== Step 4: Create DSPy module ===')
     module = _make_decomposer_module()
-    logger.info(f'Module: {type(module).__name__}, instruction length: '
-                f'{len(module.planner.signature.instructions)} chars')
+    logger.info(
+        f'Module: {type(module).__name__}, instruction length: '
+        f'{len(module.planner.signature.instructions)} chars'
+    )
 
     # 5. Run MIPROv2 with minimal settings and the small trainset
     logger.info('=== Step 5: Run MIPROv2 (auto=light, 5 tasks) ===')
@@ -76,7 +81,7 @@ def main():
         auto='light',
         num_threads=2,
         trainset=trainset,
-        critic_model_id=SMOKE_MODEL_ID,
+        critic_model_id=smoke_model_id,
     )
 
     # 6. Report results

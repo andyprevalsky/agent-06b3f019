@@ -16,17 +16,29 @@
 // Mirror functions from index.ts (so we can test without Deno imports)
 // ============================================================================
 
+import process from 'node:process';
 function transformSchemaForAnthropic(schema) {
   if (!schema || typeof schema !== 'object') return schema;
 
   const transformed = { ...schema };
 
-  const unsupported = ['minimum', 'maximum', 'minLength', 'maxLength', 'multipleOf', 'minItems', 'maxItems'];
+  const unsupported = [
+    'minimum',
+    'maximum',
+    'minLength',
+    'maxLength',
+    'multipleOf',
+    'minItems',
+    'maxItems',
+  ];
   for (const key of unsupported) {
     delete transformed[key];
   }
 
-  if (transformed.type === 'object' && typeof transformed.additionalProperties === 'object' && transformed.additionalProperties !== null) {
+  if (
+    transformed.type === 'object' && typeof transformed.additionalProperties === 'object' &&
+    transformed.additionalProperties !== null
+  ) {
     transformed.additionalProperties = false;
   }
 
@@ -98,14 +110,20 @@ function extractToolsFromResponseFormat(responseFormat) {
 }
 
 function reconstructAgentResponse(textContent, toolUseBlocks) {
-  const toolCalls = toolUseBlocks.map(t => ({
+  const toolCalls = toolUseBlocks.map((t) => ({
     tool: t.name,
     ...t.input,
   }));
   return JSON.stringify({ response: textContent, tool_calls: toolCalls });
 }
 
-function applyAnthropicToolConfig(anthropicBody, responseFormat, isClaudeAuth, explicitTools, explicitToolChoice) {
+function applyAnthropicToolConfig(
+  anthropicBody,
+  responseFormat,
+  isClaudeAuth,
+  explicitTools,
+  explicitToolChoice,
+) {
   const extractedTools = extractToolsFromResponseFormat(responseFormat);
 
   if (extractedTools) {
@@ -122,8 +140,11 @@ function applyAnthropicToolConfig(anthropicBody, responseFormat, isClaudeAuth, e
     }));
     if (explicitToolChoice) {
       if (explicitToolChoice === 'auto') anthropicBody.tool_choice = { type: 'auto' };
-      else if (explicitToolChoice === 'required' || explicitToolChoice === 'any') anthropicBody.tool_choice = { type: 'any' };
-      else if (explicitToolChoice?.function?.name) anthropicBody.tool_choice = { type: 'tool', name: explicitToolChoice.function.name };
+      else if (explicitToolChoice === 'required' || explicitToolChoice === 'any') {
+        anthropicBody.tool_choice = { type: 'any' };
+      } else if (explicitToolChoice?.function?.name) {
+        anthropicBody.tool_choice = { type: 'tool', name: explicitToolChoice.function.name };
+      }
     }
     return false;
   }
@@ -132,12 +153,12 @@ function applyAnthropicToolConfig(anthropicBody, responseFormat, isClaudeAuth, e
     const transformedSchema = transformSchemaForAnthropic(responseFormat.json_schema.schema);
     if (isClaudeAuth) {
       anthropicBody.output_config = {
-        format: { type: 'json_schema', schema: transformedSchema }
+        format: { type: 'json_schema', schema: transformedSchema },
       };
     } else {
       anthropicBody.output_format = {
         type: 'json_schema',
-        schema: transformedSchema
+        schema: transformedSchema,
       };
     }
   }
@@ -161,7 +182,7 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
       properties: {
         response: {
           type: 'string',
-          description: 'Thinking/reasoning about what to do next.'
+          description: 'Thinking/reasoning about what to do next.',
         },
         tool_calls: {
           type: 'array',
@@ -169,11 +190,15 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
             anyOf: [
               {
                 type: 'object',
-                description: 'Spawn an autonomous browser agent to complete short, simple web tasks.',
+                description:
+                  'Spawn an autonomous browser agent to complete short, simple web tasks.',
                 properties: {
                   tool: { type: 'string', const: 'spawn_browser_agent' },
                   start_url: { type: 'string', description: 'The URL to navigate to first.' },
-                  goal: { type: 'string', description: 'Complete, high-level goal for the browser agent.' },
+                  goal: {
+                    type: 'string',
+                    description: 'Complete, high-level goal for the browser agent.',
+                  },
                   output_schema: {
                     type: 'object',
                     properties: {
@@ -183,27 +208,39 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                           type: 'object',
                           properties: {
                             name: { type: 'string' },
-                            type: { type: 'string', enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]'] },
+                            type: {
+                              type: 'string',
+                              enum: [
+                                'str',
+                                'int',
+                                'float',
+                                'bool',
+                                'list[str]',
+                                'list[int]',
+                                'file_pointer',
+                                'list[file_pointer]',
+                              ],
+                            },
                             required: { type: 'boolean' },
-                            description: { type: 'string' }
+                            description: { type: 'string' },
                           },
                           required: ['name', 'type', 'required', 'description'],
-                          additionalProperties: false
-                        }
-                      }
+                          additionalProperties: false,
+                        },
+                      },
                     },
                     required: ['fields'],
-                    additionalProperties: false
+                    additionalProperties: false,
                   },
                   attachments: {
                     anyOf: [
                       { type: 'array', items: { type: 'string' } },
-                      { type: 'null' }
-                    ]
-                  }
+                      { type: 'null' },
+                    ],
+                  },
                 },
                 required: ['tool', 'start_url', 'goal', 'output_schema', 'attachments'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
@@ -220,33 +257,45 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                           type: 'object',
                           properties: {
                             name: { type: 'string' },
-                            type: { type: 'string', enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]'] },
+                            type: {
+                              type: 'string',
+                              enum: [
+                                'str',
+                                'int',
+                                'float',
+                                'bool',
+                                'list[str]',
+                                'list[int]',
+                                'file_pointer',
+                                'list[file_pointer]',
+                              ],
+                            },
                             required: { type: 'boolean' },
-                            description: { type: 'string' }
+                            description: { type: 'string' },
                           },
                           required: ['name', 'type', 'required', 'description'],
-                          additionalProperties: false
-                        }
-                      }
+                          additionalProperties: false,
+                        },
+                      },
                     },
                     required: ['fields'],
-                    additionalProperties: false
+                    additionalProperties: false,
                   },
                   attachments: {
                     anyOf: [
                       { type: 'array', items: { type: 'string' } },
-                      { type: 'null' }
-                    ]
+                      { type: 'null' },
+                    ],
                   },
                   github_repo_link: {
                     anyOf: [
                       { type: 'string' },
-                      { type: 'null' }
-                    ]
-                  }
+                      { type: 'null' },
+                    ],
+                  },
                 },
                 required: ['tool', 'goal', 'output_schema', 'attachments', 'github_repo_link'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
@@ -262,10 +311,10 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                         type: 'object',
                         properties: {
                           type: { type: 'string', enum: ['FLOAT_LLM_JUDGE'] },
-                          llm_judge_prompt: { type: 'string' }
+                          llm_judge_prompt: { type: 'string' },
                         },
                         required: ['type', 'llm_judge_prompt'],
-                        additionalProperties: false
+                        additionalProperties: false,
                       },
                       output_schema: {
                         type: 'object',
@@ -276,51 +325,68 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                               type: 'object',
                               properties: {
                                 name: { type: 'string' },
-                                type: { type: 'string', enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]', 'file_pointer', 'list[file_pointer]'] },
+                                type: {
+                                  type: 'string',
+                                  enum: [
+                                    'str',
+                                    'int',
+                                    'float',
+                                    'bool',
+                                    'list[str]',
+                                    'list[int]',
+                                    'file_pointer',
+                                    'list[file_pointer]',
+                                  ],
+                                },
                                 required: { type: 'boolean' },
-                                description: { type: 'string' }
+                                description: { type: 'string' },
                               },
                               required: ['name', 'type', 'required', 'description'],
-                              additionalProperties: false
-                            }
-                          }
+                              additionalProperties: false,
+                            },
+                          },
                         },
                         required: ['fields'],
-                        additionalProperties: false
+                        additionalProperties: false,
                       },
                       attachments: {
                         anyOf: [
                           { type: 'array', items: { type: 'string' } },
-                          { type: 'null' }
-                        ]
-                      }
+                          { type: 'null' },
+                        ],
+                      },
                     },
                     required: ['goal', 'read_only', 'verifier', 'output_schema', 'attachments'],
-                    additionalProperties: false
-                  }
+                    additionalProperties: false,
+                  },
                 },
                 required: ['tool', 'sub_agent'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
                 description: 'Tool call for pausing execution.',
                 properties: {
                   tool: { type: 'string', const: 'wait_seconds' },
-                  seconds: { type: 'integer', minimum: 1, maximum: 3600, description: 'Number of seconds to wait' }
+                  seconds: {
+                    type: 'integer',
+                    minimum: 1,
+                    maximum: 3600,
+                    description: 'Number of seconds to wait',
+                  },
                 },
                 required: ['tool', 'seconds'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
                 description: 'Tool call for searching the web.',
                 properties: {
                   tool: { type: 'string', const: 'web_search' },
-                  query: { type: 'string', description: 'Search query' }
+                  query: { type: 'string', description: 'Search query' },
                 },
                 required: ['tool', 'query'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
@@ -330,10 +396,10 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                   url: { type: 'string', description: 'URL to fetch' },
                   objective: { type: 'string', description: 'What content to extract' },
                   excerpts: { type: 'boolean' },
-                  full_content: { type: 'boolean' }
+                  full_content: { type: 'boolean' },
                 },
                 required: ['tool', 'url', 'objective', 'excerpts', 'full_content'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
@@ -344,22 +410,22 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                   max_results: {
                     anyOf: [
                       { type: 'integer', minimum: 1, maximum: 100 },
-                      { type: 'null' }
-                    ]
-                  }
+                      { type: 'null' },
+                    ],
+                  },
                 },
                 required: ['tool', 'query', 'max_results'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
                 description: 'Send an informational message to the user during execution.',
                 properties: {
                   tool: { type: 'string', const: 'send_message_to_user_execute_phase' },
-                  message: { type: 'string', description: 'User-visible markdown text.' }
+                  message: { type: 'string', description: 'User-visible markdown text.' },
                 },
                 required: ['tool', 'message'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
@@ -367,43 +433,46 @@ const FULL_EXECUTE_PHASE_SCHEMA = {
                 properties: {
                   tool: { type: 'string', const: 'call_phone_number' },
                   to: { type: 'string', description: 'Phone number in E.164 format' },
-                  system_prompt: { type: 'string', description: 'Instructions for the voice agent.' },
+                  system_prompt: {
+                    type: 'string',
+                    description: 'Instructions for the voice agent.',
+                  },
                   output_schema: {
                     type: 'object',
-                    additionalProperties: { type: 'string' }
-                  }
+                    additionalProperties: { type: 'string' },
+                  },
                 },
                 required: ['tool', 'to', 'system_prompt', 'output_schema'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
-                description: 'Send SMS via the user\'s iMessage client.',
+                description: "Send SMS via the user's iMessage client.",
                 properties: {
                   tool: { type: 'string', const: 'send_sms_as_user' },
                   phone_number: { type: 'string', description: 'E.164 format phone number' },
-                  message: { type: 'string', description: 'SMS/iMessage text to send' }
+                  message: { type: 'string', description: 'SMS/iMessage text to send' },
                 },
                 required: ['tool', 'phone_number', 'message'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
                 description: 'Signal that the agent has completed its work.',
                 properties: {
-                  tool: { type: 'string', const: 'attempt_completion' }
+                  tool: { type: 'string', const: 'attempt_completion' },
                 },
                 required: ['tool'],
-                additionalProperties: false
-              }
-            ]
-          }
-        }
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
       },
       required: ['response', 'tool_calls'],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 /** Minimal schema with just 2 tools — for focused testing */
@@ -424,28 +493,28 @@ const MINIMAL_SCHEMA = {
                 description: 'Search the web.',
                 properties: {
                   tool: { type: 'string', const: 'web_search' },
-                  query: { type: 'string' }
+                  query: { type: 'string' },
                 },
                 required: ['tool', 'query'],
-                additionalProperties: false
+                additionalProperties: false,
               },
               {
                 type: 'object',
                 description: 'Signal completion.',
                 properties: {
-                  tool: { type: 'string', const: 'attempt_completion' }
+                  tool: { type: 'string', const: 'attempt_completion' },
                 },
                 required: ['tool'],
-                additionalProperties: false
-              }
-            ]
-          }
-        }
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
       },
       required: ['response', 'tool_calls'],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 /** Schema with NO tool_calls anyOf — should NOT be extracted */
@@ -457,12 +526,12 @@ const NON_TOOL_SCHEMA = {
       type: 'object',
       properties: {
         result: { type: 'string' },
-        confidence: { type: 'number' }
+        confidence: { type: 'number' },
       },
       required: ['result', 'confidence'],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 /** Schema with tool_calls but no discriminator const — should NOT be extracted */
@@ -482,19 +551,19 @@ const BAD_DISCRIMINATOR_SCHEMA = {
                 type: 'object',
                 properties: {
                   tool: { type: 'string' }, // No .const — not a tool discriminator
-                  query: { type: 'string' }
+                  query: { type: 'string' },
                 },
                 required: ['tool', 'query'],
-                additionalProperties: false
-              }
-            ]
-          }
-        }
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
       },
       required: ['response', 'tool_calls'],
-      additionalProperties: false
-    }
-  }
+      additionalProperties: false,
+    },
+  },
 };
 
 // ============================================================================
@@ -521,7 +590,11 @@ function assertDeepEqual(actual, expected, message) {
   const expectedStr = JSON.stringify(expected);
   if (actualStr !== expectedStr) {
     failed++;
-    failures.push(`${message}\n    Expected: ${expectedStr.slice(0, 300)}\n    Actual:   ${actualStr.slice(0, 300)}`);
+    failures.push(
+      `${message}\n    Expected: ${expectedStr.slice(0, 300)}\n    Actual:   ${
+        actualStr.slice(0, 300)
+      }`,
+    );
     console.log(`  FAIL: ${message}`);
     console.log(`    Expected: ${expectedStr.slice(0, 200)}`);
     console.log(`    Actual:   ${actualStr.slice(0, 200)}`);
@@ -545,12 +618,19 @@ function testExtractionFullSchema() {
 
   // Verify all tool names
   const expectedNames = [
-    'spawn_browser_agent', 'spawn_claude_code_agent', 'spawn_sub_agent',
-    'wait_seconds', 'web_search', 'web_fetch', 'people_search',
-    'send_message_to_user_execute_phase', 'call_phone_number',
-    'send_sms_as_user', 'attempt_completion'
+    'spawn_browser_agent',
+    'spawn_claude_code_agent',
+    'spawn_sub_agent',
+    'wait_seconds',
+    'web_search',
+    'web_fetch',
+    'people_search',
+    'send_message_to_user_execute_phase',
+    'call_phone_number',
+    'send_sms_as_user',
+    'attempt_completion',
   ];
-  const actualNames = result.tools.map(t => t.name);
+  const actualNames = result.tools.map((t) => t.name);
   assertDeepEqual(actualNames, expectedNames, 'Tool names should match EXECUTE_PHASE_TOOLS order');
 
   // Verify response field schema is preserved
@@ -563,25 +643,46 @@ function testExtractionToolProperties() {
   const result = extractToolsFromResponseFormat(FULL_EXECUTE_PHASE_SCHEMA);
 
   // web_search: simple tool with one parameter
-  const webSearch = result.tools.find(t => t.name === 'web_search');
+  const webSearch = result.tools.find((t) => t.name === 'web_search');
   assert(webSearch !== undefined, 'web_search tool should exist');
-  assert(webSearch.input_schema.properties.query !== undefined, 'web_search should have query property');
-  assert(webSearch.input_schema.properties.tool === undefined, 'web_search should NOT have tool property (discriminator removed)');
+  assert(
+    webSearch.input_schema.properties.query !== undefined,
+    'web_search should have query property',
+  );
+  assert(
+    webSearch.input_schema.properties.tool === undefined,
+    'web_search should NOT have tool property (discriminator removed)',
+  );
   assert(webSearch.input_schema.required.includes('query'), 'query should be required');
   assert(!webSearch.input_schema.required.includes('tool'), 'tool should NOT be in required');
-  assert(webSearch.description === 'Tool call for searching the web.', `web_search description: "${webSearch.description}"`);
+  assert(
+    webSearch.description === 'Tool call for searching the web.',
+    `web_search description: "${webSearch.description}"`,
+  );
 
   // attempt_completion: zero-parameter tool
-  const attemptCompletion = result.tools.find(t => t.name === 'attempt_completion');
+  const attemptCompletion = result.tools.find((t) => t.name === 'attempt_completion');
   assert(attemptCompletion !== undefined, 'attempt_completion should exist');
-  assert(Object.keys(attemptCompletion.input_schema.properties).length === 0, 'attempt_completion should have 0 properties');
-  assert(attemptCompletion.input_schema.required.length === 0, 'attempt_completion should have 0 required fields');
+  assert(
+    Object.keys(attemptCompletion.input_schema.properties).length === 0,
+    'attempt_completion should have 0 properties',
+  );
+  assert(
+    attemptCompletion.input_schema.required.length === 0,
+    'attempt_completion should have 0 required fields',
+  );
 
   // send_sms_as_user: simple multi-param tool
-  const sendSms = result.tools.find(t => t.name === 'send_sms_as_user');
+  const sendSms = result.tools.find((t) => t.name === 'send_sms_as_user');
   assert(sendSms !== undefined, 'send_sms_as_user should exist');
-  assert(sendSms.input_schema.properties.phone_number !== undefined, 'send_sms_as_user should have phone_number');
-  assert(sendSms.input_schema.properties.message !== undefined, 'send_sms_as_user should have message');
+  assert(
+    sendSms.input_schema.properties.phone_number !== undefined,
+    'send_sms_as_user should have phone_number',
+  );
+  assert(
+    sendSms.input_schema.properties.message !== undefined,
+    'send_sms_as_user should have message',
+  );
   assert(sendSms.input_schema.required.includes('phone_number'), 'phone_number should be required');
   assert(sendSms.input_schema.required.includes('message'), 'message should be required');
 }
@@ -592,7 +693,7 @@ function testExtractionNestedSchemas() {
   const result = extractToolsFromResponseFormat(FULL_EXECUTE_PHASE_SCHEMA);
 
   // spawn_browser_agent: has deeply nested output_schema -> fields -> items
-  const browserAgent = result.tools.find(t => t.name === 'spawn_browser_agent');
+  const browserAgent = result.tools.find((t) => t.name === 'spawn_browser_agent');
   const outputSchema = browserAgent.input_schema.properties.output_schema;
   assert(outputSchema !== undefined, 'spawn_browser_agent should have output_schema');
   assert(outputSchema.type === 'object', 'output_schema should be object');
@@ -601,15 +702,24 @@ function testExtractionNestedSchemas() {
   const fieldItem = outputSchema.properties.fields.items;
   assert(fieldItem.properties.name !== undefined, 'field items should have name');
   assert(fieldItem.properties.type.enum !== undefined, 'field items type should have enum');
-  assert(fieldItem.properties.type.enum.includes('file_pointer'), 'enum should include file_pointer');
+  assert(
+    fieldItem.properties.type.enum.includes('file_pointer'),
+    'enum should include file_pointer',
+  );
 
   // spawn_sub_agent: has sub_agent -> verifier (nested object)
-  const subAgent = result.tools.find(t => t.name === 'spawn_sub_agent');
+  const subAgent = result.tools.find((t) => t.name === 'spawn_sub_agent');
   const subAgentConfig = subAgent.input_schema.properties.sub_agent;
   assert(subAgentConfig !== undefined, 'spawn_sub_agent should have sub_agent property');
   assert(subAgentConfig.properties.verifier !== undefined, 'sub_agent should have verifier');
-  assert(subAgentConfig.properties.verifier.properties.type.enum[0] === 'FLOAT_LLM_JUDGE', 'verifier type enum correct');
-  assert(subAgentConfig.properties.verifier.properties.llm_judge_prompt !== undefined, 'verifier should have llm_judge_prompt');
+  assert(
+    subAgentConfig.properties.verifier.properties.type.enum[0] === 'FLOAT_LLM_JUDGE',
+    'verifier type enum correct',
+  );
+  assert(
+    subAgentConfig.properties.verifier.properties.llm_judge_prompt !== undefined,
+    'verifier should have llm_judge_prompt',
+  );
 }
 
 function testExtractionAdditionalProperties() {
@@ -619,12 +729,14 @@ function testExtractionAdditionalProperties() {
 
   // call_phone_number.output_schema has additionalProperties: { type: 'string' }
   // transformSchemaForAnthropic should convert this to additionalProperties: false
-  const callPhone = result.tools.find(t => t.name === 'call_phone_number');
+  const callPhone = result.tools.find((t) => t.name === 'call_phone_number');
   const phoneOutputSchema = callPhone.input_schema.properties.output_schema;
   assert(phoneOutputSchema !== undefined, 'call_phone_number should have output_schema');
   assert(
     phoneOutputSchema.additionalProperties === false,
-    `output_schema additionalProperties should be false, got ${JSON.stringify(phoneOutputSchema.additionalProperties)}`
+    `output_schema additionalProperties should be false, got ${
+      JSON.stringify(phoneOutputSchema.additionalProperties)
+    }`,
   );
 }
 
@@ -634,17 +746,17 @@ function testExtractionUnsupportedConstraints() {
   const result = extractToolsFromResponseFormat(FULL_EXECUTE_PHASE_SCHEMA);
 
   // wait_seconds has minimum/maximum on seconds field
-  const waitSeconds = result.tools.find(t => t.name === 'wait_seconds');
+  const waitSeconds = result.tools.find((t) => t.name === 'wait_seconds');
   const secondsProp = waitSeconds.input_schema.properties.seconds;
   assert(secondsProp.minimum === undefined, 'minimum should be stripped from seconds');
   assert(secondsProp.maximum === undefined, 'maximum should be stripped from seconds');
   assert(secondsProp.type === 'integer', 'seconds type should be preserved');
 
   // people_search has min/max on max_results via anyOf
-  const peopleSearch = result.tools.find(t => t.name === 'people_search');
+  const peopleSearch = result.tools.find((t) => t.name === 'people_search');
   const maxResults = peopleSearch.input_schema.properties.max_results;
   assert(maxResults.anyOf !== undefined, 'max_results should have anyOf (nullable)');
-  const intVariant = maxResults.anyOf.find(v => v.type === 'integer');
+  const intVariant = maxResults.anyOf.find((v) => v.type === 'integer');
   assert(intVariant !== undefined, 'max_results anyOf should have integer variant');
   assert(intVariant.minimum === undefined, 'minimum should be stripped from integer variant');
   assert(intVariant.maximum === undefined, 'maximum should be stripped from integer variant');
@@ -666,23 +778,23 @@ function testExtractionRejectsNonToolSchema() {
 
   assert(
     extractToolsFromResponseFormat(NON_TOOL_SCHEMA) === null,
-    'Should return null for non-tool schema'
+    'Should return null for non-tool schema',
   );
   assert(
     extractToolsFromResponseFormat(BAD_DISCRIMINATOR_SCHEMA) === null,
-    'Should return null for schema without const discriminator'
+    'Should return null for schema without const discriminator',
   );
   assert(
     extractToolsFromResponseFormat(null) === null,
-    'Should return null for null input'
+    'Should return null for null input',
   );
   assert(
     extractToolsFromResponseFormat({}) === null,
-    'Should return null for empty object'
+    'Should return null for empty object',
   );
   assert(
     extractToolsFromResponseFormat({ json_schema: {} }) === null,
-    'Should return null for missing schema'
+    'Should return null for missing schema',
   );
 }
 
@@ -691,7 +803,7 @@ function testReconstructSingleTool() {
 
   const text = 'I need to search for the latest emails.';
   const toolUseBlocks = [
-    { name: 'web_search', input: { query: 'latest emails for user' } }
+    { name: 'web_search', input: { query: 'latest emails for user' } },
   ];
 
   const result = reconstructAgentResponse(text, toolUseBlocks);
@@ -718,7 +830,10 @@ function testReconstructMultipleTools() {
   assert(parsed.response === text, 'Response text should match');
   assert(parsed.tool_calls.length === 2, 'Should have 2 tool calls');
   assert(parsed.tool_calls[0].tool === 'web_search', 'First tool should be web_search');
-  assert(parsed.tool_calls[1].tool === 'send_message_to_user_execute_phase', 'Second tool should be send_message_to_user_execute_phase');
+  assert(
+    parsed.tool_calls[1].tool === 'send_message_to_user_execute_phase',
+    'Second tool should be send_message_to_user_execute_phase',
+  );
 }
 
 function testReconstructNoTools() {
@@ -746,12 +861,12 @@ function testReconstructComplexToolInput() {
         output_schema: {
           fields: [
             { name: 'heading', type: 'str', required: true, description: 'The main heading' },
-            { name: 'links', type: 'list[str]', required: false, description: 'All links on page' }
-          ]
+            { name: 'links', type: 'list[str]', required: false, description: 'All links on page' },
+          ],
         },
-        attachments: null
-      }
-    }
+        attachments: null,
+      },
+    },
   ];
 
   const result = reconstructAgentResponse(text, toolUseBlocks);
@@ -759,8 +874,14 @@ function testReconstructComplexToolInput() {
 
   assert(parsed.tool_calls[0].tool === 'spawn_browser_agent', 'Tool should be spawn_browser_agent');
   assert(parsed.tool_calls[0].start_url === 'https://example.com', 'start_url should be correct');
-  assert(parsed.tool_calls[0].output_schema.fields.length === 2, 'output_schema should have 2 fields');
-  assert(parsed.tool_calls[0].output_schema.fields[0].name === 'heading', 'First field name should be heading');
+  assert(
+    parsed.tool_calls[0].output_schema.fields.length === 2,
+    'output_schema should have 2 fields',
+  );
+  assert(
+    parsed.tool_calls[0].output_schema.fields[0].name === 'heading',
+    'First field name should be heading',
+  );
   assert(parsed.tool_calls[0].attachments === null, 'attachments should be null');
 }
 
@@ -777,10 +898,10 @@ function testReconstructCallPhoneNumber() {
         output_schema: {
           confirmed: 'Whether the reservation was confirmed',
           time: 'The confirmed reservation time',
-          party_size: 'Number of guests'
-        }
-      }
-    }
+          party_size: 'Number of guests',
+        },
+      },
+    },
   ];
 
   const result = reconstructAgentResponse(text, toolUseBlocks);
@@ -788,7 +909,10 @@ function testReconstructCallPhoneNumber() {
 
   assert(parsed.tool_calls[0].tool === 'call_phone_number', 'Tool should be call_phone_number');
   assert(parsed.tool_calls[0].to === '+19729777432', 'to should be correct');
-  assert(parsed.tool_calls[0].output_schema.confirmed === 'Whether the reservation was confirmed', 'output_schema dict values should be preserved');
+  assert(
+    parsed.tool_calls[0].output_schema.confirmed === 'Whether the reservation was confirmed',
+    'output_schema dict values should be preserved',
+  );
 }
 
 function testReconstructSpecialCharacters() {
@@ -798,8 +922,8 @@ function testReconstructSpecialCharacters() {
   const toolUseBlocks = [
     {
       name: 'send_message_to_user_execute_phase',
-      input: { message: 'Here is a quote: "hello world"\nNew line here.\tTab here.' }
-    }
+      input: { message: 'Here is a quote: "hello world"\nNew line here.\tTab here.' },
+    },
   ];
 
   const result = reconstructAgentResponse(text, toolUseBlocks);
@@ -809,7 +933,10 @@ function testReconstructSpecialCharacters() {
   assert(parsed.response.includes('"hello"'), 'Response should contain double quotes');
   assert(parsed.response.includes('\n'), 'Response should contain newlines');
   assert(parsed.response.includes('\t'), 'Response should contain tabs');
-  assert(parsed.tool_calls[0].message.includes('"hello world"'), 'Tool input should preserve quotes');
+  assert(
+    parsed.tool_calls[0].message.includes('"hello world"'),
+    'Tool input should preserve quotes',
+  );
 }
 
 function testReconstructAttemptCompletion() {
@@ -817,7 +944,7 @@ function testReconstructAttemptCompletion() {
 
   const text = 'Task is complete. All emails have been retrieved and displayed.';
   const toolUseBlocks = [
-    { name: 'attempt_completion', input: {} }
+    { name: 'attempt_completion', input: {} },
   ];
 
   const result = reconstructAgentResponse(text, toolUseBlocks);
@@ -836,8 +963,8 @@ function testStreamingJsonEscaping() {
   const textDeltas = [
     'Hello, I will help you with that.\n',
     'Let me search for "recent emails" from your account.\n',
-    'Here\'s what I found:\t',
-    'Result with backslash \\ and unicode.'
+    "Here's what I found:\t",
+    'Result with backslash \\ and unicode.',
   ];
 
   // Mimic the streaming escape logic
@@ -880,7 +1007,13 @@ function testStreamingWithToolCalls() {
   // Simulate the complete streamed output: prefix + text + closing with tools
   const responseText = 'Searching for your emails now.';
   const toolCalls = [
-    { tool: 'spawn_browser_agent', start_url: 'https://mail.google.com', goal: 'Read recent emails', output_schema: { fields: [] }, attachments: null }
+    {
+      tool: 'spawn_browser_agent',
+      start_url: 'https://mail.google.com',
+      goal: 'Read recent emails',
+      output_schema: { fields: [] },
+      attachments: null,
+    },
   ];
 
   const escaped = responseText
@@ -934,7 +1067,8 @@ function testRoundTripConsistency() {
   assert(extracted !== null, 'Extraction should succeed');
 
   // Simulate an Anthropic response that uses some of the extracted tools
-  const anthropicTextContent = 'I found the user wants to check their emails. Let me spawn a browser agent.';
+  const anthropicTextContent =
+    'I found the user wants to check their emails. Let me spawn a browser agent.';
   const anthropicToolUseBlocks = [
     {
       name: 'spawn_browser_agent',
@@ -943,12 +1077,17 @@ function testRoundTripConsistency() {
         goal: 'Navigate to inbox and read the 5 most recent emails',
         output_schema: {
           fields: [
-            { name: 'emails', type: 'list[str]', required: true, description: 'List of email subjects' }
-          ]
+            {
+              name: 'emails',
+              type: 'list[str]',
+              required: true,
+              description: 'List of email subjects',
+            },
+          ],
         },
-        attachments: null
-      }
-    }
+        attachments: null,
+      },
+    },
   ];
 
   // Reconstruct the agent response
@@ -958,9 +1097,18 @@ function testRoundTripConsistency() {
   // Validate the reconstructed response matches what the agent expects
   assert(typeof parsed.response === 'string', 'response should be a string');
   assert(Array.isArray(parsed.tool_calls), 'tool_calls should be an array');
-  assert(parsed.tool_calls[0].tool === 'spawn_browser_agent', 'First tool call should be spawn_browser_agent');
-  assert(parsed.tool_calls[0].start_url === 'https://mail.google.com', 'start_url should be preserved');
-  assert(parsed.tool_calls[0].output_schema.fields[0].name === 'emails', 'Nested field name should be preserved');
+  assert(
+    parsed.tool_calls[0].tool === 'spawn_browser_agent',
+    'First tool call should be spawn_browser_agent',
+  );
+  assert(
+    parsed.tool_calls[0].start_url === 'https://mail.google.com',
+    'start_url should be preserved',
+  );
+  assert(
+    parsed.tool_calls[0].output_schema.fields[0].name === 'emails',
+    'Nested field name should be preserved',
+  );
 
   // Verify the response can be parsed as a valid AgentAction
   // (agent does JSON.parse(content) and then validates against its Pydantic model)
@@ -979,7 +1127,7 @@ function testAllToolsHaveDescriptions() {
   for (const tool of result.tools) {
     assert(
       typeof tool.description === 'string' && tool.description.length > 0,
-      `Tool "${tool.name}" should have a non-empty description, got: "${tool.description}"`
+      `Tool "${tool.name}" should have a non-empty description, got: "${tool.description}"`,
     );
   }
 }
@@ -992,25 +1140,25 @@ function testAllToolsHaveValidInputSchema() {
   for (const tool of result.tools) {
     assert(
       tool.input_schema.type === 'object',
-      `Tool "${tool.name}" input_schema should be type: object`
+      `Tool "${tool.name}" input_schema should be type: object`,
     );
     assert(
       typeof tool.input_schema.properties === 'object',
-      `Tool "${tool.name}" input_schema should have properties`
+      `Tool "${tool.name}" input_schema should have properties`,
     );
     assert(
       Array.isArray(tool.input_schema.required),
-      `Tool "${tool.name}" input_schema should have required array`
+      `Tool "${tool.name}" input_schema should have required array`,
     );
     // Verify no tool has "tool" in its properties (discriminator should be removed)
     assert(
       tool.input_schema.properties.tool === undefined,
-      `Tool "${tool.name}" should NOT have "tool" in properties (discriminator removed)`
+      `Tool "${tool.name}" should NOT have "tool" in properties (discriminator removed)`,
     );
     // Verify no tool has "tool" in its required array
     assert(
       !tool.input_schema.required.includes('tool'),
-      `Tool "${tool.name}" should NOT have "tool" in required array`
+      `Tool "${tool.name}" should NOT have "tool" in required array`,
     );
   }
 }
@@ -1019,24 +1167,30 @@ function testWebFetchMultipleParams() {
   console.log('\n=== Test: web_fetch has all expected parameters ===');
 
   const result = extractToolsFromResponseFormat(FULL_EXECUTE_PHASE_SCHEMA);
-  const webFetch = result.tools.find(t => t.name === 'web_fetch');
+  const webFetch = result.tools.find((t) => t.name === 'web_fetch');
 
   const expectedParams = ['url', 'objective', 'excerpts', 'full_content'];
   for (const param of expectedParams) {
     assert(
       webFetch.input_schema.properties[param] !== undefined,
-      `web_fetch should have "${param}" property`
+      `web_fetch should have "${param}" property`,
     );
   }
-  assert(webFetch.input_schema.properties.excerpts.type === 'boolean', 'excerpts should be boolean');
-  assert(webFetch.input_schema.properties.full_content.type === 'boolean', 'full_content should be boolean');
+  assert(
+    webFetch.input_schema.properties.excerpts.type === 'boolean',
+    'excerpts should be boolean',
+  );
+  assert(
+    webFetch.input_schema.properties.full_content.type === 'boolean',
+    'full_content should be boolean',
+  );
 }
 
 function testSpawnSubAgentDeepNesting() {
   console.log('\n=== Test: spawn_sub_agent deep nesting preserved ===');
 
   const result = extractToolsFromResponseFormat(FULL_EXECUTE_PHASE_SCHEMA);
-  const subAgent = result.tools.find(t => t.name === 'spawn_sub_agent');
+  const subAgent = result.tools.find((t) => t.name === 'spawn_sub_agent');
 
   // Navigate deep: sub_agent -> output_schema -> fields -> items -> properties
   const subAgentConfig = subAgent.input_schema.properties.sub_agent;
@@ -1046,8 +1200,14 @@ function testSpawnSubAgentDeepNesting() {
 
   assert(fieldItems.properties.name !== undefined, 'Deep nested field items should have name');
   assert(fieldItems.properties.type !== undefined, 'Deep nested field items should have type');
-  assert(fieldItems.properties.type.enum.length === 8, `Should have 8 type enum values, got ${fieldItems.properties.type.enum.length}`);
-  assert(fieldItems.additionalProperties === false, 'Deep nested objects should have additionalProperties: false');
+  assert(
+    fieldItems.properties.type.enum.length === 8,
+    `Should have 8 type enum values, got ${fieldItems.properties.type.enum.length}`,
+  );
+  assert(
+    fieldItems.additionalProperties === false,
+    'Deep nested objects should have additionalProperties: false',
+  );
 }
 
 // ============================================================================
@@ -1073,8 +1233,18 @@ function testApplyExplicitTools() {
 
   const body = { model: 'claude-opus-4-7', messages: [], max_tokens: 4096 };
   const explicitTools = [
-    { function: { name: 'get_weather', description: 'Get weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } } },
-    { name: 'calculator', description: 'Do math', input_schema: { type: 'object', properties: { expr: { type: 'string' } } } }
+    {
+      function: {
+        name: 'get_weather',
+        description: 'Get weather',
+        parameters: { type: 'object', properties: { city: { type: 'string' } } },
+      },
+    },
+    {
+      name: 'calculator',
+      description: 'Do math',
+      input_schema: { type: 'object', properties: { expr: { type: 'string' } } },
+    },
   ];
 
   const result = applyAnthropicToolConfig(body, null, true, explicitTools, 'auto');
@@ -1101,7 +1271,11 @@ function testApplyExplicitToolChoiceRequired() {
 
   const body3 = {};
   applyAnthropicToolConfig(body3, null, true, tools, { function: { name: 'foo' } });
-  assertDeepEqual(body3.tool_choice, { type: 'tool', name: 'foo' }, 'function name maps to tool type');
+  assertDeepEqual(
+    body3.tool_choice,
+    { type: 'tool', name: 'foo' },
+    'function name maps to tool type',
+  );
 }
 
 function testApplyStructuredOutputClaudeAuth() {
@@ -1130,11 +1304,19 @@ function testApplyStructuredOutputRoseKey() {
 }
 
 function testApplyNativeToolsOverrideExplicitTools() {
-  console.log('\n=== Test: applyAnthropicToolConfig — native tools take priority over explicit tools ===');
+  console.log(
+    '\n=== Test: applyAnthropicToolConfig — native tools take priority over explicit tools ===',
+  );
 
   const body = {};
   const explicitTools = [{ name: 'should_not_appear', description: '', input_schema: {} }];
-  const result = applyAnthropicToolConfig(body, FULL_EXECUTE_PHASE_SCHEMA, true, explicitTools, 'auto');
+  const result = applyAnthropicToolConfig(
+    body,
+    FULL_EXECUTE_PHASE_SCHEMA,
+    true,
+    explicitTools,
+    'auto',
+  );
 
   assert(result === true, 'Should return true (native tool mode wins)');
   assert(body.tools.length === 11, 'Should have 11 native tools, not 1 explicit tool');
@@ -1165,15 +1347,24 @@ function testApplyStreamingVsNonStreamingParity() {
   const nonStreamNative = applyAnthropicToolConfig(nonStreamBody, FULL_EXECUTE_PHASE_SCHEMA, true);
 
   assert(streamNative === nonStreamNative, 'Both should return same nativeToolMode');
-  assert(streamBody.tools.length === nonStreamBody.tools.length, 'Both should have same number of tools');
-  assertDeepEqual(streamBody.tool_choice, nonStreamBody.tool_choice, 'Both should have same tool_choice');
+  assert(
+    streamBody.tools.length === nonStreamBody.tools.length,
+    'Both should have same number of tools',
+  );
+  assertDeepEqual(
+    streamBody.tool_choice,
+    nonStreamBody.tool_choice,
+    'Both should have same tool_choice',
+  );
 
   // Deep compare the tool definitions
   for (let i = 0; i < streamBody.tools.length; i++) {
     assertDeepEqual(
       streamBody.tools[i],
       nonStreamBody.tools[i],
-      `Tool ${i} (${streamBody.tools[i].name}) should be identical between streaming and non-streaming`
+      `Tool ${i} (${
+        streamBody.tools[i].name
+      }) should be identical between streaming and non-streaming`,
     );
   }
 }
@@ -1183,7 +1374,9 @@ function testApplyStreamingVsNonStreamingParity() {
 // ============================================================================
 
 console.log('=== Native Tool Extraction & Response Reconstruction Tests ===');
-console.log('Testing: extractToolsFromResponseFormat, reconstructAgentResponse, applyAnthropicToolConfig, streaming escaping\n');
+console.log(
+  'Testing: extractToolsFromResponseFormat, reconstructAgentResponse, applyAnthropicToolConfig, streaming escaping\n',
+);
 
 // Extraction tests
 testExtractionFullSchema();

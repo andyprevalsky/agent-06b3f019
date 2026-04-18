@@ -26,21 +26,16 @@
  *   back to string matching when API key is missing).
  */
 
-import {
-  assertEquals,
-  assertExists,
-  assertNotEquals,
-  assertThrows,
-} from 'https://deno.land/std@0.190.0/testing/asserts.ts';
+import { assertEquals, assertExists } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
 
 // ---------------------------------------------------------------------------
 // Evaluator: repetition-checker
 // ---------------------------------------------------------------------------
 
 import {
+  analyzeRepetition,
   checkRepetition,
   messageSimilarity,
-  analyzeRepetition,
   RepetitionChecker,
 } from '../../benchmarks/evaluators/repetition-checker.ts';
 
@@ -49,7 +44,12 @@ Deno.test('checkRepetition — returns false for fewer messages than minRepetiti
 });
 
 Deno.test('checkRepetition — returns true for 4 identical messages (default threshold)', () => {
-  const msgs = ['hello world foo bar baz', 'hello world foo bar baz', 'hello world foo bar baz', 'hello world foo bar baz'];
+  const msgs = [
+    'hello world foo bar baz',
+    'hello world foo bar baz',
+    'hello world foo bar baz',
+    'hello world foo bar baz',
+  ];
   assertEquals(checkRepetition(msgs), true);
 });
 
@@ -226,10 +226,7 @@ Deno.test('evaluateMathAnswer — wrong answer returns false', async () => {
 // Evaluator: code-evaluator
 // ---------------------------------------------------------------------------
 
-import {
-  evaluateCode,
-  extractPythonCode,
-} from '../../benchmarks/evaluators/code-evaluator.ts';
+import { evaluateCode, extractPythonCode } from '../../benchmarks/evaluators/code-evaluator.ts';
 
 Deno.test('extractPythonCode — extracts from ```python block', () => {
   const input = 'Here is the solution:\n```python\nprint("hello")\n```\nDone.';
@@ -337,7 +334,11 @@ Deno.test('MMLUProHarness — formatPrompt includes question and options', () =>
   assertEquals(prompt.includes('A) 3'), true, 'Prompt must include options');
   assertEquals(prompt.includes('B) 4'), true);
   assertEquals(prompt.includes('C) 5'), true);
-  assertEquals(prompt.includes('Answer with only the letter'), true, 'Prompt must include instruction');
+  assertEquals(
+    prompt.includes('Answer with only the letter'),
+    true,
+    'Prompt must include instruction',
+  );
 });
 
 Deno.test('MMLUProHarness — extractAnswer extracts single letter A-J', () => {
@@ -446,7 +447,7 @@ Deno.test('seeded sampling — same seed produces same sample', async () => {
 
   // Verify the dataset IDs are consistent across loads
   const dataset2 = await harness2.loadDataset();
-  assertEquals(dataset.map(q => q.id), dataset2.map(q => q.id));
+  assertEquals(dataset.map((q) => q.id), dataset2.map((q) => q.id));
 });
 
 // ---------------------------------------------------------------------------
@@ -496,7 +497,11 @@ Deno.test('standards.json — each benchmark has required fields', async () => {
     assertExists(b.questionCount, `${key} must have questionCount`);
     assertEquals(typeof b.questionCount, 'number', `${key}.questionCount must be a number`);
     assertExists(b.industryStandards, `${key} must have industryStandards`);
-    assertEquals(Array.isArray(b.industryStandards), true, `${key}.industryStandards must be array`);
+    assertEquals(
+      Array.isArray(b.industryStandards),
+      true,
+      `${key}.industryStandards must be array`,
+    );
     assertEquals(b.industryStandards.length >= 1, true, `${key} must have at least 1 standard`);
     assertExists(b.updateInstructions, `${key} must have updateInstructions`);
   }
@@ -612,7 +617,10 @@ Deno.test('TerminalBenchHarness — evaluateAnswer keyword matching at 50% thres
   // correctAnswer: "kernel_built_and_custom_message_added" => keywords: [kernel, built, and, custom, message, added]
   // Need at least 50% = 3 keywords
   const partialMatch = 'I will build the kernel and add a custom message';
-  const result = await harness.evaluateAnswer(partialMatch, 'kernel_built_and_custom_message_added');
+  const result = await harness.evaluateAnswer(
+    partialMatch,
+    'kernel_built_and_custom_message_added',
+  );
   assertEquals(result, true, 'Should match with 50%+ keyword coverage');
 });
 
@@ -630,7 +638,12 @@ Deno.test('TerminalBenchHarness — evaluateAnswer rejects insufficient keywords
 // ---------------------------------------------------------------------------
 
 Deno.test('checkRepetition — same input always produces same output', () => {
-  const msgs = ['hello world foo bar', 'hello world foo bar', 'hello world foo bar', 'hello world foo bar'];
+  const msgs = [
+    'hello world foo bar',
+    'hello world foo bar',
+    'hello world foo bar',
+    'hello world foo bar',
+  ];
   const results = Array.from({ length: 5 }, () => checkRepetition(msgs));
   assertEquals(new Set(results).size, 1, 'All runs should produce same result');
 });
@@ -745,14 +758,14 @@ Deno.test('checkEqualityDetailed — fallback returns false for different answer
 Deno.test('MMLU-Pro dataset — all question IDs are unique', async () => {
   const harness = new MMLUProHarness();
   const dataset = await harness.loadDataset();
-  const ids = dataset.map(q => q.id);
+  const ids = dataset.map((q) => q.id);
   assertEquals(ids.length, new Set(ids).size, 'Question IDs must be unique');
 });
 
 Deno.test('Terminal-Bench dataset — all task IDs are unique', async () => {
   const harness = new TerminalBenchHarness();
   const dataset = await harness.loadDataset();
-  const ids = dataset.map(q => q.id);
+  const ids = dataset.map((q) => q.id);
   assertEquals(ids.length, new Set(ids).size, 'Task IDs must be unique');
 });
 
@@ -761,8 +774,11 @@ Deno.test('MMLU-Pro dataset — all correct answers are valid letters A-J', asyn
   const dataset = await harness.loadDataset();
   const validLetters = new Set('ABCDEFGHIJ'.split(''));
   for (const q of dataset) {
-    assertEquals(validLetters.has(q.correctAnswer), true,
-      `${q.id}: correctAnswer "${q.correctAnswer}" must be A-J`);
+    assertEquals(
+      validLetters.has(q.correctAnswer),
+      true,
+      `${q.id}: correctAnswer "${q.correctAnswer}" must be A-J`,
+    );
   }
 });
 
@@ -770,8 +786,7 @@ Deno.test('Terminal-Bench dataset — all tasks have non-empty correctAnswer', a
   const harness = new TerminalBenchHarness();
   const dataset = await harness.loadDataset();
   for (const q of dataset) {
-    assertEquals(q.correctAnswer.length > 0, true,
-      `${q.id}: correctAnswer must not be empty`);
+    assertEquals(q.correctAnswer.length > 0, true, `${q.id}: correctAnswer must not be empty`);
   }
 });
 

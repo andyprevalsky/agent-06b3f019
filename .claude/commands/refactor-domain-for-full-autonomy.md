@@ -13,6 +13,8 @@ If `$ARGUMENTS` is empty, ask the user for the domain name and stop.
 
 **This is a loop. Do NOT stop after partial work. Continue until the domain is fully layered, all imports are correct, and all tests pass.**
 
+**Running under `/batch` (parallel workers)?** The coordinator MUST pre-seed the shared infrastructure (Step 0b: `domains/`, `providers/`, `utils/` directories + any shared-file classification/moves) on the parent branch BEFORE spawning workers. Parallel workers racing on Step 0b produce unresolvable conflicts. See Step 0b for details.
+
 ## The Architecture
 
 The exact layers depend on the codebase's language and framework, but the **principle** is universal: separate concerns into layers with forward-only import directions.
@@ -140,6 +142,19 @@ This skill is for production code refactoring only.
 **Skip this step if the codebase already has a `providers/` (or equivalent shared infrastructure) directory.**
 
 This runs ONCE for the entire codebase, on the first domain refactor.
+
+### Pre-seed requirement for `/batch` (parallel workers)
+
+**Before spawning any workers, the coordinator MUST pre-seed all shared files on the parent branch in a single commit.** Workers then branch off that commit and skip Step 0b entirely.
+
+Pre-seed checklist (coordinator-owned, runs once before the batch):
+1. Create `domains/`, `providers/`, `utils/` directories (with `.gitkeep`).
+2. **Classify and move every existing shared file** from `lib/`, `middleware/`, `helpers/`, `common/`, `shared/` into `providers/` or `utils/` using the rules below.
+3. Update ALL imports across the codebase to the new paths.
+4. Run type-check + blackbox tests; must be green.
+5. Commit + push to the parent branch.
+
+Why this is mandatory: parallel workers that each try to move `shared/types.ts` (or any shared file) into their own domain's `providers/` will produce conflicting moves on the same file. Git cannot auto-resolve "both sides renamed this file to different destinations" — you get a stuck merge and must redo worker outputs manually. Pre-seeding eliminates the race.
 
 ### Create the shared infrastructure directories
 

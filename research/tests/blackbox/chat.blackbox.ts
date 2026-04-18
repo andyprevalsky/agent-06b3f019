@@ -231,7 +231,9 @@ Deno.test({
     );
 
     if (AUTH_OR_QUOTA_CODES.has(chatRes.status) || AUTH_OR_QUOTA_CODES.has(directRes.status)) {
-      console.log(`Skipping: API key rejected or quota exceeded (chat=${chatRes.status}, direct=${directRes.status})`);
+      console.log(
+        `Skipping: API key rejected or quota exceeded (chat=${chatRes.status}, direct=${directRes.status})`,
+      );
       return;
     }
 
@@ -383,7 +385,11 @@ Deno.test('OPTIONS /chat/completions — returns CORS headers', async () => {
   const res = await testClient.request('/chat/completions', { method: 'OPTIONS' });
   // Supabase edge functions handle OPTIONS at the platform level
   // The function should not return an error for OPTIONS
-  assertEquals(res.status === 200 || res.status === 204, true, `Expected 200 or 204, got ${res.status}`);
+  assertEquals(
+    res.status === 200 || res.status === 204,
+    true,
+    `Expected 200 or 204, got ${res.status}`,
+  );
 });
 
 // ---------------------------------------------------------------------------

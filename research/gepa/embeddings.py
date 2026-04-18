@@ -79,12 +79,14 @@ def embed_texts(
 
     if uncached_indices:
         uncached_texts = [texts[i] for i in uncached_indices]
-        logger.info(f'Embedding {len(uncached_texts)} texts ({len(texts) - len(uncached_texts)} cached)')
+        logger.info(
+            f'Embedding {len(uncached_texts)} texts ({len(texts) - len(uncached_texts)} cached)'
+        )
 
         client = OpenAI()
         # Batch in chunks of 2048 (OpenAI limit)
         for batch_start in range(0, len(uncached_texts), 2048):
-            batch = uncached_texts[batch_start:batch_start + 2048]
+            batch = uncached_texts[batch_start : batch_start + 2048]
             response = client.embeddings.create(model=MODEL, input=batch)
             for j, item in enumerate(response.data):
                 idx = uncached_indices[batch_start + j]
@@ -100,7 +102,7 @@ def embed_texts(
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0 or norm_b == 0:

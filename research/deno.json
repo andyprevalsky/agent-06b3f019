@@ -9,9 +9,15 @@
     "include": [
       "supabase/functions/",
       "benchmarks/",
+      "domains/",
+      "providers/",
+      "utils/",
       "shared/",
       "scripts/",
-      "tests/"
+      "tests/",
+      "domains/",
+      "providers/",
+      "utils/"
     ],
     "exclude": [
       "node_modules/",
@@ -22,9 +28,15 @@
     "include": [
       "supabase/functions/",
       "benchmarks/",
+      "domains/",
+      "providers/",
+      "utils/",
       "shared/",
       "scripts/",
-      "tests/"
+      "tests/",
+      "domains/",
+      "providers/",
+      "utils/"
     ],
     "exclude": [
       "node_modules/",

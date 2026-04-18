@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'agents'))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(ROOT / 'agents' / '.env')
 
 logging.basicConfig(
@@ -38,6 +39,7 @@ async def main():
 
     # Quick summary
     from collections import Counter
+
     prefs = Counter(l['preference'] for l in new_labels)
     logger.info(f'New label distribution: {dict(prefs)}')
 

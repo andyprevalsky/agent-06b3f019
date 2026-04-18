@@ -1,6 +1,6 @@
 """Shared test fixtures for GEPA tests."""
 
-from helpers.tool_schemas import PlannerResponse, PlannerTask, DependencyEntry
+from helpers.tool_schemas import DependencyEntry, PlannerResponse, PlannerTask
 
 # Default tool name must be a valid PlanToolName enum value.
 # 'web_search' was removed from the planner enum; use 'spawn_explore_agent' as
@@ -17,13 +17,24 @@ def make_planner_response(
 ) -> PlannerResponse:
     """Helper to build PlannerResponse from simple dicts."""
     planner_tasks = [
-        PlannerTask(goal=t['goal'], tool_name=t.get('tool_name', DEFAULT_TOOL), depends_on=t.get('depends_on', []))
+        PlannerTask(
+            goal=t['goal'],
+            tool_name=t.get('tool_name', DEFAULT_TOOL),
+            depends_on=t.get('depends_on', []),
+        )
         for t in tasks
     ]
     if deps is None:
-        deps = [{'task_idx': str(i), 'depends_on': [str(d) for d in t.get('depends_on', [])]} for i, t in enumerate(tasks)]
-    dep_entries = [DependencyEntry(task_idx=d['task_idx'], depends_on=d['depends_on']) for d in deps]
-    return PlannerResponse(title=title, content=content, tasks=planner_tasks, dependencies_graph=dep_entries, join=join)
+        deps = [
+            {'task_idx': str(i), 'depends_on': [str(d) for d in t.get('depends_on', [])]}
+            for i, t in enumerate(tasks)
+        ]
+    dep_entries = [
+        DependencyEntry(task_idx=d['task_idx'], depends_on=d['depends_on']) for d in deps
+    ]
+    return PlannerResponse(
+        title=title, content=content, tasks=planner_tasks, dependencies_graph=dep_entries, join=join
+    )
 
 
 # --- Valid decompositions ---
@@ -60,7 +71,10 @@ VALID_PARALLEL_2 = make_planner_response(
 )
 
 VALID_MAX_8 = make_planner_response(
-    tasks=[{'goal': f'Task {i}', 'tool_name': 'spawn_explore_agent', 'depends_on': []} for i in range(8)],
+    tasks=[
+        {'goal': f'Task {i}', 'tool_name': 'spawn_explore_agent', 'depends_on': []}
+        for i in range(8)
+    ],
 )
 
 
@@ -71,7 +85,10 @@ INVALID_1_TASK = make_planner_response(
 )
 
 INVALID_9_TASKS = make_planner_response(
-    tasks=[{'goal': f'Task {i}', 'tool_name': 'spawn_explore_agent', 'depends_on': []} for i in range(9)],
+    tasks=[
+        {'goal': f'Task {i}', 'tool_name': 'spawn_explore_agent', 'depends_on': []}
+        for i in range(9)
+    ],
 )
 
 INVALID_SELF_DEP = make_planner_response(

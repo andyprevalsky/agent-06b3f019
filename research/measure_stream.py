@@ -1,11 +1,16 @@
 """Measure streaming response: TTFC (time to first contentful token) and total time."""
-import sys, time, json, subprocess, os
 
-SUPABASE_URL = "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions"
-ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
-API_KEY = os.environ["ROSE_API_KEY"]
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_KEY = os.environ["OPENROUTER_API_KEY"]
+import json
+import os
+import subprocess
+import sys
+import time
+
+SUPABASE_URL = 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions'
+ANON_KEY = os.environ['SUPABASE_ANON_KEY']
+API_KEY = os.environ['ROSE_API_KEY']
+OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+OPENROUTER_KEY = os.environ['OPENROUTER_API_KEY']
 
 
 def measure_stream(stdin):
@@ -79,11 +84,21 @@ def run_test_openrouter(model, payload_path):
     body.setdefault('stream_options', {'include_usage': True})
 
     proc = subprocess.Popen(
-        ['curl', '-s', '--max-time', '120',
-         '-X', 'POST', OPENROUTER_URL,
-         '-H', 'Content-Type: application/json',
-         '-H', f'Authorization: Bearer {OPENROUTER_KEY}',
-         '-d', json.dumps(body)],
+        [
+            'curl',
+            '-s',
+            '--max-time',
+            '120',
+            '-X',
+            'POST',
+            OPENROUTER_URL,
+            '-H',
+            'Content-Type: application/json',
+            '-H',
+            f'Authorization: Bearer {OPENROUTER_KEY}',
+            '-d',
+            json.dumps(body),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -104,12 +119,23 @@ def run_test_claude_auth(payload_path, claude_token):
     body.setdefault('stream_options', {'include_usage': True})
 
     proc = subprocess.Popen(
-        ['curl', '-s', '--max-time', '120',
-         '-X', 'POST', SUPABASE_URL,
-         '-H', 'Content-Type: application/json',
-         '-H', f'Authorization: Bearer {ANON_KEY}',
-         '-H', f'x-api-key: {API_KEY}',
-         '-d', json.dumps(body)],
+        [
+            'curl',
+            '-s',
+            '--max-time',
+            '120',
+            '-X',
+            'POST',
+            SUPABASE_URL,
+            '-H',
+            'Content-Type: application/json',
+            '-H',
+            f'Authorization: Bearer {ANON_KEY}',
+            '-H',
+            f'x-api-key: {API_KEY}',
+            '-d',
+            json.dumps(body),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -121,24 +147,26 @@ def run_test_claude_auth(payload_path, claude_token):
 
 def print_row(r, label=None):
     name = label or r['actual_model'] or '???'
-    ttfa_s = f"{r['ttfa']:.1f}s" if r['ttfa'] else "N/A"
-    ttfc_s = f"{r['ttfc']:.1f}s" if r['ttfc'] else "NONE"
-    total_s = f"{r['total']:.1f}s"
-    print(f"{name:<35} {ttfa_s:>6} {ttfc_s:>6} {total_s:>6} {r['reasoning_chars']:>7} {r['content_chars']:>8} {r['finish_reason'] or 'N/A':>8}")
+    ttfa_s = f'{r["ttfa"]:.1f}s' if r['ttfa'] else 'N/A'
+    ttfc_s = f'{r["ttfc"]:.1f}s' if r['ttfc'] else 'NONE'
+    total_s = f'{r["total"]:.1f}s'
+    print(
+        f'{name:<35} {ttfa_s:>6} {ttfc_s:>6} {total_s:>6} {r["reasoning_chars"]:>7} {r["content_chars"]:>8} {r["finish_reason"] or "N/A":>8}'
+    )
 
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         # stdin pipe mode
         r = measure_stream(sys.stdin)
-        print(f"Model: {r['actual_model']}")
-        print(f"TTFA: {r['ttfa']:.1f}s" if r['ttfa'] else "TTFA: N/A")
-        print(f"TTFC: {r['ttfc']:.1f}s" if r['ttfc'] else "TTFC: N/A (no content)")
-        print(f"Total: {r['total']:.1f}s")
-        print(f"Chunks: {r['chunks']}")
-        print(f"Reasoning: {r['reasoning_chars']} chars")
-        print(f"Content: {r['content_chars']} chars")
-        print(f"Finish: {r['finish_reason']}")
+        print(f'Model: {r["actual_model"]}')
+        print(f'TTFA: {r["ttfa"]:.1f}s' if r['ttfa'] else 'TTFA: N/A')
+        print(f'TTFC: {r["ttfc"]:.1f}s' if r['ttfc'] else 'TTFC: N/A (no content)')
+        print(f'Total: {r["total"]:.1f}s')
+        print(f'Chunks: {r["chunks"]}')
+        print(f'Reasoning: {r["reasoning_chars"]} chars')
+        print(f'Content: {r["content_chars"]} chars')
+        print(f'Finish: {r["finish_reason"]}')
     else:
         payload_path = sys.argv[1]
         claude_token = sys.argv[2] if len(sys.argv) > 2 else None
@@ -149,13 +177,15 @@ if __name__ == '__main__':
             'google/gemini-3-flash-preview',
         ]
 
-        print(f"{'Model':<35} {'TTFA':>6} {'TTFC':>6} {'Total':>6} {'Reason':>7} {'Content':>8} {'Finish':>8}")
+        print(
+            f'{"Model":<35} {"TTFA":>6} {"TTFC":>6} {"Total":>6} {"Reason":>7} {"Content":>8} {"Finish":>8}'
+        )
         print('-' * 90)
 
         # ClaudeAuth baseline first
         if claude_token:
             r = run_test_claude_auth(payload_path, claude_token)
-            print_row(r, label=f"claudeAuth ({r['actual_model'] or '?'})")
+            print_row(r, label=f'claudeAuth ({r["actual_model"] or "?"})')
             print('-' * 90)
 
         # Each waterfall model via OpenRouter

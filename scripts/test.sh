@@ -219,10 +219,12 @@ fi
 
 if should_run "research"; then
   if ! command -v deno &>/dev/null && ! [ -x "${DENO_BIN:-$HOME/.deno/bin/deno}" ]; then
-    echo "ERROR: Deno is not installed. Research blackbox tests require Deno."
+    echo "ERROR: Deno is not installed. Research tests require Deno."
     echo "  Install: curl -fsSL https://deno.land/install.sh | sh"
     exit 1
   fi
+
+  bg_suite "Research Structural" bash -c "cd research && bash scripts/lint-check.sh"
 
   # Derive RESEARCH_PORT from --port if available (port + 3 matches run.sh fan-out)
   RESEARCH_PORT_EXPORT=""

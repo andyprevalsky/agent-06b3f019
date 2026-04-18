@@ -8,7 +8,6 @@ Run:
 """
 
 import modal
-import pytest
 
 from research.gepa.critic import serialize_candidate, serialize_prompt
 
@@ -16,7 +15,9 @@ train = modal.Function.from_name('gepa-critic', 'train')
 score = modal.Function.from_name('gepa-critic', 'score')
 
 
-def _make_candidate(title: str, tasks: list[dict], me_score: float = 0.9, ce_score: float = 0.8) -> dict:
+def _make_candidate(
+    title: str, tasks: list[dict], me_score: float = 0.9, ce_score: float = 0.8
+) -> dict:
     return {
         'title': title,
         'content': f'Plan: {title}',
@@ -34,54 +35,164 @@ SEED = 'Get me a black beanie from Amazon'
 CONTEXT = [{'role': 'user', 'content': SEED}]
 
 GOOD_CANDIDATES = [
-    _make_candidate('Buy Black Beanie from Amazon', [
-        {'goal': 'Search Amazon for black beanies under $30', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Compare top 3 results by rating and price', 'tool_name': 'reasoning', 'depends_on': [0]},
-        {'goal': 'Add best option to cart and checkout', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-    ], me_score=0.95, ce_score=0.90),
-    _make_candidate('Purchase Warm Black Beanie', [
-        {'goal': 'Search for black wool beanies on Amazon', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Filter results by Prime shipping and 4+ stars', 'tool_name': 'reasoning', 'depends_on': [0]},
-        {'goal': 'Complete purchase of top-rated beanie', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-    ], me_score=0.92, ce_score=0.88),
-    _make_candidate('Find and Order Black Beanie', [
-        {'goal': 'Browse Amazon beanie category', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Read reviews for top candidates', 'tool_name': 'web_search', 'depends_on': [0]},
-        {'goal': 'Select best value option and purchase', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-    ], me_score=0.90, ce_score=0.85),
-    _make_candidate('Amazon Beanie Shopping', [
-        {'goal': 'Search Amazon for highly-rated black beanies', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Analyze materials and sizing from listings', 'tool_name': 'reasoning', 'depends_on': [0]},
-        {'goal': 'Purchase the best match', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-    ], me_score=0.93, ce_score=0.87),
-    _make_candidate('Get Premium Black Beanie', [
-        {'goal': 'Research best black beanie brands on Amazon', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Compare Carhartt vs Nike vs generic options', 'tool_name': 'reasoning', 'depends_on': [0]},
-        {'goal': 'Order the winner with fastest shipping', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
-    ], me_score=0.94, ce_score=0.91),
+    _make_candidate(
+        'Buy Black Beanie from Amazon',
+        [
+            {
+                'goal': 'Search Amazon for black beanies under $30',
+                'tool_name': 'web_search',
+                'depends_on': [],
+            },
+            {
+                'goal': 'Compare top 3 results by rating and price',
+                'tool_name': 'reasoning',
+                'depends_on': [0],
+            },
+            {
+                'goal': 'Add best option to cart and checkout',
+                'tool_name': 'spawn_browser_agent',
+                'depends_on': [1],
+            },
+        ],
+        me_score=0.95,
+        ce_score=0.90,
+    ),
+    _make_candidate(
+        'Purchase Warm Black Beanie',
+        [
+            {
+                'goal': 'Search for black wool beanies on Amazon',
+                'tool_name': 'web_search',
+                'depends_on': [],
+            },
+            {
+                'goal': 'Filter results by Prime shipping and 4+ stars',
+                'tool_name': 'reasoning',
+                'depends_on': [0],
+            },
+            {
+                'goal': 'Complete purchase of top-rated beanie',
+                'tool_name': 'spawn_browser_agent',
+                'depends_on': [1],
+            },
+        ],
+        me_score=0.92,
+        ce_score=0.88,
+    ),
+    _make_candidate(
+        'Find and Order Black Beanie',
+        [
+            {'goal': 'Browse Amazon beanie category', 'tool_name': 'web_search', 'depends_on': []},
+            {
+                'goal': 'Read reviews for top candidates',
+                'tool_name': 'web_search',
+                'depends_on': [0],
+            },
+            {
+                'goal': 'Select best value option and purchase',
+                'tool_name': 'spawn_browser_agent',
+                'depends_on': [1],
+            },
+        ],
+        me_score=0.90,
+        ce_score=0.85,
+    ),
+    _make_candidate(
+        'Amazon Beanie Shopping',
+        [
+            {
+                'goal': 'Search Amazon for highly-rated black beanies',
+                'tool_name': 'web_search',
+                'depends_on': [],
+            },
+            {
+                'goal': 'Analyze materials and sizing from listings',
+                'tool_name': 'reasoning',
+                'depends_on': [0],
+            },
+            {
+                'goal': 'Purchase the best match',
+                'tool_name': 'spawn_browser_agent',
+                'depends_on': [1],
+            },
+        ],
+        me_score=0.93,
+        ce_score=0.87,
+    ),
+    _make_candidate(
+        'Get Premium Black Beanie',
+        [
+            {
+                'goal': 'Research best black beanie brands on Amazon',
+                'tool_name': 'web_search',
+                'depends_on': [],
+            },
+            {
+                'goal': 'Compare Carhartt vs Nike vs generic options',
+                'tool_name': 'reasoning',
+                'depends_on': [0],
+            },
+            {
+                'goal': 'Order the winner with fastest shipping',
+                'tool_name': 'spawn_browser_agent',
+                'depends_on': [1],
+            },
+        ],
+        me_score=0.94,
+        ce_score=0.91,
+    ),
 ]
 
 BAD_CANDIDATES = [
-    _make_candidate('Get Beanie', [
-        {'goal': 'Get a beanie somehow', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Do something else', 'tool_name': 'reasoning', 'depends_on': []},
-    ], me_score=0.3, ce_score=0.2),
-    _make_candidate('Look at Hats', [
-        {'goal': 'Search for hats', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Think about hats', 'tool_name': 'reasoning', 'depends_on': []},
-    ], me_score=0.4, ce_score=0.3),
-    _make_candidate('Beanie Plan', [
-        {'goal': 'Research beanies on the internet', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Summarize findings', 'tool_name': 'reasoning', 'depends_on': [0]},
-    ], me_score=0.5, ce_score=0.25),
-    _make_candidate('Hat Shopping', [
-        {'goal': 'Go shopping for any hat', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Maybe buy one', 'tool_name': 'reasoning', 'depends_on': []},
-    ], me_score=0.35, ce_score=0.2),
-    _make_candidate('Find Something', [
-        {'goal': 'Look around online', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Figure it out later', 'tool_name': 'reasoning', 'depends_on': []},
-    ], me_score=0.3, ce_score=0.15),
+    _make_candidate(
+        'Get Beanie',
+        [
+            {'goal': 'Get a beanie somehow', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Do something else', 'tool_name': 'reasoning', 'depends_on': []},
+        ],
+        me_score=0.3,
+        ce_score=0.2,
+    ),
+    _make_candidate(
+        'Look at Hats',
+        [
+            {'goal': 'Search for hats', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Think about hats', 'tool_name': 'reasoning', 'depends_on': []},
+        ],
+        me_score=0.4,
+        ce_score=0.3,
+    ),
+    _make_candidate(
+        'Beanie Plan',
+        [
+            {
+                'goal': 'Research beanies on the internet',
+                'tool_name': 'web_search',
+                'depends_on': [],
+            },
+            {'goal': 'Summarize findings', 'tool_name': 'reasoning', 'depends_on': [0]},
+        ],
+        me_score=0.5,
+        ce_score=0.25,
+    ),
+    _make_candidate(
+        'Hat Shopping',
+        [
+            {'goal': 'Go shopping for any hat', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Maybe buy one', 'tool_name': 'reasoning', 'depends_on': []},
+        ],
+        me_score=0.35,
+        ce_score=0.2,
+    ),
+    _make_candidate(
+        'Find Something',
+        [
+            {'goal': 'Look around online', 'tool_name': 'web_search', 'depends_on': []},
+            {'goal': 'Figure it out later', 'tool_name': 'reasoning', 'depends_on': []},
+        ],
+        me_score=0.3,
+        ce_score=0.15,
+    ),
 ]
 
 
@@ -90,7 +201,7 @@ def _build_training_rows() -> dict:
     prompt_text = serialize_prompt(SEED, CONTEXT)
     rows = {'prompt': [], 'chosen': [], 'rejected': []}
 
-    for good, bad in zip(GOOD_CANDIDATES, BAD_CANDIDATES):
+    for good, bad in zip(GOOD_CANDIDATES, BAD_CANDIDATES, strict=False):
         rows['prompt'].append([{'role': 'user', 'content': prompt_text}])
         rows['chosen'].append([{'role': 'assistant', 'content': serialize_candidate(good)}])
         rows['rejected'].append([{'role': 'assistant', 'content': serialize_candidate(bad)}])
@@ -130,8 +241,8 @@ class TestTrainOnModal:
         assert result['num_examples'] == 10
         assert result['train_loss'] is not None
         assert isinstance(result['train_loss'], float)
-        print(f"Train loss: {result['train_loss']}")
-        print(f"Metrics: {result['metrics']}")
+        print(f'Train loss: {result["train_loss"]}')
+        print(f'Metrics: {result["metrics"]}')
 
 
 class TestScoreOnModal:

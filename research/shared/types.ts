@@ -5,7 +5,7 @@ export interface ModelWeights {
 }
 
 export interface Message {
-  role: "system" | "user" | "assistant";
+  role: 'system' | 'user' | 'assistant';
   content: string;
 }
 
@@ -25,9 +25,9 @@ export interface CostBreakdown {
 
 // Re-export benchmark types
 export type {
+  BenchmarkConfig,
   BenchmarkQuestion,
   BenchmarkResult,
-  BenchmarkConfig,
   BenchmarkSummary,
   IBenchmarkHarness,
-} from "../benchmarks/harnesses/base.ts";
+} from '../domains/benchmark-runner/types.ts';
