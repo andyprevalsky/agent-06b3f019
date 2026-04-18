@@ -1,5 +1,9 @@
 /**
- * Hierarchical span tracing for the research (Supabase edge function) layer.
+ * Hierarchical span tracing provider for the research (Supabase edge function)
+ * layer.
+ *
+ * Lives in providers/ because every public function has a side effect — it
+ * writes `span.start` / `span.end` JSON events to stdout via `console.log`.
  *
  * Mirrors `back-end/src/providers/tracing.ts` and `agents/helpers/tracing.py`:
  *   - Emits `span.start` / `span.end` JSON log events with `span_id` and
