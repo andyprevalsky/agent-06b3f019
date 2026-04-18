@@ -137,6 +137,14 @@ cd front-end && npm run test:coverage
 
 Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
 
+## Step 4g: Agents code coverage check (skip if no agents/ changes)
+
+```bash
+cd agents && bash scripts/run-coverage.sh
+```
+
+Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+
 ## Step 4r: Research lint + structural (skip if `$CHANGED_RESEARCH` is empty)
 
 If the diff touches `research/`, run the research-side check harness. It enforces fmt/lint (base + strict overlay), structural invariants (max 300 lines per file, 80 per function), and Python ruff.
@@ -478,6 +486,7 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 # ║  3. TypeScript: 0 errors                                          ║
 # ║  4. Structural tests: 100% pass                                   ║
 # ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
+# ║  4g. Agents code coverage: meets pyproject.toml threshold         ║
 # ║  4c. Credential health: all integrations authenticate             ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
 # ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║

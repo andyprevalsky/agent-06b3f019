@@ -1,11 +1,17 @@
 """Blackbox tests for set-plan domain."""
 
 import asyncio
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
 from _test_utils import (
     BlackboxResult,
     get_captured_requests,
     teardown_mock,
 )
+
+
+# ── validate_dependencies ────────────────────────────────────────────────
 
 
 def test_validate_dependencies_valid():
@@ -18,6 +24,13 @@ def test_validate_dependencies_valid():
     assert result is None
 
 
+def test_validate_dependencies_empty_deps_is_valid():
+    """validate_dependencies returns None for empty deps (all parallel)."""
+    from tools.set_plan import validate_dependencies
+
+    assert validate_dependencies(["A", "B", "C"], {}) is None
+
+
 def test_validate_dependencies_cycle():
     """validate_dependencies catches a dependency cycle."""
     from tools.set_plan import validate_dependencies
@@ -28,8 +41,59 @@ def test_validate_dependencies_cycle():
     assert result is not None and "cycle" in result.lower()
 
 
+def test_validate_dependencies_self_dependency():
+    """Task cannot depend on itself."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"1": ["1"]})
+    assert err is not None and "itself" in err
+
+
+def test_validate_dependencies_non_numeric_task_idx():
+    """Task index must be a digit string."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"foo": ["0"]})
+    assert err is not None and "numeric" in err.lower()
+
+
+def test_validate_dependencies_out_of_range_task():
+    """Task index must be in range."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"5": ["0"]})
+    assert err is not None and "out of range" in err.lower()
+
+
+def test_validate_dependencies_preds_not_list():
+    """Predecessors must be a list."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"1": "0"})  # type: ignore[dict-item]
+    assert err is not None and "list" in err.lower()
+
+
+def test_validate_dependencies_non_numeric_predecessor():
+    """Predecessor must be a digit string."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"1": ["abc"]})
+    assert err is not None and "numeric" in err.lower()
+
+
+def test_validate_dependencies_out_of_range_predecessor():
+    """Predecessor index must be in range."""
+    from tools.set_plan import validate_dependencies
+
+    err = validate_dependencies(["A", "B"], {"1": ["99"]})
+    assert err is not None and "non-existent" in err.lower()
+
+
+# ── validate_planner_result ──────────────────────────────────────────────
+
+
 def test_validate_planner_result_valid():
-    """_validate_planner_result returns None for a well-formed plan."""
+    """validate_planner_result returns None for a well-formed plan."""
     from tools.set_plan import _validate_planner_result
 
     result = _validate_planner_result({
@@ -47,6 +111,289 @@ def test_validate_planner_result_valid():
     assert result is None
 
 
+def test_validate_planner_result_no_tasks():
+    """validate_planner_result errors on empty tasks."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result({"tasks": [], "join": "all"})
+    assert err is not None and "No tasks" in err
+
+
+def test_validate_planner_result_invalid_join():
+    """validate_planner_result errors on invalid join value."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result({
+        "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
+        "join": "invalid",
+        "dependencies_graph": [],
+    })
+    assert err is not None and "join" in err.lower()
+
+
+def test_validate_planner_result_mismatch_depends_on():
+    """task.depends_on must match dependencies_graph."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result({
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning", "depends_on": []},
+            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+        ],
+        "dependencies_graph": [],  # missing entry for task 1
+        "join": "all",
+    })
+    assert err is not None
+
+
+def test_validate_planner_result_propagates_dep_error():
+    """validate_planner_result returns dependency-validation error."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result({
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
+            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+        ],
+        "dependencies_graph": [
+            {"task_idx": "0", "depends_on": ["1"]},
+            {"task_idx": "1", "depends_on": ["0"]},
+        ],
+        "join": "all",
+    })
+    # cycle detected
+    assert err is not None and "cycle" in err.lower()
+
+
+# ── convert_dependencies_list_to_dict ────────────────────────────────────
+
+
+def test_convert_deps_list_to_dict():
+    """Conversion from list format to dict format."""
+    from domains.set_plan.service import convert_dependencies_list_to_dict
+
+    result = convert_dependencies_list_to_dict([
+        {"task_idx": "0", "depends_on": []},
+        {"task_idx": "1", "depends_on": ["0"]},
+    ])
+    assert result == {"0": [], "1": ["0"]}
+
+
+def test_convert_deps_empty_list():
+    """Empty list returns empty dict."""
+    from domains.set_plan.service import convert_dependencies_list_to_dict
+
+    assert convert_dependencies_list_to_dict([]) == {}
+
+
+def test_convert_deps_skips_missing_task_idx():
+    """Entries without task_idx are skipped."""
+    from domains.set_plan.service import convert_dependencies_list_to_dict
+
+    result = convert_dependencies_list_to_dict([
+        {"task_idx": "", "depends_on": []},
+        {"task_idx": "0", "depends_on": []},
+    ])
+    assert result == {"0": []}
+
+
+# ── build_plan_data & build_plan_message ─────────────────────────────────
+
+
+def test_build_plan_data_maps_fields():
+    """build_plan_data returns PlanData TypedDict with all fields."""
+    from domains.set_plan.service import build_plan_data
+
+    plan_data = build_plan_data({
+        "tasks": [
+            {"goal": "Research", "tool_name": "spawn_explore_agent"},
+            {"goal": "Synthesize", "tool_name": "reasoning"},
+        ],
+        "dependencies_graph": [{"task_idx": "1", "depends_on": ["0"]}],
+        "title": "Plan A",
+        "content": "Detailed plan content",
+        "join": "all",
+    })
+    assert plan_data["type"] == "plan_artifact"
+    assert plan_data["title"] == "Plan A"
+    assert plan_data["content"] == "Detailed plan content"
+    assert plan_data["status"] == "planning"
+    assert plan_data["join"] == "all"
+    assert len(plan_data["tasks"]) == 2
+    assert plan_data["tasks"][0]["goal"] == "Research"
+    assert plan_data["tasks"][0]["tool_name"] == "spawn_explore_agent"
+    assert plan_data["dependencies"] == {"1": ["0"]}
+
+
+def test_build_plan_message_join_any():
+    """join='any' yields hypothesis message."""
+    from domains.set_plan.service import build_plan_message
+
+    msg = build_plan_message({
+        "type": "plan_artifact",
+        "title": "Explore",
+        "content": "",
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning"},
+            {"goal": "B", "tool_name": "reasoning"},
+        ],
+        "dependencies": {},
+        "join": "any",
+        "status": "planning",
+    })
+    assert "hypotheses" in msg
+    assert "2" in msg
+
+
+def test_build_plan_message_parallel_no_deps():
+    """With no dependencies, tasks execute in parallel."""
+    from domains.set_plan.service import build_plan_message
+
+    msg = build_plan_message({
+        "type": "plan_artifact",
+        "title": "Parallel",
+        "content": "",
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning"},
+            {"goal": "B", "tool_name": "reasoning"},
+            {"goal": "C", "tool_name": "reasoning"},
+        ],
+        "dependencies": {},
+        "join": "all",
+        "status": "planning",
+    })
+    assert "parallel" in msg.lower()
+
+
+def test_build_plan_message_sequential():
+    """Linear chain is labelled sequential."""
+    from domains.set_plan.service import build_plan_message
+
+    msg = build_plan_message({
+        "type": "plan_artifact",
+        "title": "Sequential Plan",
+        "content": "",
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning"},
+            {"goal": "B", "tool_name": "reasoning"},
+            {"goal": "C", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"1": ["0"], "2": ["1"]},
+        "join": "all",
+        "status": "planning",
+    })
+    assert "sequential" in msg.lower()
+
+
+def test_build_plan_message_dag():
+    """Non-linear graph is labelled staged/DAG."""
+    from domains.set_plan.service import build_plan_message
+
+    msg = build_plan_message({
+        "type": "plan_artifact",
+        "title": "Staged Plan",
+        "content": "",
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning"},
+            {"goal": "B", "tool_name": "reasoning"},
+            {"goal": "C", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"2": ["0", "1"]},
+        "join": "all",
+        "status": "planning",
+    })
+    assert "staged" in msg.lower() or "dependencies" in msg.lower()
+
+
+# ── get_planner_tools_description ───────────────────────────────────────
+
+
+def test_get_planner_tools_description_non_empty():
+    """Planner tool description includes at least one planning tool."""
+    from domains.set_plan.service import get_planner_tools_description
+
+    desc = get_planner_tools_description()
+    assert isinstance(desc, str)
+    assert len(desc) > 0
+    # Should mention at least one well-known planner-assignable tool
+    assert "reasoning" in desc or "spawn_explore_agent" in desc
+
+
+# ── build_planner_messages ──────────────────────────────────────────────
+
+
+def test_build_planner_messages_basic():
+    """build_planner_messages converts context into LLM messages + user_messages list."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Find me a flight to Paris"},
+        {"role": "ASSISTANT", "text": "Sure, I'll help."},
+        {"role": "USER", "text": "Under $500"},
+    ]
+    base_messages, user_messages = build_planner_messages(context)
+
+    # GOAL line prepended + 3 context messages
+    assert len(base_messages) == 4
+    assert base_messages[0]["content"].startswith("GOAL: Find me a flight to Paris")
+    assert user_messages == ["Find me a flight to Paris", "Under $500"]
+
+
+def test_build_planner_messages_empty_context():
+    """Empty context uses DEFAULT_GOAL."""
+    from domains.set_plan.config import DEFAULT_GOAL
+    from domains.set_plan.service import build_planner_messages
+
+    base_messages, user_messages = build_planner_messages([])
+
+    assert len(base_messages) == 1
+    assert DEFAULT_GOAL in base_messages[0]["content"]
+    assert user_messages == []
+
+
+def test_build_planner_messages_tool_and_system_roles():
+    """TOOL/SYSTEM messages are included as user role with prefix."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Goal"},
+        {"role": "TOOL", "text": "Result"},
+        {"role": "SYSTEM", "text": "Note"},
+    ]
+    base_messages, _ = build_planner_messages(context)
+    # goal + 3 messages
+    assert len(base_messages) == 4
+    # Find the TOOL message
+    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
+    assert tool_msg["role"] == "user"
+    system_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
+    assert system_msg["role"] == "user"
+
+
+def test_build_planner_messages_skips_empty_text():
+    """Messages with empty text are skipped."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Goal"},
+        {"role": "ASSISTANT", "text": ""},
+        {"role": "USER", "text": ""},
+    ]
+    base_messages, user_messages = build_planner_messages(context)
+    # GOAL line + one USER message
+    assert len(base_messages) == 2
+    # Empty user text is not included in user_messages
+    assert user_messages == ["Goal"]
+
+
+def test_build_planner_messages_no_outbound_http():
+    """Helper is pure — no outbound HTTP calls."""
+    from domains.set_plan.service import build_planner_messages
+
+    build_planner_messages([{"role": "USER", "text": "hi"}])
+    assert len(get_captured_requests()) == 0
+
+
 def test_no_outbound_http_calls():
     """set_plan validation helpers make zero outbound HTTP calls."""
     from tools.set_plan import validate_dependencies
@@ -55,13 +402,294 @@ def test_no_outbound_http_calls():
     assert len(get_captured_requests()) == 0
 
 
+# =========================================================================
+# SetPlanManager tests - patch workflow module and run_planner_attempt
+# =========================================================================
+
+
+class _FakeWorkflowModule:
+    """Minimal stand-in for temporalio.workflow used by handler."""
+
+    def __init__(self):
+        self.logger = type(
+            "L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None}
+        )()
+
+    def now(self):
+        return datetime.now(timezone.utc)
+
+
+def _patch_handler_workflow(fake_workflow):
+    import domains.set_plan.handler as h
+
+    original = h.workflow
+    h.workflow = fake_workflow
+
+    def restore():
+        h.workflow = original
+
+    return restore
+
+
+async def _collect_events(gen):
+    events = []
+    async for e in gen:
+        events.append(e)
+    return events
+
+
+class _FakeWFInstance:
+    def __init__(self, context=None, *, output_schema=None):
+        self.context = context or [{"role": "USER", "text": "Find flights"}]
+        self.output_schema = output_schema
+        self.user_context_section = "Name: Test User"
+        self.user_id = "user-1"
+        self.agent_id = "agent-1"
+        self.claude_max_token = None
+        self.refreshes = 0
+
+    async def _refresh_claude_token(self, user_id):
+        self.refreshes += 1
+
+    async def _track_usage(self, *a, **kw):
+        pass
+
+
+async def test_handler_happy_path_first_try():
+    """Planner returns valid plan on first attempt -> FINISHED event."""
+    from domains.set_plan.handler import SetPlanManager
+    from tools.base import MessageStatus
+
+    valid_plan = {
+        "tasks": [
+            {"goal": "A", "tool_name": "reasoning", "depends_on": []},
+            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+        ],
+        "dependencies_graph": [
+            {"task_idx": "1", "depends_on": ["0"]},
+        ],
+        "title": "Test Plan",
+        "content": "Plan content",
+        "join": "all",
+    }
+
+    fake_wf = _FakeWorkflowModule()
+    restore = _patch_handler_workflow(fake_wf)
+
+    # Also patch run_planner_attempt to return the plan directly.
+    import domains.set_plan.handler as h
+
+    original_runner = h.run_planner_attempt
+    h.run_planner_attempt = AsyncMock(return_value=valid_plan)
+    try:
+        wf = _FakeWFInstance()
+        events = await _collect_events(
+            SetPlanManager().execute_tool(workflow_instance=wf, tool_call={}, tool_call_id="tc-1")
+        )
+    finally:
+        h.run_planner_attempt = original_runner
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    finished = next(e for e in events if e.status == MessageStatus.FINISHED)
+    assert finished.title == "Test Plan"
+    assert finished.data["type"] == "plan_artifact"
+
+
+async def test_handler_retries_emit_retry_event():
+    """Invalid first attempt triggers retry yielding IN_PROGRESS retry event."""
+    from domains.set_plan.handler import SetPlanManager
+    from tools.base import MessageStatus
+
+    bad_plan = {"tasks": [], "dependencies_graph": [], "join": "all"}
+
+    fake_wf = _FakeWorkflowModule()
+    restore = _patch_handler_workflow(fake_wf)
+
+    import domains.set_plan.handler as h
+
+    original_runner = h.run_planner_attempt
+    h.run_planner_attempt = AsyncMock(return_value=bad_plan)
+    try:
+        wf = _FakeWFInstance()
+        events = await _collect_events(
+            SetPlanManager().execute_tool(workflow_instance=wf, tool_call={}, tool_call_id="tc-r")
+        )
+    finally:
+        h.run_planner_attempt = original_runner
+        restore()
+
+    # Expect an IN_PROGRESS retry event (emitted between attempts)
+    titles = [e.title for e in events]
+    assert any("Retrying" in (t or "") for t in titles)
+    # Final status is an ERROR since plan never validated
+    assert any(e.status == MessageStatus.ERROR for e in events)
+
+
+async def test_handler_fails_after_all_retries():
+    """Persistently invalid plan leads to Plan Validation Failed error."""
+    from domains.set_plan.handler import SetPlanManager
+    from tools.base import MessageStatus
+
+    bad_plan = {"tasks": [], "dependencies_graph": [], "join": "all"}
+    fake_wf = _FakeWorkflowModule()
+    restore = _patch_handler_workflow(fake_wf)
+
+    import domains.set_plan.handler as h
+
+    original_runner = h.run_planner_attempt
+    h.run_planner_attempt = AsyncMock(return_value=bad_plan)
+    try:
+        wf = _FakeWFInstance()
+        events = await _collect_events(
+            SetPlanManager().execute_tool(workflow_instance=wf, tool_call={}, tool_call_id="tc-f")
+        )
+    finally:
+        h.run_planner_attempt = original_runner
+        restore()
+
+    error = next((e for e in events if e.status == MessageStatus.ERROR), None)
+    assert error is not None
+    assert "Validation" in error.title
+
+
+async def test_handler_planner_exception_yields_error():
+    """Planner raising exception yields a Planner Error event."""
+    from domains.set_plan.handler import SetPlanManager
+    from tools.base import MessageStatus
+
+    fake_wf = _FakeWorkflowModule()
+    restore = _patch_handler_workflow(fake_wf)
+
+    import domains.set_plan.handler as h
+
+    original_runner = h.run_planner_attempt
+
+    async def boom(**kwargs):
+        raise RuntimeError("planner exploded")
+
+    h.run_planner_attempt = boom
+    try:
+        wf = _FakeWFInstance()
+        events = await _collect_events(
+            SetPlanManager().execute_tool(workflow_instance=wf, tool_call={}, tool_call_id="tc-x")
+        )
+    finally:
+        h.run_planner_attempt = original_runner
+        restore()
+
+    error = next(e for e in events if e.status == MessageStatus.ERROR)
+    assert "Planner Error" in error.title
+    assert "planner exploded" in error.message
+
+
+# =========================================================================
+# service.run_planner_attempt / _apply_generated_schema tests
+# =========================================================================
+
+
+def _patch_service_workflow(fake_workflow):
+    import domains.set_plan.service as s
+
+    original = s.workflow
+    s.workflow = fake_workflow
+
+    def restore():
+        s.workflow = original
+
+    return restore
+
+
+async def test_apply_generated_schema_new_format():
+    """_apply_generated_schema reads 'schema' sub-key and sets output_schema."""
+    from domains.set_plan.service import _apply_generated_schema
+
+    restore = _patch_service_workflow(_FakeWorkflowModule())
+    try:
+        wf = _FakeWFInstance()
+
+        async def track_cost(*a, **kw):
+            return None
+
+        wf._track_llm_cost = track_cost
+
+        schema = {"schema": {"fields": [{"name": "x", "type": "str"}]}, "usage": {"prompt_tokens": 1, "completion_tokens": 2}}
+        _apply_generated_schema(wf, schema)
+        assert wf.output_schema == {"fields": [{"name": "x", "type": "str"}]}
+    finally:
+        restore()
+
+
+async def test_apply_generated_schema_legacy_format():
+    """Legacy (direct schema dict) also sets output_schema."""
+    from domains.set_plan.service import _apply_generated_schema
+
+    restore = _patch_service_workflow(_FakeWorkflowModule())
+    try:
+        wf = _FakeWFInstance()
+        _apply_generated_schema(wf, {"fields": []})
+        assert wf.output_schema == {"fields": []}
+    finally:
+        restore()
+
+
+def test_apply_generated_schema_none_skips():
+    """None schema does NOT overwrite output_schema."""
+    from domains.set_plan.service import _apply_generated_schema
+
+    wf = _FakeWFInstance(output_schema={"existing": True})
+    _apply_generated_schema(wf, None)
+    assert wf.output_schema == {"existing": True}
+
+
 async def run_all_tests():
     print("set-plan blackbox tests:")
     r = BlackboxResult()
+    # validate_dependencies
     r.record("validate_deps_valid", test_validate_dependencies_valid)
+    r.record("validate_deps_empty", test_validate_dependencies_empty_deps_is_valid)
     r.record("validate_deps_cycle", test_validate_dependencies_cycle)
+    r.record("validate_deps_self", test_validate_dependencies_self_dependency)
+    r.record("validate_deps_non_numeric_task", test_validate_dependencies_non_numeric_task_idx)
+    r.record("validate_deps_task_out_of_range", test_validate_dependencies_out_of_range_task)
+    r.record("validate_deps_preds_not_list", test_validate_dependencies_preds_not_list)
+    r.record("validate_deps_non_numeric_pred", test_validate_dependencies_non_numeric_predecessor)
+    r.record("validate_deps_pred_out_of_range", test_validate_dependencies_out_of_range_predecessor)
+    # validate_planner_result
     r.record("validate_planner_result", test_validate_planner_result_valid)
+    r.record("validate_planner_result_no_tasks", test_validate_planner_result_no_tasks)
+    r.record("validate_planner_result_invalid_join", test_validate_planner_result_invalid_join)
+    r.record("validate_planner_result_mismatch", test_validate_planner_result_mismatch_depends_on)
+    r.record("validate_planner_result_dep_err", test_validate_planner_result_propagates_dep_error)
+    # convert_deps
+    r.record("convert_deps_list_to_dict", test_convert_deps_list_to_dict)
+    r.record("convert_deps_empty", test_convert_deps_empty_list)
+    r.record("convert_deps_skips_missing", test_convert_deps_skips_missing_task_idx)
+    # build_plan_data / build_plan_message
+    r.record("build_plan_data", test_build_plan_data_maps_fields)
+    r.record("build_plan_message_any", test_build_plan_message_join_any)
+    r.record("build_plan_message_parallel", test_build_plan_message_parallel_no_deps)
+    r.record("build_plan_message_sequential", test_build_plan_message_sequential)
+    r.record("build_plan_message_dag", test_build_plan_message_dag)
+    # tools description
+    r.record("planner_tools_description", test_get_planner_tools_description_non_empty)
+    # build_planner_messages
+    r.record("build_planner_messages_basic", test_build_planner_messages_basic)
+    r.record("build_planner_messages_empty", test_build_planner_messages_empty_context)
+    r.record("build_planner_messages_tool_system", test_build_planner_messages_tool_and_system_roles)
+    r.record("build_planner_messages_empty_text", test_build_planner_messages_skips_empty_text)
+    r.record("build_planner_messages_no_http", test_build_planner_messages_no_outbound_http)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)
+    # SetPlanManager.execute_tool paths
+    await r.record_async("handler_happy_path", test_handler_happy_path_first_try)
+    await r.record_async("handler_retries_emit_event", test_handler_retries_emit_retry_event)
+    await r.record_async("handler_fails_after_retries", test_handler_fails_after_all_retries)
+    await r.record_async("handler_planner_exception", test_handler_planner_exception_yields_error)
+    # _apply_generated_schema
+    await r.record_async("apply_schema_new", test_apply_generated_schema_new_format)
+    await r.record_async("apply_schema_legacy", test_apply_generated_schema_legacy_format)
+    r.record("apply_schema_none", test_apply_generated_schema_none_skips)
     teardown_mock()
     return r.all_passed
 

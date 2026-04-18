@@ -59,7 +59,15 @@ cd back-end && npm run test:coverage
 cd front-end && npm run test:coverage
 ```
 
-### 1g. Blackbox API tests (skip if no back-end/ changes)
+### 1g. Agents code coverage (skip if no agents/ changes)
+
+```bash
+cd agents && bash scripts/run-coverage.sh
+```
+
+Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward 80%.
+
+### 1h. Blackbox API tests (skip if no back-end/ changes)
 
 The blackbox runner auto-starts an isolated backend on a dedicated port:
 
@@ -67,7 +75,7 @@ The blackbox runner auto-starts an isolated backend on a dedicated port:
 cd back-end && bash scripts/run-blackbox-tests.sh
 ```
 
-### 1h. Research lint + structural (skip if no research/ changes)
+### 1i. Research lint + structural (skip if no research/ changes)
 
 Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
 

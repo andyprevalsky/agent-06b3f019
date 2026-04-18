@@ -830,6 +830,1751 @@ async def _run_all_workflow_tests() -> List[tuple]:
 # ===========================================================================
 
 
+# ===========================================================================
+# 4. AgentWorkflow pure-method tests (bare instance, no Temporal env)
+# ===========================================================================
+
+
+def _bare_workflow_instance():
+    """Create a bare AgentWorkflow instance without running @workflow.run."""
+    from workflows.agent_workflow import AgentWorkflow
+
+    return AgentWorkflow()
+
+
+def test_workflow_get_pending_child_workflow_ids_empty():
+    wf = _bare_workflow_instance()
+    assert wf._get_pending_child_workflow_ids() == []
+
+
+def test_workflow_get_pending_child_workflow_ids_populated():
+    wf = _bare_workflow_instance()
+    wf.pending_children = {"child-1", "child-2", "child-missing"}
+    wf.child_workflow_ids = {"child-1": "wf-1", "child-2": "wf-2"}
+    result = set(wf._get_pending_child_workflow_ids())
+    # child-missing isn't in child_workflow_ids so it's skipped
+    assert result == {"wf-1", "wf-2"}
+
+
+def test_workflow_get_children_tokens_empty():
+    wf = _bare_workflow_instance()
+    assert wf._get_children_tokens() == (0, 0)
+
+
+def test_workflow_get_children_tokens_sums_correctly():
+    wf = _bare_workflow_instance()
+    wf.children_tokens_in = {"a": 100, "b": 200, "c": 50}
+    wf.children_tokens_out = {"a": 10, "b": 20}
+    assert wf._get_children_tokens() == (350, 30)
+
+
+def test_workflow_get_status_query():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.goal = "test goal"
+    wf.token_count = 500
+    status = wf.get_status()
+    assert status == {"agent_id": "agent-1", "goal": "test goal", "tokens": 500}
+
+
+def test_workflow_is_paused_query_default_false():
+    wf = _bare_workflow_instance()
+    assert wf.is_paused_query() is False
+
+
+def test_workflow_is_paused_query_true():
+    wf = _bare_workflow_instance()
+    wf.is_paused = True
+    assert wf.is_paused_query() is True
+
+
+def test_workflow_is_cost_limit_reached_query_default():
+    wf = _bare_workflow_instance()
+    assert wf.is_cost_limit_reached_query() is False
+
+
+def test_workflow_parent_state_query():
+    wf = _bare_workflow_instance()
+    wf.is_paused = True
+    wf._cost_limit_reached = True
+    assert wf.parent_state_query() == {"is_paused": True, "is_cost_limit_reached": True}
+
+
+def test_workflow_parent_state_query_all_false():
+    wf = _bare_workflow_instance()
+    assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False}
+
+
+def test_workflow_format_outputs_no_schema_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.output_schema = None
+    assert wf._format_outputs({"x": 1}) == []
+
+
+def test_workflow_format_outputs_no_response_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {"fields": [{"name": "x"}]}
+    assert wf._format_outputs(None) == []
+
+
+def test_workflow_format_outputs_maps_fields():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "summary", "description": "A summary"},
+            {"name": "topics"},  # No description -> fallback to Title Case
+        ]
+    }
+    outputs = wf._format_outputs({"summary": "Hello", "topics": ["AI", "ML"], "extra": "ignored"})
+    assert len(outputs) == 2
+    assert outputs[0] == {"key": "summary", "label": "A summary", "value": "Hello"}
+    assert outputs[1] == {"key": "topics", "label": "Topics", "value": ["AI", "ML"]}
+
+
+def test_workflow_format_outputs_skips_missing_fields():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {"fields": [{"name": "present"}, {"name": "missing"}]}
+    outputs = wf._format_outputs({"present": "yes"})
+    assert len(outputs) == 1
+    assert outputs[0]["key"] == "present"
+
+
+def test_workflow_format_outputs_field_without_name_skipped():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {"fields": [{"description": "no name"}]}
+    outputs = wf._format_outputs({"x": "y"})
+    assert outputs == []
+
+
+def test_workflow_extract_failure_context_empty_context():
+    wf = _bare_workflow_instance()
+    result = wf._extract_failure_context(context=[])
+    assert result["trajectory"] == []
+    assert result["last_reasoning"] is None
+    assert result["last_plan"] is None
+    assert result["steps_taken"] == 0
+    assert result["progress_estimate"] == "No steps completed"
+
+
+def test_workflow_extract_failure_context_assistant_reasoning():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {"role": "ASSISTANT", "text": "Thinking about the problem"},
+        {"role": "ASSISTANT", "text": "Final conclusion"},
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["last_reasoning"] == "Final conclusion"
+
+
+def test_workflow_extract_failure_context_skips_reasoning_metadata():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {"role": "ASSISTANT", "text": "hidden reasoning", "metadata": {"reasoning": True}},
+        {"role": "ASSISTANT", "text": "visible response"},
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["last_reasoning"] == "visible response"
+
+
+def test_workflow_extract_failure_context_truncates_reasoning():
+    wf = _bare_workflow_instance()
+    long_text = "x" * 1000
+    ctx = [{"role": "ASSISTANT", "text": long_text}]
+    result = wf._extract_failure_context(context=ctx)
+    assert len(result["last_reasoning"]) == 500
+
+
+def test_workflow_extract_failure_context_plan_extraction():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "plan set",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {
+                    "tasks": [
+                        {"goal": "Research topic"},
+                        {"goal": "Write report"},
+                    ]
+                },
+            },
+        }
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["last_plan"] == ["Research topic", "Write report"]
+
+
+def test_workflow_extract_failure_context_plan_limits_to_5_tasks():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "set_plan",
+                "toolStatus": "FINISHED",
+                "data": {"tasks": [{"goal": f"task {i}"} for i in range(10)]},
+            },
+        }
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert len(result["last_plan"]) == 5
+
+
+def test_workflow_extract_failure_context_trajectory_dedupe():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-1",  # Duplicate
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "error!",
+            "metadata": {
+                "toolCallId": "tc-2",
+                "toolName": "web_fetch",
+                "toolStatus": "ERROR",
+            },
+        },
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["steps_taken"] == 2
+    assert result["trajectory"][0]["tool_name"] == "web_search"
+    assert result["trajectory"][0]["success"] is True
+    assert result["trajectory"][1]["tool_name"] == "web_fetch"
+    assert result["trajectory"][1]["success"] is False
+    assert result["trajectory"][1]["error_message"] == "error!"
+
+
+def test_workflow_extract_failure_context_skips_internal_tools():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "check_progress",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-2",
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["steps_taken"] == 0
+
+
+def test_workflow_extract_failure_context_skips_in_progress_tools():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "web_search",
+                "toolStatus": "IN_PROGRESS",
+            },
+        },
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert result["steps_taken"] == 0
+
+
+def test_workflow_extract_failure_context_verifier_progress():
+    wf = _bare_workflow_instance()
+    result = wf._extract_failure_context(
+        context=[], verifier_progress=0.75, verifier_reasoning="mostly done"
+    )
+    assert result["progress_estimate"] == "75%"
+    assert result["verifier_reasoning"] == "mostly done"
+
+
+def test_workflow_extract_failure_context_partial_structured_response():
+    wf = _bare_workflow_instance()
+    partial = {"field_a": "done"}
+    result = wf._extract_failure_context(context=[], partial_structured_response=partial)
+    assert result["partial_structured_response"] == partial
+
+
+def test_workflow_extract_failure_context_step_based_progress():
+    wf = _bare_workflow_instance()
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": f"tc-{i}",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        }
+        for i in range(3)
+    ]
+    # Add one failed
+    ctx.append(
+        {
+            "role": "TOOL",
+            "text": "oops",
+            "metadata": {"toolCallId": "tc-err", "toolName": "web_search", "toolStatus": "ERROR"},
+        }
+    )
+    result = wf._extract_failure_context(context=ctx)
+    assert result["steps_taken"] == 4
+    assert result["progress_estimate"] == "3/4 steps succeeded"
+
+
+def test_workflow_extract_failure_context_error_message_truncated():
+    wf = _bare_workflow_instance()
+    long_err = "x" * 500
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": long_err,
+            "metadata": {"toolCallId": "tc-1", "toolName": "web_search", "toolStatus": "ERROR"},
+        }
+    ]
+    result = wf._extract_failure_context(context=ctx)
+    assert len(result["trajectory"][0]["error_message"]) == 200
+
+
+# ===========================================================================
+# 5. AgentWorkflow signal-handler + cost-tracking tests with fake workflow module
+# ===========================================================================
+
+
+class _FakeWorkflowLogger:
+    def __init__(self):
+        self.records: List[tuple] = []
+
+    def info(self, msg, *args, **kwargs):
+        self.records.append(("info", str(msg)))
+
+    def warning(self, msg, *args, **kwargs):
+        self.records.append(("warning", str(msg)))
+
+    def error(self, msg, *args, **kwargs):
+        self.records.append(("error", str(msg)))
+
+    def debug(self, msg, *args, **kwargs):
+        self.records.append(("debug", str(msg)))
+
+
+class _FakeExternalHandle:
+    def __init__(self, wf_id: str, signals: List[tuple]):
+        self.wf_id = wf_id
+        self._signals = signals
+
+    async def signal(self, name, data=None):
+        self._signals.append((self.wf_id, name, data))
+
+
+class _FakeWorkflowModule:
+    """Stand-in for temporalio.workflow inside a workflow method. Captures activities + signals."""
+
+    def __init__(self):
+        self.logger = _FakeWorkflowLogger()
+        self.activity_calls: List[tuple] = []  # (fn_name, args)
+        self.signal_calls: List[tuple] = []  # (wf_id, name, data)
+        self.activity_fail_for: set = set()  # fn_names that should raise
+        self.activity_returns: Dict[str, Any] = {}  # fn_name -> return value override
+        self.now_value = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        fn_name = getattr(fn, "__name__", str(fn))
+        self.activity_calls.append((fn_name, args))
+        if fn_name in self.activity_fail_for:
+            raise RuntimeError(f"{fn_name} failed")
+        if fn_name in self.activity_returns:
+            return self.activity_returns[fn_name]
+        return None
+
+    def get_external_workflow_handle(self, wf_id):
+        return _FakeExternalHandle(wf_id, self.signal_calls)
+
+    def now(self):
+        return self.now_value
+
+    def uuid4(self):
+        return "00000000-0000-0000-0000-000000000001"
+
+
+def _patch_workflow(fake: _FakeWorkflowModule):
+    """Swap workflows.agent_workflow.workflow with a fake; returns original."""
+    import workflows.agent_workflow as m
+
+    original = m.workflow
+    m.workflow = fake
+    return original
+
+
+def _restore_workflow(original):
+    import workflows.agent_workflow as m
+
+    m.workflow = original
+
+
+async def test_workflow_signal_pause_sets_paused_flag():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause()
+        assert wf.is_paused is True
+        # Should have tried to broadcast tree state (via update_agent_tree_state activity)
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "update_agent_tree_state" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_pause_cascades_to_children():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.pending_children = {"c1", "c2"}
+    wf.child_workflow_ids = {"c1": "wfc1", "c2": "wfc2"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.pause()
+        # Both children should have received "pause" signal
+        cascaded = [s for s in fake.signal_calls if s[1] == "pause"]
+        assert {s[0] for s in cascaded} == {"wfc1", "wfc2"}
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_resume_clears_paused_flag():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    # No parent_workflow_id -> resume shouldn't be blocked
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.resume()
+        assert wf.is_paused is False
+        assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_receive_user_response_plain_string():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("hello plain")
+        assert wf._last_signal_response == "hello plain"
+        assert wf._has_new_messages is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_receive_user_response_with_request_id():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response(json.dumps({"request_id": "req-123", "response": "yes"}))
+        assert wf._signal_responses.get("req-123") == "yes"
+        assert wf._has_new_messages is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_receive_user_response_json_without_request_id():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response('{"unrelated": "data"}')
+        # Falls through to plain string path
+        assert wf._last_signal_response == '{"unrelated": "data"}'
+        assert wf._has_new_messages is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_signup_completed_and_dismissed():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.signup_completed()
+        assert wf._signup_completed is True
+        await wf.signup_dismissed()
+        assert wf._signup_dismissed is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_child_cost_update_aggregates():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.own_cost_cents = 10.0
+    wf.tokens_in = 100
+    wf.tokens_out = 50
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.child_cost_update(
+            {
+                "child_agent_id": "child-1",
+                "subtree_cost_cents": 25.0,
+                "subtree_tokens_in": 500,
+                "subtree_tokens_out": 200,
+            }
+        )
+        assert wf.children_cost_cents["child-1"] == 25.0
+        assert wf.children_tokens_in["child-1"] == 500
+        assert wf.children_tokens_out["child-1"] == 200
+        # subtree_cost_cents should be own + children_sum
+        assert wf.subtree_cost_cents == 35.0
+        assert wf.tree_tokens_in == 600
+        assert wf.tree_tokens_out == 250
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_child_progress_tracks_deltas():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.child_tool_ids = {"child-1": "tool-call-1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.child_progress(
+            {
+                "child_agent_id": "child-1",
+                "progress": 0.5,
+                "tokens_in": 100,
+                "tokens_out": 50,
+                "token_count": 150,
+                "goal": "subtask",
+            }
+        )
+        assert wf.tokens_in == 100
+        assert wf.tokens_out == 50
+        assert wf.token_count == 150
+
+        # Second progress update with higher cumulative — deltas should apply
+        await wf.child_progress(
+            {
+                "child_agent_id": "child-1",
+                "progress": 0.9,
+                "tokens_in": 250,
+                "tokens_out": 120,
+                "token_count": 370,
+                "goal": "subtask",
+            }
+        )
+        assert wf.tokens_in == 250
+        assert wf.tokens_out == 120
+        assert wf.token_count == 370
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_child_completed_success():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.pending_children = {"child-1"}
+    wf.child_tool_ids = {"child-1": "tool-call-1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.child_completed(
+            {
+                "child_agent_id": "child-1",
+                "result": {
+                    "status": "completed",
+                    "goal": "subtask",
+                    "summary": "done",
+                    "tool_counts": {"web_search": 2, "web_fetch": 1},
+                    "structured_response": {"x": 1},
+                },
+            }
+        )
+        assert "child-1" not in wf.pending_children
+        assert wf.child_tool_counts == {"web_search": 2, "web_fetch": 1}
+        assert wf.child_results["child-1"]["status"] == "completed"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_child_completed_failure():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.pending_children = {"child-1"}
+    wf.child_tool_ids = {"child-1": "tool-call-1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.child_completed(
+            {
+                "child_agent_id": "child-1",
+                "result": {
+                    "status": "failed",
+                    "goal": "subtask",
+                    "error_reason": "timeout",
+                    "summary": "sub-agent failed",
+                },
+            }
+        )
+        assert "child-1" not in wf.pending_children
+        # Failure path doesn't aggregate tool counts
+        assert wf.child_tool_counts == {}
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_cost_limit_reached_sets_flags():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.cost_limit_reached()
+        assert wf._cost_limit_reached is True
+        assert wf.is_paused is True
+        assert wf._paused_by_parent is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_price_limit_increased_clears_limit():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._cost_limit_reached = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.price_limit_increased({"new_limit_cents": 500})
+        assert wf.price_limit_cents == 500
+        assert wf._cost_limit_reached is False
+        assert wf.is_paused is False
+        assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_tokens_and_cost_updates_counters():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_tokens_and_cost({"token_count": 250, "context_size": 12000})
+        assert wf.token_count == 250
+        assert wf.context_size == 12000
+
+        # Subsequent call adds to token_count but replaces context_size
+        await wf._track_tokens_and_cost({"token_count": 100, "context_size": 15000})
+        assert wf.token_count == 350
+        assert wf.context_size == 15000
+
+        # Missing context_size leaves it unchanged
+        await wf._track_tokens_and_cost({"token_count": 10})
+        assert wf.token_count == 360
+        assert wf.context_size == 15000
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_llm_cost_calculates_and_persists():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.model = "claude-3-5-sonnet"
+    wf.input_cents_per_1k = 0.3  # cents per 1k
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_llm_cost(tokens_in=1000, tokens_out=500, call_site="completion_summary")
+        # cost = (1000 * 0.3 / 1000) + (500 * 1.5 / 1000) = 0.3 + 0.75 = 1.05
+        assert abs(wf.own_cost_cents - 1.05) < 1e-6
+        assert wf.tokens_in == 1000
+        assert wf.tokens_out == 500
+        # save_tool_usage activity should have been invoked
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_llm_cost_zero_when_no_pricing():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_llm_cost(tokens_in=1000, tokens_out=500, call_site="x")
+        # No cost, no save_tool_usage activity
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" not in activity_names
+        assert wf.own_cost_cents == 0.0
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_usage_empty_is_no_op():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_usage(None)
+        await wf._track_usage({})
+        assert wf.own_cost_cents == 0.0
+        assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_usage_service_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        usage = {"service": [{"cost_cents": 2.5, "provider": "Exa"}]}
+        await wf._track_usage(usage, tool_name="web_search")
+        assert abs(wf.own_cost_cents - 2.5) < 1e-6
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_cost_and_signal_parent_root_checks_limit():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root"
+    wf.user_id = "u"
+    wf.parent_workflow_id = None
+    wf.own_cost_cents = 50.0
+    wf.children_cost_cents = {"c1": 60.0}
+    wf.tokens_in = 100
+    wf.tokens_out = 50
+    wf.price_limit_cents = 100  # Under 50+60=110 → should trip
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_cost_and_signal_parent()
+        assert wf.subtree_cost_cents == 110.0
+        assert wf._cost_limit_reached is True
+        assert wf.is_paused is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_cost_and_signal_parent_non_root_signals():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child"
+    wf.user_id = "u"
+    wf.parent_workflow_id = "parent-wf-id"
+    wf.own_cost_cents = 5.0
+    wf.children_cost_cents = {}
+    wf.tokens_in = 100
+    wf.tokens_out = 50
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_cost_and_signal_parent()
+        # Should have sent child_cost_update to parent
+        assert any(s[1] == "child_cost_update" for s in fake.signal_calls)
+        assert wf._cost_limit_reached is False  # non-root doesn't check limit
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_cost_limit_no_op_when_below():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.parent_workflow_id = None
+    wf.subtree_cost_cents = 10.0
+    wf.price_limit_cents = 100
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_cost_limit()
+        assert wf._cost_limit_reached is False
+        assert wf.is_paused is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_cost_limit_skips_non_root():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent"
+    wf.subtree_cost_cents = 999
+    wf.price_limit_cents = 10
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_cost_limit()
+        assert wf._cost_limit_reached is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_tree_state_skips_without_bus():
+    wf = _bare_workflow_instance()
+    wf.bus_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_tree_state(status="ACTIVE")
+        # No activity calls because bus_id missing
+        assert fake.activity_calls == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_update_tree_state_with_bus_broadcasts():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.bus_id = "bus-1"
+    wf.goal = "do the thing"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_tree_state(status="PAUSED", progress=0.5)
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "update_agent_tree_state" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_persist_tree_cost_executes_activity():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.subtree_cost_cents = 7.5
+    wf.own_cost_cents = 3.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._persist_tree_cost()
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "update_agent_tree_cost_activity" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_query_parent_state_returns_empty_without_parent():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._query_parent_state()
+        assert result == {}
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_paused_reflects_flag():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = None  # Skip parent state
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        assert await wf._check_paused() is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_refresh_claude_token_still_fresh_returns_early():
+    wf = _bare_workflow_instance()
+    wf.claude_max_token = "existing-token"
+    fake = _FakeWorkflowModule()
+    wf.claude_max_token_fetched_at = fake.now_value  # Age = 0 < 5min
+    original = _patch_workflow(fake)
+    try:
+        await wf._refresh_claude_token("user-1")
+        # No activity calls because token fresh
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "fetch_claude_max_token_activity" not in activity_names
+        assert wf.claude_max_token == "existing-token"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_calculates_cost_with_pricing():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "claude-sonnet-4"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=1000,
+            tokens_out_delta=500,
+            actual_model=None,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            call_site="test",
+        )
+        assert wf.tokens_in == 1000
+        assert wf.tokens_out == 500
+        assert wf.own_cost_cents > 0
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_no_pricing_still_logs():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=100, tokens_out_delta=50, actual_model=None, call_site="x"
+        )
+        assert wf.tokens_in == 100
+        assert wf.tokens_out == 50
+        assert wf.own_cost_cents == 0.0
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_wait_for_messages_timeout_returns_false():
+    # When _wait_for_messages times out and no new messages, returns False.
+    # Use a fake workflow.wait_condition that raises asyncio.TimeoutError.
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+
+    async def fake_wait_condition(cond, timeout=None):
+        raise asyncio.TimeoutError()
+
+    fake.wait_condition = fake_wait_condition
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._wait_for_messages()
+        assert result is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_get_model_pricing_returns_primary_when_matches():
+    wf = _bare_workflow_instance()
+    wf.model = "claude-sonnet-4"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        pricing = await wf._get_model_pricing("claude-sonnet-4")
+        assert pricing == {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5}
+        # No fetch activity because primary pricing is cached
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "fetch_model_pricing" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_get_model_pricing_uses_cache():
+    wf = _bare_workflow_instance()
+    wf.model = "other-model"
+    wf.model_pricing_cache["cached-model"] = {"input_cents_per_1k": 1.0, "output_cents_per_1k": 2.0}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        pricing = await wf._get_model_pricing("cached-model")
+        assert pricing == {"input_cents_per_1k": 1.0, "output_cents_per_1k": 2.0}
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "fetch_model_pricing" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_failed_signals_parent_with_context():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.user_id = "u-1"
+    wf.goal = "fail goal"
+    wf.parent_workflow_id = "parent-wf"
+    wf.token_count = 10
+    wf.context_size = 500
+    wf.tokens_in = 100
+    wf.tokens_out = 50
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
+    original = _patch_workflow(fake)
+    try:
+        ctx = [{"role": "USER", "text": "orig"}]
+        await wf._mark_failed(
+            context=ctx,
+            reason="max_iterations",
+            message="Max Steps Reached",
+            verifier_progress=0.5,
+            verifier_reasoning="halfway",
+        )
+        # Should call update_agent_status and tree state
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "update_agent_status" in activity_names
+        assert "post_agent_message" in activity_names
+        # Signal to parent
+        signal_names = [s[1] for s in fake.signal_calls]
+        assert "child_completed" in signal_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_failed_no_parent_no_signal():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-1"
+    wf.user_id = "u-1"
+    wf.goal = "root goal"
+    wf.parent_workflow_id = None
+    wf.token_count = 10
+    wf.tokens_in = 50
+    wf.tokens_out = 20
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_failed(
+            context=[],
+            reason="error",
+            message="Something broke",
+        )
+        # No child_completed signal (no parent)
+        signal_names = [s[1] for s in fake.signal_calls]
+        assert "child_completed" not in signal_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_incomplete_max_iterations():
+    """_handle_incomplete calls _mark_failed and returns failed result for max_iterations."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.parent_workflow_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._handle_incomplete(
+            {"status": "max_iterations", "context": [], "verifier_progress": 0.5},
+            phase="EXECUTE",
+        )
+        assert result["status"] == "failed"
+        assert result["reason"] == "max_iterations"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_incomplete_error():
+    """_handle_incomplete handles error status."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.parent_workflow_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._handle_incomplete(
+            {"status": "error", "context": [], "message": "Bad happened"},
+            phase="EXECUTE",
+        )
+        assert result["status"] == "failed"
+        assert result["reason"] == "error"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_incomplete_unknown_passthrough():
+    """_handle_incomplete returns unknown status dict as-is."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._handle_incomplete({"status": "weird", "foo": "bar"}, phase="PLAN")
+        assert result == {"status": "weird", "foo": "bar"}
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_credits_no_credits_pauses():
+    """_check_credits flips is_paused=True when credits depleted."""
+    wf = _bare_workflow_instance()
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "check_user_usage":
+            return {"has_credits": False}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_credits()
+        assert wf.is_paused is True
+        assert wf._has_credits is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_credits_has_credits_no_pause():
+    """_check_credits sets _has_credits=True and does not pause when credits ok."""
+    wf = _bare_workflow_instance()
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "check_user_usage":
+            return {"has_credits": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_credits()
+        assert wf.is_paused is False
+        assert wf._has_credits is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_credits_on_exception_continues():
+    """_check_credits warns and continues if activity raises."""
+    wf = _bare_workflow_instance()
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        raise RuntimeError("credits endpoint down")
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_credits()
+        # No crash - defaults unchanged
+        assert wf.is_paused is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_executes_activity():
+    """_post_message forwards to post_agent_message activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.message_count = 0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("hello", "ASSISTANT", {"toolCallId": "tc-1"})
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "post_agent_message" in activity_names
+        assert wf.message_count == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_failure_logs_warning():
+    """_post_message swallows errors from activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("post_agent_message")
+    original = _patch_workflow(fake)
+    try:
+        # Should not raise
+        await wf._post_message("x", "USER", {})
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_tool_event_forwards_to_helper():
+    """_handle_tool_event invokes handle_tool_event helper with our execute_activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+
+    import workflows.agent_workflow as m
+    from tools.base import ToolEvent, EventType, MessageStatus
+
+    orig_handle_tool_event = m.handle_tool_event
+    called = {"n": 0}
+
+    async def fake_handle(**kwargs):
+        called["n"] += 1
+        assert kwargs.get("agent_id") == "a"
+        assert kwargs.get("user_id") == "u"
+
+    m.handle_tool_event = fake_handle
+    original = _patch_workflow(fake)
+    try:
+        evt = ToolEvent(
+            type=EventType.POST_MESSAGE,
+            message="hi",
+            status=MessageStatus.IN_PROGRESS,
+        )
+        await wf._handle_tool_event(evt, "tc-1", "web_search")
+        assert called["n"] == 1
+    finally:
+        _restore_workflow(original)
+        m.handle_tool_event = orig_handle_tool_event
+
+
+async def test_workflow_check_parent_state_parent_paused_inherits():
+    """_check_parent_state inherits pause when parent is paused."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"is_paused": True, "is_cost_limit_reached": False}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf.is_paused is True
+        assert wf._paused_by_parent is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_parent_cost_limited_inherits():
+    """_check_parent_state inherits cost limit when parent is cost-limited."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"is_paused": False, "is_cost_limit_reached": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._cost_limit_reached is True
+        assert wf.is_paused is True
+        assert wf._paused_by_parent is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_parent_resumes_clears_inherit():
+    """_check_parent_state unpauses a parent-paused child when parent resumes."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"is_paused": False, "is_cost_limit_reached": False}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf.is_paused is False
+        assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_happy_path():
+    """_mark_complete posts summary, updates tree, signals parent."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-complete-1"
+    wf.user_id = "u-mc"
+    wf.goal = "finish goal"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = "parent-mc"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 100
+    wf.tokens_in = 70
+    wf.tokens_out = 30
+    wf.context_size = 500
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    # Stub generate_completion_summary to return a summary dict
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "All done",
+        "tool_counts": {"web_search": 2},
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[{"role": "USER", "text": "go"}], structured_response={"answer": "42"})
+        names = [c[0] for c in fake.activity_calls]
+        assert "generate_completion_summary" in names
+        assert "post_agent_message" in names
+        assert "mark_finished" in names
+        # Child-completed signal to parent
+        signal_names = [s[1] for s in fake.signal_calls]
+        assert "child_completed" in signal_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_no_parent_no_signal():
+    """_mark_complete without parent does not signal."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-mc"
+    wf.user_id = "u-mc"
+    wf.goal = "root goal"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 0
+    wf.tokens_in = 0
+    wf.tokens_out = 0
+    wf.context_size = 0
+    wf.child_tool_counts = {}
+    wf.output_schema = None
+    wf.agent_source = "WEB"
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_agent_config"] = {"response_schema": None}
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "root done",
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response=None)
+        signal_names = [s[1] for s in fake.signal_calls]
+        assert "child_completed" not in signal_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_format_outputs_with_schema():
+    """_format_outputs returns structured outputs array from response."""
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "answer", "type": "string"},
+            {"name": "count", "type": "number"},
+        ]
+    }
+    outputs = wf._format_outputs({"answer": "42", "count": 7})
+    # Returns a list of {label, value, type} or similar
+    assert isinstance(outputs, list)
+    # Should have at least 2 entries for the two fields
+    assert len(outputs) >= 1
+
+
+async def test_workflow_format_outputs_empty_without_schema():
+    """_format_outputs handles missing schema gracefully."""
+    wf = _bare_workflow_instance()
+    wf.output_schema = None
+    outputs = wf._format_outputs({"answer": "anything"})
+    assert isinstance(outputs, list)
+
+
+async def test_workflow_format_outputs_none_response():
+    """_format_outputs returns [] for None structured_response."""
+    wf = _bare_workflow_instance()
+    wf.output_schema = {"fields": [{"name": "x", "type": "string"}]}
+    outputs = wf._format_outputs(None)
+    assert outputs == []
+
+
+async def test_workflow_extract_failure_context_basic():
+    """_extract_failure_context extracts recent context into failure report."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "fc-1"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
+    original = _patch_workflow(fake)
+    try:
+        ctx = [
+            {"role": "USER", "text": "goal"},
+            {"role": "ASSISTANT", "text": "thinking"},
+            {"role": "TOOL", "text": "result", "metadata": {"toolName": "web_search"}},
+        ]
+        result = wf._extract_failure_context(ctx, verifier_progress=0.4, verifier_reasoning="halfway")
+        # Should return some structured failure context
+        assert result is not None
+    finally:
+        _restore_workflow(original)
+
+
+# ===========================================================================
+# W3-A / W3-D additional coverage (fetch_shared_memory, poll_messages,
+# execute_tool, refresh_claude_token, get_model_pricing, on_tokens branches)
+# ===========================================================================
+
+
+async def test_workflow_fetch_shared_memory_no_bus_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.bus_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._fetch_shared_memory()
+        assert result == ""
+        # No activity call when bus_id missing
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "get_shared_memory" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_fetch_shared_memory_formats_entries():
+    wf = _bare_workflow_instance()
+    wf.bus_id = "bus-1"
+    wf.shared_memory_hash = None
+    wf.context_gates = {}  # Default: all gates open (includes shared_files)
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["get_shared_memory"] = {
+        "content": [
+            {
+                "timestamp": "2025-01-01T12:00:00",
+                "type": "USER_MESSAGE",
+                "content": "hi",
+                "files": [{"original_filename": "a.txt", "mime_type": "text/plain"}],
+            }
+        ],
+        "hash": "h-1",
+    }
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._fetch_shared_memory()
+        assert "USER_MESSAGE" in result, f"Got: {result!r}"
+        assert "hi" in result, f"Got: {result!r}"
+        # files included because shared_files gate defaults to True
+        assert "a.txt" in result, f"Got: {result!r}"
+        assert wf.shared_memory_hash == "h-1"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_fetch_shared_memory_exception_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.bus_id = "bus-1"
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("get_shared_memory")
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._fetch_shared_memory()
+        assert result == ""
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_poll_messages_merges_and_sorts():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.context = [{"id": "m0", "timestamp": "2025-01-01T00:00:00"}]
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = [
+        {"id": "m2", "timestamp": "2025-01-01T00:00:02", "role": "USER"},
+        {"id": "m1", "timestamp": "2025-01-01T00:00:01", "role": "USER"},
+    ]
+    original = _patch_workflow(fake)
+    try:
+        msgs = await wf._poll_messages(datetime(2025, 1, 1, tzinfo=timezone.utc))
+        assert len(msgs) == 2
+        # Context is sorted by timestamp ascending
+        assert [m.get("id") for m in wf.context] == ["m0", "m1", "m2"]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_poll_messages_exception_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("poll_new_messages")
+    original = _patch_workflow(fake)
+    try:
+        msgs = await wf._poll_messages(datetime(2025, 1, 1, tzinfo=timezone.utc))
+        assert msgs == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_unknown_tool_returns_error():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._execute_tool("not_a_tool", {}, "call-1")
+        assert result.get("error") is True
+        assert "Unknown tool" in result.get("message", "")
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.current_phase = "PLAN"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._execute_tool(
+            "spawn_agent", {"type": "browser", "goal": "x"}, "call-1"
+        )
+        assert result.get("error") is True
+        assert "PLAN" in result.get("message", "") or "explore" in result.get("message", "")
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
+    wf = _bare_workflow_instance()
+    wf.claude_max_token = None
+    wf.claude_max_token_fetched_at = None
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_claude_max_token_activity"] = {
+        "accessToken": "new-tok",
+        "source": "user",
+        "poolTokenId": None,
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._refresh_claude_token("user-1")
+        assert wf.claude_max_token == "new-tok"
+        assert wf.claude_max_token_source == "user"
+        assert wf.claude_max_token_fetched_at == fake.now_value
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_refresh_claude_token_result_none_clears_token():
+    wf = _bare_workflow_instance()
+    wf.claude_max_token = "old-tok"
+    wf.claude_max_token_source = "pool"
+    wf.claude_max_token_fetched_at = None
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_claude_max_token_activity"] = None
+    original = _patch_workflow(fake)
+    try:
+        await wf._refresh_claude_token("user-1")
+        assert wf.claude_max_token is None
+        assert wf.claude_max_token_source is None
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_refresh_claude_token_exception_logged_no_raise():
+    wf = _bare_workflow_instance()
+    wf.claude_max_token = None
+    wf.claude_max_token_fetched_at = None
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("fetch_claude_max_token_activity")
+    original = _patch_workflow(fake)
+    try:
+        # Must not raise
+        await wf._refresh_claude_token("user-1")
+        # Token stays None
+        assert wf.claude_max_token is None
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_get_model_pricing_fetches_and_caches():
+    wf = _bare_workflow_instance()
+    wf.model = "workflow-primary"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_model_pricing"] = {
+        "input_cents_per_1k": 0.5,
+        "output_cents_per_1k": 2.0,
+    }
+    original = _patch_workflow(fake)
+    try:
+        pricing = await wf._get_model_pricing("new-model")
+        assert pricing == {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.0}
+        # Second call hits cache (no second activity)
+        pricing2 = await wf._get_model_pricing("new-model")
+        assert pricing2 == pricing
+        fetches = [c for c in fake.activity_calls if c[0] == "fetch_model_pricing"]
+        assert len(fetches) == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_get_model_pricing_exception_returns_none():
+    wf = _bare_workflow_instance()
+    wf.model = "primary"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("fetch_model_pricing")
+    original = _patch_workflow(fake)
+    try:
+        pricing = await wf._get_model_pricing("unknown-model")
+        assert pricing is None
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
+    """When claude_token is set but actual_model is non-claude and error=auth_error,
+    _on_tokens marks the token rate-limited and clears it."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.claude_max_token = "some-token"
+    wf.claude_max_token_source = "pool"
+    wf.claude_max_token_pool_id = "pool-id-1"
+    wf.claude_max_token_fetched_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    # After rotation, refresh returns None so token stays cleared
+    fake.activity_returns["fetch_claude_max_token_activity"] = None
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=10,
+            tokens_out_delta=5,
+            actual_model="gemini/gemini-2.5-pro",  # non-claude
+            call_site="test",
+            claude_token_error="auth_error",
+        )
+        # Token should be cleared
+        assert wf.claude_max_token is None
+        assert wf.claude_max_token_source is None
+        # mark activity executed
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "mark_claude_token_rate_limited_activity" in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_transient_error_keeps_claude_token():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.claude_max_token = "keep-me"
+    wf.claude_max_token_source = "user"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="gemini/gemini-2.5-pro",
+            call_site="test",
+            claude_token_error="stall",  # transient - keep token
+        )
+        assert wf.claude_max_token == "keep-me"
+        # mark activity NOT executed
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "mark_claude_token_rate_limited_activity" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_no_parent_returns_early():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = None
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        # Should return without invoking any activities
+        await wf._check_parent_state()
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "query_parent_state_activity" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_query_parent_state_exception_returns_empty():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    fake = _FakeWorkflowModule()
+    fake.activity_fail_for.add("query_parent_state_activity")
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._query_parent_state()
+        assert result == {}
+    finally:
+        _restore_workflow(original)
+
+
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
@@ -845,8 +2590,111 @@ async def run_all_tests():
     r.record("extract_error_simple", test_extract_error_message_simple)
     r.record("extract_error_chained", test_extract_error_message_chained)
 
+    # AgentWorkflow pure-method tests
+    r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)
+    r.record("wf_pending_children_populated", test_workflow_get_pending_child_workflow_ids_populated)
+    r.record("wf_children_tokens_empty", test_workflow_get_children_tokens_empty)
+    r.record("wf_children_tokens_sums", test_workflow_get_children_tokens_sums_correctly)
+    r.record("wf_get_status_query", test_workflow_get_status_query)
+    r.record("wf_is_paused_default", test_workflow_is_paused_query_default_false)
+    r.record("wf_is_paused_true", test_workflow_is_paused_query_true)
+    r.record("wf_cost_limit_reached_default", test_workflow_is_cost_limit_reached_query_default)
+    r.record("wf_parent_state_query", test_workflow_parent_state_query)
+    r.record("wf_parent_state_all_false", test_workflow_parent_state_query_all_false)
+    r.record("wf_format_outputs_no_schema", test_workflow_format_outputs_no_schema_returns_empty)
+    r.record("wf_format_outputs_no_response", test_workflow_format_outputs_no_response_returns_empty)
+    r.record("wf_format_outputs_maps_fields", test_workflow_format_outputs_maps_fields)
+    r.record("wf_format_outputs_skips_missing", test_workflow_format_outputs_skips_missing_fields)
+    r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_skipped)
+    r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
+    r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
+    r.record("wf_efc_skips_reasoning_meta", test_workflow_extract_failure_context_skips_reasoning_metadata)
+    r.record("wf_efc_truncates_reasoning", test_workflow_extract_failure_context_truncates_reasoning)
+    r.record("wf_efc_plan_extraction", test_workflow_extract_failure_context_plan_extraction)
+    r.record("wf_efc_plan_limit_5", test_workflow_extract_failure_context_plan_limits_to_5_tasks)
+    r.record("wf_efc_trajectory_dedupe", test_workflow_extract_failure_context_trajectory_dedupe)
+    r.record("wf_efc_skips_internal_tools", test_workflow_extract_failure_context_skips_internal_tools)
+    r.record("wf_efc_skips_in_progress", test_workflow_extract_failure_context_skips_in_progress_tools)
+    r.record("wf_efc_verifier_progress", test_workflow_extract_failure_context_verifier_progress)
+    r.record("wf_efc_partial_structured", test_workflow_extract_failure_context_partial_structured_response)
+    r.record("wf_efc_step_based_progress", test_workflow_extract_failure_context_step_based_progress)
+    r.record("wf_efc_err_truncated", test_workflow_extract_failure_context_error_message_truncated)
+
     # Async tests
     await r.record_async("poll_and_update_context", test_poll_and_update_context)
+
+    # Signal-handler + cost-tracking tests (fake workflow module)
+    await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
+    await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
+    await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
+    await r.record_async("wf_signal_recv_user_plain", test_workflow_signal_receive_user_response_plain_string)
+    await r.record_async("wf_signal_recv_user_req_id", test_workflow_signal_receive_user_response_with_request_id)
+    await r.record_async("wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id)
+    await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
+    await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)
+    await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
+    await r.record_async("wf_signal_child_completed_success", test_workflow_signal_child_completed_success)
+    await r.record_async("wf_signal_child_completed_failure", test_workflow_signal_child_completed_failure)
+    await r.record_async("wf_signal_cost_limit_reached", test_workflow_signal_cost_limit_reached_sets_flags)
+    await r.record_async("wf_signal_price_limit_inc", test_workflow_signal_price_limit_increased_clears_limit)
+    await r.record_async("wf_track_tokens_and_cost", test_workflow_track_tokens_and_cost_updates_counters)
+    await r.record_async("wf_track_llm_cost", test_workflow_track_llm_cost_calculates_and_persists)
+    await r.record_async("wf_track_llm_cost_no_pricing", test_workflow_track_llm_cost_zero_when_no_pricing)
+    await r.record_async("wf_track_usage_empty", test_workflow_track_usage_empty_is_no_op)
+    await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
+    await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
+    await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
+    await r.record_async("wf_check_cost_limit_below", test_workflow_check_cost_limit_no_op_when_below)
+    await r.record_async("wf_check_cost_limit_non_root", test_workflow_check_cost_limit_skips_non_root)
+    await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
+    await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
+    await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
+    await r.record_async("wf_query_parent_state_empty", test_workflow_query_parent_state_returns_empty_without_parent)
+    await r.record_async("wf_check_paused", test_workflow_check_paused_reflects_flag)
+    await r.record_async("wf_refresh_claude_token_fresh", test_workflow_refresh_claude_token_still_fresh_returns_early)
+    await r.record_async("wf_on_tokens_with_pricing", test_workflow_on_tokens_calculates_cost_with_pricing)
+    await r.record_async("wf_on_tokens_no_pricing", test_workflow_on_tokens_no_pricing_still_logs)
+    await r.record_async("wf_wait_for_messages_timeout", test_workflow_wait_for_messages_timeout_returns_false)
+    await r.record_async("wf_get_model_pricing_primary", test_workflow_get_model_pricing_returns_primary_when_matches)
+    await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)
+    await r.record_async("wf_mark_failed_signals_parent", test_workflow_mark_failed_signals_parent_with_context)
+    await r.record_async("wf_mark_failed_no_parent", test_workflow_mark_failed_no_parent_no_signal)
+    await r.record_async("wf_handle_incomplete_max_iterations", test_workflow_handle_incomplete_max_iterations)
+    await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
+    await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
+    await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
+    await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
+    await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)
+    await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)
+    await r.record_async("wf_post_message_failure", test_workflow_post_message_failure_logs_warning)
+    await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
+    await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
+    await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
+    await r.record_async("wf_check_parent_resumes", test_workflow_check_parent_state_parent_resumes_clears_inherit)
+    await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
+    await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)
+    await r.record_async("wf_format_outputs_no_schema", test_workflow_format_outputs_empty_without_schema)
+    await r.record_async("wf_format_outputs_none_response", test_workflow_format_outputs_none_response)
+    await r.record_async("wf_extract_failure_context", test_workflow_extract_failure_context_basic)
+
+    # W3-A/W3-D additional coverage tests
+    await r.record_async("wf_fetch_shared_memory_no_bus", test_workflow_fetch_shared_memory_no_bus_returns_empty)
+    await r.record_async("wf_fetch_shared_memory_formats", test_workflow_fetch_shared_memory_formats_entries)
+    await r.record_async("wf_fetch_shared_memory_exception", test_workflow_fetch_shared_memory_exception_returns_empty)
+    await r.record_async("wf_poll_messages_merges", test_workflow_poll_messages_merges_and_sorts)
+    await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_returns_empty)
+    await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
+    await r.record_async("wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn)
+    await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
+    await r.record_async("wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token)
+    await r.record_async("wf_refresh_claude_token_exception", test_workflow_refresh_claude_token_exception_logged_no_raise)
+    await r.record_async("wf_get_model_pricing_fetches_caches", test_workflow_get_model_pricing_fetches_and_caches)
+    await r.record_async("wf_get_model_pricing_exception", test_workflow_get_model_pricing_exception_returns_none)
+    await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
+    await r.record_async("wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token)
+    await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
+    await r.record_async("wf_query_parent_state_exception", test_workflow_query_parent_state_exception_returns_empty)
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()

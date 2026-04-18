@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import (
     BlackboxResult,
@@ -86,12 +86,353 @@ async def test_create_approval_minimal_params():
     assert "metadata" not in body
 
 
+async def test_user_rejected_error_defaults():
+    """UserRejectedError has default rejection message of empty string."""
+    from domains.request_user_approval.types import UserRejectedError
+
+    e = UserRejectedError()
+    assert e.rejection_message == ""
+    assert "rejected" in str(e).lower()
+
+
+async def test_user_rejected_error_custom():
+    """UserRejectedError carries rejection_message."""
+    from domains.request_user_approval.types import UserRejectedError
+
+    e = UserRejectedError("no way", rejection_message="too expensive")
+    assert e.rejection_message == "too expensive"
+
+
+async def test_manager_singleton():
+    """get_manager returns same instance each call."""
+    from domains.request_user_approval.service import get_manager
+
+    a = get_manager()
+    b = get_manager()
+    assert a is b
+
+
+# ── RequestUserApprovalManager.execute_tool paths ──────────────────
+
+
+class _FakeWFModule:
+    """Stand-in for temporalio.workflow used by service."""
+
+    def __init__(self, activity_results=None, wait_condition_sets_context=None):
+        self._activity_results = activity_results or {}
+        self._wait_sets_context = wait_condition_sets_context  # callable to mutate wf
+        self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
+
+    def info(self):
+        return type("I", (), {"workflow_id": "wf-123"})()
+
+    def uuid4(self):
+        return "tool-call-uuid"
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "?")
+        if name in self._activity_results:
+            value = self._activity_results[name]
+            if isinstance(value, Exception):
+                raise value
+            if callable(value):
+                return value()
+            return value
+        raise KeyError(f"No fake result for activity: {name}")
+
+    async def wait_condition(self, predicate, timeout=None):
+        if self._wait_sets_context is not None:
+            self._wait_sets_context()
+        return
+
+
+def _patch_service_workflow(fake):
+    import domains.request_user_approval.service as s
+
+    original = s.workflow
+    s.workflow = fake
+
+    def restore():
+        s.workflow = original
+
+    return restore
+
+
+class _WFInstance:
+    def __init__(self, user_id="user-1", agent_id="agent-1", *, context=None):
+        self.user_id = user_id
+        self.agent_id = agent_id
+        self.context = context if context is not None else []
+        self._signal_responses = {}
+        self.parent_workflow_id = None
+        self.agent_source = "WEB"
+        self.handled_events = []
+
+    async def _handle_tool_event(self, event, tool_call_id, tool_name):
+        self.handled_events.append((event, tool_call_id, tool_name))
+
+    async def _poll_messages(self, since):
+        return None
+
+
+async def _collect(gen):
+    out = []
+    async for e in gen:
+        out.append(e)
+    return out
+
+
+async def test_manager_missing_question_yields_error():
+    """Empty question yields ERROR event."""
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    manager = RequestUserApprovalManager()
+    events = await _collect(
+        manager.execute_tool(
+            workflow_instance=_WFInstance(),
+            tool_call={"question": ""},
+            tool_call_id="tc-e",
+        )
+    )
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+
+
+async def test_manager_happy_path_yields_pre_and_post_events():
+    """execute_tool yields IN_PROGRESS then FINISHED when user responds."""
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    wf = _WFInstance()
+
+    def append_user_message():
+        wf.context.append({"role": "USER", "text": "Approved!"})
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": "req-abc"},
+        wait_condition_sets_context=append_user_message,
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        events = await _collect(
+            RequestUserApprovalManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"question": "Approve?", "image_url": "http://x/y.png", "metadata": {"k": "v"}},
+                tool_call_id="tc-ok",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.IN_PROGRESS in statuses
+    assert MessageStatus.FINISHED in statuses
+    # Metadata from the attention request should be propagated to the pre-event
+    pre = next(e for e in events if e.status == MessageStatus.IN_PROGRESS)
+    assert pre.metadata is not None
+    assert "requestUserApproval" in pre.metadata
+    assert pre.metadata["requestUserApproval"]["attentionRequestId"] == "req-abc"
+
+
+async def test_manager_create_request_failure_yields_error():
+    """If create_approval_request_activity raises, ERROR is yielded."""
+    from domains.request_user_approval.service import RequestUserApprovalManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": RuntimeError("db down")}
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        events = await _collect(
+            RequestUserApprovalManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"question": "Approve?", "metadata": {"k": "v"}},
+                tool_call_id="tc-fail",
+            )
+        )
+    finally:
+        restore()
+
+    assert any(e.status == MessageStatus.ERROR for e in events)
+    # Metadata is preserved on error
+    err = next(e for e in events if e.status == MessageStatus.ERROR)
+    assert err.metadata is not None
+
+
+async def test_manager_multiple_user_messages_collected():
+    """Manager reads back all consecutive USER messages as response."""
+    from domains.request_user_approval.service import RequestUserApprovalManager
+
+    wf = _WFInstance()
+
+    def append_user_messages():
+        wf.context.append({"role": "USER", "text": "part 1"})
+        wf.context.append({"role": "USER", "text": "part 2"})
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": "req-xy"},
+        wait_condition_sets_context=append_user_messages,
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        events = await _collect(
+            RequestUserApprovalManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"question": "OK?"},
+                tool_call_id="tc-multi",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 2  # IN_PROGRESS + FINISHED
+
+
+# ── request_user_approval_direct helper tests ──────────────────────
+
+
+async def test_direct_rejection_raises_user_rejected():
+    """If _signal_responses holds REJECTION_SENTINEL, raises UserRejectedError."""
+    from domains.request_user_approval.config import REJECTION_SENTINEL
+    from domains.request_user_approval.service import request_user_approval_direct
+    from domains.request_user_approval.types import UserRejectedError
+
+    wf = _WFInstance()
+
+    def populate():
+        # Signal arrives (rejection) and user rejection text appended to context
+        wf._signal_responses["req-z"] = REJECTION_SENTINEL
+        wf.context.append({"role": "USER", "text": "way too expensive"})
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": "req-z"},
+        wait_condition_sets_context=populate,
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        raised = False
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="OK?",
+                image_url=None,
+                metadata=None,
+            )
+        except UserRejectedError as e:
+            raised = True
+            assert "way too expensive" in e.rejection_message
+        assert raised
+    finally:
+        restore()
+
+
+async def test_direct_approval_returns_response_text():
+    """Successful approval returns dict with response text."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf._signal_responses["req-q"] = "ok"
+    wf.context.append({"role": "USER", "text": "Go ahead"})
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": "req-q"},
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Send?",
+            metadata={"foo": "bar"},
+        )
+    finally:
+        restore()
+
+    assert result["response"] == "Go ahead"
+    assert result["question"] == "Send?"
+    assert result["attention_request_id"] == "req-q"
+
+
+async def test_direct_create_failure_propagates():
+    """Create-request failure posts error event and re-raises."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": RuntimeError("db error")}
+    )
+    restore = _patch_service_workflow(fake)
+
+    wf = _WFInstance()
+    raised = False
+    try:
+        try:
+            await request_user_approval_direct(
+                workflow_instance=wf,
+                question="q",
+                metadata={"k": "v"},
+            )
+        except RuntimeError:
+            raised = True
+    finally:
+        restore()
+
+    assert raised is True
+    # The error event should have been posted
+    assert any("Failed to create approval" in (ev.title or "") for ev, _, _ in wf.handled_events)
+
+
+async def test_direct_sms_source_attempts_sms_notify():
+    """SMS-source root agent also fires notify_sms_event_activity."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf.agent_source = "SMS"
+    wf.parent_workflow_id = None
+    wf._signal_responses["req-s"] = "ok"
+    wf.context.append({"role": "USER", "text": "Yes"})
+
+    activity_calls = []
+
+    async def fake_notify():
+        activity_calls.append("notify")
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-s",
+            "notify_sms_event_activity": lambda: activity_calls.append("notify") or None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        await request_user_approval_direct(
+            workflow_instance=wf,
+            question="q",
+            metadata=None,
+        )
+    finally:
+        restore()
+
+    assert "notify" in activity_calls
+
+
 async def run_all_tests():
     print("request-user-approval blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_create_approval_happy_path)
     await r.record_async("boundary", test_create_approval_boundary)
     await r.record_async("minimal_params", test_create_approval_minimal_params)
+    await r.record_async("user_rejected_defaults", test_user_rejected_error_defaults)
+    await r.record_async("user_rejected_custom", test_user_rejected_error_custom)
+    await r.record_async("manager_singleton", test_manager_singleton)
+    await r.record_async("manager_missing_question", test_manager_missing_question_yields_error)
+    await r.record_async("manager_happy", test_manager_happy_path_yields_pre_and_post_events)
+    await r.record_async("manager_create_fail", test_manager_create_request_failure_yields_error)
+    await r.record_async("manager_multi_user_msgs", test_manager_multiple_user_messages_collected)
+    await r.record_async("direct_rejection", test_direct_rejection_raises_user_rejected)
+    await r.record_async("direct_approval", test_direct_approval_returns_response_text)
+    await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
+    await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
     teardown_mock()
     return r.all_passed
 

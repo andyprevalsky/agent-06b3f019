@@ -100,6 +100,7 @@ class SpawnAgentManager(ToolManager):
         network_metadata: Optional[str] = None,
         local_data_summary: Optional[str] = None,
         display_goal: Optional[str] = None,
+        capture_tool_results: Optional[List[str]] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn explore agent - research sub-agent.
 
@@ -107,6 +108,9 @@ class SpawnAgentManager(ToolManager):
         data and a known task_id, avoiding redundant fetches and enabling
         cross-referencing between parent tool events and explore messages.
         display_goal overrides the goal shown in the UI (e.g. clean condition text).
+        capture_tool_results, if supplied, is extended with the sub-agent's raw
+        tool-call outputs. This is out-of-band so the 100+ KB trace never gets
+        persisted into message metadata or shipped across activity boundaries.
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
@@ -241,9 +245,16 @@ class SpawnAgentManager(ToolManager):
                 return
 
             explore_result = result.get("result", "No results found.")
-            explore_tool_call_results = result.get("tool_call_results", [])
+            explore_tool_call_results = result.get("tool_call_results") or []
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
+
+            # Hand raw tool-call traces to any caller that asked for them
+            # (wait_for's condition-judge). Keeping this out of the persisted
+            # ToolEvent.data avoids shipping ~150–220 KB of debug trace per
+            # spawn through Temporal activity payloads and message storage.
+            if capture_tool_results is not None:
+                capture_tool_results.extend(explore_tool_call_results)
 
             combined_llm = list(llm_iteration_usage)
             combined_service: List[Dict[str, Any]] = []
@@ -263,7 +274,6 @@ class SpawnAgentManager(ToolManager):
                         "service": combined_service,
                     },
                     "result": explore_result,
-                    "tool_call_results": explore_tool_call_results,
                 },
                 metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
             )

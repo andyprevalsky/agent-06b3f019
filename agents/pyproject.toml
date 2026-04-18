@@ -86,3 +86,52 @@ known-first-party = [
 "helpers.usage".msg = "Moved to utils.usage — use `from utils.usage import ...`."
 "helpers.utils".msg = "Moved to utils.utils — use `from utils.utils import ...`."
 "helpers.tool_schemas".msg = "Moved to utils.tool_schemas — use `from utils.tool_schemas import ...`."
+
+# =============================================================================
+# Coverage configuration (coverage.py)
+#
+# Commands:
+#   coverage run scripts/run_blackbox_tests.py && coverage report
+#   coverage html    # detailed HTML report
+#
+# Threshold is a ratchet: only move it up, never down. Bump after adding tests.
+# Target: 80% line coverage. Bump toward 80% as new tests land.
+# =============================================================================
+[tool.coverage.run]
+branch = true
+source = [
+    "config.py",
+    "domains",
+    "tools",
+    "helpers",
+    "utils",
+    "loop",
+    "activities",
+    "workflows",
+]
+omit = [
+    "tests/*",
+    "benchmarks/*",
+    "browser_tools/*",
+    "scripts/*",
+    "*/__pycache__/*",
+    "venv/*",
+    ".venv/*",
+    "worker.py",
+    "health_server.py",
+    "test_ttft.py",
+]
+
+[tool.coverage.report]
+# Ratchet: only move up, never down. Bump after adding tests.
+# Target: 80%. Current: 81%.
+fail_under = 80
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]

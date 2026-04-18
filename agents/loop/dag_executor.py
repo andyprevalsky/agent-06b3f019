@@ -24,6 +24,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from loop.context_utils import poll_and_update_context
+from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
 
 logger = structlog.get_logger()
@@ -402,9 +403,14 @@ async def _execute_single_task(
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
             stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
 
+            reasoning_args = [task.goal, context, model, agent_id, stream_id]
+            # Fail fast if context has grown past Temporal's 2 MiB payload limit —
+            # otherwise the workflow-task encoder loops silently on replay.
+            check_activity_payload("execute_reasoning_activity", reasoning_args)
+
             reasoning_result = await execute_activity(
                 execute_reasoning_activity,
-                args=[task.goal, context, model, agent_id, stream_id],
+                args=reasoning_args,
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )

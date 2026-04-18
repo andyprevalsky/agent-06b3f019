@@ -44,3 +44,6 @@ flask>=3.0.0
 # Retry and resilience
 tenacity>=8.2.3
 
+# Test coverage
+coverage>=7.6.0
+

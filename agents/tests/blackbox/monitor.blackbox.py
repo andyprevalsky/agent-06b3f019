@@ -82,12 +82,121 @@ async def test_monitor_minimal_params():
     assert body["cadence"] == "daily"
 
 
+# -------------------- service.py tests --------------------
+
+
+def test_truncate_short():
+    from domains.monitor.service import _truncate
+    assert _truncate("abc", 10) == "abc"
+
+
+def test_truncate_long():
+    from domains.monitor.service import _truncate
+    assert _truncate("abcdefghijkl", 8) == "abcde..."
+
+
+async def test_execute_monitor_happy():
+    from domains.monitor.service import execute_monitor
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        if getattr(activity_fn, "__name__", "") == "monitor_activity":
+            return {"monitor_id": "m-1", "status": {"status": "active"}}
+        return None
+
+    async def fake_monitor_activity(query, cadence, webhook_url, metadata):
+        return {"monitor_id": "m-1", "status": {"status": "active"}}
+    fake_monitor_activity.__name__ = "monitor_activity"
+
+    out = await execute_monitor(
+        execute_activity=mock_execute_activity,
+        monitor_activity=fake_monitor_activity,
+        tool_call={"query": "AI news", "cadence": "daily"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["result"]["monitor_id"] == "m-1"
+    assert out["usage"]["service"][0]["provider"] == "Parallel Monitor API"
+
+
+async def test_execute_monitor_error():
+    from domains.monitor.service import execute_monitor
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "monitor_activity":
+            raise RuntimeError("API down")
+        return None
+
+    async def fake_monitor_activity(*a, **kw):
+        return None
+    fake_monitor_activity.__name__ = "monitor_activity"
+
+    out = await execute_monitor(
+        execute_activity=mock_execute_activity,
+        monitor_activity=fake_monitor_activity,
+        tool_call={"query": "q"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+    )
+    assert "error" in out["result"]
+    assert "API down" in out["result"]["error"]
+    assert out["usage"]["service"] == []
+
+
+async def test_execute_monitor_long_query_truncated():
+    from domains.monitor.service import execute_monitor
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        if getattr(activity_fn, "__name__", "") == "monitor_activity":
+            return {"monitor_id": "m-2"}
+        return None
+
+    async def fake_monitor_activity(*a, **kw):
+        return {"monitor_id": "m-2"}
+    fake_monitor_activity.__name__ = "monitor_activity"
+
+    out = await execute_monitor(
+        execute_activity=mock_execute_activity,
+        monitor_activity=fake_monitor_activity,
+        tool_call={"query": "x" * 300},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+    )
+    assert out["result"]["monitor_id"] == "m-2"
+
+
+async def test_monitor_entry_point():
+    """The top-level monitor() function delegates to execute_monitor."""
+    from domains.monitor.handler import monitor
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        if getattr(activity_fn, "__name__", "") == "monitor_activity":
+            return {"monitor_id": "m-3"}
+        return None
+
+    out = await monitor(
+        execute_activity=mock_execute_activity,
+        tool_call={"query": "q"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["result"]["monitor_id"] == "m-3"
+
+
 async def run_all_tests():
     print("monitor blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_monitor_happy_path)
     await r.record_async("boundary", test_monitor_boundary)
     await r.record_async("minimal_params", test_monitor_minimal_params)
+    r.record("truncate_short", test_truncate_short)
+    r.record("truncate_long", test_truncate_long)
+    await r.record_async("execute_monitor_happy", test_execute_monitor_happy)
+    await r.record_async("execute_monitor_error", test_execute_monitor_error)
+    await r.record_async("execute_monitor_long_query", test_execute_monitor_long_query_truncated)
+    await r.record_async("monitor_entry_point", test_monitor_entry_point)
     teardown_mock()
     return r.all_passed
 

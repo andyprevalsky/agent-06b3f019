@@ -50,11 +50,15 @@ cd front-end && npm run test:coverage   # Front-end coverage check (enforces thr
 cd front-end && npm run test:coverage:report  # Front-end detailed coverage report
 cd agents && python tests/run_all_tests.py  # Agent tool tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
+cd agents && bash scripts/run-coverage.sh            # Agents coverage check (enforces fail_under)
+cd agents && bash scripts/run-coverage.sh --report   # Detailed report without threshold
+cd agents && bash scripts/run-coverage.sh --html     # HTML report in htmlcov/
 ```
 
 **Code coverage:**
 - **Backend** requires minimum 88% line/statement, 87% function, 76% branch (see `back-end/.c8rc.json`).
 - **Front-end** requires 80% lines, 75% statements/functions, 70% branches (see `front-end/vitest.config.ts` → `coverage.thresholds`). Current: ~80% lines, ~79% statements, ~77% functions, ~72% branches. Target: 80% across all four.
+- **Agents** requires 80% line+branch (see `agents/pyproject.toml` → `[tool.coverage.report]`). Current: 81%.
 - **Research** enforces coverage via `bash research/scripts/coverage-check.sh` (auto-invoked by `research/scripts/lint-check.sh`). TS domains: 95% line floor (baseline 96.6%). Python gepa: 80% line floor (baseline 99.66%, set in `research/domains/gepa/pyproject.toml`).
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 

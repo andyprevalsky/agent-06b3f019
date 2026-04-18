@@ -78,12 +78,63 @@ async def test_invalid_monitor_id():
     mock_execute.assert_not_called()
 
 
+# -------------------- handler.py tests --------------------
+
+
+def _mock_execute(calls: list, *, result: dict | None = None, raises: bool = False):
+    async def mock(activity_fn, *args, **kwargs):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append({"activity": name, "kwargs": kwargs})
+        if name == "check_monitor_events_activity":
+            if raises:
+                raise RuntimeError("parallel offline")
+            return result or {"events": [{"id": "e-1"}]}
+        return None
+    return mock
+
+
+async def test_manager_happy_path():
+    """CheckMonitorEventsManager returns activity result on success."""
+    from tools.check_monitor_events import CheckMonitorEventsManager
+
+    calls = []
+    manager = CheckMonitorEventsManager()
+    out = await manager.execute_tool(
+        execute_activity=_mock_execute(calls, result={"events": [{"id": "e-1"}, {"id": "e-2"}]}),
+        tool_call={"monitor_id": "monitor_ok_abc", "limit": 5},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+        user_id="user-1",
+    )
+    assert out["events"][0]["id"] == "e-1"
+    assert len(out["events"]) == 2
+
+
+async def test_manager_error_returns_error_dict():
+    """On activity failure, manager returns {error, events=[]}, does not raise."""
+    from tools.check_monitor_events import CheckMonitorEventsManager
+
+    calls = []
+    manager = CheckMonitorEventsManager()
+    out = await manager.execute_tool(
+        execute_activity=_mock_execute(calls, raises=True),
+        tool_call={"monitor_id": "monitor_xyz", "limit": 5},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+        user_id="user-1",
+    )
+    assert "error" in out
+    assert out["events"] == []
+
+
 async def run_all_tests():
     print("check-monitor-events blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
     await r.record_async("boundary_request_params", test_boundary_request_params)
     await r.record_async("invalid_monitor_id", test_invalid_monitor_id)
+    await r.record_async("manager_happy_path", test_manager_happy_path)
+    await r.record_async("manager_error_returns_error_dict", test_manager_error_returns_error_dict)
     teardown_mock()
     return r.all_passed
 

@@ -250,8 +250,10 @@ class WaitForManager(ToolManager):
                 },
             )
 
-            # Delegate to _spawn_explore
-            explore_tool_call_results: list[Any] = []
+            # Delegate to _spawn_explore. Pass a local list for raw tool results
+            # so the ~150 KB sub-agent trace stays in-process and never gets
+            # persisted into ToolEvent.data / shipped across activity boundaries.
+            explore_tool_call_results: list[str] = []
             explore_usage: dict[str, list[Any]] = {}
 
             async for event in spawn_mgr._spawn_explore(
@@ -262,13 +264,13 @@ class WaitForManager(ToolManager):
                 network_metadata=network_metadata,
                 local_data_summary=local_data_summary,
                 display_goal=condition,
+                capture_tool_results=explore_tool_call_results,
             ):
                 # Route explore events as spawn_agent messages (correct toolName for FE grouping)
                 await workflow_instance._handle_tool_event(event, explore_tool_call_id, "spawn_agent")
 
-                # Capture result, raw tool results, and usage from the FINISHED event
+                # Capture usage from the FINISHED event (raw tool results come via the collector)
                 if event.status == MessageStatus.FINISHED and event.data:
-                    explore_tool_call_results = event.data.get("tool_call_results", [])
                     explore_usage = event.data.get("usage", {})
 
             # Check if explore was cancelled (paused during explore)

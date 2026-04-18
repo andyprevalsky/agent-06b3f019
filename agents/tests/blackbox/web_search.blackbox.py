@@ -76,11 +76,100 @@ async def test_web_search_boundary():
     assert "parallel-beta" in headers_lower
 
 
+# -------------------- handler.py tests --------------------
+
+
+def _mock_execute(calls: list, *, result: dict | None = None, raises: bool = False):
+    async def mock(activity_fn, *args, **kwargs):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append({"activity": name, "kwargs": kwargs})
+        if name == "web_search_activity":
+            if raises:
+                raise RuntimeError("parallel offline")
+            return result or {"results": [], "answer": "", "query": "x"}
+        return None
+    return mock
+
+
+async def test_manager_execute_tool_happy():
+    """WebSearchManager.execute_tool returns result + usage with per-query cost."""
+    from tools.web_search.handler import WebSearchManager
+
+    calls = []
+    manager = WebSearchManager()
+    out = await manager.execute_tool(
+        execute_activity=_mock_execute(
+            calls, result={"results": [{"title": "r"}], "answer": "a", "query": "q"}
+        ),
+        tool_call={"query": "AI trends", "max_tokens": 1000},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+        user_id="user-1",
+    )
+    assert out["result"]["answer"] == "a"
+    assert out["usage"]["service"][0]["provider"] == "Parallel AI Search"
+
+
+async def test_manager_execute_tool_raises_on_error():
+    """WebSearchManager re-raises on activity exception."""
+    from tools.web_search.handler import WebSearchManager
+
+    calls = []
+    manager = WebSearchManager()
+    try:
+        await manager.execute_tool(
+            execute_activity=_mock_execute(calls, raises=True),
+            tool_call={"query": "q"},
+            tool_call_id="tc-1",
+            agent_id="agent-1",
+            user_id="user-1",
+        )
+        raise AssertionError("Expected RuntimeError")
+    except RuntimeError as e:
+        assert "parallel offline" in str(e)
+
+
+async def test_manager_execute_tool_long_query_truncates():
+    """Long query is truncated for display only; activity gets full value."""
+    from tools.web_search.handler import WebSearchManager
+
+    calls = []
+    manager = WebSearchManager()
+    long_query = "q" * 500
+    await manager.execute_tool(
+        execute_activity=_mock_execute(calls),
+        tool_call={"query": long_query},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+    )
+    read = [c for c in calls if c["activity"] == "web_search_activity"]
+    assert len(read) == 1
+
+
+async def test_web_search_entry_point():
+    """web_search() entry point dispatches to manager."""
+    from tools.web_search.handler import web_search
+
+    calls = []
+    out = await web_search(
+        execute_activity=_mock_execute(calls),
+        tool_call={"query": "q"},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+        user_id="user-1",
+    )
+    assert "result" in out
+
+
 async def run_all_tests():
     print("web-search blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_web_search_happy_path)
     await r.record_async("boundary", test_web_search_boundary)
+    await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
+    await r.record_async("manager_execute_tool_raises", test_manager_execute_tool_raises_on_error)
+    await r.record_async("manager_long_query_truncates", test_manager_execute_tool_long_query_truncates)
+    await r.record_async("web_search_entry_point", test_web_search_entry_point)
     teardown_mock()
     return r.all_passed
 

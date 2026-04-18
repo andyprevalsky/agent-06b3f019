@@ -141,6 +141,108 @@ async def test_grep_empty_pattern():
     assert body["pattern"] == ""
 
 
+# -------------------- service.py tests --------------------
+
+
+def test_truncate_pattern_short():
+    from domains.grep.service import _truncate_pattern
+    assert _truncate_pattern("abc") == "abc"
+
+
+def test_truncate_pattern_long():
+    from domains.grep.service import _truncate_pattern
+    from domains.grep.config import DISPLAY_PATTERN_MAX_LENGTH
+    long = "x" * (DISPLAY_PATTERN_MAX_LENGTH + 50)
+    out = _truncate_pattern(long)
+    assert len(out) == DISPLAY_PATTERN_MAX_LENGTH
+    assert out.endswith("...")
+
+
+async def test_execute_grep_happy():
+    from domains.grep.service import execute_grep
+
+    calls = []
+    activity_result = {"matches": [], "total_matches": 0, "truncated": False}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        calls.append({"activity": getattr(activity_fn, "__name__", "fn")})
+        if getattr(activity_fn, "__name__", "") == "grep_activity":
+            return activity_result
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "foo", "source": "messages"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["result"] == activity_result
+    assert out["usage"] == {"llm": [], "service": []}
+    # IN_PROGRESS + activity + FINISHED = 3
+    assert any(c["activity"] == "grep_activity" for c in calls)
+
+
+async def test_execute_grep_empty_pattern_path():
+    """Empty pattern exercises the 'all messages' title branch."""
+    from domains.grep.service import execute_grep
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        if getattr(activity_fn, "__name__", "") == "grep_activity":
+            return {"matches": []}
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": ""},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+    )
+    assert out["result"] == {"matches": []}
+
+
+async def test_execute_grep_error_reraises():
+    from domains.grep.service import execute_grep
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "grep_activity":
+            raise RuntimeError("backend down")
+        return None
+
+    try:
+        await execute_grep(
+            execute_activity=mock_execute_activity,
+            tool_call={"pattern": "x", "person_id": "p-abcdef"},
+            tool_call_id="tc-1",
+            agent_id="a-1",
+        )
+        raise AssertionError("should have raised")
+    except RuntimeError as e:
+        assert "backend down" in str(e)
+
+
+async def test_manager_execute_tool():
+    from domains.grep.handler import GrepManager
+
+    activity_result = {"matches": [], "total_matches": 0}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        if getattr(activity_fn, "__name__", "") == "grep_activity":
+            return activity_result
+        return None
+
+    manager = GrepManager()
+    out = await manager.execute_tool(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "foo", "source": "messages"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["result"] == activity_result
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -148,6 +250,12 @@ async def run_all_tests():
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
+    r.record("truncate_pattern_short", test_truncate_pattern_short)
+    r.record("truncate_pattern_long", test_truncate_pattern_long)
+    await r.record_async("execute_grep_happy", test_execute_grep_happy)
+    await r.record_async("execute_grep_empty_pattern_path", test_execute_grep_empty_pattern_path)
+    await r.record_async("execute_grep_error_reraises", test_execute_grep_error_reraises)
+    await r.record_async("manager_execute_tool", test_manager_execute_tool)
     teardown_mock()
     return r.all_passed
 

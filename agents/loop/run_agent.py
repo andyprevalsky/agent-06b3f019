@@ -36,7 +36,7 @@ from helpers.llm import (
     check_progress,
 )
 from helpers.summarize import compress_context
-from helpers.tracing import span, traced
+from helpers.tracing import traced
 from helpers.update_status import update_agent_status
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context

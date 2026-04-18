@@ -70,6 +70,8 @@ def _clear_user_context_cache():
         import importlib
         mod = importlib.import_module("helpers.get_user_context")
     mod._user_context_cache.clear()
+    if hasattr(mod, "_simulation_messages_cache"):
+        mod._simulation_messages_cache.clear()
 
 
 async def test_get_user_context_happy_path():
@@ -90,6 +92,22 @@ async def test_get_user_context_happy_path():
     assert "CONNECTED INTEGRATIONS" in result
 
 
+async def test_get_user_context_uses_cache_on_second_call():
+    """Second call to get_user_context within TTL hits the cache (no HTTP)."""
+    _setup()
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_context
+
+        await get_user_context(user_id="user-cache-1")
+        # Clear mock so if HTTP happens it would fail/404
+        teardown_mock()
+        result2 = await get_user_context(user_id="user-cache-1")
+
+    assert "Alice Test" in result2
+
+
 async def test_get_system_name():
     """get_user_system_name returns the custom system name."""
     _setup()
@@ -102,6 +120,76 @@ async def test_get_system_name():
     assert result == "Rosie"
 
 
+async def test_get_system_name_default_on_error():
+    """get_user_system_name returns 'Rose' when backend fails."""
+    def handler(req):
+        return httpx.Response(500, json={"error": "boom"})
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_system_name
+
+        result = await get_user_system_name(user_id="user-err-sn")
+
+    assert result == "Rose"
+
+
+async def test_get_system_name_outer_except():
+    """get_user_system_name's outer except is triggered when load_config raises."""
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"), \
+         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+        from helpers.get_user_context import get_user_system_name
+        result = await get_user_system_name(user_id="user-outer-1")
+    assert result == "Rose"
+
+
+async def test_get_custom_prompt_outer_except():
+    """get_user_custom_system_prompt outer except triggered when load_config raises."""
+    _clear_user_context_cache()
+    with patch("temporalio.activity.heartbeat"), \
+         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+        from helpers.get_user_context import get_user_custom_system_prompt
+        result = await get_user_custom_system_prompt(user_id="user-outer-2")
+    assert result is None
+
+
+async def test_get_user_context_outer_except():
+    """get_user_context's outer except returns empty string when load_config raises."""
+    _clear_user_context_cache()
+    with patch("temporalio.activity.heartbeat"), \
+         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+        from helpers.get_user_context import get_user_context
+        result = await get_user_context(user_id="user-outer-3")
+    assert result == ""
+
+
+async def test_fetch_frequent_contact_messages_outer_except():
+    """fetch_frequent_contact_messages outer except when load_config raises."""
+    _clear_user_context_cache()
+    with patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+        from helpers.get_user_context import fetch_frequent_contact_messages
+        result = await fetch_frequent_contact_messages("user-outer-4")
+    assert result == []
+
+
+async def test_get_system_name_fallback_when_missing():
+    """get_user_system_name falls back to 'Rose' when user_settings lacks systemName."""
+    def handler(req):
+        if "/api/user-settings" in str(req.url):
+            return httpx.Response(200, json={"name": "X"})  # no systemName
+        return httpx.Response(404)
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_system_name
+        result = await get_user_system_name(user_id="u-fallback")
+    assert result == "Rose"
+
+
 async def test_get_custom_prompt():
     """get_user_custom_system_prompt returns the custom prompt string."""
     _setup()
@@ -112,6 +200,35 @@ async def test_get_custom_prompt():
         result = await get_user_custom_system_prompt(user_id="user-test-789")
 
     assert result == "Always be polite."
+
+
+async def test_get_custom_prompt_none_on_error():
+    """get_user_custom_system_prompt returns None on error."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_custom_system_prompt
+
+        result = await get_user_custom_system_prompt(user_id="user-err-cp")
+
+    assert result is None
+
+
+async def test_get_custom_prompt_missing():
+    """get_user_custom_system_prompt returns None when customSystemPrompt absent."""
+    def handler(req):
+        if "/api/user-settings" in str(req.url):
+            return httpx.Response(200, json={"name": "X"})
+        return httpx.Response(404)
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_custom_system_prompt
+        assert await get_user_custom_system_prompt(user_id="u-nocust") is None
 
 
 async def test_get_user_context_boundary():
@@ -162,14 +279,424 @@ async def test_get_user_context_gates_closed():
     assert len(get_captured_requests()) == 0
 
 
+async def test_get_user_context_partial_gates():
+    """When only some gates are open, only relevant endpoints are hit."""
+    _setup()
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_context
+
+        result = await get_user_context(
+            user_id="user-partial-1",
+            context_gates={
+                "user_profile": True,
+                "authenticated_sessions": False,
+                "integrations": False,
+                "recent_communications": False,
+                "network": False,
+            },
+        )
+
+    # User profile present
+    assert "USER PROFILE" in result
+    # Other sections should NOT be present
+    assert "CONNECTED INTEGRATIONS" not in result
+    assert "AUTHENTICATED BROWSER SESSIONS" not in result
+
+
+async def test_get_user_context_error_returns_empty():
+    """When all backend calls error out, get_user_context still returns a string (possibly empty)."""
+    def handler(req):
+        raise RuntimeError("network down")
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_context
+        result = await get_user_context(user_id="user-all-err")
+
+    # The internal fetchers catch their own exceptions and return empty, so format returns ""
+    assert result == ""
+
+
+async def test_fetch_frequent_contact_messages_happy():
+    """fetch_frequent_contact_messages returns messages via API."""
+    def handler(req):
+        if "/api/people/messages/recent" in str(req.url):
+            return httpx.Response(200, json={
+                "messages": [
+                    {"channel": "SMS", "timestamp": "2026-04-05T12:00:00Z", "from": "me", "to": "you", "message": "yo"},
+                ]
+            })
+        return httpx.Response(404)
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    from helpers.get_user_context import fetch_frequent_contact_messages
+    result = await fetch_frequent_contact_messages("user-sim-1")
+    assert len(result) == 1
+
+
+async def test_fetch_frequent_contact_messages_cache_hit():
+    """Second call within TTL returns cached messages."""
+    def handler(req):
+        if "/api/people/messages/recent" in str(req.url):
+            return httpx.Response(200, json={
+                "messages": [{"channel": "SMS", "timestamp": "2026-04-05T12:00:00Z", "message": "yo"}]
+            })
+        return httpx.Response(404)
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    from helpers.get_user_context import fetch_frequent_contact_messages
+    await fetch_frequent_contact_messages("user-sim-cache")
+
+    # Second call should use cache — if we tear down mock it still works
+    teardown_mock()
+    result = await fetch_frequent_contact_messages("user-sim-cache")
+    assert len(result) == 1
+
+
+async def test_fetch_frequent_contact_messages_error():
+    """fetch_frequent_contact_messages returns empty list on error."""
+    def handler(req):
+        return httpx.Response(500, json={"error": "boom"})
+    setup_mock_fn(handler)
+    _clear_user_context_cache()
+
+    from helpers.get_user_context import fetch_frequent_contact_messages
+    result = await fetch_frequent_contact_messages("user-sim-err")
+    assert result == []
+
+
+def test_format_messages_for_simulation_empty():
+    """format_messages_for_simulation returns empty string for empty input."""
+    from helpers.get_user_context import format_messages_for_simulation
+
+    assert format_messages_for_simulation([]) == ""
+
+
+def test_format_messages_for_simulation_happy():
+    """format_messages_for_simulation builds example conversations."""
+    from helpers.get_user_context import format_messages_for_simulation
+
+    messages = [
+        {"channel": "SMS", "timestamp": "2026-04-05T12:00:00Z", "from": "user", "to": "friend", "message": "hey"},
+        {"channel": "EMAIL", "timestamp": "2026-04-05T13:00:00Z", "from": "", "to": "user", "message": "hi"},
+        {"channel": "SMS", "timestamp": "bad-ts", "from": "user", "to": "x", "message": ""},  # skipped: empty message
+        {"channel": "SMS", "timestamp": "bad-ts", "from": "user", "to": "x", "message": "x" * 600},  # truncated
+    ]
+    result = format_messages_for_simulation(messages)
+
+    # Should include the first two, skip empty, truncate long
+    assert "SENT" in result
+    assert "RECEIVED" in result
+    assert "..." in result  # truncation marker
+
+
+def test_format_user_context_empty_returns_empty():
+    """_format_user_context returns empty when nothing to show."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=None,
+    )
+    assert result == ""
+
+
+def test_format_user_context_integration_no_creds():
+    """_format_user_context includes integration with no creds when CONNECTED."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "Calendar", "status": "CONNECTED", "emailCredentials": []},
+        ],
+    )
+    assert "Calendar" in result
+    assert "CONNECTED INTEGRATIONS" in result
+
+
+def test_format_user_context_skips_disconnected_no_creds():
+    """Integrations not CONNECTED and without creds are skipped."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "Slack", "status": "DISCONNECTED", "emailCredentials": []},
+        ],
+    )
+    # Nothing present (all else empty, integration skipped)
+    assert result == ""
+
+
+def test_format_user_context_bad_timestamp():
+    """Bad timestamp is handled gracefully."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[
+            {"channel": "SMS", "timestamp": "not-a-timestamp", "from": "a", "to": "b", "message": "hi"},
+        ],
+        frequent_contacts=[],
+    )
+    assert "RECENT COMMUNICATIONS" in result
+
+
+def test_format_user_context_recent_message_truncation():
+    """Long recent messages are truncated with ellipsis."""
+    from helpers.get_user_context import _format_user_context
+
+    long_msg = "y" * 400
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[
+            {"channel": "SMS", "timestamp": "2026-04-05T12:00:00Z", "from": "a", "to": "b", "message": long_msg},
+        ],
+        frequent_contacts=[],
+    )
+    assert "..." in result
+
+
+def test_format_user_context_address_variants():
+    """Address lines assemble correctly even with partial fields."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={
+            "name": "Z",
+            "city": "Paris",
+            "state": "",
+            "postalCode": "",
+            "country": "France",
+        },
+        recent_messages=[],
+        frequent_contacts=[],
+    )
+    assert "Paris" in result
+    assert "France" in result
+    assert "Delivery Address" in result
+
+
+def test_format_user_context_recent_msg_to_direction():
+    """Message with no 'from' uses 'To:' direction."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[
+            {"channel": "SMS", "timestamp": "2026-04-05T12:00:00Z", "from": "", "to": "b@example.com", "message": "hi"},
+        ],
+        frequent_contacts=[],
+    )
+    assert "To:" in result
+
+
+def test_format_user_context_contacts_variants():
+    """Network section handles contacts with/without phone/email/relation."""
+    from helpers.get_user_context import _format_user_context
+
+    contacts = [
+        # Fully-populated
+        {"firstName": "A", "lastName": "B", "phoneNumber": "+1", "communicationFrequency": "daily", "messagesExchanged": 10, "relation": "friend", "company": "Acme", "email": "a@b.com"},
+        # Phone only, no name
+        {"phoneNumber": "+2"},
+        # Name only, no phone, with email
+        {"firstName": "C", "email": "c@d.com"},
+        # No identifier — skipped
+        {},
+    ]
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=contacts,
+    )
+    assert "YOUR NETWORK" in result
+    assert "A B" in result
+    assert "friend" in result
+    assert "Acme" in result
+    # Email included only for name-only contact with no phone
+    assert "c@d.com" in result
+    # Name-and-phone user does NOT include email (phone present)
+    assert "a@b.com" not in result
+
+
+async def test_fetch_integrations_error_returns_empty_lists():
+    """_fetch_integrations_and_auth_domains returns ([], []) on 500."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+
+    import httpx as _httpx
+    from helpers.get_user_context import _fetch_integrations_and_auth_domains
+    from config import load_config
+
+    async with _httpx.AsyncClient() as client:
+        integs, auths = await _fetch_integrations_and_auth_domains(client, load_config(), "u")
+    assert integs == []
+    assert auths == []
+
+
+async def test_fetch_user_settings_error_returns_empty():
+    """_fetch_user_settings returns {} on error."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+
+    import httpx as _httpx
+    from helpers.get_user_context import _fetch_user_settings
+    from config import load_config
+
+    async with _httpx.AsyncClient() as client:
+        result = await _fetch_user_settings(client, load_config(), "u")
+    assert result == {}
+
+
+async def test_fetch_recent_messages_error_returns_empty():
+    """_fetch_recent_messages returns [] on error."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+
+    import httpx as _httpx
+    from helpers.get_user_context import _fetch_recent_messages
+    from config import load_config
+
+    async with _httpx.AsyncClient() as client:
+        result = await _fetch_recent_messages(client, load_config(), "u")
+    assert result == []
+
+
+async def test_fetch_top_contacts_error_returns_empty():
+    """_fetch_top_contacts returns [] on error."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+
+    import httpx as _httpx
+    from helpers.get_user_context import _fetch_top_contacts
+    from config import load_config
+
+    async with _httpx.AsyncClient() as client:
+        result = await _fetch_top_contacts(client, load_config(), "u")
+    assert result == []
+
+
+async def test_fetch_messages_for_simulation_error_returns_empty():
+    """_fetch_messages_for_simulation returns [] on error."""
+    def handler(req):
+        return httpx.Response(500)
+    setup_mock_fn(handler)
+
+    import httpx as _httpx
+    from helpers.get_user_context import _fetch_messages_for_simulation
+    from config import load_config
+
+    async with _httpx.AsyncClient() as client:
+        result = await _fetch_messages_for_simulation(client, load_config(), "u")
+    assert result == []
+
+
+def test_normalize_domain():
+    """_normalize_domain strips leading dot and www."""
+    from helpers.get_user_context import _normalize_domain
+
+    assert _normalize_domain(".example.com") == "example.com"
+    assert _normalize_domain("www.example.com") == "example.com"
+    assert _normalize_domain(".www.example.com") == "example.com"
+
+
+def test_get_base_domain():
+    """_get_base_domain extracts last 2 labels."""
+    from helpers.get_user_context import _get_base_domain
+
+    assert _get_base_domain("mail.google.com") == "google.com"
+    assert _get_base_domain("example.com") == "example.com"
+    assert _get_base_domain("localhost") == "localhost"
+
+
+def test_is_false_positive_cookie():
+    """_is_false_positive_cookie matches known analytics cookie names."""
+    from helpers.get_user_context import _is_false_positive_cookie
+
+    assert _is_false_positive_cookie("_ga") is True
+    assert _is_false_positive_cookie("cf_clearance") is True
+    assert _is_false_positive_cookie("session_id") is False
+
+
+def test_is_auth_cookie():
+    """_is_auth_cookie detects auth-like cookie names."""
+    from helpers.get_user_context import _is_auth_cookie
+
+    assert _is_auth_cookie({"name": "session_id"}) is True
+    assert _is_auth_cookie({"name": "auth_token"}) is True
+    assert _is_auth_cookie({"name": "jwt"}) is True
+    # False positive: has "session" but is in false-positive list
+    assert _is_auth_cookie({"name": "_hjSession"}) is False
+    # No auth pattern at all
+    assert _is_auth_cookie({"name": "lang"}) is False
+
+
 async def run_all_tests():
     print("get-user-context blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_get_user_context_happy_path)
+    await r.record_async("uses_cache", test_get_user_context_uses_cache_on_second_call)
     await r.record_async("get_system_name", test_get_system_name)
+    await r.record_async("get_system_name_error", test_get_system_name_default_on_error)
+    await r.record_async("get_system_name_outer_except", test_get_system_name_outer_except)
+    await r.record_async("get_custom_prompt_outer_except", test_get_custom_prompt_outer_except)
+    await r.record_async("get_user_context_outer_except", test_get_user_context_outer_except)
+    await r.record_async("fetch_freq_outer_except", test_fetch_frequent_contact_messages_outer_except)
+    await r.record_async("get_system_name_fallback", test_get_system_name_fallback_when_missing)
     await r.record_async("get_custom_prompt", test_get_custom_prompt)
+    await r.record_async("get_custom_prompt_error", test_get_custom_prompt_none_on_error)
+    await r.record_async("get_custom_prompt_missing", test_get_custom_prompt_missing)
     await r.record_async("boundary", test_get_user_context_boundary)
     await r.record_async("gates_closed", test_get_user_context_gates_closed)
+    await r.record_async("partial_gates", test_get_user_context_partial_gates)
+    await r.record_async("error_returns_empty", test_get_user_context_error_returns_empty)
+    await r.record_async("fetch_freq_happy", test_fetch_frequent_contact_messages_happy)
+    await r.record_async("fetch_freq_cache", test_fetch_frequent_contact_messages_cache_hit)
+    await r.record_async("fetch_freq_error", test_fetch_frequent_contact_messages_error)
+    r.record("format_sim_empty", test_format_messages_for_simulation_empty)
+    r.record("format_sim_happy", test_format_messages_for_simulation_happy)
+    r.record("fmt_ctx_empty", test_format_user_context_empty_returns_empty)
+    r.record("fmt_ctx_integ_no_creds", test_format_user_context_integration_no_creds)
+    r.record("fmt_ctx_skips_disconnected", test_format_user_context_skips_disconnected_no_creds)
+    r.record("fmt_ctx_bad_ts", test_format_user_context_bad_timestamp)
+    r.record("fmt_ctx_msg_truncate", test_format_user_context_recent_message_truncation)
+    r.record("fmt_ctx_address", test_format_user_context_address_variants)
+    r.record("fmt_ctx_to_direction", test_format_user_context_recent_msg_to_direction)
+    r.record("fmt_ctx_contacts", test_format_user_context_contacts_variants)
+    await r.record_async("fetch_integrations_err", test_fetch_integrations_error_returns_empty_lists)
+    await r.record_async("fetch_settings_err", test_fetch_user_settings_error_returns_empty)
+    await r.record_async("fetch_recent_err", test_fetch_recent_messages_error_returns_empty)
+    await r.record_async("fetch_top_contacts_err", test_fetch_top_contacts_error_returns_empty)
+    await r.record_async("fetch_sim_err", test_fetch_messages_for_simulation_error_returns_empty)
+    r.record("normalize_domain", test_normalize_domain)
+    r.record("get_base_domain", test_get_base_domain)
+    r.record("is_false_positive_cookie", test_is_false_positive_cookie)
+    r.record("is_auth_cookie", test_is_auth_cookie)
     teardown_mock()
     return r.all_passed
 
