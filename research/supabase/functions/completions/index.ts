@@ -29,6 +29,6 @@
 import { serve } from 'https://deno.land/std@0.190.0/http/server.ts';
 
 import { handleCompletionsRequest } from '../../../domains/completions/service/handler.ts';
-import { withRequestSpan } from '../../../utils/tracing.ts';
+import { withRequestSpan } from '../../../providers/tracing.ts';
 
 serve(withRequestSpan('research.completions', handleCompletionsRequest));
