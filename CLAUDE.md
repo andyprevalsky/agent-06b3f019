@@ -55,6 +55,7 @@ cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawn
 **Code coverage:**
 - **Backend** requires minimum 88% line/statement, 87% function, 76% branch (see `back-end/.c8rc.json`).
 - **Front-end** requires 80% lines, 75% statements/functions, 70% branches (see `front-end/vitest.config.ts` → `coverage.thresholds`). Current: ~80% lines, ~79% statements, ~77% functions, ~72% branches. Target: 80% across all four.
+- **Research** enforces coverage via `bash research/scripts/coverage-check.sh` (auto-invoked by `research/scripts/lint-check.sh`). TS domains: 95% line floor (baseline 96.6%). Python gepa: 80% line floor (baseline 99.66%, set in `research/domains/gepa/pyproject.toml`).
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
 **Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.

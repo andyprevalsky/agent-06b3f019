@@ -17,13 +17,23 @@ import type {
 import { DEFAULT_COT_STEPS, DEFAULT_SAMPLE_SIZE, DEFAULT_SEED } from './config.ts';
 import { MMLUProHarness } from './service-mmlu-pro.ts';
 import { TerminalBenchHarness } from './service-terminal-bench.ts';
+import type { CallModelFn } from './service-harness.ts';
 
-const BENCHMARK_REGISTRY: Record<string, () => IBenchmarkHarness> = {
-  'MMLU-Pro': () => new MMLUProHarness(),
-  'Terminal-Bench': () => new TerminalBenchHarness(),
+/** Dependencies used by the benchmark suite orchestrator. */
+export interface BenchmarkSuiteDeps {
+  /** Model-call function (defaults to the HTTP-backed repo impl). */
+  callModelFn?: CallModelFn;
+}
+
+const BENCHMARK_REGISTRY: Record<string, (deps: BenchmarkSuiteDeps) => IBenchmarkHarness> = {
+  'MMLU-Pro': (deps) => new MMLUProHarness(deps.callModelFn),
+  'Terminal-Bench': (deps) => new TerminalBenchHarness(deps.callModelFn),
 };
 
-export function createHarness(benchmarkName: string): IBenchmarkHarness {
+export function createHarness(
+  benchmarkName: string,
+  deps: BenchmarkSuiteDeps = {},
+): IBenchmarkHarness {
   const factory = BENCHMARK_REGISTRY[benchmarkName];
   if (!factory) {
     throw new Error(
@@ -32,11 +42,12 @@ export function createHarness(benchmarkName: string): IBenchmarkHarness {
       }`,
     );
   }
-  return factory();
+  return factory(deps);
 }
 
 export async function runBenchmarkSuite(
   config: TestConfig,
+  deps: BenchmarkSuiteDeps = {},
 ): Promise<BenchmarkSuiteResults> {
   console.log('\n🚀 Rose Benchmark Suite');
   console.log('========================\n');
@@ -54,7 +65,7 @@ export async function runBenchmarkSuite(
     console.log('='.repeat(60));
 
     try {
-      const harness = createHarness(benchmarkName);
+      const harness = createHarness(benchmarkName, deps);
 
       const benchmarkConfig: BenchmarkConfig = {
         modelUrl: config.modelUrl,

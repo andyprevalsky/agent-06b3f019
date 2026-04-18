@@ -9,12 +9,13 @@
  *   4. Surface upstream transport failures as a 500 error shape.
  *
  * The service is framework-agnostic: it accepts a {@link ChatProxyRequest}
- * and returns a {@link Response}. The runtime layer is the sole caller.
+ * plus injected {@link ChatServiceDeps} and returns a {@link Response}. The
+ * runtime layer is the sole caller.
  */
 
 import { slog } from '../../providers/logger.ts';
 import { ALLOWED_SUBPATHS, CHAT_PATH_PREFIX, CORS_HEADERS, getCompletionsUrl } from './config.ts';
-import type { ChatProxyRequest } from './types.ts';
+import type { ChatProxyRequest, ChatServiceDeps } from './types.ts';
 
 const JSON_HEADERS: Record<string, string> = {
   ...CORS_HEADERS,
@@ -29,8 +30,22 @@ function jsonError(message: string, status: number): Response {
   });
 }
 
-/** Entry point for the chat proxy. */
-export async function handleChatRequest(req: ChatProxyRequest): Promise<Response> {
+/** Default production dependencies for the chat proxy service. */
+export const DEFAULT_CHAT_DEPS: ChatServiceDeps = {
+  fetch: globalThis.fetch.bind(globalThis),
+  getCompletionsUrl,
+};
+
+/**
+ * Entry point for the chat proxy.
+ *
+ * Accepts optional `deps` so tests can inject a stub fetch and URL resolver.
+ * Production call sites rely on {@link DEFAULT_CHAT_DEPS}.
+ */
+export async function handleChatRequest(
+  req: ChatProxyRequest,
+  deps: ChatServiceDeps = DEFAULT_CHAT_DEPS,
+): Promise<Response> {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: CORS_HEADERS });
   }
@@ -42,7 +57,7 @@ export async function handleChatRequest(req: ChatProxyRequest): Promise<Response
 
   try {
     const body = await req.readBody();
-    const upstream = await fetch(getCompletionsUrl(), {
+    const upstream = await deps.fetch(deps.getCompletionsUrl(), {
       method: req.method,
       headers: req.headers,
       body: body.length > 0 ? body : undefined,

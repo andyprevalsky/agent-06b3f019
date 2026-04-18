@@ -8,9 +8,10 @@
  *
  * Layer rules: thin controller — parses CLI args / env, calls service, handles
  * exit codes. No data access, no business logic.
+ *
+ * Tests call `createHandler(deps)` directly with stub dependencies so no live
+ * network, filesystem, or env access is required.
  */
-
-// deno-lint-ignore-file no-console -- CLI runner; stderr reporting is part of the contract.
 
 import { parse } from 'https://deno.land/std/flags/mod.ts';
 
@@ -23,14 +24,17 @@ import {
   getRoseApiKey,
 } from './config.ts';
 import { runBenchmarkSuite } from './service.ts';
-import type { BenchmarkSuiteOptions } from './types.ts';
+import type { BenchmarkProductionDeps, BenchmarkSuiteOptions } from './types.ts';
+
+/** Exit code returned when ROSE_API_KEY is missing from the environment. */
+export const MISSING_API_KEY_EXIT_CODE = 1;
 
 /**
  * Parse CLI flags and environment into strongly-typed suite options.
- * Exits the process when required configuration is missing.
+ * Returns null when required configuration is missing (caller exits).
  */
-function parseOptions(): BenchmarkSuiteOptions {
-  const flags = parse(Deno.args, {
+export function parseOptions(args: string[]): BenchmarkSuiteOptions | null {
+  const flags = parse(args, {
     string: ['models', 'benchmarks', 'cot', 'samples'],
     default: {
       models: DEFAULT_MODELS,
@@ -43,10 +47,7 @@ function parseOptions(): BenchmarkSuiteOptions {
   const baseUrl = getBaseUrl();
   const apiKey = getRoseApiKey();
 
-  if (apiKey === '') {
-    console.error('❌ Error: ROSE_API_KEY required');
-    Deno.exit(1);
-  }
+  if (apiKey === '') return null;
 
   return {
     baseUrl,
@@ -58,14 +59,46 @@ function parseOptions(): BenchmarkSuiteOptions {
   };
 }
 
-async function main(): Promise<void> {
-  const options = parseOptions();
-  await runBenchmarkSuite(options);
+/**
+ * Build the CLI handler with injected boundary dependencies.
+ *
+ * Returns a function that accepts `Deno.args` (or equivalent) and resolves
+ * to the process exit code (0 on success, 1 on failure).
+ */
+export function createHandler(
+  deps: BenchmarkProductionDeps,
+): (args: string[]) => Promise<number> {
+  return async (args: string[]): Promise<number> => {
+    const options = parseOptions(args);
+    if (options === null) {
+      deps.error('❌ Error: ROSE_API_KEY required');
+      return MISSING_API_KEY_EXIT_CODE;
+    }
+    try {
+      await runBenchmarkSuite(deps, options);
+      return 0;
+    } catch (error) {
+      deps.error('Fatal error:', error);
+      return 1;
+    }
+  };
+}
+
+/** Real Deno-backed dependency bundle used by the CLI entry point. */
+function defaultDeps(): BenchmarkProductionDeps {
+  return {
+    fetch: (input, init) => fetch(input, init),
+    mkdir: (path, options) => Deno.mkdir(path, options),
+    writeTextFile: (path, data) => Deno.writeTextFile(path, data),
+    // deno-lint-ignore no-console -- CLI runner; stdout is the output channel.
+    log: (...args) => console.log(...args),
+    // deno-lint-ignore no-console -- CLI runner; stderr reporting is part of the contract.
+    error: (...args) => console.error(...args),
+  };
 }
 
 if (import.meta.main) {
-  main().catch((error: unknown) => {
-    console.error('Fatal error:', error);
-    Deno.exit(1);
-  });
+  const handler = createHandler(defaultDeps());
+  const code = await handler(Deno.args);
+  if (code !== 0) Deno.exit(code);
 }

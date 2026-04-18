@@ -70,3 +70,8 @@ export function readModelUrlEnv(): string {
 export function readApiKeyEnv(): string {
   return Deno.env.get('API_KEY') ?? '';
 }
+
+/** Canonical env getter for the benchmark-runner domain. */
+export function getEnv(key: string): string | undefined {
+  return Deno.env.get(key);
+}

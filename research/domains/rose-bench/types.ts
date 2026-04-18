@@ -72,3 +72,13 @@ export type CreateSupabaseClientFn = (
   url: string,
   serviceKey: string,
 ) => SupabaseClientLike;
+
+/**
+ * Injectable fetch used by the repo for model HTTP calls.
+ * Shape-compatible with the global `fetch`, so production wires the global
+ * in and tests can supply a stub.
+ */
+export type FetchFn = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;

@@ -14,6 +14,7 @@ import type {
   BenchmarkResult,
   BenchmarkSummary,
   IBenchmarkHarness,
+  ModelCallResult,
 } from './types.ts';
 import {
   DEFAULT_COT_STEPS,
@@ -21,7 +22,14 @@ import {
   DEFAULT_SEED,
   readMaxSamplesEnv,
 } from './config.ts';
-import { callModel } from './repo.ts';
+import { callModel, type ModelCallParams } from './repo.ts';
+
+/**
+ * Dependency-injectable model call function.
+ * Defaults to the real HTTP-backed `callModel` in the repo layer; tests pass a
+ * stub so no network is touched.
+ */
+export type CallModelFn = (params: ModelCallParams) => Promise<ModelCallResult>;
 
 // Simple seeded random number generator
 function seededRandom(seed: number): () => number {
@@ -63,6 +71,13 @@ export abstract class BaseBenchmarkHarness implements IBenchmarkHarness {
   abstract readonly questionCount: number;
   abstract readonly defaultRepeats: number;
 
+  /** Injected model-call function; defaults to the HTTP-backed repo impl. */
+  protected readonly callModelFn: CallModelFn;
+
+  constructor(callModelFn: CallModelFn = callModel) {
+    this.callModelFn = callModelFn;
+  }
+
   abstract loadDataset(): Promise<BenchmarkQuestion[]>;
   abstract formatPrompt(question: BenchmarkQuestion): string;
   abstract extractAnswer(modelResponse: string): string;
@@ -77,7 +92,7 @@ export abstract class BaseBenchmarkHarness implements IBenchmarkHarness {
     return sampleQuestionsDeterministic(questions, n, seed);
   }
 
-  /** Helper method for calling the model API (delegates to repo layer). */
+  /** Helper method for calling the model API (delegates to the injected fn). */
   protected callModel(
     url: string,
     apiKey: string,
@@ -85,8 +100,8 @@ export abstract class BaseBenchmarkHarness implements IBenchmarkHarness {
     temperature?: number,
     maxTokens?: number,
     cotSteps?: number,
-  ): Promise<{ response: string; cost: number }> {
-    return callModel({ url, apiKey, prompt, temperature, maxTokens, cotSteps });
+  ): Promise<ModelCallResult> {
+    return this.callModelFn({ url, apiKey, prompt, temperature, maxTokens, cotSteps });
   }
 
   /** Default implementation of runBenchmark. */

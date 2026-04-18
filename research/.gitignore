@@ -45,3 +45,6 @@ build/
 
 
 
+
+# Deno coverage reports
+.coverage/

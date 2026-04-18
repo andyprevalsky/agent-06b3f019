@@ -12,11 +12,13 @@
  * limits, so concurrent requests would be rejected.
  */
 
-// deno-lint-ignore-file no-console -- CLI progress output is a first-class concern for this domain.
-
 import { postBenchmark, saveResults } from './repo.ts';
 import { RESULTS_FILE } from './config.ts';
-import type { BenchmarkRunResult, BenchmarkSuiteOptions } from './types.ts';
+import type {
+  BenchmarkProductionDeps,
+  BenchmarkRunResult,
+  BenchmarkSuiteOptions,
+} from './types.ts';
 
 /** Render a visual trend indicator based on industry comparison position. */
 function positionIcon(position: string): string {
@@ -26,23 +28,29 @@ function positionIcon(position: string): string {
 }
 
 /** Log the full suite configuration banner. */
-function logSuiteHeader(options: BenchmarkSuiteOptions): void {
+function logSuiteHeader(
+  deps: Pick<BenchmarkProductionDeps, 'log'>,
+  options: BenchmarkSuiteOptions,
+): void {
   const separator = '='.repeat(80);
-  console.log(separator);
-  console.log('ROSE MODEL BENCHMARK SUITE');
-  console.log(separator);
-  console.log(`Models: ${options.models.join(', ')}`);
-  console.log(`Benchmarks: ${options.benchmarks.join(', ')}`);
-  console.log(`CoT Steps: ${options.cotSteps.join(', ')}`);
-  console.log(`Samples: ${options.samples}`);
-  console.log(separator);
+  deps.log(separator);
+  deps.log('ROSE MODEL BENCHMARK SUITE');
+  deps.log(separator);
+  deps.log(`Models: ${options.models.join(', ')}`);
+  deps.log(`Benchmarks: ${options.benchmarks.join(', ')}`);
+  deps.log(`CoT Steps: ${options.cotSteps.join(', ')}`);
+  deps.log(`Samples: ${options.samples}`);
+  deps.log(separator);
 }
 
 /** Log a single benchmark result in compact, human-readable form. */
-function logResult(result: BenchmarkRunResult): void {
+function logResult(
+  deps: Pick<BenchmarkProductionDeps, 'log'>,
+  result: BenchmarkRunResult,
+): void {
   const icon = positionIcon(result.industryComparison.position);
   const costDollars = (result.totalCostCents / 100).toFixed(2);
-  console.log(
+  deps.log(
     `${icon} ${result.accuracy.toFixed(1)}% (${result.durationSeconds}s, $${costDollars})`,
   );
 }
@@ -52,14 +60,15 @@ function logResult(result: BenchmarkRunResult): void {
  * Returns the result on success, or null on failure (error is logged).
  */
 async function runOne(
+  deps: BenchmarkProductionDeps,
   options: BenchmarkSuiteOptions,
   model: string,
   benchmark: string,
   cotSteps: number,
 ): Promise<BenchmarkRunResult | null> {
-  console.log(`\n▶ Running ${benchmark} on ${model} (CoT=${cotSteps}, n=${options.samples})...`);
+  deps.log(`\n▶ Running ${benchmark} on ${model} (CoT=${cotSteps}, n=${options.samples})...`);
   try {
-    const result = await postBenchmark({
+    const result = await postBenchmark(deps, {
       baseUrl: options.baseUrl,
       apiKey: options.apiKey,
       benchmark,
@@ -67,10 +76,10 @@ async function runOne(
       cotSteps,
       samples: options.samples,
     });
-    logResult(result);
+    logResult(deps, result);
     return result;
   } catch (error) {
-    console.error(`✗ Failed:`, error);
+    deps.error(`✗ Failed:`, error);
     return null;
   }
 }
@@ -78,8 +87,11 @@ async function runOne(
 /**
  * Run the full production benchmark suite and persist results.
  */
-export async function runBenchmarkSuite(options: BenchmarkSuiteOptions): Promise<void> {
-  logSuiteHeader(options);
+export async function runBenchmarkSuite(
+  deps: BenchmarkProductionDeps,
+  options: BenchmarkSuiteOptions,
+): Promise<void> {
+  logSuiteHeader(deps, options);
 
   const results: BenchmarkRunResult[] = [];
 
@@ -87,7 +99,7 @@ export async function runBenchmarkSuite(options: BenchmarkSuiteOptions): Promise
     for (const benchmark of options.benchmarks) {
       for (const cotSteps of options.cotSteps) {
         // deno-lint-ignore no-await-in-loop -- Sequential execution is required by rate limits.
-        const result = await runOne(options, model, benchmark, cotSteps);
+        const result = await runOne(deps, options, model, benchmark, cotSteps);
         if (result !== null) {
           results.push(result);
         }
@@ -95,8 +107,8 @@ export async function runBenchmarkSuite(options: BenchmarkSuiteOptions): Promise
     }
   }
 
-  await saveResults(results);
+  await saveResults(deps, results);
 
-  console.log('\n' + '='.repeat(80));
-  console.log(`✓ Results saved to ${RESULTS_FILE}`);
+  deps.log('\n' + '='.repeat(80));
+  deps.log(`✓ Results saved to ${RESULTS_FILE}`);
 }

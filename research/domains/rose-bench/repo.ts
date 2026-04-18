@@ -10,6 +10,7 @@
 
 import type {
   CreateSupabaseClientFn,
+  FetchFn,
   ModelConfig,
   QuestionResult,
   SupabaseClientLike,
@@ -21,6 +22,8 @@ export interface ModelCallArgs {
   headers: Record<string, string>;
   modelConfig: ModelConfig;
   prompt: string;
+  /** Injectable fetch; defaults to global fetch in production. */
+  fetchFn?: FetchFn;
 }
 
 export interface ModelCallResponse {
@@ -34,7 +37,8 @@ export interface ModelCallResponse {
 export async function callModelEndpoint(
   args: ModelCallArgs,
 ): Promise<ModelCallResponse> {
-  const response = await fetch(args.url, {
+  const fetchImpl = args.fetchFn ?? fetch;
+  const response = await fetchImpl(args.url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

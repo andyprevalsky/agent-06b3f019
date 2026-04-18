@@ -11,7 +11,7 @@ import {
   MODEL_POOLS,
   PRICE_ROUNDING_STEP_USD,
 } from './config.ts';
-import { fetchOpenRouterModels } from './repo.ts';
+import { type FetchFn, fetchOpenRouterModels } from './repo.ts';
 import type { AggregatedPricing, CostResponse, OpenRouterModel } from './types.ts';
 
 /** Typed error surface for the service layer. */
@@ -114,8 +114,13 @@ export function aggregatePricing(
 /**
  * End-to-end cost computation for a normalized model name.
  * Throws CostError on unknown model / missing pricing.
+ *
+ * `fetchFn` is injected so tests can stub out the OpenRouter catalog call.
  */
-export async function computeCost(modelName: string): Promise<CostResponse> {
+export async function computeCost(
+  modelName: string,
+  fetchFn?: FetchFn,
+): Promise<CostResponse> {
   // Underlying-model lookup: when racing falls back to a specific provider (e.g.
   // `google/gemini-3-flash-preview`), the worker asks for pricing by that raw id
   // instead of the Rose variant. Resolve it directly from FIXED_PRICING so the
@@ -139,7 +144,7 @@ export async function computeCost(modelName: string): Promise<CostResponse> {
 
   // Skip OpenRouter fetch if every pool model has fixed pricing.
   const needsCatalog = pool.some((id) => !FIXED_PRICING[id]);
-  const catalog = needsCatalog ? await fetchOpenRouterModels() : [];
+  const catalog = needsCatalog ? await fetchOpenRouterModels(fetchFn) : [];
 
   const pricing = aggregatePricing(pool, catalog);
   if (!pricing) {

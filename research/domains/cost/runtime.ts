@@ -7,6 +7,7 @@
 
 import { slog } from '../../providers/logger.ts';
 import { CORS_HEADERS } from './config.ts';
+import type { FetchFn } from './repo.ts';
 import { computeCost, CostError, parseModelName } from './service.ts';
 import type { CostResponse } from './types.ts';
 
@@ -36,24 +37,35 @@ function internalError(error: unknown): Response {
   );
 }
 
-/** HTTP handler for GET /cost. Exported as the runtime entry point. */
-export async function handleCostRequest(req: Request): Promise<Response> {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: CORS_HEADERS });
-  }
-
-  try {
-    const modelName = parseModelName(new URL(req.url));
-    if (!modelName) {
-      return jsonError('Missing required query parameter: model', 400);
+/**
+ * Build an HTTP handler for GET /cost. `fetchFn` is injected so tests can
+ * substitute a fake in place of `globalThis.fetch`; production wires in the
+ * default via {@link handleCostRequest}.
+ */
+export function createHandler(
+  fetchFn?: FetchFn,
+): (req: Request) => Promise<Response> {
+  return async (req: Request): Promise<Response> => {
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { headers: CORS_HEADERS });
     }
 
-    const result = await computeCost(modelName);
-    return jsonOk(result);
-  } catch (error) {
-    if (error instanceof CostError) {
-      return jsonError(error.message, error.status);
+    try {
+      const modelName = parseModelName(new URL(req.url));
+      if (!modelName) {
+        return jsonError('Missing required query parameter: model', 400);
+      }
+
+      const result = await computeCost(modelName, fetchFn);
+      return jsonOk(result);
+    } catch (error) {
+      if (error instanceof CostError) {
+        return jsonError(error.message, error.status);
+      }
+      return internalError(error);
     }
-    return internalError(error);
-  }
+  };
 }
+
+/** HTTP handler for GET /cost. Exported as the runtime entry point. */
+export const handleCostRequest: (req: Request) => Promise<Response> = createHandler();

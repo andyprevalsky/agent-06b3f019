@@ -50,6 +50,10 @@ echo "=== Canonical utility enforcement ==="
 bash "$ROOT/scripts/lint-canonical.sh" || FAIL=1
 
 echo ""
+echo "=== Coverage gate (TS domains + gepa) ==="
+bash "$ROOT/scripts/coverage-check.sh" || FAIL=1
+
+echo ""
 echo "=== Python (ruff format + ruff check) ==="
 if $FIX; then
   ruff format .

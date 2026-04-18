@@ -37,3 +37,24 @@ export interface BenchmarkSuiteOptions {
   cotSteps: number[];
   samples: number;
 }
+
+/**
+ * Injectable boundary dependencies for the benchmark-production domain.
+ *
+ * Every external boundary (HTTP, filesystem, stdout/stderr) is reached through
+ * this interface so unit tests can supply stubs without live network or disk
+ * access. Env reads live in config.ts (the canonical location for Deno.env)
+ * and are driven via `Deno.env.set(...)` / `Deno.env.delete(...)` in tests.
+ */
+export interface BenchmarkProductionDeps {
+  /** HTTP client used to POST to the Rose `/rose/bench` endpoint. */
+  fetch: typeof fetch;
+  /** Filesystem: create the results directory. */
+  mkdir: (path: string, options: { recursive: boolean }) => Promise<void>;
+  /** Filesystem: write the aggregated results file. */
+  writeTextFile: (path: string, data: string) => Promise<void>;
+  /** Stdout sink for human-readable progress. */
+  log: (...args: unknown[]) => void;
+  /** Stderr sink for error messages. */
+  error: (...args: unknown[]) => void;
+}

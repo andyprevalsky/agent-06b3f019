@@ -20,3 +20,21 @@ export interface ChatProxyRequest {
   /** Promise that resolves to the raw request body as a string. */
   readonly readBody: () => Promise<string>;
 }
+
+/**
+ * Signature of the injected fetch function used to reach the completions
+ * edge function. Matches the global `fetch` shape loosely so tests can swap
+ * it for a stub that returns a fake `Response`.
+ */
+export type FetchFn = (
+  input: Request | URL | string,
+  init?: RequestInit,
+) => Promise<Response>;
+
+/** Injectable dependencies for the chat proxy service. */
+export interface ChatServiceDeps {
+  /** Network transport used to reach the completions edge function. */
+  readonly fetch: FetchFn;
+  /** Resolves the upstream completions URL at call time (reads env). */
+  readonly getCompletionsUrl: () => string;
+}

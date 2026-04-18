@@ -5,7 +5,7 @@
  * Runtime layer: imports own service / types / config only.
  */
 
-import type { BenchmarkRequest, CreateSupabaseClientFn } from './types.ts';
+import type { BenchmarkRequest, CreateSupabaseClientFn, FetchFn } from './types.ts';
 import { corsHeaders } from './config.ts';
 import {
   isFullBenchmark,
@@ -28,12 +28,14 @@ export interface HandlerDeps {
   createSupabaseClient: CreateSupabaseClientFn;
   /** Injected logger so the handler stays no-console under strict lint. */
   logError: (message: string, err: unknown) => void;
+  /** Injectable fetch used for the model HTTP boundary; defaults to global fetch. */
+  fetchFn?: FetchFn;
 }
 
 export function createHandler(
   deps: HandlerDeps,
 ): (req: Request) => Promise<Response> {
-  const { createSupabaseClient, logError } = deps;
+  const { createSupabaseClient, logError, fetchFn } = deps;
 
   return async (req: Request): Promise<Response> => {
     if (req.method === 'OPTIONS') {
@@ -90,6 +92,7 @@ export function createHandler(
           headers: headers ?? {},
           modelConfig,
           seed,
+          fetchFn,
         }, logError);
         return jsonResponse(full, 200);
       }
@@ -100,6 +103,7 @@ export function createHandler(
         modelConfig,
         benchmarkName: benchmark,
         seed,
+        fetchFn,
       }, logError);
 
       const logResult = await logBenchmarkRun(

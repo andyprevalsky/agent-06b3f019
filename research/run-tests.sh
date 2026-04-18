@@ -45,7 +45,8 @@ echo ""
 echo "Running tests..."
 echo ""
 
-deno test --allow-net --allow-env --no-config tests/
+bash scripts/test-unit.sh || exit 1
+deno test --allow-net --allow-env --no-config tests/integration/
 
 # Check exit code
 if [ $? -eq 0 ]; then

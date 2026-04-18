@@ -14,6 +14,7 @@ import type {
   BenchmarkQuestion,
   BenchmarkResult,
   CreateSupabaseClientFn,
+  FetchFn,
   FullBenchmarkResult,
   ModelConfig,
   QuestionResult,
@@ -116,6 +117,8 @@ export interface RunSingleBenchmarkArgs {
   modelConfig: ModelConfig;
   benchmarkName: string;
   seed?: number;
+  /** Injectable fetch; defaults to global fetch in production. */
+  fetchFn?: FetchFn;
 }
 
 export async function runSingleBenchmark(
@@ -142,6 +145,7 @@ export async function runSingleBenchmark(
         headers: args.headers,
         modelConfig: args.modelConfig,
         prompt: formatQuestion(question),
+        fetchFn: args.fetchFn,
       });
       const extractedAnswer = extractAnswer(modelResponse);
       const isCorrect = extractedAnswer === question.correctAnswer;
@@ -196,6 +200,8 @@ export interface RunFullBenchmarkArgs {
   headers: Record<string, string>;
   modelConfig: ModelConfig;
   seed?: number;
+  /** Injectable fetch; defaults to global fetch in production. */
+  fetchFn?: FetchFn;
 }
 
 export async function runFullBenchmark(
@@ -218,6 +224,7 @@ export async function runFullBenchmark(
         modelConfig: args.modelConfig,
         benchmarkName: benchmarkType,
         seed: args.seed,
+        fetchFn: args.fetchFn,
       }, logError);
       benchmarkResults.push(result);
       totalCost += result.totalCostCents;

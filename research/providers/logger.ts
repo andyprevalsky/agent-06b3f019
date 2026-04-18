@@ -11,8 +11,10 @@ export type LogLevel = 'info' | 'warn' | 'error';
 
 function safeStringify(entry: Record<string, unknown>): string {
   try {
-    return JSON.stringify(entry, (_key, value) =>
-      typeof value === 'bigint' ? value.toString() : value);
+    return JSON.stringify(
+      entry,
+      (_key, value) => typeof value === 'bigint' ? value.toString() : value,
+    );
   } catch {
     return JSON.stringify({
       timestamp: entry.timestamp,
