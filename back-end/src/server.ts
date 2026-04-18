@@ -40,6 +40,7 @@ import benchmarksRouter from './domains/benchmarks/routes';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
+import { tracingMiddleware } from './providers/tracing';
 
 // System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
 const SYSTEM_TOOLS = [
@@ -157,8 +158,12 @@ app.use(
   })
 );
 
-// Request logging middleware
-// UUID pattern to extract agent_id from URL paths like /api/agents/:id
+// Tracing middleware: emits hierarchical span.start/span.end per request,
+// binds request_id/span_id/agent_id into AsyncLocalStorage so downstream code
+// (Prisma hooks, broadcast helpers) can attribute their work to the request.
+app.use(tracingMiddleware);
+
+// Legacy single-line request log (kept for backward-compat dashboards)
 const UUID_RE =
   /\/api\/(?:agents|tool-usage)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 

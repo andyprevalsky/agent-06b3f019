@@ -27,6 +27,7 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.tracing import backend_api_headers, current_request_id, rose_api_headers, traced
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
     create_agent_action_model,
@@ -793,8 +794,9 @@ async def call_llm_structured_streaming(  # noqa: C901
     is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
 
     if is_rose_model:
-        # Generate unique request ID for tracing
-        request_id = str(uuid.uuid4())[:8]
+        # Prefer the request_id already bound to the trace context so research
+        # spans nest under the caller; only mint when nothing is bound.
+        request_id = current_request_id() or str(uuid.uuid4())[:8]
         logger.info(
             f"📤 [{request_id}] [{call_site}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
         )
@@ -919,14 +921,13 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "POST",
                     config.rose.api_url,
                     json=request_body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                        "x-api-key": config.rose.api_key,
-                        "x-request-id": request_id,
-                        "x-agent-id": agent_id or "",
-                        "x-call-site": call_site,
-                    },
+                    headers=rose_api_headers(
+                        api_key=config.rose.api_key,
+                        anon_key=config.rose.supabase_anon_key,
+                        call_site=call_site,
+                        fallback_request_id=request_id,
+                        fallback_agent_id=agent_id,
+                    ),
                 ) as stream_response:
                     stream_response.raise_for_status()
 
@@ -1765,6 +1766,7 @@ def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
 
 
 @activity.defn
+@traced("call_llm")
 async def call_llm(
     messages: List[Dict[str, Any]],
     model: Optional[str] = None,
@@ -1803,8 +1805,9 @@ async def call_llm(
         is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
 
         if is_rose_model:
-            # Generate unique request ID for tracing
-            request_id = str(uuid.uuid4())[:8]
+            # Prefer the request_id already bound to the trace context so research
+            # spans nest under the caller; only mint when nothing is bound.
+            request_id = current_request_id() or str(uuid.uuid4())[:8]
             # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
             logger.info(
                 f"📤 [{request_id}] [{call_site}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
@@ -1867,14 +1870,13 @@ async def call_llm(
                 http_response = await http_client.post(
                     config.rose.api_url,
                     json=request_body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                        "x-api-key": config.rose.api_key,
-                        "x-request-id": request_id,
-                        "x-agent-id": agent_id or "",
-                        "x-call-site": call_site,
-                    },
+                    headers=rose_api_headers(
+                        api_key=config.rose.api_key,
+                        anon_key=config.rose.supabase_anon_key,
+                        call_site=call_site,
+                        fallback_request_id=request_id,
+                        fallback_agent_id=agent_id,
+                    ),
                 )
                 http_response.raise_for_status()
 
@@ -1962,6 +1964,7 @@ async def _call_llm_verifier(  # noqa: C901
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
+    agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Simple LLM call for verifier - no streaming UI, no tool detection.
@@ -1997,6 +2000,8 @@ async def _call_llm_verifier(  # noqa: C901
     stream_usage = None
 
     stream_interrupted = False
+    # Prefer request_id from trace context; mint only when nothing is bound.
+    verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     try:
         async with (
             httpx.AsyncClient(timeout=60.0) as http_client,
@@ -2004,11 +2009,13 @@ async def _call_llm_verifier(  # noqa: C901
                 "POST",
                 config.rose.api_url,
                 json=request_body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config.rose.supabase_anon_key}",
-                    "x-api-key": config.rose.api_key,
-                },
+                headers=rose_api_headers(
+                    api_key=config.rose.api_key,
+                    anon_key=config.rose.supabase_anon_key,
+                    call_site=call_site,
+                    fallback_request_id=verifier_request_id,
+                    fallback_agent_id=agent_id,
+                ),
             ) as stream_response,
         ):
             stream_response.raise_for_status()
@@ -2267,6 +2274,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 
 
 @activity.defn
+@traced("check_progress")
 async def check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
@@ -2275,6 +2283,7 @@ async def check_progress(
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal.
@@ -2348,7 +2357,13 @@ async def check_progress(
         for attempt in range(max_retries + 1):
             try:
                 result, usage = await _call_llm_verifier(
-                    messages, model, config, response_schema, claude_token=claude_token, call_site=call_site
+                    messages,
+                    model,
+                    config,
+                    response_schema,
+                    claude_token=claude_token,
+                    call_site=call_site,
+                    agent_id=agent_id,
                 )
                 break
             except Exception as e:
@@ -2404,6 +2419,7 @@ async def check_progress(
 
 
 @activity.defn
+@traced("call_llm_activity")
 async def call_llm_activity(  # noqa: C901
     messages_or_agent_id: Any,
     model: str,
@@ -2580,6 +2596,7 @@ async def call_llm_activity(  # noqa: C901
 
 
 @activity.defn
+@traced("set_response_schema_activity")
 async def set_response_schema_activity(
     agent_id: str,
     user_messages: List[str],
@@ -2625,7 +2642,7 @@ async def set_response_schema_activity(
             api_start = time.perf_counter()
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers=backend_api_headers(api_key),
                 json={"goal": goal},
             )
             schema_response.raise_for_status()
@@ -2653,7 +2670,7 @@ async def set_response_schema_activity(
             save_start = time.perf_counter()
             save_response = await client.patch(
                 f"{backend_url}/api/agents/{agent_id}",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers=backend_api_headers(api_key),
                 json={"response_schema": schema},
             )
             save_elapsed = time.perf_counter() - save_start
@@ -2797,6 +2814,7 @@ async def mark_claude_token_rate_limited_activity(
 
 
 @activity.defn
+@traced("call_planner_llm_activity")
 async def call_planner_llm_activity(
     messages: List[Dict[str, Any]],
     model: str,
@@ -2885,6 +2903,7 @@ async def call_planner_llm_activity(
             response_model=PlannerResponse,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
+            agent_id=agent_id,
             claude_token=claude_max_token,
             skip_cache=True,  # Plan is generated once per iteration — no cache reuse
             call_site="planner",

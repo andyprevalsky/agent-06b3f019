@@ -18,10 +18,12 @@ Auto-debug mode:
     Use the `/benchmark <task-name>` skill in Claude Code. It contains the full
     12-step auto-debug loop with monitoring, diagnosis, fix, PR, deploy, and rerun.
 
-    Log inspection CLI:
-      python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+    Log inspection CLI (run both summaries in parallel — they answer different questions):
+      python benchmarks/agent_latency.py <agent_id>           # span waterfall + slowest paths/LLMs/HTTP
+      python benchmarks/agent_logs.py <agent_id> --tree --diagnostics  # event-timeline tree w/ errors
+      # Expand whichever summary found the issue:
+      python benchmarks/agent_latency.py <agent_id> -v
       python benchmarks/agent_logs.py <agent_id> --tree --source worker|backend|research|messages
-      See benchmarks/agent_logs.py for full usage.
 """
 
 import argparse
@@ -1164,21 +1166,23 @@ async def main_async(args):
             tasks = [t for t in tasks if not t.requires_claude_code]
 
     # Pre-flight: resolve per-task timeout from history corpus.
-    # In bootstrap mode, tasks without history fall back to tasks.json timeout_seconds
-    # (and passes recorded this run will seed the corpus for future runs).
+    # In bootstrap mode, always use tasks.json timeout_seconds as the ceiling — passes
+    # recorded this run seed/extend the corpus for future dynamic caps. This lets
+    # bootstrap widen the cap when infra slowdown has pushed real durations past the
+    # existing p95 (otherwise the tight dynamic cap kills every run before it can pass).
     # In non-bootstrap mode, any task lacking history is a hard error.
     missing_history: List[str] = []
     for t in tasks:
+        if args.bootstrap:
+            t._resolved_timeout_seconds = t.timeout_seconds
+            s = _history_summary(t.name)
+            print(f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
+                  f"(history n={s['count']}, p95={s['p95']}s)")
+            continue
         try:
             t._resolved_timeout_seconds = _history_get_timeout(t.name)
         except InsufficientHistoryError as e:
-            if args.bootstrap:
-                t._resolved_timeout_seconds = t.timeout_seconds
-                s = _history_summary(t.name)
-                print(f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
-                      f"(history has {s['count']}/{e.need} passes)")
-            else:
-                missing_history.append(f"{t.name} ({e.have}/{e.need})")
+            missing_history.append(f"{t.name} ({e.have}/{e.need})")
         else:
             s = _history_summary(t.name)
             print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "

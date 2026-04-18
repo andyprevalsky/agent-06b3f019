@@ -36,6 +36,7 @@ from helpers.llm import (
     check_progress,
 )
 from helpers.summarize import compress_context
+from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
@@ -49,6 +50,7 @@ logger = structlog.get_logger()
 CREDIT_CHECK_INTERVAL = 5
 
 
+@traced("run_agent")
 async def run_agent(  # noqa: C901
     # Identity
     agent_id: str,
@@ -1161,6 +1163,7 @@ async def _run_verifier(
             current_response_schema,
             claude_token,
             "verifier_plan" if is_plan_loop else "verifier_execute",
+            agent_id,
         ],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
