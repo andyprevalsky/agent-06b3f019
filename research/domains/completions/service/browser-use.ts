@@ -19,8 +19,6 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-import type { SupabaseClient } from 'npm:@supabase/supabase-js@~2.39.3';
-
 import {
   ANTHROPIC_API_URL,
   BU_DEFAULT_LATENCY_MS,
@@ -32,7 +30,7 @@ import {
   MODEL_POOLS,
   TRIO_SIZE,
 } from '../config.ts';
-import type { BrowserUseRequest, UnifiedAction } from '../types.ts';
+import type { BrowserUseContext, UnifiedAction } from '../types.ts';
 import { extractJSON, slog, truncateForLogging, withTimeout } from '../utils.ts';
 import { getCachedLatencies } from '../repo.ts';
 import { isAnthropicModel, transformMessagesForAnthropic } from './anthropic.ts';
@@ -43,17 +41,6 @@ import { getAnthropicModelName } from './cost.ts';
 import { callGenericLLM, normalizeBrowserUseResponse } from './generic.ts';
 import { raceBrowserUseModels, selectRacingTrio } from './racing.ts';
 import { callYutoriLLM, normalizeYutoriResponse } from './yutori.ts';
-
-/** Request-level state the caller already resolved before dispatching to this sub-flow. */
-export interface BrowserUseContext {
-  rawBody: BrowserUseRequest;
-  requestId: string;
-  agentId: string | undefined;
-  callSite: string | undefined;
-  authInfo: { apiKeyId: string; userId: string };
-  supabase: SupabaseClient;
-  supabaseUrl: string;
-}
 
 /**
  * Build the `callProvider` dispatcher closure that the three sub-modes all

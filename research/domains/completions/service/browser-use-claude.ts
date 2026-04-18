@@ -17,7 +17,7 @@ import { logUsage } from '../repo.ts';
 import { transformContentBlockForAnthropic } from './anthropic.ts';
 import { transformToBrowserUseFormat } from './browser-use-native.ts';
 import { normalizeBrowserUseResponse } from './generic.ts';
-import type { BrowserUseContext } from './browser-use.ts';
+import type { BrowserUseContext } from '../types.ts';
 
 /**
  * Claude-mode: direct Anthropic Opus 4.7 call using the user's Claude Code

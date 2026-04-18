@@ -116,6 +116,22 @@ export interface UnifiedAction {
   params?: Record<string, any>;
 }
 
+/**
+ * Request-level state shared by every browser-use sub-mode (default racing,
+ * claude passthrough, native single-model). Lives in types.ts so that
+ * sibling service files can reference it without creating an import cycle
+ * between `service/browser-use.ts` and `service/browser-use-claude.ts`.
+ */
+export interface BrowserUseContext {
+  rawBody: BrowserUseRequest;
+  requestId: string;
+  agentId: string | undefined;
+  callSite: string | undefined;
+  authInfo: { apiKeyId: string; userId: string };
+  supabase: SupabaseClient;
+  supabaseUrl: string;
+}
+
 // ---------------------------------------------------------------------------
 // Racing / routing types
 // ---------------------------------------------------------------------------
