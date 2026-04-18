@@ -114,7 +114,12 @@ const ALLOWS_TOP_UTILS: Record<Layer, boolean> = {
 function parseImportPaths(filePath: string): string[] {
   const content = readFileSync(filePath, 'utf-8');
   const results: string[] = [];
-  const regex = /(?:import\s+(?:type\s+)?[^'"`;]*from|import)\s+['"]([^'"]+)['"]/g;
+  // Covers: `import ... from '...'`, bare `import '...'`, and re-exports:
+  // `export * from '...'` / `export { foo } from '...'` (with optional `type`).
+  // Re-exports create the same dependency edges as imports and must be tracked
+  // so layer-direction, cross-domain, and circular-import checks see them.
+  const regex =
+    /(?:import\s+(?:type\s+)?[^'"`;]*from|import|export\s+(?:type\s+)?(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from)\s+['"]([^'"]+)['"]/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(content)) !== null) {
     results.push(match[1]);
@@ -356,12 +361,16 @@ function listFiles(dir: string): string[] {
 
 function hasServiceLayer(domainDir: string, files: string[]): boolean {
   // Either a top-level service.ts / service-*.ts file, OR a service/ subdir
-  // with at least one .ts file inside.
+  // with at least one file that classifyFile() treats as 'service' (so a
+  // runtime adapter under service/handler.ts or service/runtime.ts does not
+  // satisfy completeness).
   if (files.includes('service.ts')) return true;
   if (files.some((f) => f.startsWith('service-') && f.endsWith('.ts'))) return true;
   const subdir = resolve(domainDir, 'service');
   if (existsSync(subdir) && statSync(subdir).isDirectory()) {
-    const serviceFiles = collectTsFiles(subdir);
+    const serviceFiles = collectTsFiles(subdir).filter(
+      (f) => classifyFile(f, domainDir) === 'service',
+    );
     if (serviceFiles.length > 0) return true;
   }
   return false;
@@ -442,6 +451,8 @@ function checkDomainCompletenessPython(domain: string, domainDir: string): Viola
 
 const SUPABASE_PKG_RE = /['"]npm:@supabase\/supabase-js[^'"]*['"]|['"]@supabase\/supabase-js['"]/;
 
+const PROVIDERS_DATABASE_DIR = resolve(PROVIDERS_DIR, 'database');
+
 function checkDataAccessBoundary(
   filePath: string,
   layer: Layer,
@@ -472,6 +483,31 @@ function checkDataAccessBoundary(
       message: `Imports Supabase client from ${src} but only repo and runtime may access it`,
       fix:
         `Move the query to repo.ts, or inject the client through the runtime handler and call it via the repo layer.`,
+    });
+  }
+
+  // Block the indirect bypass: non-repo/non-runtime files may not reach the
+  // data client through providers/database* either. Type-only imports are OK.
+  for (const raw of parseImportPaths(filePath)) {
+    if (!raw.startsWith('.')) continue;
+    const resolved = resolve(dirname(filePath), raw);
+    const isDatabaseProvider = resolved === PROVIDERS_DATABASE_DIR ||
+      resolved.startsWith(PROVIDERS_DATABASE_DIR + sep) ||
+      resolved === PROVIDERS_DATABASE_DIR + '.ts' ||
+      resolved.startsWith(PROVIDERS_DATABASE_DIR + '.');
+    if (!isDatabaseProvider) continue;
+    // Skip `import type { ... } from '...providers/database...'`.
+    const typeOnlyRe = new RegExp(
+      `import\\s+type\\s+[^'"\`;]*from\\s+['"]${raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]`,
+    );
+    if (typeOnlyRe.test(content)) continue;
+    violations.push({
+      category: 'DATA ACCESS BOUNDARY VIOLATION',
+      file: fileLabel,
+      message:
+        `Imports '${raw}' (providers/database) but only repo and runtime may reach the data client`,
+      fix:
+        `Move the query into repo.ts, or inject the provider through the runtime handler and call it via the repo layer.`,
     });
   }
   return violations;
