@@ -11,8 +11,9 @@
  *   npx tsx research/scripts/map-domains.ts --classify      # shared file analysis
  */
 
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
-import { resolve, dirname, relative, extname, join } from 'path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { dirname, extname, join, relative, resolve } from 'path';
+import process from "node:process";
 
 const RESEARCH = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const FUNCTIONS_DIR = resolve(RESEARCH, 'supabase/functions');
@@ -148,19 +149,20 @@ const domains: DomainInfo[] = [];
 // 1. Edge Functions (type: "edge-function")
 if (existsSync(FUNCTIONS_DIR)) {
   const fnDirs = readdirSync(FUNCTIONS_DIR, { withFileTypes: true })
-    .filter(d => d.isDirectory())
-    .map(d => d.name)
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
     .sort();
 
   for (const fnName of fnDirs) {
     const entryFile = resolve(FUNCTIONS_DIR, fnName, 'index.ts');
     if (!existsSync(entryFile)) continue;
 
-    const files = traceImports(entryFile).map(f => relative(RESEARCH, f));
+    const files = traceImports(entryFile).map((f) => relative(RESEARCH, f));
 
-    // Find test file in tests/
+    // Find test file in tests/blackbox/ (preferred) or tests/ (legacy)
     let testFile: string | null = null;
     const candidates = [
+      resolve(TESTS_DIR, 'blackbox', `${fnName}.blackbox.ts`),
       resolve(TESTS_DIR, `rose-${fnName}.test.ts`),
       resolve(TESTS_DIR, `${fnName}.test.ts`),
     ];
@@ -169,7 +171,10 @@ if (existsSync(FUNCTIONS_DIR)) {
       candidates.push(resolve(TESTS_DIR, 'rose-bench.test.ts'));
     }
     for (const tp of candidates) {
-      if (existsSync(tp)) { testFile = relative(RESEARCH, tp); break; }
+      if (existsSync(tp)) {
+        testFile = relative(RESEARCH, tp);
+        break;
+      }
     }
 
     domains.push({
@@ -192,13 +197,15 @@ if (existsSync(BENCHMARKS_DIR)) {
   for (const { name, file } of benchEntries) {
     const entry = resolve(BENCHMARKS_DIR, file);
     if (!existsSync(entry)) continue;
-    const files = traceImports(entry).map(f => relative(RESEARCH, f));
+    const files = traceImports(entry).map((f) => relative(RESEARCH, f));
+    const benchTest = resolve(TESTS_DIR, 'blackbox', 'benchmarks.blackbox.ts');
+    const testFile = existsSync(benchTest) ? relative(RESEARCH, benchTest) : null;
     domains.push({
       domain: name,
       type: 'benchmark',
       entryFile: relative(RESEARCH, entry),
       files,
-      testFile: null,
+      testFile,
       fileCount: files.length,
     });
   }
@@ -215,28 +222,51 @@ if (existsSync(GEPA_DIR)) {
   for (const { name, file } of gepaEntries) {
     const entry = resolve(GEPA_DIR, file);
     if (!existsSync(entry)) continue;
-    const files = traceImports(entry).map(f => relative(RESEARCH, f));
+    const files = traceImports(entry).map((f) => relative(RESEARCH, f));
 
-    // Find matching test file
+    // Find matching test file (blackbox preferred, then domain-specific unit test)
     let testFile: string | null = null;
     const slug = name.replace(/^gepa-?/, '').replace(/-/g, '_') || 'gepa_optimizer';
-    const testPath = resolve(GEPA_TESTS_DIR, `test_${slug}.py`);
-    if (existsSync(testPath)) testFile = relative(RESEARCH, testPath);
+    const candidates = [
+      resolve(GEPA_TESTS_DIR, `test_${slug}_blackbox.py`),
+      resolve(GEPA_TESTS_DIR, `test_${slug}.py`),
+    ];
+    if (name === 'gepa') candidates.unshift(resolve(GEPA_TESTS_DIR, 'test_gepa_blackbox.py'));
+    for (const tp of candidates) {
+      if (existsSync(tp)) {
+        testFile = relative(RESEARCH, tp);
+        break;
+      }
+    }
 
-    domains.push({ domain: name, type: 'pipeline', entryFile: relative(RESEARCH, entry), files, testFile, fileCount: files.length });
+    domains.push({
+      domain: name,
+      type: 'pipeline',
+      entryFile: relative(RESEARCH, entry),
+      files,
+      testFile,
+      fileCount: files.length,
+    });
   }
 }
 
 // 4. Root-level experiment scripts (type: "experiment")
 const experiments = readdirSync(RESEARCH)
-  .filter(f => f.startsWith('test_') && f.endsWith('.py'))
+  .filter((f) => f.startsWith('test_') && f.endsWith('.py'))
   .sort();
 
 for (const script of experiments) {
   const entry = resolve(RESEARCH, script);
-  const files = traceImports(entry).map(f => relative(RESEARCH, f));
+  const files = traceImports(entry).map((f) => relative(RESEARCH, f));
   const name = script.replace('.py', '').replace(/^test_/, '').replace(/_/g, '-');
-  domains.push({ domain: name, type: 'experiment', entryFile: relative(RESEARCH, entry), files, testFile: null, fileCount: files.length });
+  domains.push({
+    domain: name,
+    type: 'experiment',
+    entryFile: relative(RESEARCH, entry),
+    files,
+    testFile: null,
+    fileCount: files.length,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -257,9 +287,24 @@ function collectSourceFiles(): Set<string> {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = resolve(dir, entry.name);
       if (entry.isDirectory()) {
-        if (['node_modules', '.git', '__pycache__', 'data', 'browser-use-repo', 'datasets', '.branches', '.temp'].includes(entry.name)) continue;
+        if (
+          [
+            'node_modules',
+            '.git',
+            '__pycache__',
+            'data',
+            'browser-use-repo',
+            'datasets',
+            '.branches',
+            '.temp',
+          ].includes(entry.name)
+        ) continue;
         walk(full, exts);
-      } else if (exts.some(e => entry.name.endsWith(e)) && !entry.name.startsWith('test-') && !entry.name.startsWith('test_') && entry.name !== 'fixtures.py' && entry.name !== 'fixtures.ts') {
+      } else if (
+        exts.some((e) => entry.name.endsWith(e)) && !entry.name.startsWith('test-') &&
+        !entry.name.startsWith('test_') && entry.name !== 'fixtures.py' &&
+        entry.name !== 'fixtures.ts'
+      ) {
         files.add(relative(RESEARCH, full));
       }
     }
@@ -284,7 +329,9 @@ function classifyFiles(): Classification {
   const shared: Classification['shared'] = [];
   const domainOnly: Record<string, string> = {};
   const orphaned: string[] = [];
-  const appWiring = ['deploy.sh', 'run-local.sh', 'run-tests.sh'].filter(f => existsSync(resolve(RESEARCH, f)));
+  const appWiring = ['deploy.sh', 'run-local.sh', 'run-tests.sh'].filter((f) =>
+    existsSync(resolve(RESEARCH, f))
+  );
 
   for (const file of [...allSource].sort()) {
     const doms = fileDomains.get(file);
@@ -335,10 +382,10 @@ if (arg === '--classify') {
 }
 
 if (arg && !arg.startsWith('-')) {
-  const d = domains.find(x => x.domain === arg);
+  const d = domains.find((x) => x.domain === arg);
   if (!d) {
     console.error(`Unknown domain: ${arg}`);
-    console.error(`Available: ${domains.map(x => x.domain).join(', ')}`);
+    console.error(`Available: ${domains.map((x) => x.domain).join(', ')}`);
     process.exit(1);
   }
   console.log(`Domain: ${d.domain}`);
@@ -346,7 +393,7 @@ if (arg && !arg.startsWith('-')) {
   console.log(`Entry:  ${d.entryFile}`);
   console.log(`Test:   ${d.testFile || '(none)'}`);
   console.log(`Files (${d.fileCount}):`);
-  d.files.forEach(f => console.log(`  ${f}`));
+  d.files.forEach((f) => console.log(`  ${f}`));
   process.exit(0);
 }
 

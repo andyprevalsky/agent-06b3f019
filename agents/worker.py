@@ -90,7 +90,12 @@ from helpers import (
     update_agent_status,
 )
 from helpers.attachments import resolve_attachments_activity
-from helpers.llm import call_planner_llm_activity, fetch_claude_max_token_activity, set_response_schema_activity
+from helpers.llm import (
+    call_planner_llm_activity,
+    fetch_claude_max_token_activity,
+    mark_claude_token_rate_limited_activity,
+    set_response_schema_activity,
+)
 from helpers.messages import update_agent_tree_state
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from helpers.save_tool_usage import save_tool_usage
@@ -584,6 +589,7 @@ async def main():
             call_planner_llm_activity,
             set_response_schema_activity,
             fetch_claude_max_token_activity,
+            mark_claude_token_rate_limited_activity,
             update_agent_status,
             compress_context,
             generate_completion_summary,

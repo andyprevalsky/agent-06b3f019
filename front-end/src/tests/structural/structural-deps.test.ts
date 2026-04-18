@@ -159,6 +159,9 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/terminal/components/AgentChatArea.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
   ],
+  'features/terminal/components/ChatScrollArea.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group"',
+  ],
   'features/terminal/components/BackgroundPattern.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
   ],

@@ -1,32 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+
+import { useDocumentSeo } from '@/lib/seo';
 
 import { ABOUT_TITLE, ABOUT_DESCRIPTION } from './config';
 
 /** Sets document title, meta description, and canonical link for the About page. */
 export function useAboutSeo(): void {
-  useEffect(() => {
-    document.title = ABOUT_TITLE;
-
-    const ensureMeta = (name: string, content: string) => {
-      let tag = document.querySelector(`meta[name="${name}"]`);
-      if (!tag) {
-        tag = document.createElement('meta');
-        tag.setAttribute('name', name);
-        document.head.appendChild(tag);
-      }
-      tag.setAttribute('content', content);
-    };
-
-    ensureMeta('description', ABOUT_DESCRIPTION);
-
-    let link = document.querySelector('link[rel="canonical"]') as HTMLLinkElement | null;
-    if (!link) {
-      link = document.createElement('link');
-      link.rel = 'canonical';
-      document.head.appendChild(link);
-    }
-    link.href = window.location.href;
-  }, []);
+  useDocumentSeo({
+    title: ABOUT_TITLE,
+    description: ABOUT_DESCRIPTION,
+    canonical: true,
+  });
 }
 
 /** Manages the contact modal open/close state. */

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useContext, createContext } from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 import { unsubscribe } from '@/lib/realtime';
+import { getQueryParams } from '@/lib/url';
 import type { AgentDetail, Message } from '@/lib/api';
 
 import type {
@@ -53,8 +54,7 @@ export function useAgentProvider({
   // ─── Agent state ─────────────────────────────────────────────────────────
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('agent-id');
+    return getQueryParams().get('agent-id');
   });
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);

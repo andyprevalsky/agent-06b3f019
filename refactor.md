@@ -108,7 +108,7 @@ Build behavioral safety net for each domain. Make sure all tests are passing on 
 
 #### 4.A.2 Setup Formatter + Linter
 `/batch /setup-formatter-and-linter` (all domains in this repo)
-Configure fmt + lint rules for each domain. Auto-fix what's fixable. **DO NOT** enforce passing all rules yet — remaining violations get resolved during `/refactor-domain` in step 4.C.
+Configure fmt + lint rules for each domain. **DO NOT** auto-run the formatter across the codebase at this stage — 4.C will rewrite these files anyway, so mass reformatting now just creates a huge throwaway diff. Install configs, wire up the `lint-check.sh` script, add cleaned domains to the strict ratchet, and leave violations to be resolved during `/refactor-domain` in step 4.C.
 
 ### Step 4.B — Deploy (first checkpoint)
 `/deploy` — ✅ lint ✅ fmt ✅ blackbox 🔴 E2E 🔴 structural 🔴 types
@@ -179,39 +179,6 @@ Add ESLint `no-restricted-syntax` rules to ban hand-rolled patterns for cross-cu
 `/enforce-code-coverage <starting-threshold>` — configure coverage thresholds per domain. Start at whatever the repo currently hits (ratchet only upward from there). Add coverage gate to CI.
 
 Run once per repo.
-
----
-
-## Level 5 — Bug Bash + Regenerate (after all Level 4)
-
-### 5.1 Joint Team Bug Bash + Manual Fix
-The dev team and the refactor team walk through each refactored domain together. Identify any regressions, broken flows, or architectural inconsistencies the automated pipeline missed. Fix issues manually as a team — this is also a teaching moment for how to use the skills going forward.
-
-### 5.2 Regenerate CLAUDE.md
-`/generate-claude-md`
-Re-scan all repos now that they have layered architecture, TS, structural tests, coverage gates, and bug bash fixes applied.
-**Output:** CLAUDE.md reflects the final refactored codebase state.
-
----
-
-## Level 6 — Handoff (depends on Level 5)
-
-### 6.1 Live Code Development Session
-Video call with the dev team.
-- Demo: pick a ticket, `/new_branch_with_context`, implement feature, `/deploy` end-to-end
-- Show: Conductor multi-workspace parallelism
-- Show: CodeRabbit review cycle
-- Walk through CLAUDE.md and how to maintain it
-
-**Output:** team can operate independently with the delivered skills.
-
-### 6.2 Final Deliverables
-Compile and deliver:
-1. Claude Code skills (deployed to `.claude/skills`)
-2. Linter/formatter/review config files + recommendations doc
-3. This refactor roadmap (updated with actual results)
-
-**Output:** all deliverables transferred.
 
 ---
 

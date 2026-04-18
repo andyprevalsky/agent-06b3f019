@@ -3,61 +3,46 @@
  * Called once from main.tsx at app startup.
  */
 
-import * as amplitude from '@amplitude/analytics-browser';
 import { sessionReplayPlugin } from '@amplitude/plugin-session-replay-browser';
 
+import * as analytics from '@/lib/analytics';
+
+import { sendDevLog } from './api';
 import {
   AMPLITUDE_API_KEY,
   SESSION_REPLAY_SAMPLE_RATE,
-  DEV_LOG_ENDPOINT,
+  IS_DEV,
   VH_REMEASURE_DELAY_MS,
 } from './config';
 
 /** Patches console.log/warn/error to forward logs to the backend in dev mode. */
 export function initDevLogging(): void {
-  if (!import.meta.env.DEV) return;
+  if (!IS_DEV) return;
 
   // eslint-disable-next-line no-console -- capturing originals for dev log forwarding
   const originalLog = console.log;
   const originalWarn = console.warn;
   const originalError = console.error;
 
-  const backendUrl = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
-    /\/$/,
-    '',
-  );
-
-  const sendLog = (level: string, args: unknown[]) => {
-    fetch(`${backendUrl}${DEV_LOG_ENDPOINT}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level,
-        args: args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))),
-      }),
-    }).catch(() => {}); // Silently fail if backend unavailable
-  };
-
   // eslint-disable-next-line no-console -- patching console.log with forwarding wrapper
   console.log = (...args) => {
     originalLog(...args);
-    sendLog('log', args);
+    sendDevLog('log', args);
   };
   console.warn = (...args) => {
     originalWarn(...args);
-    sendLog('warn', args);
+    sendDevLog('warn', args);
   };
   console.error = (...args) => {
     originalError(...args);
-    sendLog('error', args);
+    sendDevLog('error', args);
   };
 }
 
 /** Initializes Amplitude analytics with session replay. */
 export function initAmplitude(): void {
-  amplitude.add(sessionReplayPlugin({ sampleRate: SESSION_REPLAY_SAMPLE_RATE }));
-  amplitude.init(AMPLITUDE_API_KEY, { autocapture: true });
+  analytics.addPlugin(sessionReplayPlugin({ sampleRate: SESSION_REPLAY_SAMPLE_RATE }));
+  analytics.init(AMPLITUDE_API_KEY, { autocapture: true });
 }
 
 /** Sets the `--vh` CSS custom property and installs resize/orientation listeners. */

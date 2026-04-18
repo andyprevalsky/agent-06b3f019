@@ -4,6 +4,7 @@
     "include": [
       "supabase/functions/api-keys/index.ts",
       "supabase/functions/chat/index.ts",
+      "supabase/functions/completions/index.ts",
       "supabase/functions/cost/index.ts",
       "supabase/functions/delete-api-key/handler.ts",
       "supabase/functions/delete-api-key/index.ts",

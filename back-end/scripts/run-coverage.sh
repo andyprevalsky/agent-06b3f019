@@ -39,6 +39,15 @@ fi
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"
 
+# Pin the blackbox artifact dir so failures leave a known log path. Without this
+# the blackbox runner mints a random RUN_ID dir, which gets lost if the caller
+# tails output — forcing a full rerun just to find failures.
+BLACKBOX_ARTIFACT_DIR="$BACKEND_DIR/coverage/blackbox-run"
+rm -rf "$BLACKBOX_ARTIFACT_DIR"
+mkdir -p "$BLACKBOX_ARTIFACT_DIR"
+export BLACKBOX_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
+export CONTRACT_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
+
 # ── Use local Postgres when Conductor provides port info ──
 # Mirror the same logic from run-blackbox-tests.sh so the coverage backend
 # and the test runner both hit the same local DB (avoids FK / 404 mismatches).
@@ -185,9 +194,19 @@ PYEOF
   exit "$COV_EXIT"
 fi
 
-# If blackbox tests failed, report it even if coverage passed
+# If blackbox tests failed, surface the runner log path + failure tail so the
+# caller can diagnose without rerunning the whole coverage suite.
 if [[ "$TEST_EXIT" -ne 0 ]]; then
+  RUNNER_LOG="$BLACKBOX_ARTIFACT_DIR/runner.log"
   echo ""
   echo "⚠️  Blackbox tests failed (exit code $TEST_EXIT). Coverage data may be incomplete."
+  echo "    Full runner log: $RUNNER_LOG"
+  echo "    Backend log:     $BLACKBOX_ARTIFACT_DIR/backend.log"
+  if [[ -f "$RUNNER_LOG" ]]; then
+    echo ""
+    echo "=== Failure tail (last 120 lines of runner.log) ==="
+    tail -n 120 "$RUNNER_LOG"
+    echo "=== End failure tail ==="
+  fi
   exit "$TEST_EXIT"
 fi

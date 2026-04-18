@@ -70,6 +70,7 @@
 import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -2760,6 +2761,365 @@ async function testClaudeCodePoolRateLimited_missingPoolTokenId() {
   assert(body.error.includes('poolTokenId'), `Expected poolTokenId error, got: ${body.error}`);
 }
 
+// --- Claude Code token rotation: full end-to-end rotation coverage ---
+//
+// Regression guard for the bug where Andy's rate-limited user token kept being
+// returned by `getClaudeCodeToken` because (a) the workflow never POSTed to
+// `/token/rate-limited` on rate_limit and (b) even if it had, the user branch
+// was fetched before the pool branch. These tests lock in:
+//   1. POST /rate-limited(source=user) sets Integration.rateLimitedUntil in DB
+//      (time-windowed, NOT permanent — must be in the future, not null)
+//   2. After marking user rate-limited, GET /credentials/token falls back to pool
+//   3. Pool rotation via excludePoolTokens returns a DIFFERENT pool token
+//   4. Once rateLimitedUntil passes, the token is available again (auto-heal)
+//   5. All tokens rate-limited → 404 NoTokensAvailableError
+//
+// Tests seed real encrypted Claude credential envelopes matching the format
+// decryptCredentialEnvelope() expects (RSA-OAEP-SHA256 wrapped AES-256-GCM).
+
+const CLAUDE_DECRYPTION_KEY_B64 = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY ?? '';
+
+function claudePublicKeyPem(): string {
+  if (CLAUDE_DECRYPTION_KEY_B64 === '') {
+    throw new Error('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set — cannot seed token fixtures');
+  }
+  const privatePem = Buffer.from(CLAUDE_DECRYPTION_KEY_B64, 'base64').toString('utf8');
+  const keyObj = crypto.createPrivateKey(privatePem);
+  return crypto.createPublicKey(keyObj).export({ type: 'spki', format: 'pem' }) as string;
+}
+
+/** Produces a credential envelope that decryptCredentialEnvelope() can decrypt. */
+function encryptClaudeEnvelope(plaintext: string): string {
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  const encryptedPart = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const ciphertextWithTag = Buffer.concat([encryptedPart, authTag]);
+
+  const encryptedAesKey = crypto.publicEncrypt(
+    {
+      key: claudePublicKeyPem(),
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+    },
+    aesKey
+  );
+
+  const envelope = {
+    version: 1,
+    encrypted_aes_key: encryptedAesKey.toString('base64'),
+    iv: iv.toString('base64'),
+    ciphertext: ciphertextWithTag.toString('base64'),
+  };
+  return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+}
+
+function buildCredentialPayload(accessToken: string): string {
+  return encryptClaudeEnvelope(
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken,
+        refreshToken: 'test-refresh',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    })
+  );
+}
+
+interface SeededIntegration {
+  id: string;
+  userId: string;
+  accessToken: string;
+}
+
+async function seedClaudeIntegration(
+  userId: string,
+  opts: { poolingEnabled?: boolean; accessToken?: string } = {}
+): Promise<SeededIntegration> {
+  const accessToken = opts.accessToken ?? `seed-token-${crypto.randomBytes(8).toString('hex')}`;
+  const encryptedCredentials = buildCredentialPayload(accessToken);
+
+  const integration = await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'claude_code' } },
+    create: {
+      userId,
+      name: 'claude_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+      poolingEnabled: opts.poolingEnabled ?? false,
+      config: { encryptedCredentials },
+    },
+    update: {
+      status: 'CONNECTED',
+      poolingEnabled: opts.poolingEnabled ?? false,
+      rateLimitedUntil: null,
+      lastUsedAt: null,
+      config: { encryptedCredentials },
+    },
+  });
+  return { id: integration.id, userId, accessToken };
+}
+
+async function completeOnboarding(userId: string): Promise<void> {
+  // User.userId is the Supabase auth id; User.id is a separate autogen PK.
+  // Integration.userId + getClaudeCodeToken's findUserById both use the auth id.
+  await prisma.user.update({
+    where: { userId },
+    data: { onboardingCompletedAt: new Date() },
+  });
+}
+
+async function existingPoolIds(): Promise<string[]> {
+  const rows = await prisma.integration.findMany({
+    where: { name: 'claude_code', poolingEnabled: true, status: 'CONNECTED' },
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+async function cleanupIntegrations(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await prisma.integration.deleteMany({ where: { id: { in: ids } } });
+}
+
+// Test 1: Marking user token rate-limited → GET returns a pool token.
+// This is the exact regression Andy saw — rate_limit should flip over to pool.
+async function testRotation_userRateLimitedFallsBackToPool() {
+  const callerIds = await existingPoolIds();
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  try {
+    // Step 1: Happy path — user token returned before rate-limit.
+    const before = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: apiKeyHeaders(caller.userId),
+    });
+    assertStatus(before.status, 200, before.data);
+    assert(
+      (before.data as { source: string }).source === 'user',
+      `Pre-rate-limit: expected source=user, got ${JSON.stringify(before.data)}`
+    );
+
+    // Step 2: Mark user token rate-limited (the fix that was missing).
+    const markRes = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        source: 'user',
+        userId: caller.userId,
+        rateLimitedUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      }),
+    });
+    assertStatus(markRes.status, 200, markRes.data);
+
+    // Step 3: rateLimitedUntil is TIME-WINDOWED (future, not null, not permanent).
+    const rowAfterMark = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    assert(
+      rowAfterMark?.rateLimitedUntil instanceof Date,
+      'Integration.rateLimitedUntil must be set after mark'
+    );
+    const untilMs = rowAfterMark!.rateLimitedUntil!.getTime();
+    const nowMs = Date.now();
+    assert(
+      untilMs > nowMs,
+      `rateLimitedUntil must be in the future (got ${untilMs - nowMs}ms from now)`
+    );
+    assert(
+      untilMs - nowMs <= 10 * 60 * 1000,
+      `rateLimitedUntil must be bounded (≤10min), got ${untilMs - nowMs}ms — looks permanent`
+    );
+
+    // Step 4: GET /credentials/token now falls back to pool (exclude any pre-existing pool tokens).
+    const after = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: {
+        ...apiKeyHeaders(caller.userId),
+        ...(callerIds.length > 0 ? { 'X-Exclude-Pool-Tokens': callerIds.join(',') } : {}),
+      },
+    });
+    assertStatus(after.status, 200, after.data);
+    const afterBody = after.data as { source: string; poolTokenId?: string };
+    assert(
+      afterBody.source === 'pool',
+      `Post-rate-limit: expected source=pool, got ${afterBody.source}`
+    );
+    assert(
+      afterBody.poolTokenId === poolInt.id,
+      `Expected our seeded pool token, got ${afterBody.poolTokenId}`
+    );
+  } finally {
+    await cleanupIntegrations([userInt.id, poolInt.id]);
+  }
+}
+
+// Test 2: Pool rotation — marking pool token A rate-limited makes the next forced-pool
+// fetch return token B (never A).
+async function testRotation_poolRotatesOnRateLimit() {
+  const existing = await existingPoolIds();
+  const caller = await createAnonSession();
+  await completeOnboarding(caller.userId);
+
+  const poolOwnerA = await createAnonSession();
+  const poolOwnerB = await createAnonSession();
+  const poolA = await seedClaudeIntegration(poolOwnerA.userId, { poolingEnabled: true });
+  const poolB = await seedClaudeIntegration(poolOwnerB.userId, { poolingEnabled: true });
+
+  // Exclude every pool row that isn't ours so the LRU query is deterministic.
+  const excludeHeader = existing.join(',');
+
+  try {
+    // Step 1: force-pool → get ONE of our two seeded tokens.
+    const fetchPool = async (extraExcludes: string[] = []) => {
+      const excludes = [...existing, ...extraExcludes].filter((x) => x !== '');
+      const headers: Record<string, string> = {
+        ...apiKeyHeaders(caller.userId),
+        'X-Force-Pool': 'true',
+      };
+      if (excludes.length > 0) headers['X-Exclude-Pool-Tokens'] = excludes.join(',');
+      return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, { headers });
+    };
+
+    const res1 = await fetchPool();
+    assertStatus(res1.status, 200, res1.data);
+    const firstId = (res1.data as { poolTokenId: string }).poolTokenId;
+    assert(
+      [poolA.id, poolB.id].includes(firstId),
+      `First fetch: expected one of our seeded pool ids, got ${firstId} (existing=${excludeHeader})`
+    );
+
+    // Step 2: mark the returned pool token as rate-limited.
+    const markRes = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        source: 'pool',
+        poolTokenId: firstId,
+        rateLimitedUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      }),
+    });
+    assertStatus(markRes.status, 200, markRes.data);
+
+    // Step 3: next force-pool fetch must return the OTHER token (rate-limit filter works).
+    const res2 = await fetchPool();
+    assertStatus(res2.status, 200, res2.data);
+    const secondId = (res2.data as { poolTokenId: string }).poolTokenId;
+    assert(secondId !== firstId, `Rotation failed: got same token twice (${firstId})`);
+    assert(
+      [poolA.id, poolB.id].includes(secondId),
+      `Second fetch: expected the other seeded token, got ${secondId}`
+    );
+  } finally {
+    await cleanupIntegrations([poolA.id, poolB.id]);
+  }
+}
+
+// Test 3: Auto-expiry — a token whose rateLimitedUntil is in the past is available again.
+// Locks in that the filter is `rateLimitedUntil < now`, not a permanent disable flag.
+async function testRotation_autoExpiresAfterCooldown() {
+  const existing = await existingPoolIds();
+  const caller = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  const poolOwner = await createAnonSession();
+  const pool = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  try {
+    // Manually put rateLimitedUntil 1 second in the past — simulates cooldown elapsed.
+    await prisma.integration.update({
+      where: { id: pool.id },
+      data: { rateLimitedUntil: new Date(Date.now() - 1000) },
+    });
+
+    const excludes = existing.join(',');
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    if (excludes !== '') headers['X-Exclude-Pool-Tokens'] = excludes;
+
+    const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers,
+    });
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as { source: string; poolTokenId: string };
+    assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
+    assert(
+      body.poolTokenId === pool.id,
+      `Expired rate-limit should auto-heal; expected our pool id, got ${body.poolTokenId}`
+    );
+  } finally {
+    await cleanupIntegrations([pool.id]);
+  }
+}
+
+// Test 4: All tokens exhausted → 404 NoTokensAvailableError.
+// The caller has a user token + one pool exists, both rate-limited → no fallback.
+async function testRotation_allExhausted404() {
+  const existing = await existingPoolIds();
+  const caller = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  const poolOwner = await createAnonSession();
+
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  try {
+    const until = new Date(Date.now() + 5 * 60 * 1000);
+    await prisma.integration.update({
+      where: { id: userInt.id },
+      data: { rateLimitedUntil: until },
+    });
+    await prisma.integration.update({
+      where: { id: poolInt.id },
+      data: { rateLimitedUntil: until },
+    });
+
+    const excludes = existing.join(',');
+    const headers: Record<string, string> = apiKeyHeaders(caller.userId);
+    if (excludes !== '') headers['X-Exclude-Pool-Tokens'] = excludes;
+
+    const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers,
+    });
+    assertStatus(res.status, 404, res.data);
+    assertSchema(ErrorResponse, res.data, 'all-exhausted 404');
+  } finally {
+    await cleanupIntegrations([userInt.id, poolInt.id]);
+  }
+}
+
+// Test 5: Default cooldown (no rateLimitedUntil in body) is a bounded time window,
+// not permanent. Guards against a future regression where someone sets it to far-future.
+async function testRotation_defaultCooldownIsBounded() {
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+
+  try {
+    const markRes = await request(`${BASE_URL}/api/integrations/claude-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ source: 'user', userId: caller.userId }),
+    });
+    assertStatus(markRes.status, 200, markRes.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    const until = row?.rateLimitedUntil;
+    assert(until instanceof Date, 'rateLimitedUntil must be set even when body omits it');
+    const ms = until!.getTime() - Date.now();
+    assert(ms > 0, `rateLimitedUntil must be in the future (got ${ms}ms from now)`);
+    assert(
+      ms <= 10 * 60 * 1000,
+      `default cooldown must be bounded (≤10min); got ${ms}ms — looks permanent`
+    );
+  } finally {
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
 // --- Claude Code token: exercises internal auth paths ---
 
 async function testClaudeCodeToken_viaApiKeyInternal() {
@@ -3398,6 +3758,20 @@ async function runAll() {
   // Phase 3: Sequential tests (state-dependent + boundary capture)
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'state transition -- full lifecycle', fn: testStateTransition_fullLifecycle },
+    {
+      name: 'rotation -- user rate-limited falls back to pool',
+      fn: testRotation_userRateLimitedFallsBackToPool,
+    },
+    { name: 'rotation -- pool rotates on rate-limit', fn: testRotation_poolRotatesOnRateLimit },
+    {
+      name: 'rotation -- auto-expires after cooldown (time-windowed)',
+      fn: testRotation_autoExpiresAfterCooldown,
+    },
+    { name: 'rotation -- all exhausted returns 404', fn: testRotation_allExhausted404 },
+    {
+      name: 'rotation -- default cooldown is bounded (not permanent)',
+      fn: testRotation_defaultCooldownIsBounded,
+    },
   ];
 
   if (ctx.captureAvailable) {
