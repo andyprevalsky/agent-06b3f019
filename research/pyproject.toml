@@ -1,7 +1,7 @@
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["gepa", "."]
+src = ["gepa", "domains", "."]
 
 [tool.ruff.lint]
 select = [
@@ -27,7 +27,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["gepa", "research"]
+known-first-party = ["gepa", "domains", "research"]
 
 # ---------------------------------------------------------------------------
 # Strict per-domain enforcement
@@ -64,9 +64,6 @@ known-first-party = ["gepa", "research"]
 "gepa/pipelines/expansion.py" = ["C901", "TCH", "ASYNC", "T20"]
 "gepa/pipelines/simulate_user.py" = ["C901", "TCH", "ASYNC", "T20"]
 "gepa/pipelines/synthetic_pairs.py" = ["C901", "TCH", "ASYNC", "T20"]
-"gepa/run_full_pipeline.py" = ["C901", "TCH", "ASYNC", "T20"]
-"gepa/run_judge.py" = ["C901", "TCH", "ASYNC", "T20"]
-"gepa/smoke_optimizer.py" = ["C901", "TCH", "ASYNC", "T20"]
 "gepa/verify_labels.py" = ["C901", "TCH", "ASYNC", "T20"]
 
 [tool.ruff.lint.mccabe]
