@@ -16,17 +16,14 @@ import modal
 
 app = modal.App('gepa-critic')
 
-image = (
-    modal.Image.debian_slim(python_version='3.11')
-    .pip_install(
-        'torch',
-        'transformers',
-        'trl',
-        'peft',
-        'datasets',
-        'accelerate',
-        'bitsandbytes',
-    )
+image = modal.Image.debian_slim(python_version='3.11').pip_install(
+    'torch',
+    'transformers',
+    'trl',
+    'peft',
+    'datasets',
+    'accelerate',
+    'bitsandbytes',
 )
 
 vol = modal.Volume.from_name('gepa-models', create_if_missing=True)
@@ -64,7 +61,9 @@ def train(
         dict with 'model_id', 'num_examples', 'train_loss', 'metrics'.
     """
     import os
+
     import datasets
+    import torch
     from huggingface_hub import login
     from peft import LoraConfig, TaskType
     from transformers import (
@@ -73,7 +72,6 @@ def train(
         BitsAndBytesConfig,
     )
     from trl import RewardConfig, RewardTrainer
-    import torch
 
     if os.environ.get('HF_TOKEN'):
         login(token=os.environ['HF_TOKEN'])
@@ -162,6 +160,7 @@ class Scorer:
     @modal.enter()
     def load_model(self):
         import os
+
         import torch
         from huggingface_hub import login
         from peft import AutoPeftModelForSequenceClassification
@@ -179,7 +178,8 @@ class Scorer:
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
         self.model = AutoPeftModelForSequenceClassification.from_pretrained(
-            model_dir, num_labels=1,
+            model_dir,
+            num_labels=1,
             quantization_config=quantization_config,
             device_map='auto',
         )

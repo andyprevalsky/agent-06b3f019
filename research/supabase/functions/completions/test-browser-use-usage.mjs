@@ -7,13 +7,15 @@
  * Run: node test-browser-use-usage.mjs
  */
 
+import { Buffer } from 'node:buffer';
 const ROSE_API_KEY = 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 const SUPABASE_URL = 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions';
 
 // Fetch a sample screenshot and convert to base64
 async function getScreenshotBase64() {
   console.log('📸 Fetching sample screenshot...');
-  const imageUrl = 'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png';
+  const imageUrl =
+    'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png';
 
   const response = await fetch(imageUrl);
   const arrayBuffer = await response.arrayBuffer();
@@ -41,11 +43,11 @@ async function testProviderUsage(modelSeed, providerName, screenshot) {
   [7] h1 "Welcome to Example.com"`,
       screenshot: screenshot,
       viewport: { width: 1280, height: 720 },
-      scroll_position: { x: 0, y: 0 }
+      scroll_position: { x: 0, y: 0 },
     },
     action_history: [],
     available_actions: ['click', 'type', 'scroll', 'goto', 'done'],
-    model_seed: modelSeed
+    model_seed: modelSeed,
   };
 
   console.log('\n📤 Request (screenshot truncated):');
@@ -61,9 +63,9 @@ async function testProviderUsage(modelSeed, providerName, screenshot) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': ROSE_API_KEY
+        'x-api-key': ROSE_API_KEY,
       },
-      body: JSON.stringify(request)
+      body: JSON.stringify(request),
     });
 
     const elapsed = Date.now() - startTime;
@@ -84,9 +86,9 @@ async function testProviderUsage(modelSeed, providerName, screenshot) {
 
     // Check for usage
     const hasUsage = data.usage &&
-                     typeof data.usage.prompt_tokens === 'number' &&
-                     typeof data.usage.completion_tokens === 'number' &&
-                     typeof data.usage.total_tokens === 'number';
+      typeof data.usage.prompt_tokens === 'number' &&
+      typeof data.usage.completion_tokens === 'number' &&
+      typeof data.usage.total_tokens === 'number';
 
     if (hasUsage) {
       console.log('\n✅ USAGE FOUND:');
@@ -105,9 +107,8 @@ async function testProviderUsage(modelSeed, providerName, screenshot) {
       hasUsage,
       usage: data.usage,
       ttft_ms: data.ttft_ms,
-      action: data.action?.action
+      action: data.action?.action,
     };
-
   } catch (error) {
     console.error(`\n❌ Request failed: ${error.message}`);
     return { success: false, provider: providerName, error: error.message };
@@ -129,7 +130,7 @@ async function runAllTests() {
   results.push(await testProviderUsage(0, 'browser-use (bu-1-0)', screenshot));
 
   // Brief pause
-  await new Promise(r => setTimeout(r, 1000));
+  await new Promise((r) => setTimeout(r, 1000));
 
   // Test yutori (model_seed=1)
   results.push(await testProviderUsage(1, 'yutori/n1', screenshot));
@@ -147,7 +148,9 @@ async function runAllTests() {
       console.log(`   action: ${r.action}`);
       console.log(`   ttft_ms: ${r.ttft_ms}`);
       if (r.hasUsage) {
-        console.log(`   usage: { prompt_tokens: ${r.usage.prompt_tokens}, completion_tokens: ${r.usage.completion_tokens}, total_tokens: ${r.usage.total_tokens} }`);
+        console.log(
+          `   usage: { prompt_tokens: ${r.usage.prompt_tokens}, completion_tokens: ${r.usage.completion_tokens}, total_tokens: ${r.usage.total_tokens} }`,
+        );
       } else {
         console.log(`   usage: MISSING or incomplete`);
       }
@@ -156,9 +159,13 @@ async function runAllTests() {
     }
   }
 
-  const allHaveUsage = results.every(r => r.success && r.hasUsage);
+  const allHaveUsage = results.every((r) => r.success && r.hasUsage);
   console.log('\n' + '='.repeat(60));
-  console.log(allHaveUsage ? '✅ All providers return usage correctly!' : '⚠️ Some providers missing usage data');
+  console.log(
+    allHaveUsage
+      ? '✅ All providers return usage correctly!'
+      : '⚠️ Some providers missing usage data',
+  );
   console.log('='.repeat(60));
 }
 

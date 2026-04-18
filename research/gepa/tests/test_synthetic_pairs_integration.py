@@ -6,22 +6,33 @@ Run:
 
 import pytest
 
+from research.gepa.critic import serialize_prompt
 from research.gepa.pipelines.synthetic_pairs import (
     JudgeVerdict,
     _judge_once,
-    judge_preference,
     format_candidate_for_judge,
+    judge_preference,
 )
-from research.gepa.critic import serialize_prompt
-
 
 GOOD_CANDIDATE = {
     'title': 'Buy Black Beanie from Amazon',
     'content': 'Multi-step plan to find and purchase a black beanie',
     'tasks': [
-        {'goal': 'Search Amazon for black beanies under $30 with 4+ star rating', 'tool_name': 'web_search', 'depends_on': []},
-        {'goal': 'Compare top 3 results by price, rating, material, and shipping speed', 'tool_name': 'reasoning', 'depends_on': [0]},
-        {'goal': 'Navigate to Amazon, add best option to cart, and complete checkout', 'tool_name': 'spawn_browser_agent', 'depends_on': [1]},
+        {
+            'goal': 'Search Amazon for black beanies under $30 with 4+ star rating',
+            'tool_name': 'web_search',
+            'depends_on': [],
+        },
+        {
+            'goal': 'Compare top 3 results by price, rating, material, and shipping speed',
+            'tool_name': 'reasoning',
+            'depends_on': [0],
+        },
+        {
+            'goal': 'Navigate to Amazon, add best option to cart, and complete checkout',
+            'tool_name': 'spawn_browser_agent',
+            'depends_on': [1],
+        },
     ],
     'me': {'passed': True, 'score': 0.95, 'reasoning': 'Tasks are distinct'},
     'ce': {'passed': True, 'score': 0.90, 'reasoning': 'Covers full flow'},
@@ -41,7 +52,6 @@ BAD_CANDIDATE = {
 
 
 class TestJudgeOnce:
-
     @pytest.mark.asyncio
     async def test_returns_valid_verdict(self):
         context = serialize_prompt('Buy a black beanie from Amazon', [])
@@ -65,7 +75,6 @@ class TestJudgeOnce:
 
 
 class TestDebiasedJudge:
-
     @pytest.mark.asyncio
     async def test_returns_valid_result(self):
         result = await judge_preference(

@@ -19,6 +19,7 @@ All commands run from repo root. Compute changed files once:
 ```bash
 CHANGED_TS=$(git diff --name-only main...HEAD -- 'back-end/src/**/*.ts' | sed 's|^back-end/||')
 CHANGED_FRONTEND=$(git diff --name-only main...HEAD -- 'front-end/**' || true)
+CHANGED_RESEARCH=$(git diff --name-only main...HEAD -- 'research/' || true)
 ```
 
 ### 1a. Prettier (skip if no TS changes)
@@ -64,6 +65,21 @@ The blackbox runner auto-starts an isolated backend on a dedicated port:
 
 ```bash
 cd back-end && bash scripts/run-blackbox-tests.sh
+```
+
+### 1h. Research lint + structural (skip if no research/ changes)
+
+Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
+
+```bash
+cd research && bash scripts/lint-check.sh
+```
+
+If it fails, re-run with `--fix` to auto-apply format/lint fixes, then re-verify:
+
+```bash
+cd research && bash scripts/lint-check.sh --fix
+cd research && bash scripts/lint-check.sh
 ```
 
 If any step fails, fix the issue and re-run from the top.

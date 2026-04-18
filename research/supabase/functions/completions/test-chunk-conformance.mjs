@@ -18,17 +18,25 @@
  * Run: node test-chunk-conformance.mjs
  */
 
+import process from 'node:process';
 const EDGE_URL = 'http://127.0.0.1:54321/functions/v1/completions';
 const BACKEND_URL = 'http://localhost:3001';
 const ROSE_API_KEY = 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 const BACKEND_API_KEY = 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU';
+const SUPABASE_ANON =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU';
 const USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 // Fields consumers actually read (from agent code + backend + FE analysis)
-const REQUIRED_CONTENT_FIELDS = ['choices', 'actual_model', 'requested_model', 'pool_name', 'pool_size'];
+const REQUIRED_CONTENT_FIELDS = [
+  'choices',
+  'actual_model',
+  'requested_model',
+  'pool_name',
+  'pool_size',
+];
 const REQUIRED_DELTA_FIELD = 'content';
-const REQUIRED_FINAL_FIELDS = ['finish_reason'];  // on choices[0]
+const _REQUIRED_FINAL_FIELDS = ['finish_reason']; // on choices[0]
 const REQUIRED_USAGE_FIELDS = ['prompt_tokens', 'completion_tokens', 'total_tokens'];
 
 // Racing-only fields that consumers don't read — allowed on racing but not required
@@ -56,7 +64,7 @@ async function fetchClaudeToken() {
     return process.env.CLAUDE_TOKEN;
   }
   const res = await fetch(`${BACKEND_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: { 'X-API-Key': BACKEND_API_KEY, 'X-User-Id': USER_ID }
+    headers: { 'X-API-Key': BACKEND_API_KEY, 'X-User-Id': USER_ID },
   });
   if (!res.ok) throw new Error(`Token fetch failed: ${res.status} ${await res.text()}`);
   const { accessToken } = await res.json();
@@ -90,7 +98,7 @@ async function sendRequest(extraBody = {}) {
 
 /** Extract the set of top-level field names, excluding racing-only fields */
 function consumerFields(chunk) {
-  return new Set(Object.keys(chunk).filter(k => !RACING_ONLY_FIELDS.has(k)));
+  return new Set(Object.keys(chunk).filter((k) => !RACING_ONLY_FIELDS.has(k)));
 }
 
 /** Validate a chunk array against required fields */
@@ -103,8 +111,8 @@ function validateChunks(chunks, label) {
   }
 
   // Split into content chunks and final chunk
-  const contentChunks = chunks.filter(c => c.choices?.[0]?.delta?.content !== undefined);
-  const finalChunk = chunks.find(c => c.choices?.[0]?.finish_reason);
+  const contentChunks = chunks.filter((c) => c.choices?.[0]?.delta?.content !== undefined);
+  const finalChunk = chunks.find((c) => c.choices?.[0]?.finish_reason);
 
   if (contentChunks.length === 0) {
     errors.push(`${label}: no content chunks found`);
@@ -123,7 +131,9 @@ function validateChunks(chunks, label) {
     }
     const delta = chunk.choices?.[0]?.delta;
     if (delta?.[REQUIRED_DELTA_FIELD] === undefined) {
-      errors.push(`${label} content chunk[${i}]: missing 'choices[0].delta.${REQUIRED_DELTA_FIELD}'`);
+      errors.push(
+        `${label} content chunk[${i}]: missing 'choices[0].delta.${REQUIRED_DELTA_FIELD}'`,
+      );
     }
   }
 
@@ -161,7 +171,7 @@ async function main() {
 
   const racingErrors = validateChunks(racingChunks, 'Racing');
   if (racingErrors.length > 0) {
-    racingErrors.forEach(e => console.log(`    FAIL: ${e}`));
+    racingErrors.forEach((e) => console.log(`    FAIL: ${e}`));
     allPassed = false;
   } else {
     console.log('    PASS: All required fields present');
@@ -185,7 +195,7 @@ async function main() {
 
   const claudeErrors = validateChunks(claudeChunks, 'Claude-auth');
   if (claudeErrors.length > 0) {
-    claudeErrors.forEach(e => console.log(`    FAIL: ${e}`));
+    claudeErrors.forEach((e) => console.log(`    FAIL: ${e}`));
     allPassed = false;
   } else {
     console.log('    PASS: All required fields present');
@@ -193,27 +203,41 @@ async function main() {
 
   // ── Test 3: Structural comparison ──
   console.log('\n[3] Structural comparison');
-  const racingContentFields = consumerFields(racingChunks.find(c => c.choices?.[0]?.delta?.content !== undefined));
-  const claudeContentFields = consumerFields(claudeChunks.find(c => c.choices?.[0]?.delta?.content !== undefined));
+  const racingContentFields = consumerFields(
+    racingChunks.find((c) => c.choices?.[0]?.delta?.content !== undefined),
+  );
+  const claudeContentFields = consumerFields(
+    claudeChunks.find((c) => c.choices?.[0]?.delta?.content !== undefined),
+  );
 
-  const racingFinal = racingChunks.find(c => c.choices?.[0]?.finish_reason);
-  const claudeFinal = claudeChunks.find(c => c.choices?.[0]?.finish_reason);
+  const racingFinal = racingChunks.find((c) => c.choices?.[0]?.finish_reason);
+  const claudeFinal = claudeChunks.find((c) => c.choices?.[0]?.finish_reason);
   const racingFinalFields = racingFinal ? consumerFields(racingFinal) : new Set();
   const claudeFinalFields = claudeFinal ? consumerFields(claudeFinal) : new Set();
 
   // Check that claude-auth has all the fields racing has (minus racing-only)
-  const missingContent = [...racingContentFields].filter(f => !claudeContentFields.has(f));
-  const missingFinal = [...racingFinalFields].filter(f => !claudeFinalFields.has(f));
+  const missingContent = [...racingContentFields].filter((f) => !claudeContentFields.has(f));
+  const missingFinal = [...racingFinalFields].filter((f) => !claudeFinalFields.has(f));
 
   if (missingContent.length > 0) {
-    console.log(`    FAIL: Claude-auth content chunks missing fields present in racing: ${missingContent.join(', ')}`);
+    console.log(
+      `    FAIL: Claude-auth content chunks missing fields present in racing: ${
+        missingContent.join(', ')
+      }`,
+    );
     allPassed = false;
   } else {
-    console.log(`    PASS: Content chunk fields match (${[...claudeContentFields].sort().join(', ')})`);
+    console.log(
+      `    PASS: Content chunk fields match (${[...claudeContentFields].sort().join(', ')})`,
+    );
   }
 
   if (missingFinal.length > 0) {
-    console.log(`    FAIL: Claude-auth final chunk missing fields present in racing: ${missingFinal.join(', ')}`);
+    console.log(
+      `    FAIL: Claude-auth final chunk missing fields present in racing: ${
+        missingFinal.join(', ')
+      }`,
+    );
     allPassed = false;
   } else {
     console.log(`    PASS: Final chunk fields match (${[...claudeFinalFields].sort().join(', ')})`);
@@ -222,7 +246,7 @@ async function main() {
   // ── Test 4: Content is not raw JSON (the original display bug) ──
   console.log('\n[4] Content display check (no raw JSON in response)');
   const claudeContent = claudeChunks
-    .map(c => c.choices?.[0]?.delta?.content || '')
+    .map((c) => c.choices?.[0]?.delta?.content || '')
     .join('');
 
   // Parse the accumulated JSON and check response field
@@ -230,7 +254,9 @@ async function main() {
     const parsed = JSON.parse(claudeContent);
     const response = parsed.response || '';
     if (response.startsWith('{') && response.includes('"reasoning"')) {
-      console.log(`    FAIL: response field contains raw JSON (display bug): ${response.slice(0, 80)}`);
+      console.log(
+        `    FAIL: response field contains raw JSON (display bug): ${response.slice(0, 80)}`,
+      );
       allPassed = false;
     } else {
       console.log(`    PASS: response field is clean text: "${response.slice(0, 60)}..."`);
@@ -250,7 +276,7 @@ async function main() {
   }
 }
 
-main().catch(e => {
+main().catch((e) => {
   console.error('Test error:', e);
   process.exit(1);
 });

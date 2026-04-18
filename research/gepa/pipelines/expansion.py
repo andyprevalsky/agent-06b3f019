@@ -13,7 +13,6 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import List
 
 from ..types import ClarifiedTask, DecompositionCandidate
 
@@ -108,12 +107,12 @@ def _make_expanded_filename(seed: str, idx: int) -> str:
 
 
 async def expand_tasks(
-    existing_tasks: List[ClarifiedTask],
+    existing_tasks: list[ClarifiedTask],
     n: int = 10,
     tasks_dir: str | Path = TASKS_DIR,
     state_path: str | Path = STATE_PATH,
     labels_path: str | Path = LABELS_PATH,
-) -> List[ClarifiedTask]:
+) -> list[ClarifiedTask]:
     """Generate new clarified tasks from spawn_sub_agent goals.
 
     1. Extracts spawn_sub_agent goals from labeled decompositions
@@ -141,7 +140,9 @@ async def expand_tasks(
             new_seeds.append(s)
     new_seeds = new_seeds[:n]
 
-    logger.info(f'Expansion: {len(seeds)} total spawn_sub_agent goals, {len(new_seeds)} new after dedup (cap {n})')
+    logger.info(
+        f'Expansion: {len(seeds)} total spawn_sub_agent goals, {len(new_seeds)} new after dedup (cap {n})'
+    )
 
     results = []
     for idx, seed in enumerate(new_seeds):
@@ -153,24 +154,30 @@ async def expand_tasks(
             logger.info(f'  Skipping (cached): {filename}')
             with open(filepath) as f:
                 data = json.load(f)
-            results.append(ClarifiedTask(
-                id=data['id'],
-                raw_seed=data['raw_seed'],
-                agent_context=data['agent_context'],
-                set_plan_args=data['set_plan_args'],
-            ))
+            results.append(
+                ClarifiedTask(
+                    id=data['id'],
+                    raw_seed=data['raw_seed'],
+                    agent_context=data['agent_context'],
+                    set_plan_args=data['set_plan_args'],
+                )
+            )
             continue
 
         logger.info(f'  Clarifying ({idx + 1}/{len(new_seeds)}): {seed[:80]}')
         try:
             task = await clarifar(seed)
             with open(filepath, 'w') as f:
-                json.dump({
-                    'id': task.id,
-                    'raw_seed': task.raw_seed,
-                    'agent_context': task.agent_context,
-                    'set_plan_args': task.set_plan_args,
-                }, f, indent=2)
+                json.dump(
+                    {
+                        'id': task.id,
+                        'raw_seed': task.raw_seed,
+                        'agent_context': task.agent_context,
+                        'set_plan_args': task.set_plan_args,
+                    },
+                    f,
+                    indent=2,
+                )
             results.append(task)
         except Exception as e:
             logger.error(f'  Failed to clarify "{seed[:60]}": {e}')
@@ -182,9 +189,10 @@ async def expand_tasks(
 async def expand_candidates(
     task: ClarifiedTask,
     n: int = 4,
-) -> List[DecompositionCandidate]:
+) -> list[DecompositionCandidate]:
     """Generate decomposition candidates for a task."""
     from .decomposer import decompose_k
+
     return await decompose_k(task, k=n)
 
 
@@ -206,8 +214,7 @@ def _serialize_candidate(c: DecompositionCandidate) -> dict:
             for t in pr.tasks
         ],
         'dependencies_graph': [
-            {'task_idx': d.task_idx, 'depends_on': d.depends_on}
-            for d in pr.dependencies_graph
+            {'task_idx': d.task_idx, 'depends_on': d.depends_on} for d in pr.dependencies_graph
         ],
         'join': pr.join,
         'validation_errors': [{'type': e.type, 'detail': e.detail} for e in c.validation_errors],
@@ -218,7 +225,7 @@ def _serialize_candidate(c: DecompositionCandidate) -> dict:
 
 
 async def generate_and_cache_candidates(
-    tasks: List[ClarifiedTask],
+    tasks: list[ClarifiedTask],
     state_path: str | Path = STATE_PATH,
     k: int = 4,
 ) -> dict[str, list]:

@@ -50,12 +50,12 @@ const KNOWN_MODELS = ['rose-1-lite', 'rose-1-ultra', 'rose-1-browser-use'];
 const UPSTREAM_FAILURE_CODES = new Set([402, 429, 500, 502, 503]);
 
 // deno-lint-ignore no-explicit-any
-function isUpstreamUnavailable(status: number, data: any): boolean {
+function isUpstreamUnavailable(status: number, _data: any): boolean {
   return UPSTREAM_FAILURE_CODES.has(status);
 }
 
 // deno-lint-ignore no-explicit-any
-function skipIfUpstream(status: number, data: any, label: string): boolean {
+function skipIfUpstream(status: number, data: any, _label: string): boolean {
   if (isUpstreamUnavailable(status, data)) {
     console.log(`SKIP: Upstream provider unavailable (${status}: ${data?.error ?? 'unknown'})`);
     return true;

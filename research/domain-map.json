@@ -76,26 +76,34 @@
     {
       "domain": "benchmark-runner",
       "type": "benchmark",
-      "entryFile": "benchmarks/test-runner.ts",
+      "entryFile": "domains/benchmark-runner/runtime.ts",
       "files": [
-        "benchmarks/evaluators/repetition-checker.ts",
-        "benchmarks/harnesses/base.ts",
-        "benchmarks/harnesses/mmlu-pro.ts",
-        "benchmarks/harnesses/terminal-bench.ts",
-        "benchmarks/test-runner.ts"
+        "domains/benchmark-runner/config.ts",
+        "domains/benchmark-runner/repo.ts",
+        "domains/benchmark-runner/runtime.ts",
+        "domains/benchmark-runner/service-harness.ts",
+        "domains/benchmark-runner/service-mmlu-pro.ts",
+        "domains/benchmark-runner/service-repetition.ts",
+        "domains/benchmark-runner/service-terminal-bench.ts",
+        "domains/benchmark-runner/service.ts",
+        "domains/benchmark-runner/types.ts"
       ],
       "testFile": "tests/blackbox/benchmarks.blackbox.ts",
-      "fileCount": 5
+      "fileCount": 9
     },
     {
       "domain": "benchmark-production",
       "type": "benchmark",
-      "entryFile": "benchmarks/run_production_benchmarks.ts",
+      "entryFile": "domains/benchmark-production/runtime.ts",
       "files": [
-        "benchmarks/run_production_benchmarks.ts"
+        "domains/benchmark-production/config.ts",
+        "domains/benchmark-production/repo.ts",
+        "domains/benchmark-production/runtime.ts",
+        "domains/benchmark-production/service.ts",
+        "domains/benchmark-production/types.ts"
       ],
       "testFile": "tests/blackbox/benchmarks.blackbox.ts",
-      "fileCount": 1
+      "fileCount": 5
     },
     {
       "domain": "gepa",
@@ -402,11 +410,6 @@
       "run-tests.sh"
     ],
     "domainOnly": {
-      "benchmarks/evaluators/repetition-checker.ts": "benchmark-runner",
-      "benchmarks/harnesses/base.ts": "benchmark-runner",
-      "benchmarks/harnesses/mmlu-pro.ts": "benchmark-runner",
-      "benchmarks/harnesses/terminal-bench.ts": "benchmark-runner",
-      "benchmarks/run_production_benchmarks.ts": "benchmark-production",
       "gepa/embeddings.py": "gepa-judge",
       "gepa/pipelines/synthetic_pairs.py": "gepa-judge",
       "gepa/run.py": "gepa",
@@ -428,6 +431,10 @@
       "benchmarks/evaluators/code-evaluator.ts",
       "benchmarks/evaluators/equality-checker.ts",
       "benchmarks/evaluators/math-evaluator.ts",
+      "benchmarks/evaluators/repetition-checker.ts",
+      "benchmarks/harnesses/base.ts",
+      "benchmarks/harnesses/mmlu-pro.ts",
+      "benchmarks/harnesses/terminal-bench.ts",
       "gepa/__init__.py",
       "gepa/evaluators/__init__.py",
       "gepa/labeler.py",

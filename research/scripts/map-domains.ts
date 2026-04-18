@@ -11,9 +11,9 @@
  *   npx tsx research/scripts/map-domains.ts --classify      # shared file analysis
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
-import { dirname, extname, join, relative, resolve } from 'path';
-import process from "node:process";
+import { existsSync, readdirSync, readFileSync } from 'fs';
+import { dirname, extname, relative, resolve } from 'path';
+import process from 'node:process';
 
 const RESEARCH = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const FUNCTIONS_DIR = resolve(RESEARCH, 'supabase/functions');
@@ -191,11 +191,16 @@ if (existsSync(FUNCTIONS_DIR)) {
 // 2. Benchmarks (type: "benchmark")
 if (existsSync(BENCHMARKS_DIR)) {
   const benchEntries: { name: string; file: string }[] = [
-    { name: 'benchmark-runner', file: 'test-runner.ts' },
-    { name: 'benchmark-production', file: 'run_production_benchmarks.ts' },
+    {
+      name: 'benchmark-runner',
+      file: resolve(RESEARCH, 'domains/benchmark-runner/runtime.ts'),
+    },
+    {
+      name: 'benchmark-production',
+      file: resolve(RESEARCH, 'domains/benchmark-production/runtime.ts'),
+    },
   ];
-  for (const { name, file } of benchEntries) {
-    const entry = resolve(BENCHMARKS_DIR, file);
+  for (const { name, file: entry } of benchEntries) {
     if (!existsSync(entry)) continue;
     const files = traceImports(entry).map((f) => relative(RESEARCH, f));
     const benchTest = resolve(TESTS_DIR, 'blackbox', 'benchmarks.blackbox.ts');

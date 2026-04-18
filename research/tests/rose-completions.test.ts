@@ -2,77 +2,70 @@
  * Tests for POST /completions
  */
 
-import {
-  assertEquals,
-  assertExists,
-} from "https://deno.land/std@0.190.0/testing/asserts.ts";
-import { testClient } from "./utils/test-client.ts";
-import {
-  assertStatusCode,
-  assertHasProperty,
-  sampleMessages,
-} from "./utils/fixtures.ts";
+import { assertEquals, assertExists } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
+import { testClient } from './utils/test-client.ts';
+import { assertHasProperty, assertStatusCode, sampleMessages } from './utils/fixtures.ts';
 
 // Get API key from environment (generate via /rose/generate-api-key)
-const ROSE_API_KEY = Deno.env.get("ROSE_API_KEY") || "";
+const ROSE_API_KEY = Deno.env.get('ROSE_API_KEY') || '';
 
 Deno.test(
-  "POST /completions - returns chat completion with valid API key",
+  'POST /completions - returns chat completion with valid API key',
   async () => {
     const response = await testClient.post(
-      "/completions",
+      '/completions',
       {
-        model: "rose-labs/rose-1-lite",
+        model: 'rose-labs/rose-1-lite',
         messages: sampleMessages,
       },
       {
-        headers: { "x-api-key": ROSE_API_KEY },
+        headers: { 'x-api-key': ROSE_API_KEY },
       },
     );
 
     if (response.status === 401) {
       console.log(
-        "⚠️  Test requires valid API key in ROSE_API_KEY env var (generate via /rose/generate-api-key)",
+        '⚠️  Test requires valid API key in ROSE_API_KEY env var (generate via /rose/generate-api-key)',
       );
       return;
     }
 
     assertStatusCode(response.status, 200);
-    assertHasProperty(response.data, "id");
-    assertHasProperty(response.data, "object");
-    assertHasProperty(response.data, "choices");
-    assertHasProperty(response.data, "usage");
+    assertHasProperty(response.data, 'id');
+    assertHasProperty(response.data, 'object');
+    assertHasProperty(response.data, 'choices');
+    assertHasProperty(response.data, 'usage');
 
-    assertEquals(response.data.object, "chat.completion");
+    assertEquals(response.data.object, 'chat.completion');
     assertExists(response.data.choices[0].message.content);
   },
 );
 
-Deno.test("POST /completions - rejects request without API key", async () => {
-  const response = await testClient.post("/completions", {
-    model: "rose-labs/rose-1-lite",
+Deno.test('POST /completions - rejects request without API key', async () => {
+  const response = await testClient.post('/completions', {
+    model: 'rose-labs/rose-1-lite',
     messages: sampleMessages,
   });
 
   assertStatusCode(response.status, 401);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });
 
-Deno.test("POST /completions - accepts seed parameter", async () => {
+Deno.test('POST /completions - accepts seed parameter', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
-      model: "rose-labs/rose-1-lite",
+      model: 'rose-labs/rose-1-lite',
       messages: sampleMessages,
       seed: 42,
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
@@ -80,21 +73,21 @@ Deno.test("POST /completions - accepts seed parameter", async () => {
   assertEquals(response.status === 200 || response.status === 401, true);
 });
 
-Deno.test("POST /completions - accepts cot_steps parameter", async () => {
+Deno.test('POST /completions - accepts cot_steps parameter', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
-      model: "rose-labs/rose-1-lite",
+      model: 'rose-labs/rose-1-lite',
       messages: sampleMessages,
       cot_steps: 3,
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
@@ -102,22 +95,22 @@ Deno.test("POST /completions - accepts cot_steps parameter", async () => {
   assertEquals(response.status === 200 || response.status === 401, true);
 });
 
-Deno.test("POST /completions - accepts tools parameter", async () => {
+Deno.test('POST /completions - accepts tools parameter', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
-      model: "rose-labs/rose-1-lite",
-      messages: [{ role: "user", content: "What is the weather?" }],
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'What is the weather?' }],
       tools: [
         {
-          type: "function",
+          type: 'function',
           function: {
-            name: "get_weather",
-            description: "Get weather",
+            name: 'get_weather',
+            description: 'Get weather',
             parameters: {
-              type: "object",
+              type: 'object',
               properties: {
-                location: { type: "string" },
+                location: { type: 'string' },
               },
             },
           },
@@ -125,12 +118,12 @@ Deno.test("POST /completions - accepts tools parameter", async () => {
       ],
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
@@ -138,63 +131,63 @@ Deno.test("POST /completions - accepts tools parameter", async () => {
   assertEquals(response.status === 200 || response.status === 401, true);
 });
 
-Deno.test("POST /completions - returns 400 for missing model", async () => {
+Deno.test('POST /completions - returns 400 for missing model', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
       messages: sampleMessages,
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
   assertStatusCode(response.status, 400);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });
 
-Deno.test("POST /completions - returns 400 for missing messages", async () => {
+Deno.test('POST /completions - returns 400 for missing messages', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
-      model: "rose-labs/rose-1-lite",
+      model: 'rose-labs/rose-1-lite',
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
   assertStatusCode(response.status, 400);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });
 
-Deno.test("POST /completions - returns 400 for invalid model", async () => {
+Deno.test('POST /completions - returns 400 for invalid model', async () => {
   const response = await testClient.post(
-    "/completions",
+    '/completions',
     {
-      model: "invalid-model-name",
+      model: 'invalid-model-name',
       messages: sampleMessages,
     },
     {
-      headers: { "x-api-key": ROSE_API_KEY },
+      headers: { 'x-api-key': ROSE_API_KEY },
     },
   );
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
   assertStatusCode(response.status, 400);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });

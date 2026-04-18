@@ -12,23 +12,23 @@ export API_KEY="your-rose-api-key"
 export MODEL_URL="https://your-project.supabase.co/functions/v1/rose-chat"
 
 # Run MMLU-Pro benchmark (10 questions for testing)
-deno run --allow-net --allow-env test-runner.ts
+deno run --allow-net --allow-env ../domains/benchmark-runner/runtime.ts
 ```
 
 ### Using in TypeScript
 
 ```typescript
-import { runBenchmarkSuite } from './test-runner.ts';
+import { runBenchmarkSuite } from '../domains/benchmark-runner/service.ts';
 
 const results = await runBenchmarkSuite({
-  modelUrl: "https://your-project.supabase.co/functions/v1/rose-chat",
+  modelUrl: 'https://your-project.supabase.co/functions/v1/rose-chat',
   authHeaders: {
-    "x-api-key": "your-api-key-here"
+    'x-api-key': 'your-api-key-here',
   },
-  benchmarks: ["MMLU-Pro"],
-  sampleSize: 100,  // Default: 100 questions
-  sampleSeed: 42,   // For reproducibility
-  cotSteps: 1       // Chain-of-thought steps
+  benchmarks: ['MMLU-Pro'],
+  sampleSize: 100, // Default: 100 questions
+  sampleSeed: 42, // For reproducibility
+  cotSteps: 1, // Chain-of-thought steps
 });
 
 console.log(results);
@@ -65,46 +65,50 @@ console.log(results);
 ## Evaluators
 
 ### Equality Checker
+
 Uses GPT-4o to check semantic equivalence.
 
 ```typescript
 import { checkEquality } from './evaluators/equality-checker.ts';
 
 const isCorrect = await checkEquality(
-  "The capital of France is Paris",
-  "Paris",
-  "What is the capital of France?"
+  'The capital of France is Paris',
+  'Paris',
+  'What is the capital of France?',
 );
 ```
 
 ### Math Evaluator
+
 Extracts answers from `\boxed{}` and normalizes.
 
 ```typescript
 import { evaluateMathAnswer } from './evaluators/math-evaluator.ts';
 
 const isCorrect = await evaluateMathAnswer(
-  "The answer is \\boxed{42}",
-  "42"
+  'The answer is \\boxed{42}',
+  '42',
 );
 ```
 
 ### Repetition Checker
+
 Detects agent loops algorithmically.
 
 ```typescript
 import { checkRepetition } from './evaluators/repetition-checker.ts';
 
 const isStuck = checkRepetition([
-  "Let me search for that",
-  "Let me search for that",
-  "Let me search for that",
-  "Let me search for that"
+  'Let me search for that',
+  'Let me search for that',
+  'Let me search for that',
+  'Let me search for that',
 ]);
 // Returns: true (3+ consecutive similar messages)
 ```
 
 ### Code Evaluator
+
 Docker sandbox for code execution (placeholder).
 
 ```typescript
@@ -119,14 +123,14 @@ import { evaluateCode } from './evaluators/code-evaluator.ts';
 
 ```typescript
 interface BenchmarkConfig {
-  modelUrl: string;         // API endpoint
-  apiKey: string;           // Authentication key
-  temperature?: number;     // Default: 0.7
-  maxTokens?: number;       // Default: 2000
-  repeats?: number;         // Override default repeats
-  cotSteps?: number;        // Chain-of-thought steps (1-30)
-  sampleSize?: number;      // Questions to sample (default: 100)
-  sampleSeed?: number;      // Random seed (default: 42)
+  modelUrl: string; // API endpoint
+  apiKey: string; // Authentication key
+  temperature?: number; // Default: 0.7
+  maxTokens?: number; // Default: 2000
+  repeats?: number; // Override default repeats
+  cotSteps?: number; // Chain-of-thought steps (1-30)
+  sampleSize?: number; // Questions to sample (default: 100)
+  sampleSeed?: number; // Random seed (default: 42)
 }
 ```
 
@@ -138,30 +142,30 @@ interface BenchmarkConfig {
 import { BaseBenchmarkHarness, BenchmarkQuestion } from './base.ts';
 
 export class MyBenchmarkHarness extends BaseBenchmarkHarness {
-  readonly name = "My Benchmark";
-  readonly description = "Description here";
+  readonly name = 'My Benchmark';
+  readonly description = 'Description here';
   readonly questionCount = 1000;
   readonly defaultRepeats = 1;
-  
+
   async loadDataset(): Promise<BenchmarkQuestion[]> {
     // Load your dataset
   }
-  
+
   formatPrompt(question: BenchmarkQuestion): string {
     // Format the prompt
   }
-  
+
   extractAnswer(modelResponse: string): string {
     // Extract the answer
   }
-  
+
   async evaluateAnswer(extracted: string, correct: string): Promise<boolean> {
     // Evaluate if correct
   }
 }
 ```
 
-2. Register in `test-runner.ts`:
+2. Register in `../domains/benchmark-runner/service.ts`:
 
 ```typescript
 const BENCHMARK_REGISTRY = {
@@ -177,6 +181,7 @@ See `/datasets/README.md` for instructions on obtaining benchmark datasets.
 ## Cost Estimates
 
 Running the full suite (100 questions per benchmark):
+
 - MMLU-Pro: ~$0.08
 - GPQA Diamond: ~$0.65
 - AIME 2025: ~$0.48
@@ -189,6 +194,7 @@ Full benchmarks (all questions): ~$51
 ## Environment Variables
 
 Required:
+
 ```bash
 ROSELABS_API_KEY=<your-openrouter-key>  # For evaluators
 API_KEY=<your-rose-api-key>             # For model access
@@ -196,22 +202,24 @@ MODEL_URL=<your-model-endpoint>
 ```
 
 Optional:
+
 ```bash
 CODE_SANDBOX_ENDPOINT=<docker-sandbox-url>
 MAX_SAMPLES_PER_BENCH=100              # Override default sample size per benchmark
 ```
 
 The `MAX_SAMPLES_PER_BENCH` environment variable controls how many questions are sampled from each benchmark dataset. This is useful for:
+
 - **Development**: Set to 10 for quick testing
 - **CI/CD**: Set to 50 for automated testing
 - **Production**: Set to 100+ for thorough evaluation
 
 Example:
+
 ```bash
 # Quick test with 10 questions
-MAX_SAMPLES_PER_BENCH=10 deno run --allow-net --allow-env test-runner.ts
+MAX_SAMPLES_PER_BENCH=10 deno run --allow-net --allow-env ../domains/benchmark-runner/runtime.ts
 
 # Full evaluation with 200 questions
-MAX_SAMPLES_PER_BENCH=200 API_KEY=<key> MODEL_URL=<url> deno run --allow-net --allow-env test-runner.ts
+MAX_SAMPLES_PER_BENCH=200 API_KEY=<key> MODEL_URL=<url> deno run --allow-net --allow-env ../domains/benchmark-runner/runtime.ts
 ```
-

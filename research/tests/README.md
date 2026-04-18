@@ -78,25 +78,14 @@ TEST_SUPABASE_JWT=your-test-jwt-token
 1. Create a new test file: `research/tests/your-feature.test.ts`
 2. Import test utilities:
    ```typescript
-   import { assertEquals } from "https://deno.land/std@0.190.0/testing/asserts.ts";
-   import { testClient } from "./utils/test-client.ts";
+   import { assertEquals } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
+   import { testClient } from './utils/test-client.ts';
    ```
 3. Write tests using `Deno.test()`:
    ```typescript
-   Deno.test("description", async () => {
+   Deno.test('description', async () => {
      const response = await testClient.get('/your/endpoint');
      assertEquals(response.status, 200);
    });
    ```
 4. Run with: `deno test --allow-net --allow-env research/tests/your-feature.test.ts`
-
-
-
-
-
-
-
-
-
-
-

@@ -56,13 +56,14 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`). Commit any resulting changes once.
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty). Commit any resulting changes once.
 2. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
+   - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
@@ -136,6 +137,23 @@ cd front-end && npm run test:coverage
 
 Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
 
+## Step 4r: Research lint + structural (skip if `$CHANGED_RESEARCH` is empty)
+
+If the diff touches `research/`, run the research-side check harness. It enforces fmt/lint (base + strict overlay), structural invariants (max 300 lines per file, 80 per function), and Python ruff.
+
+```bash
+cd research && bash scripts/lint-check.sh
+```
+
+If anything fails, re-run with `--fix` to auto-apply format/lint fixes, then re-run without `--fix` to verify:
+
+```bash
+cd research && bash scripts/lint-check.sh --fix
+cd research && bash scripts/lint-check.sh
+```
+
+Commit any auto-fix changes before proceeding. "Pre-existing" violations in touched files are your responsibility — the same 0-failure rule from Steps 2/3/4 applies here.
+
 ## Step 4c: Credential health check (no skip — always runs)
 
 Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
@@ -165,6 +183,16 @@ Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish be
 **Consequence for Phase 2:** by the time you reach Step 7/8, the push and PR already exist. Treat Steps 7 and 8 as "verify already done" unless an earlier test-loop iteration failed and forced a restart.
 
 ## Step 5: Spin up local services
+
+**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. Orphans subscribe to the same Temporal task queue the new run will use and will silently steal work from smoke tasks.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/list-services.sh           # inspect what's running (optional, informational)
+bash scripts/kill-services.sh           # kill the whole tree; preserves DB container + volume
+```
+
+`scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
 Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
 
@@ -226,12 +254,15 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
-**Teardown helper** (use after Step 5 failures or after Step 6 completes). Note: this does NOT stop the DB — it stays alive for subsequent test runs. Use `scripts/teardown.sh` for full workspace cleanup.
+**Teardown (MANDATORY):** after Step 6 finishes (pass OR fail), and any time you abort Step 5/6 mid-way, you MUST tear the stack down before moving on. Skipping this leaves zombie run.sh + grandchildren that (a) subscribe to the Temporal queue and poison the next smoke run, and (b) leak ports, RAM, and worker slots across `/deploy` invocations.
+
 ```bash
-pkill -f "scripts/run.sh --benchmark" 2>/dev/null || true
-sleep 2
-(cd research/supabase && supabase stop 2>/dev/null) || true
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/kill-services.sh                    # kills run.sh tree, preserves DB
+(cd research/supabase && supabase stop 2>/dev/null) || true   # stop supabase compose stack
 ```
+
+`kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
 
 ## Step 5a: Blackbox API tests + fix
 

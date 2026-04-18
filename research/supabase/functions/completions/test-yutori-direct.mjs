@@ -4,7 +4,8 @@
 
 const YUTORI_API_KEY = 'yt_9vPF-8hXpt8pIY_pnBJK_3w2yiw2IV-uINYJXw3jr7c';
 const YUTORI_API_URL = 'https://api.yutori.com/v1/chat/completions';
-const SCREENSHOT_URL = 'https://upload.wikimedia.org/wikipedia/commons/5/53/Google_homepage_%28as_of_January_2024%29.jpg';
+const SCREENSHOT_URL =
+  'https://upload.wikimedia.org/wikipedia/commons/5/53/Google_homepage_%28as_of_January_2024%29.jpg';
 
 async function testYutoriDirect() {
   console.log('🎯 Testing Yutori n1-latest API directly...\n');
@@ -16,22 +17,22 @@ async function testYutoriDirect() {
       content: [
         {
           type: 'text',
-          text: 'Click on the Google Search button.'
+          text: 'Click on the Google Search button.',
         },
         {
           type: 'image_url',
           image_url: {
-            url: SCREENSHOT_URL
-          }
-        }
-      ]
-    }
+            url: SCREENSHOT_URL,
+          },
+        },
+      ],
+    },
   ];
 
   const requestBody = {
     model: 'n1-latest',
     messages,
-    temperature: 0.3
+    temperature: 0.3,
   };
 
   console.log('📤 Request:');
@@ -45,9 +46,9 @@ async function testYutoriDirect() {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${YUTORI_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
     });
 
     const elapsed = Date.now() - startTime;
@@ -81,7 +82,6 @@ async function testYutoriDirect() {
     } else {
       console.log('\n✅ No tool calls - model considers task done');
     }
-
   } catch (error) {
     console.error('❌ Request failed:', error);
   }

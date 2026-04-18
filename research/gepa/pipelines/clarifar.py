@@ -11,21 +11,20 @@ Standalone agent loop (no Temporal) that:
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
 import httpx
-
 from config import load_config
+from helpers.llm import call_llm_structured_streaming
 from helpers.prompts import build_system_prompt
 from helpers.tool_schemas import (
     PLAN_PHASE_TOOLS,
     create_agent_action_model,
 )
-from helpers.llm import call_llm_structured_streaming
 
-from .simulate_user import simulate_user
 from ..types import ClarifiedTask
+from .simulate_user import simulate_user
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +32,10 @@ MAX_ITERATIONS = 30
 MODEL = 'rose-labs/rose-1-lite'
 
 
-class SetPlanTrap(Exception):
+class SetPlanTrap(Exception):  # noqa: N818
     """Raised when agent calls set_plan. Stops the agent loop."""
 
-    def __init__(self, plan_args: Dict[str, Any]):
+    def __init__(self, plan_args: dict[str, Any]):
         self.plan_args = plan_args
         super().__init__('set_plan called')
 
@@ -56,12 +55,14 @@ async def _execute_web_search(query: str, max_tokens: int = 1500) -> str:
         'excerpts': {'max_chars_per_result': max_tokens * 4},
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post('https://api.parallel.ai/v1beta/search', headers=headers, json=payload)
+        resp = await client.post(
+            'https://api.parallel.ai/v1beta/search', headers=headers, json=payload
+        )
         resp.raise_for_status()
         data = resp.json()
         answer = data.get('answer', '')
         sources = [r.get('url', '') for r in data.get('results', []) if r.get('url')]
-        return f"{answer}\n\nSources: {', '.join(sources[:5])}" if sources else answer
+        return f'{answer}\n\nSources: {", ".join(sources[:5])}' if sources else answer
 
 
 async def _execute_web_fetch(url: str, objective: str = '') -> str:
@@ -86,24 +87,28 @@ async def clarifar(raw_seed: str, model: str = MODEL, verbose: bool = False) -> 
         enabled_tools=PLAN_PHASE_TOOLS,
     )
 
-    AgentAction = create_agent_action_model(PLAN_PHASE_TOOLS)
+    AgentAction = create_agent_action_model(PLAN_PHASE_TOOLS)  # noqa: N806
 
     # OpenAI-format messages
-    messages: List[Dict[str, Any]] = [
+    messages: list[dict[str, Any]] = [
         {'role': 'system', 'content': system_prompt},
         {'role': 'user', 'content': raw_seed},
     ]
 
     async def _noop_chunk(text: str, token_count: int):
         if verbose:
-            print(f'  [{token_count} tok] {text[:80]}...' if len(text) > 80 else f'  [{token_count} tok] {text}')
+            print(
+                f'  [{token_count} tok] {text[:80]}...'
+                if len(text) > 80
+                else f'  [{token_count} tok] {text}'
+            )
 
     for iteration in range(MAX_ITERATIONS):
         if verbose:
             print(f'\n--- Iteration {iteration + 1} ---')
 
         # Call LLM
-        response, usage, detected_tools = await call_llm_structured_streaming(
+        response, _usage, _detected_tools = await call_llm_structured_streaming(
             messages=messages,
             model=model,
             temperature=0.7,
@@ -141,7 +146,7 @@ async def clarifar(raw_seed: str, model: str = MODEL, verbose: bool = False) -> 
             # --- TRAP: set_plan ---
             if tool_name == 'set_plan':
                 if verbose:
-                    print(f'\n=== SET_PLAN TRAPPED ===')
+                    print('\n=== SET_PLAN TRAPPED ===')
                 # Exclude system prompt from stored context (regenerable via build_system_prompt)
                 context_without_system = [m for m in messages if m.get('role') != 'system']
                 return ClarifiedTask(
@@ -155,7 +160,7 @@ async def clarifar(raw_seed: str, model: str = MODEL, verbose: bool = False) -> 
             if tool_name == 'send_message_to_user':
                 question = tc_dict.get('message', '')
                 if verbose:
-                    print(f'  -> Simulating user response...')
+                    print('  -> Simulating user response...')
                 answer = await simulate_user(question, raw_seed)
                 if verbose:
                     print(f'  <- User: {answer[:200]}')
@@ -170,7 +175,12 @@ async def clarifar(raw_seed: str, model: str = MODEL, verbose: bool = False) -> 
                     result = await _execute_web_search(query)
                 except Exception as e:
                     result = f'Error: {e}'
-                messages.append({'role': 'assistant', 'content': f'[web_search result for "{query}"]:\n{result}'})
+                messages.append(
+                    {
+                        'role': 'assistant',
+                        'content': f'[web_search result for "{query}"]:\n{result}',
+                    }
+                )
                 continue
 
             # --- EXECUTE: web_fetch ---
@@ -181,22 +191,28 @@ async def clarifar(raw_seed: str, model: str = MODEL, verbose: bool = False) -> 
                     result = await _execute_web_fetch(url, objective)
                 except Exception as e:
                     result = f'Error: {e}'
-                messages.append({'role': 'assistant', 'content': f'[web_fetch result for {url}]:\n{result}'})
+                messages.append(
+                    {'role': 'assistant', 'content': f'[web_fetch result for {url}]:\n{result}'}
+                )
                 continue
 
             # --- SKIP: attempt_completion (shouldn't happen before set_plan) ---
             if tool_name == 'attempt_completion':
-                messages.append({
-                    'role': 'assistant',
-                    'content': 'Error: You must call set_plan before attempt_completion.',
-                })
+                messages.append(
+                    {
+                        'role': 'assistant',
+                        'content': 'Error: You must call set_plan before attempt_completion.',
+                    }
+                )
                 continue
 
             # Unknown tool
-            messages.append({
-                'role': 'assistant',
-                'content': f'Tool {tool_name} not available in clarifar mode.',
-            })
+            messages.append(
+                {
+                    'role': 'assistant',
+                    'content': f'Tool {tool_name} not available in clarifar mode.',
+                }
+            )
 
     # Max iterations without set_plan
     context_without_system = [m for m in messages if m.get('role') != 'system']

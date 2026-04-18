@@ -5,9 +5,7 @@ the agent's question and the original raw seed task context.
 """
 
 import httpx
-
 from config import load_config
-
 
 SIMULATE_USER_PROMPT = """You are role-playing as a regular user who asked an AI agent to help with a task.
 The agent is asking you a clarifying question. Answer naturally, concisely, and with specific details

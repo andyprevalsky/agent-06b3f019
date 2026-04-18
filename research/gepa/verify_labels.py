@@ -15,7 +15,16 @@ from pathlib import Path
 
 LABELS_PATH = Path(__file__).parent / 'data' / 'preference_labels.json'
 
-REQUIRED_FIELDS = {'pair_id', 'task_id', 'task_seed', 'candidate_a_idx', 'candidate_b_idx', 'preference', 'label_time_s', 'timestamp'}
+REQUIRED_FIELDS = {
+    'pair_id',
+    'task_id',
+    'task_seed',
+    'candidate_a_idx',
+    'candidate_b_idx',
+    'preference',
+    'label_time_s',
+    'timestamp',
+}
 VALID_PREFERENCES = {'A', 'B', 'TIE', 'SKIP', 'SKIP_TASK'}
 K_CANDIDATES = 4
 EXPECTED_PAIRS = set(combinations(range(K_CANDIDATES), 2))  # {(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)}
@@ -23,11 +32,11 @@ EXPECTED_PAIRS = set(combinations(range(K_CANDIDATES), 2))  # {(0,1),(0,2),(0,3)
 
 def verify(labels: list[dict]) -> dict:
     issues = {
-        'malformed': [],       # structural / field issues
-        'duplicates': [],      # same (task_id, a_idx, b_idx) appears >1 time
-        'missing_pairs': [],   # task has <6 non-SKIP_TASK labels
-        'hard_cycles': [],     # A>B, B>C, C>A (all strict)
-        'soft_cycles': [],     # A>B, B==C, C>A (tie in chain, at least one strict)
+        'malformed': [],  # structural / field issues
+        'duplicates': [],  # same (task_id, a_idx, b_idx) appears >1 time
+        'missing_pairs': [],  # task has <6 non-SKIP_TASK labels
+        'hard_cycles': [],  # A>B, B>C, C>A (all strict)
+        'soft_cycles': [],  # A>B, B==C, C>A (tie in chain, at least one strict)
     }
 
     # --- 1. Field-level validation ---
@@ -46,7 +55,9 @@ def verify(labels: list[dict]) -> dict:
         elif a >= b:
             issues['malformed'].append(f'Label {i}: expected a_idx < b_idx, got {a} >= {b}')
         elif a < 0 or b >= K_CANDIDATES:
-            issues['malformed'].append(f'Label {i}: indices out of range [0,{K_CANDIDATES}), got ({a},{b})')
+            issues['malformed'].append(
+                f'Label {i}: indices out of range [0,{K_CANDIDATES}), got ({a},{b})'
+            )
 
         t = label.get('label_time_s')
         if not isinstance(t, (int, float)) or t < 0:
@@ -57,7 +68,7 @@ def verify(labels: list[dict]) -> dict:
     for label in labels:
         by_task[label['task_id']].append(label)
 
-    for task_id, task_labels in by_task.items():
+    for _task_id, task_labels in by_task.items():
         seed = task_labels[0].get('task_seed', '?')
         tag = f'[{seed}]'
 
@@ -82,9 +93,7 @@ def verify(labels: list[dict]) -> dict:
             covered = {(l['candidate_a_idx'], l['candidate_b_idx']) for l in task_labels}
             missing = EXPECTED_PAIRS - covered
             if missing:
-                issues['missing_pairs'].append(
-                    f'{tag} Missing pairs: {sorted(missing)}'
-                )
+                issues['missing_pairs'].append(f'{tag} Missing pairs: {sorted(missing)}')
 
         # --- 2c. Cycle detection (hard + soft) ---
         # Resolve duplicates: take the latest label per pair

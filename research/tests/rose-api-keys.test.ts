@@ -14,10 +14,7 @@
  *   - Each test asserts on captured boundary calls (table, filters, data)
  */
 
-import {
-  assertEquals,
-  assertExists,
-} from 'https://deno.land/std@0.190.0/testing/asserts.ts';
+import { assertEquals, assertExists } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
 import { createHandler as createListHandler } from '../supabase/functions/api-keys/handler.ts';
 import { createHandler as createGenerateHandler } from '../supabase/functions/generate-api-key/handler.ts';
 import { createHandler as createDeleteHandler } from '../supabase/functions/delete-api-key/handler.ts';

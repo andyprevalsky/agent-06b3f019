@@ -6,16 +6,17 @@ fully-evaluated DecompositionCandidates ready for labeling.
 
 import asyncio
 import logging
-from typing import List
 
+from ..evaluators import evaluate_ce, evaluate_complexity, evaluate_me
 from ..types import ClarifiedTask, DecompositionCandidate
-from ..evaluators import evaluate_me, evaluate_ce, evaluate_complexity
-from .decomposer import decompose_k, K_CANDIDATES
+from .decomposer import K_CANDIDATES, decompose_k
 
 logger = logging.getLogger(__name__)
 
 
-async def _evaluate_candidate(goal: str, candidate: DecompositionCandidate) -> DecompositionCandidate:
+async def _evaluate_candidate(
+    goal: str, candidate: DecompositionCandidate
+) -> DecompositionCandidate:
     """Run ME/CE/CX evaluations on a candidate in parallel."""
     if candidate.validation_errors:
         return candidate
@@ -34,7 +35,7 @@ async def _evaluate_candidate(goal: str, candidate: DecompositionCandidate) -> D
 async def generate_candidates(
     task: ClarifiedTask,
     k: int = K_CANDIDATES,
-) -> List[DecompositionCandidate]:
+) -> list[DecompositionCandidate]:
     """Generate K candidate decompositions with evaluations.
 
     1. Generate K candidates via planner LLM (parallel)
@@ -46,7 +47,5 @@ async def generate_candidates(
     if not candidates:
         return []
 
-    evaluated = await asyncio.gather(
-        *[_evaluate_candidate(task.raw_seed, c) for c in candidates]
-    )
+    evaluated = await asyncio.gather(*[_evaluate_candidate(task.raw_seed, c) for c in candidates])
     return list(evaluated)

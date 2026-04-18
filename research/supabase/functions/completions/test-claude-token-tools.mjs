@@ -6,6 +6,7 @@
  * Run: node test-claude-token-tools.mjs
  */
 
+import process from 'node:process';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!ANTHROPIC_API_KEY) {
   console.error('❌ ANTHROPIC_API_KEY env var required');
@@ -115,7 +116,7 @@ async function testToolCall() {
   }
 
   const data = await response.json();
-  console.log('  Raw Anthropic content blocks:', JSON.stringify(data.content.map(b => b.type)));
+  console.log('  Raw Anthropic content blocks:', JSON.stringify(data.content.map((b) => b.type)));
 
   const parsed = parseAnthropicResponse(data);
   console.log('  Parsed OpenAI message:', JSON.stringify(parsed, null, 2));
@@ -132,7 +133,7 @@ async function testToolCall() {
   return true;
 }
 
-async function testForcedToolChoice() {
+function testForcedToolChoice() {
   console.log('🎯 Test 2: tool_choice with specific function name\n');
 
   const tc = transformToolChoice({ type: 'function', function: { name: 'my_tool' } });
@@ -143,7 +144,7 @@ async function testForcedToolChoice() {
   return true;
 }
 
-async function testRequiredToolChoice() {
+function testRequiredToolChoice() {
   console.log('🔒 Test 3: tool_choice="required" maps to type=any\n');
 
   const tc = transformToolChoice('required');
@@ -153,7 +154,7 @@ async function testRequiredToolChoice() {
   return true;
 }
 
-async function testReasoningTransform() {
+function testReasoningTransform() {
   console.log('🧠 Test 4: Reasoning config transforms to thinking\n');
 
   // Mirror the logic from index.ts line 4027-4028
@@ -169,7 +170,7 @@ async function testReasoningTransform() {
   return true;
 }
 
-async function testNoToolsNoTransform() {
+function testNoToolsNoTransform() {
   console.log('📭 Test 5: Empty tools array is not added to body\n');
 
   // Mirror the guard: if (tools?.length)

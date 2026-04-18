@@ -49,7 +49,6 @@ import {
   assertExists,
   assertNotEquals,
 } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
-import { testClient } from './helpers.ts';
 
 const BASE_URL = Deno.env.get('BASE_URL') ||
   `http://localhost:${Deno.env.get('RESEARCH_PORT') || '54321'}/functions/v1`;
@@ -300,7 +299,14 @@ Deno.test('POST /rose-bench - 400 invalid benchmark includes all known types', a
 
 Deno.test('POST /rose-bench - all validation errors have { error: string } shape', async () => {
   const errorCases = [
-    { body: (() => { const b = makeValidBody(); delete b.url; return b; })(), desc: 'missing url' },
+    {
+      body: (() => {
+        const b = makeValidBody();
+        delete b.url;
+        return b;
+      })(),
+      desc: 'missing url',
+    },
     {
       body: (() => {
         const b = makeValidBody();
@@ -430,8 +436,7 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    'POST /rose-bench - single benchmark with failing URL records errors in results metadata',
+  name: 'POST /rose-bench - single benchmark with failing URL records errors in results metadata',
   fn: async () => {
     const body = makeValidBody({
       url: FAILING_MODEL_URL,
@@ -752,8 +757,7 @@ Deno.test({
 });
 
 Deno.test({
-  name:
-    'POST /rose-bench - error metadata contains "Model API error" when URL returns non-200',
+  name: 'POST /rose-bench - error metadata contains "Model API error" when URL returns non-200',
   fn: async () => {
     const body = makeValidBody({
       url: FAILING_MODEL_URL,

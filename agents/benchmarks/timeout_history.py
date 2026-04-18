@@ -24,7 +24,9 @@ HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
 
 MIN_SAMPLES = 5
-P95_MULTIPLIER = 1.5
+# p95 × 1.7: with n=MIN_SAMPLES, p95 ≈ observed max, so 1.5× caps cut local
+# parallel-contention runs 2–5s over the ceiling. 1.7× absorbs that variance.
+P95_MULTIPLIER = 1.7
 FLOOR_SECONDS = 30
 CEIL_SECONDS = 900
 

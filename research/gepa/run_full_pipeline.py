@@ -3,13 +3,21 @@
 Usage:
     PYTHONPATH=agents python -u research/gepa/run_full_pipeline.py
 """
-import asyncio, json, math, os, sys, time, logging
+
+import asyncio
+import json
+import logging
+import math
+import os
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'agents'))
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(ROOT / 'agents' / '.env')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -29,20 +37,21 @@ def _patch_dspy_reasoning():
     so we patch _process_completion to fall back to reasoning_content.
     """
     from dspy.clients.base_lm import BaseLM
+
     _orig = BaseLM._process_completion
 
     def _patched(self, response, merged_kwargs):
         outputs = _orig(self, response, merged_kwargs)
         patched = []
         for o in outputs:
-            if isinstance(o, dict) and not o.get("text") and o.get("reasoning_content"):
-                o["text"] = o["reasoning_content"]
+            if isinstance(o, dict) and not o.get('text') and o.get('reasoning_content'):
+                o['text'] = o['reasoning_content']
                 patched.append(o)
             else:
                 patched.append(o)
         # Re-simplify: if all outputs now only have "text", return just strings
-        if all(isinstance(o, dict) and len(o) == 1 and "text" in o for o in patched):
-            patched = [o["text"] for o in patched]
+        if all(isinstance(o, dict) and len(o) == 1 and 'text' in o for o in patched):
+            patched = [o['text'] for o in patched]
         return patched
 
     BaseLM._process_completion = _patched
@@ -52,6 +61,7 @@ def _patch_dspy_reasoning():
 def _patch_lm_logging():
     """Add logging to every LM call for visibility."""
     from dspy.clients.base_lm import BaseLM
+
     _orig_call = BaseLM.__call__
     _lm_n = [0]
 
@@ -64,10 +74,10 @@ def _patch_lm_logging():
         try:
             result = _orig_call(self, prompt=prompt, messages=messages, **kwargs)
             rlen = len(str(result[0])) if result else 0
-            print(f'  [LM #{n}] OK {time.time()-t0:.1f}s {rlen}ch', flush=True)
+            print(f'  [LM #{n}] OK {time.time() - t0:.1f}s {rlen}ch', flush=True)
             return result
         except Exception as e:
-            print(f'  [LM #{n}] ERR {time.time()-t0:.1f}s {type(e).__name__}: {e}', flush=True)
+            print(f'  [LM #{n}] ERR {time.time() - t0:.1f}s {type(e).__name__}: {e}', flush=True)
             raise
 
     BaseLM.__call__ = _logged_call
@@ -76,12 +86,15 @@ def _patch_lm_logging():
 
 def main():
     import dspy
+
     _patch_dspy_reasoning()
     _patch_lm_logging()
 
     lm = dspy.LM(
         model='openai/rose-labs/rose-1-ultra',
-        api_base=os.getenv('ROSE_API_URL', 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions'),
+        api_base=os.getenv(
+            'ROSE_API_URL', 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions'
+        ),
         api_key=os.getenv('ROSE_API_KEY'),
         max_tokens=8192,
         cache=False,
@@ -95,14 +108,19 @@ def main():
     print('[OK] rose-1-ultra configured (max_tokens=8192, reasoning=512)', flush=True)
 
     from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
-    from research.gepa.pipelines.gepa_optimizer import (
-        _load_trainset, _make_decomposer_module, _parse_plan,
-        get_initial_strategy, compose_prompt, TASKS_DIR,
-        _retry, MAX_RETRIES, RETRY_DELAY_S,
-    )
-    from research.gepa.pipelines.benchmark import _eval_me, _eval_ce, _eval_cx
-    from research.gepa.scoring import hard_gate, final_score
+
     from research.gepa.critic import score_candidates
+    from research.gepa.pipelines.benchmark import _eval_ce, _eval_cx, _eval_me
+    from research.gepa.pipelines.gepa_optimizer import (
+        TASKS_DIR,
+        _load_trainset,
+        _make_decomposer_module,
+        _parse_plan,
+        _retry,
+        compose_prompt,
+        get_initial_strategy,
+    )
+    from research.gepa.scoring import final_score, hard_gate
 
     call_n = [0]
 
@@ -116,9 +134,14 @@ def main():
                     last_err = e
                     if attempt < MAX_CRITIC_RETRIES - 1:
                         wait = CRITIC_RETRY_DELAY * (attempt + 1)
-                        print(f'    [{label} RETRY {attempt+1}/{MAX_CRITIC_RETRIES}] {e} (sleep {wait:.1f}s)', flush=True)
+                        print(
+                            f'    [{label} RETRY {attempt + 1}/{MAX_CRITIC_RETRIES}] {e} (sleep {wait:.1f}s)',
+                            flush=True,
+                        )
                         await asyncio.sleep(wait)
-            raise RuntimeError(f'{label} failed after {MAX_CRITIC_RETRIES} attempts: {type(last_err).__name__}: {last_err}') from last_err
+            raise RuntimeError(
+                f'{label} failed after {MAX_CRITIC_RETRIES} attempts: {type(last_err).__name__}: {last_err}'
+            ) from last_err
 
         me_r, ce_r, cx_r = await asyncio.gather(
             _retry_async(lambda: _eval_me(goal, pr, ctx), 'ME'),
@@ -138,19 +161,27 @@ def main():
             text = '\n'.join(lines)
         pr = _parse_plan(text)
         if pr is None:
-            print(f'  #{n} PARSE_FAIL {time.time()-t0:.1f}s', flush=True)
+            print(f'  #{n} PARSE_FAIL {time.time() - t0:.1f}s', flush=True)
             return ScoreWithFeedback(score=0.0, feedback='Could not parse JSON output')
         gate = hard_gate(pr)
         if math.isinf(gate):
-            print(f'  #{n} GATE_FAIL n={len(pr.tasks)} {time.time()-t0:.1f}s', flush=True)
-            return ScoreWithFeedback(score=0.0, feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected')
+            print(f'  #{n} GATE_FAIL n={len(pr.tasks)} {time.time() - t0:.1f}s', flush=True)
+            return ScoreWithFeedback(
+                score=0.0,
+                feedback=f'Invalid structure: {len(pr.tasks)} tasks (need 2-8) or cycle detected',
+            )
         ctx = json.loads(example.context) if isinstance(example.context, str) else example.context
         plan_dict = json.loads(text)
-        raw = _retry(lambda: score_candidates([plan_dict], example.goal, ctx, model_id=CRITIC), 'Critic')
+        raw = _retry(
+            lambda: score_candidates([plan_dict], example.goal, ctx, model_id=CRITIC), 'Critic'
+        )
         norm = 1.0 / (1.0 + math.exp(-raw[0]))
         me, ce, cx = asyncio.run(_run_evaluators(example.goal, pr, ctx))
         s = max(0.0, final_score(norm, me, ce, cx))
-        print(f'  #{n} critic={norm:.3f} ME={me:.2f} CE={ce:.2f} CX={cx:.2f} final={s:.3f} {time.time()-t0:.1f}s', flush=True)
+        print(
+            f'  #{n} critic={norm:.3f} ME={me:.2f} CE={ce:.2f} CX={cx:.2f} final={s:.3f} {time.time() - t0:.1f}s',
+            flush=True,
+        )
         return ScoreWithFeedback(
             score=s,
             feedback=f'critic={norm:.3f}, ME={me:.2f}, CE={ce:.2f}, CX={cx:.2f}, final={s:.3f}',
@@ -165,19 +196,27 @@ def main():
 
     # Progress reporter: writes status every 60s so you can `cat research/gepa/data/gepa_progress.json`
     import threading
+
     progress_file = Path(__file__).parent / 'data' / 'gepa_progress.json'
     _stop_progress = threading.Event()
 
     def _progress_loop():
         while not _stop_progress.wait(60):
             elapsed = time.time() - t_start
-            progress_file.write_text(json.dumps({
-                'metric_calls': call_n[0],
-                'elapsed_s': round(elapsed, 1),
-                'elapsed_min': round(elapsed / 60, 1),
-                'calls_per_min': round(call_n[0] / (elapsed / 60), 1) if elapsed > 60 else 0,
-                'status': 'running',
-            }, indent=2))
+            progress_file.write_text(
+                json.dumps(
+                    {
+                        'metric_calls': call_n[0],
+                        'elapsed_s': round(elapsed, 1),
+                        'elapsed_min': round(elapsed / 60, 1),
+                        'calls_per_min': round(call_n[0] / (elapsed / 60), 1)
+                        if elapsed > 60
+                        else 0,
+                        'status': 'running',
+                    },
+                    indent=2,
+                )
+            )
 
     progress_thread = threading.Thread(target=_progress_loop, daemon=True)
     progress_thread.start()
@@ -199,21 +238,26 @@ def main():
     demos = getattr(optimized.planner, 'demos', [])
     elapsed = time.time() - t_start
 
-    print(f'\n{"="*80}', flush=True)
+    print(f'\n{"=" * 80}', flush=True)
     print(f'DONE in {elapsed:.0f}s | {call_n[0]} metric calls | {len(demos)} demos', flush=True)
-    print(f'{"="*80}', flush=True)
+    print(f'{"=" * 80}', flush=True)
     print(f'OPTIMIZED STRATEGY ({len(strategy)} chars):', flush=True)
     print(strategy, flush=True)
 
     out = Path(__file__).parent / 'data' / 'optimization_result.json'
-    out.write_text(json.dumps({
-        'initial_strategy': get_initial_strategy(),
-        'optimized_strategy': strategy,
-        'optimized_prompt': compose_prompt(strategy),
-        'elapsed_s': elapsed,
-        'metric_calls': call_n[0],
-        'demos': len(demos),
-    }, indent=2))
+    out.write_text(
+        json.dumps(
+            {
+                'initial_strategy': get_initial_strategy(),
+                'optimized_strategy': strategy,
+                'optimized_prompt': compose_prompt(strategy),
+                'elapsed_s': elapsed,
+                'metric_calls': call_n[0],
+                'demos': len(demos),
+            },
+            indent=2,
+        )
+    )
     print(f'Saved to {out}', flush=True)
 
 

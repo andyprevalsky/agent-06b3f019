@@ -4,14 +4,11 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from research.gepa.critic import (
     prepare_reward_pairs,
     serialize_candidate,
     serialize_prompt,
 )
-
 
 # --- Test data ---
 
@@ -87,35 +84,65 @@ def _write_test_data(tmpdir: Path):
 
     labels = [
         {
-            'pair_id': 'p1', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1,
-            'preference': 'A', 'label_time_s': 5.0, 'timestamp': 1.0,
+            'pair_id': 'p1',
+            'task_id': 'task-aaa',
+            'task_seed': 'Get me a black beanie',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'label_time_s': 5.0,
+            'timestamp': 1.0,
         },
         {
-            'pair_id': 'p2', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-            'candidate_a_idx': 2, 'candidate_b_idx': 3,
-            'preference': 'B', 'label_time_s': 3.0, 'timestamp': 2.0,
+            'pair_id': 'p2',
+            'task_id': 'task-aaa',
+            'task_seed': 'Get me a black beanie',
+            'candidate_a_idx': 2,
+            'candidate_b_idx': 3,
+            'preference': 'B',
+            'label_time_s': 3.0,
+            'timestamp': 2.0,
         },
         {
-            'pair_id': 'p3', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-            'candidate_a_idx': 0, 'candidate_b_idx': 2,
-            'preference': 'TIE', 'label_time_s': 4.0, 'timestamp': 3.0,
+            'pair_id': 'p3',
+            'task_id': 'task-aaa',
+            'task_seed': 'Get me a black beanie',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 2,
+            'preference': 'TIE',
+            'label_time_s': 4.0,
+            'timestamp': 3.0,
         },
         {
-            'pair_id': 'p4', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-            'candidate_a_idx': 1, 'candidate_b_idx': 3,
-            'preference': 'SKIP', 'label_time_s': 1.0, 'timestamp': 4.0,
+            'pair_id': 'p4',
+            'task_id': 'task-aaa',
+            'task_seed': 'Get me a black beanie',
+            'candidate_a_idx': 1,
+            'candidate_b_idx': 3,
+            'preference': 'SKIP',
+            'label_time_s': 1.0,
+            'timestamp': 4.0,
         },
         {
-            'pair_id': 'p5', 'task_id': 'task-bbb', 'task_seed': 'Apply to jobs',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1,
-            'preference': 'SKIP_TASK', 'label_time_s': 0.5, 'timestamp': 5.0,
+            'pair_id': 'p5',
+            'task_id': 'task-bbb',
+            'task_seed': 'Apply to jobs',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'SKIP_TASK',
+            'label_time_s': 0.5,
+            'timestamp': 5.0,
         },
         # Label referencing a task with no candidates in cache
         {
-            'pair_id': 'p6', 'task_id': 'task-missing', 'task_seed': 'Unknown',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1,
-            'preference': 'A', 'label_time_s': 2.0, 'timestamp': 6.0,
+            'pair_id': 'p6',
+            'task_id': 'task-missing',
+            'task_seed': 'Unknown',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'label_time_s': 2.0,
+            'timestamp': 6.0,
         },
     ]
     (tmpdir / 'preference_labels.json').write_text(json.dumps(labels))
@@ -243,20 +270,34 @@ class TestLLMLabeledIntegration:
         with open(labels_path) as f:
             labels = json.load(f)
 
-        labels.extend([
-            {
-                'pair_id': 's1', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-                'candidate_a_idx': 0, 'candidate_b_idx': 3,
-                'preference': 'A', 'label_time_s': 0, 'timestamp': 7.0,
-                'source': 'llm_labeled', 'confidence': 85.0,
-            },
-            {
-                'pair_id': 's2', 'task_id': 'task-aaa', 'task_seed': 'Get me a black beanie',
-                'candidate_a_idx': 1, 'candidate_b_idx': 3,
-                'preference': 'B', 'label_time_s': 0, 'timestamp': 8.0,
-                'source': 'llm_labeled', 'confidence': 20.0,
-            },
-        ])
+        labels.extend(
+            [
+                {
+                    'pair_id': 's1',
+                    'task_id': 'task-aaa',
+                    'task_seed': 'Get me a black beanie',
+                    'candidate_a_idx': 0,
+                    'candidate_b_idx': 3,
+                    'preference': 'A',
+                    'label_time_s': 0,
+                    'timestamp': 7.0,
+                    'source': 'llm_labeled',
+                    'confidence': 85.0,
+                },
+                {
+                    'pair_id': 's2',
+                    'task_id': 'task-aaa',
+                    'task_seed': 'Get me a black beanie',
+                    'candidate_a_idx': 1,
+                    'candidate_b_idx': 3,
+                    'preference': 'B',
+                    'label_time_s': 0,
+                    'timestamp': 8.0,
+                    'source': 'llm_labeled',
+                    'confidence': 20.0,
+                },
+            ]
+        )
         labels_path.write_text(json.dumps(labels))
         return tasks_dir
 

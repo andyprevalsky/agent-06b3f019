@@ -22,8 +22,7 @@ from helpers.llm import call_llm_structured_streaming
 from pydantic import BaseModel, Field
 
 from ..critic import serialize_candidate, serialize_prompt
-from ..embeddings import EmbeddingCache, cosine_similarity, embed_texts, retrieve_similar_pairs
-from ..types import DecompositionCandidate
+from ..embeddings import EmbeddingCache, embed_texts, retrieve_similar_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,7 @@ TASKS_DIR = DATA_DIR / 'clarified_tasks'
 # Pydantic response model
 # ---------------------------------------------------------------------------
 
+
 class JudgeVerdict(BaseModel):
     overall_winner: Literal['A', 'B', 'TIE'] = Field(
         description='Which candidate is better: A, B, or TIE if too close to call'
@@ -45,14 +45,13 @@ class JudgeVerdict(BaseModel):
     overall_reasoning: str = Field(
         description='2-3 concise bullet points (use • prefix) explaining the verdict'
     )
-    confidence: float = Field(
-        description='Confidence in the verdict, 0-100'
-    )
+    confidence: float = Field(description='Confidence in the verdict, 0-100')
 
 
 # ---------------------------------------------------------------------------
 # Candidate formatting
 # ---------------------------------------------------------------------------
+
 
 def format_candidate_for_judge(candidate: dict, label: str = 'A') -> str:
     """Format a candidate dict (from candidates_cache) for the judge prompt."""
@@ -62,6 +61,7 @@ def format_candidate_for_judge(candidate: dict, label: str = 'A') -> str:
 # ---------------------------------------------------------------------------
 # Few-shot example formatting
 # ---------------------------------------------------------------------------
+
 
 def format_few_shot_example(
     label: dict,
@@ -142,6 +142,7 @@ Which candidate is better? Return your verdict."""
 # Core judge functions
 # ---------------------------------------------------------------------------
 
+
 def _flip_winner(winner: str) -> str:
     """Flip A↔B, TIE stays TIE."""
     return {'A': 'B', 'B': 'A', 'TIE': 'TIE'}.get(winner, 'TIE')
@@ -174,7 +175,7 @@ async def _judge_once(
     last_err = None
     for attempt in range(3):
         try:
-            result, usage, _ = await call_llm_structured_streaming(
+            result, _usage, _ = await call_llm_structured_streaming(
                 messages=messages,
                 model=MODEL,
                 temperature=0.0,
@@ -256,6 +257,7 @@ async def judge_preference(
 # Batch functions
 # ---------------------------------------------------------------------------
 
+
 def _build_task_id_to_file(tasks_dir: Path) -> dict[str, str]:
     """Build task_id → filename mapping."""
     mapping = {}
@@ -268,10 +270,7 @@ def _build_task_id_to_file(tasks_dir: Path) -> dict[str, str]:
 
 def _get_existing_label_keys(labels: list[dict]) -> set[str]:
     """Build set of (task_id, a_idx, b_idx) keys from existing labels."""
-    return {
-        f"{l['task_id']}_{l['candidate_a_idx']}_{l['candidate_b_idx']}"
-        for l in labels
-    }
+    return {f'{l["task_id"]}_{l["candidate_a_idx"]}_{l["candidate_b_idx"]}' for l in labels}
 
 
 async def judge_all_pairs(
@@ -355,7 +354,8 @@ async def judge_all_tasks(
 
     # Human trainable labels for few-shot retrieval (exclude LLM-labeled)
     human_trainable = [
-        l for l in all_labels
+        l
+        for l in all_labels
         if l.get('preference') in ('A', 'B') and l.get('source') != 'llm_labeled'
     ]
     existing_keys = _get_existing_label_keys(all_labels)
@@ -376,7 +376,7 @@ async def judge_all_tasks(
 
     cache = EmbeddingCache()
     embeddings = embed_texts(all_seeds, cache=cache)
-    task_embeddings = dict(zip(all_seeds, embeddings))
+    task_embeddings = dict(zip(all_seeds, embeddings, strict=False))
 
     new_labels = []
     labels_lock = asyncio.Lock()
@@ -415,11 +415,15 @@ async def judge_all_tasks(
             if example:
                 few_shot_strs.append(example)
 
-        work_items.append((filename, task_id, task_seed, agent_context, candidates, few_shot_strs, len(unlabeled)))
+        work_items.append(
+            (filename, task_id, task_seed, agent_context, candidates, few_shot_strs, len(unlabeled))
+        )
 
     logger.info(f'{len(work_items)} tasks need judging, processing concurrently (semaphore=5)')
 
-    async def _process_task(filename, task_id, task_seed, agent_context, candidates, few_shot_strs, n_unlabeled):
+    async def _process_task(
+        filename, task_id, task_seed, agent_context, candidates, few_shot_strs, n_unlabeled
+    ):
         logger.info(f'Judging {n_unlabeled} pairs for {filename} ({len(few_shot_strs)} few-shot)')
 
         task_labels = await judge_all_pairs(
@@ -435,7 +439,7 @@ async def judge_all_tasks(
             for label in task_labels:
                 label['task_id'] = task_id
                 label['timestamp'] = time.time()
-                key = f"{task_id}_{label['candidate_a_idx']}_{label['candidate_b_idx']}"
+                key = f'{task_id}_{label["candidate_a_idx"]}_{label["candidate_b_idx"]}'
                 if key not in existing_keys:
                     existing_keys.add(key)
                     all_labels.append(label)
@@ -446,11 +450,11 @@ async def judge_all_tasks(
             with open(labels_path, 'w') as f:
                 json.dump(all_labels, f, indent=2)
 
-        logger.info(f'Done {filename}: +{added} labels (total LLM: {len([l for l in all_labels if l.get("source") == "llm_labeled"])})')
+        logger.info(
+            f'Done {filename}: +{added} labels (total LLM: {len([l for l in all_labels if l.get("source") == "llm_labeled"])})'
+        )
 
-    await asyncio.gather(*[
-        _process_task(*item) for item in work_items
-    ])
+    await asyncio.gather(*[_process_task(*item) for item in work_items])
 
     logger.info(f'Added {len(new_labels)} LLM-labeled pairs to preference_labels.json')
     return new_labels

@@ -5,12 +5,10 @@ and metric edge cases. Integration tests (marked) require API keys + Modal.
 """
 
 import json
-import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-import asyncio
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -21,30 +19,28 @@ from tools.set_plan import _get_planner_tools_description
 
 from research.gepa.pipelines.benchmark import _compute_depth
 from research.gepa.pipelines.gepa_optimizer import (
-    STRATEGY_START,
-    STRATEGY_END,
     OptimizationResult,
-    extract_strategy,
-    compose_prompt,
-    get_initial_strategy,
     _build_prompt_skeleton,
-    _parse_plan,
     _load_trainset,
+    _parse_plan,
+    compose_prompt,
+    extract_strategy,
+    get_initial_strategy,
     make_gepa_metric,
     optimize_prompt,
 )
 from research.gepa.tests.fixtures import (
+    VALID_DIAMOND_4,
     VALID_LINEAR_2,
     VALID_LINEAR_3,
-    VALID_DIAMOND_4,
     VALID_PARALLEL_2,
     make_planner_response,
 )
 
-
 # ---------------------------------------------------------------------------
 # Strategy extraction
 # ---------------------------------------------------------------------------
+
 
 class TestExtractStrategy:
     def test_contains_strategy_content(self):
@@ -52,9 +48,16 @@ class TestExtractStrategy:
         # Strategy section contains planning instructions (original or overridden)
         assert len(strategy) > 100
         # Must contain at least one planning-related keyword
-        has_planning = any(kw in strategy for kw in [
-            'PLANNING', 'TWO-AXIS', 'DECOMPOSITION', 'decompos', 'plan',
-        ])
+        has_planning = any(
+            kw in strategy
+            for kw in [
+                'PLANNING',
+                'TWO-AXIS',
+                'DECOMPOSITION',
+                'decompos',
+                'plan',
+            ]
+        )
         assert has_planning, f'Strategy missing planning content: {strategy[:200]}'
 
     def test_excludes_fixed_sections(self):
@@ -67,6 +70,7 @@ class TestExtractStrategy:
     def test_starts_at_known_marker(self):
         strategy = get_initial_strategy()
         from research.gepa.pipelines.gepa_optimizer import STRATEGY_STARTS
+
         assert any(strategy.startswith(m) for m in STRATEGY_STARTS), (
             f'Strategy does not start with any known marker: {strategy[:100]}'
         )
@@ -74,6 +78,7 @@ class TestExtractStrategy:
     def test_does_not_contain_end_markers(self):
         strategy = get_initial_strategy()
         from research.gepa.pipelines.gepa_optimizer import STRATEGY_ENDS
+
         for marker in STRATEGY_ENDS:
             assert marker not in strategy, f'Strategy contains end marker: {marker}'
 
@@ -88,6 +93,7 @@ class TestExtractStrategy:
 # ---------------------------------------------------------------------------
 # Prompt composition
 # ---------------------------------------------------------------------------
+
 
 class TestComposePrompt:
     def test_roundtrip(self):
@@ -123,6 +129,7 @@ class TestComposePrompt:
 # Prompt skeleton
 # ---------------------------------------------------------------------------
 
+
 class TestPromptSkeleton:
     def test_excludes_strategy_content(self):
         skeleton = _build_prompt_skeleton()
@@ -138,6 +145,7 @@ class TestPromptSkeleton:
 # ---------------------------------------------------------------------------
 # Compute depth
 # ---------------------------------------------------------------------------
+
 
 class TestComputeDepth:
     def test_parallel(self):
@@ -157,10 +165,12 @@ class TestComputeDepth:
         assert _compute_depth(VALID_DIAMOND_4) == 2
 
     def test_all_parallel(self):
-        pr = make_planner_response(tasks=[
-            {'goal': 'a', 'depends_on': []},
-            {'goal': 'b', 'depends_on': []},
-        ])
+        pr = make_planner_response(
+            tasks=[
+                {'goal': 'a', 'depends_on': []},
+                {'goal': 'b', 'depends_on': []},
+            ]
+        )
         assert _compute_depth(pr) == 0
 
     def test_single_task(self):
@@ -171,6 +181,7 @@ class TestComputeDepth:
 # ---------------------------------------------------------------------------
 # Parse plan
 # ---------------------------------------------------------------------------
+
 
 class TestParsePlan:
     def test_valid_json(self):
@@ -201,6 +212,7 @@ class TestParsePlan:
 # ---------------------------------------------------------------------------
 # Metric function
 # ---------------------------------------------------------------------------
+
 
 class TestGepaMetric:
     def test_invalid_json_returns_zero(self):
@@ -250,6 +262,7 @@ class TestGepaMetric:
     def test_valid_plan_calls_critic(self, mock_score, mock_me, mock_ce, mock_cx):
         """Valid plan should call score_candidates + evaluators and return a score."""
         from research.gepa.types import EvalResult
+
         mock_score.return_value = [0.8]
         mock_eval = EvalResult(passed=True, score=0.9, reasoning='good')
         mock_me.return_value = (mock_eval, {})
@@ -310,11 +323,13 @@ class TestGepaMetric:
 # Load trainset (tests raw data loading; dspy wrapping tested in integration)
 # ---------------------------------------------------------------------------
 
+
 class TestLoadTrainset:
     """Verify clarified task JSON files have the fields _load_trainset expects."""
 
     def _load_raw_tasks(self):
         from research.gepa.pipelines.gepa_optimizer import TASKS_DIR
+
         tasks = []
         for path in sorted(TASKS_DIR.glob('*.json')):
             tasks.append(json.loads(path.read_text()))
@@ -347,6 +362,7 @@ class TestLoadTrainset:
 # Minimal end-to-end integration (requires OPENROUTER_API_KEY + dspy)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestOptimizeMinimal:
     """Full end-to-end GEPA pipeline at reduced data scale (2 examples).
@@ -357,7 +373,9 @@ class TestOptimizeMinimal:
     @pytest.fixture(autouse=True)
     def _skip_if_unavailable(self):
         import os
+
         from dotenv import load_dotenv
+
         load_dotenv(Path(__file__).resolve().parent.parent.parent.parent / 'agents' / '.env')
         if not os.getenv('OPENROUTER_API_KEY'):
             pytest.skip('OPENROUTER_API_KEY not set')

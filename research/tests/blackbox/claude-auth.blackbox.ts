@@ -237,7 +237,10 @@ const sampleMessages = [
 // ---------------------------------------------------------------------------
 
 // deno-lint-ignore no-explicit-any
-async function readStream(res: Response, maxChunks = 200): Promise<{ fullText: string; chunks: any[] }> {
+async function readStream(
+  res: Response,
+  maxChunks = 200,
+): Promise<{ fullText: string; chunks: any[] }> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let fullText = '';
@@ -255,7 +258,9 @@ async function readStream(res: Response, maxChunks = 200): Promise<{ fullText: s
     // Connection may drop mid-stream (e.g. expired token, upstream timeout).
     // Return whatever we've read so far — caller decides if it's enough.
   } finally {
-    try { reader.cancel(); } catch { /* already closed */ }
+    try {
+      reader.cancel();
+    } catch { /* already closed */ }
   }
   for (const line of fullText.split('\n')) {
     if (line.startsWith('data:') && !line.includes('[DONE]')) {
@@ -289,7 +294,8 @@ function skipNoKey(k: string | null): boolean {
 // ---------------------------------------------------------------------------
 
 Deno.test({
-  name: 'claudeAuth: streaming with real token routes through Anthropic (actual_model has -claude suffix)',
+  name:
+    'claudeAuth: streaming with real token routes through Anthropic (actual_model has -claude suffix)',
   fn: async () => {
     if (skipNoClaude()) return;
     const k = await getApiKey();
@@ -313,7 +319,11 @@ Deno.test({
 
     assertNotEquals(res.status, 401, 'Auth must pass with valid API key');
     assertNotEquals(res.status, 400, 'Validation must pass with valid payload');
-    assertEquals(res.status, 200, `Expected 200 but got ${res.status}: ${await res.clone().text()}`);
+    assertEquals(
+      res.status,
+      200,
+      `Expected 200 but got ${res.status}: ${await res.clone().text()}`,
+    );
 
     const { fullText, chunks } = await readStream(res);
 
@@ -383,7 +393,11 @@ Deno.test({
     try {
       parsed = JSON.parse(fullContent);
     } catch (e) {
-      throw new Error(`Accumulated content is not valid JSON: ${(e as Error).message}\nContent: ${fullContent.slice(0, 500)}`);
+      throw new Error(
+        `Accumulated content is not valid JSON: ${(e as Error).message}\nContent: ${
+          fullContent.slice(0, 500)
+        }`,
+      );
     }
 
     // Must have response field (string)
@@ -445,7 +459,9 @@ Deno.test({
     } catch {
       // Connection may drop mid-stream — use whatever we've read
     } finally {
-      try { reader.cancel(); } catch { /* already closed */ }
+      try {
+        reader.cancel();
+      } catch { /* already closed */ }
     }
 
     // Must end with [DONE]

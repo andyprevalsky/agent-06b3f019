@@ -66,7 +66,9 @@ const createdKeyIds: string[] = [];
 // ---------------------------------------------------------------------------
 
 /** List the authenticated user's API keys via the api-keys edge function. */
-async function listKeys(jwt: string): Promise<Array<{ id: string; name: string; maskedApiKey: string; createdAt: string }>> {
+async function listKeys(
+  jwt: string,
+): Promise<Array<{ id: string; name: string; maskedApiKey: string; createdAt: string }>> {
   const res = await testClient.get('/api-keys', {
     headers: { Authorization: `Bearer ${jwt}` },
   });
@@ -281,7 +283,10 @@ Deno.test('POST /generate-api-key -- success response has application/json conte
 
   const contentType = res.headers.get('content-type');
   assertExists(contentType);
-  assert(contentType!.includes('application/json'), `Expected application/json, got: ${contentType}`);
+  assert(
+    contentType!.includes('application/json'),
+    `Expected application/json, got: ${contentType}`,
+  );
 });
 
 Deno.test('POST /generate-api-key -- error response has application/json content-type', async () => {
@@ -289,7 +294,10 @@ Deno.test('POST /generate-api-key -- error response has application/json content
   assertEquals(res.status, 401);
   const contentType = res.headers.get('content-type');
   assertExists(contentType);
-  assert(contentType!.includes('application/json'), `Expected application/json, got: ${contentType}`);
+  assert(
+    contentType!.includes('application/json'),
+    `Expected application/json, got: ${contentType}`,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -396,8 +404,9 @@ Deno.test('POST /generate-api-key -- concurrent requests produce distinct keys',
   }
 
   const jwt = await getTestJwt();
-  const promises = Array.from({ length: 3 }, (_, i) =>
-    generateAndTrack(jwt, { name: `bbx-gen-concurrent-${Date.now()}-${i}` })
+  const promises = Array.from(
+    { length: 3 },
+    (_, i) => generateAndTrack(jwt, { name: `bbx-gen-concurrent-${Date.now()}-${i}` }),
   );
   const results = await Promise.all(promises);
 

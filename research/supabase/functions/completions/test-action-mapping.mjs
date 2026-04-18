@@ -2,7 +2,8 @@
 // This tests the normalization logic
 
 const SUPABASE_URL = 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU';
+const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU';
 const ROSE_API_KEY = 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 
 // Mock responses that simulate what each LLM returns
@@ -10,7 +11,7 @@ const ROSE_API_KEY = 'af1ea4b12ea8dbe07c555a45a8ad4dc8';
 
 async function testMapping() {
   console.log('🧪 Testing action name mappings...\n');
-  
+
   // Test with a prompt that should trigger a type action
   const request = {
     model: 'rose-labs/rose-1-browser-use',
@@ -22,10 +23,19 @@ async function testMapping() {
       dom_tree: '[5]: <input type="text" name="q" placeholder="Search">',
       viewport: { width: 1280, height: 720 },
       scroll_position: { x: 0, y: 0 },
-      screenshot: null
+      screenshot: null,
     },
     action_history: [],
-    available_actions: ['click', 'input_text', 'scroll', 'goto', 'navback', 'wait', 'done', 'press_key']
+    available_actions: [
+      'click',
+      'input_text',
+      'scroll',
+      'goto',
+      'navback',
+      'wait',
+      'done',
+      'press_key',
+    ],
   };
 
   try {
@@ -34,21 +44,21 @@ async function testMapping() {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'x-api-key': ROSE_API_KEY
+        'x-api-key': ROSE_API_KEY,
       },
-      body: JSON.stringify(request)
+      body: JSON.stringify(request),
     });
 
     const data = await response.json();
     console.log('📥 Response:', JSON.stringify(data, null, 2));
-    
+
     const action = data.action?.action;
     const params = data.action?.params;
-    
+
     console.log('\n✅ Validation:');
     console.log(`   Action: ${action} (expected: input_text)`);
     console.log(`   Params: ${JSON.stringify(params)}`);
-    
+
     if (action === 'input_text' && params?.text) {
       console.log('\n🎉 Mapping works correctly!');
     } else if (action === 'type') {
@@ -56,11 +66,9 @@ async function testMapping() {
     } else {
       console.log('\n⚠️ Different action returned - may need manual verification');
     }
-
   } catch (error) {
     console.error('❌ Error:', error.message);
   }
 }
 
 testMapping();
-

@@ -106,7 +106,9 @@ async function readStream(
   for (const line of fullText.split('\n')) {
     if (line.startsWith('data:') && !line.includes('[DONE]')) {
       const js = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
-      try { chunks.push(JSON.parse(js.trim())); } catch { /* partial */ }
+      try {
+        chunks.push(JSON.parse(js.trim()));
+      } catch { /* partial */ }
     }
   }
   return { fullText, chunks };
@@ -208,7 +210,12 @@ Deno.test('POST /completions - 400 invalid model_preference', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
   const { status, data } = await post(
-    { model: 'rose-labs/rose-1-lite', messages: sampleMessages, model_preference: 'INVALID', stream: false },
+    {
+      model: 'rose-labs/rose-1-lite',
+      messages: sampleMessages,
+      model_preference: 'INVALID',
+      stream: false,
+    },
     ah(k!),
   );
   assertEquals(status, 400);
@@ -220,7 +227,9 @@ Deno.test('POST /completions - 400 invalid model_preference', async () => {
 Deno.test('Error responses always have { error: string }', async () => {
   const r1 = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages });
   assertEquals(typeof r1.data.error, 'string');
-  const r2 = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages }, { 'x-api-key': 'bogus' });
+  const r2 = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages }, {
+    'x-api-key': 'bogus',
+  });
   assertEquals(typeof r2.data.error, 'string');
 });
 
@@ -238,7 +247,11 @@ Deno.test({
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ah(k!) },
-      body: JSON.stringify({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, stream: true }),
+      body: JSON.stringify({
+        model: 'rose-labs/rose-1-lite',
+        messages: sampleMessages,
+        stream: true,
+      }),
     });
     assertNotEquals(res.status, 401, 'Auth must pass with valid API key');
     assertNotEquals(res.status, 400, 'Validation must pass with valid payload');
@@ -267,7 +280,12 @@ Deno.test({
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ah(k!) },
-      body: JSON.stringify({ model: 'rose-labs/rose-1-lite', messages: [{ role: 'user', content: 'Say hi' }], stream: true, max_tokens: 10 }),
+      body: JSON.stringify({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'Say hi' }],
+        stream: true,
+        max_tokens: 10,
+      }),
     });
     assertNotEquals(res.status, 401, 'Auth must pass');
     assertNotEquals(res.status, 400, 'Validation must pass');
@@ -288,7 +306,9 @@ Deno.test({
         if (done) break;
         full += decoder.decode(value, { stream: true });
       }
-    } finally { reader.cancel(); }
+    } finally {
+      reader.cancel();
+    }
     assertEquals(full.includes('[DONE]'), true);
   },
   sanitizeResources: false,
@@ -303,7 +323,11 @@ Deno.test({
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ah(k!) },
-      body: JSON.stringify({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, stream: true }),
+      body: JSON.stringify({
+        model: 'rose-labs/rose-1-lite',
+        messages: sampleMessages,
+        stream: true,
+      }),
     });
     assertNotEquals(res.status, 401, 'Auth must pass');
     assertNotEquals(res.status, 400, 'Validation must pass');
@@ -333,7 +357,11 @@ Deno.test({
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ah(k!) },
-      body: JSON.stringify({ model: 'rose-labs/rose-1-ultra', messages: sampleMessages, stream: true }),
+      body: JSON.stringify({
+        model: 'rose-labs/rose-1-ultra',
+        messages: sampleMessages,
+        stream: true,
+      }),
     });
     assertNotEquals(res.status, 401, 'Auth must pass');
     assertNotEquals(res.status, 400, 'Validation must pass');
@@ -361,7 +389,7 @@ Deno.test({
 Deno.test('POST /completions - with rose-labs/ prefix', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status, data } = await post(
+  const { status, data: _data } = await post(
     { model: 'rose-labs/rose-1-lite', messages: sampleMessages, stream: true },
     ah(k!),
   );
@@ -372,7 +400,7 @@ Deno.test('POST /completions - with rose-labs/ prefix', async () => {
 Deno.test('POST /completions - without prefix', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status, data } = await post(
+  const { status, data: _data } = await post(
     { model: 'rose-1-lite', messages: sampleMessages, stream: true },
     ah(k!),
   );
@@ -383,7 +411,7 @@ Deno.test('POST /completions - without prefix', async () => {
 Deno.test('POST /completions - case-insensitive model', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status, data } = await post(
+  const { status, data: _data } = await post(
     { model: 'Rose-Labs/Rose-1-Lite', messages: sampleMessages, stream: true },
     ah(k!),
   );
@@ -396,28 +424,48 @@ Deno.test('POST /completions - case-insensitive model', async () => {
 Deno.test('POST /completions - accepts seed', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, seed: 42, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    seed: 42,
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
 Deno.test('POST /completions - accepts cot_steps', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, cot_steps: 3, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    cot_steps: 3,
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
 Deno.test('POST /completions - accepts temperature', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, temperature: 0.5, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    temperature: 0.5,
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
 Deno.test('POST /completions - accepts max_tokens', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, max_tokens: 50, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    max_tokens: 50,
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
@@ -427,7 +475,14 @@ Deno.test('POST /completions - accepts tools', async () => {
   const { status } = await post({
     model: 'rose-labs/rose-1-lite',
     messages: [{ role: 'user', content: 'Weather?' }],
-    tools: [{ type: 'function', function: { name: 'get_weather', description: 'Get weather', parameters: { type: 'object', properties: { location: { type: 'string' } } } } }],
+    tools: [{
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: 'Get weather',
+        parameters: { type: 'object', properties: { location: { type: 'string' } } },
+      },
+    }],
     stream: true,
   }, ah(k!));
   assertNotEquals(status, 400);
@@ -436,14 +491,24 @@ Deno.test('POST /completions - accepts tools', async () => {
 Deno.test('POST /completions - accepts skip_cache', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, skip_cache: true, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    skip_cache: true,
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
 Deno.test('POST /completions - accepts reasoning', async () => {
   const k = await getApiKey();
   if (skipNoKey(k)) return;
-  const { status } = await post({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, reasoning: { max_tokens: 256 }, stream: true }, ah(k!));
+  const { status } = await post({
+    model: 'rose-labs/rose-1-lite',
+    messages: sampleMessages,
+    reasoning: { max_tokens: 256 },
+    stream: true,
+  }, ah(k!));
   assertNotEquals(status, 400);
 });
 
@@ -457,7 +522,12 @@ Deno.test({
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...ah(k!) },
-      body: JSON.stringify({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, model_seed: 0, stream: true }),
+      body: JSON.stringify({
+        model: 'rose-labs/rose-1-lite',
+        messages: sampleMessages,
+        model_seed: 0,
+        stream: true,
+      }),
     });
     assertNotEquals(res.status, 400);
     if (res.status === 200) {
@@ -511,7 +581,11 @@ Deno.test('POST /completions - CORS on authenticated request', async () => {
   const res = await fetch(COMPLETIONS_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...ah(k!) },
-    body: JSON.stringify({ model: 'rose-labs/rose-1-lite', messages: sampleMessages, stream: true }),
+    body: JSON.stringify({
+      model: 'rose-labs/rose-1-lite',
+      messages: sampleMessages,
+      stream: true,
+    }),
   });
   // CORS headers must be present regardless of upstream success/failure
   assertEquals(res.headers.get('access-control-allow-origin'), '*');

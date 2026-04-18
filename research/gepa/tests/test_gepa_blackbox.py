@@ -32,20 +32,58 @@ Run:
     PYTHONPATH=agents python -m pytest research/gepa/tests/gepa.blackbox.py -v -n 30
 """
 
+import contextlib
 import json
 import math
-import tempfile
-from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from research.gepa.critic import prepare_reward_pairs, serialize_candidate, serialize_prompt
+from research.gepa.embeddings import EmbeddingCache, cosine_similarity, retrieve_similar_pairs
+from research.gepa.pipelines.decomposer import _build_planner_messages
+from research.gepa.pipelines.expansion import (
+    _get_existing_seeds,
+    _make_expanded_filename,
+    extract_expansion_seeds,
+)
+from research.gepa.pipelines.gepa_optimizer import (
+    STRATEGY_STARTS,
+    _build_prompt_skeleton,
+    _parse_plan,
+    _retry,
+    compose_prompt,
+    extract_strategy,
+    get_initial_strategy,
+    make_gepa_metric,
+)
+from research.gepa.pipelines.synthetic_pairs import (
+    JudgeVerdict,
+    _flip_winner,
+    format_candidate_for_judge,
+    format_few_shot_example,
+)
+from research.gepa.scoring import ALPHA, BETA, GAMMA, LAMBDA, final_score, hard_gate, soft_penalties
+from research.gepa.tests.fixtures import (
+    INVALID_1_TASK,
+    INVALID_9_TASKS,
+    INVALID_CYCLE_AB,
+    INVALID_CYCLE_ABC,
+    INVALID_DEP_OUT_OF_RANGE,
+    INVALID_SELF_DEP,
+    VALID_DIAMOND_4,
+    VALID_LINEAR_2,
+    VALID_LINEAR_3,
+    VALID_MAX_8,
+    VALID_PARALLEL_2,
+    make_planner_response,
+)
+
 # ---------------------------------------------------------------------------
 # Module imports (all under test)
 # ---------------------------------------------------------------------------
-
 from research.gepa.types import (
     ClarifiedTask,
     DecompositionCandidate,
@@ -53,53 +91,13 @@ from research.gepa.types import (
     PreferencePair,
     ValidationError,
 )
-from research.gepa.validators import validate_decomposition, MIN_TASKS, MAX_TASKS
-from research.gepa.critic import serialize_prompt, serialize_candidate, prepare_reward_pairs
-from research.gepa.embeddings import EmbeddingCache, cosine_similarity, retrieve_similar_pairs
-from research.gepa.scoring import hard_gate, soft_penalties, final_score, ALPHA, BETA, GAMMA, LAMBDA
-from research.gepa.verify_labels import verify, _find_cycles
-from research.gepa.pipelines.gepa_optimizer import (
-    extract_strategy,
-    compose_prompt,
-    get_initial_strategy,
-    _build_prompt_skeleton,
-    _parse_plan,
-    _retry,
-    make_gepa_metric,
-    STRATEGY_STARTS,
-    STRATEGY_ENDS,
-)
-from research.gepa.pipelines.expansion import (
-    extract_expansion_seeds,
-    _get_existing_seeds,
-    _make_expanded_filename,
-)
-from research.gepa.pipelines.synthetic_pairs import (
-    _flip_winner,
-    format_candidate_for_judge,
-    format_few_shot_example,
-    JudgeVerdict,
-)
-from research.gepa.pipelines.decomposer import _build_planner_messages
-from research.gepa.tests.fixtures import (
-    make_planner_response,
-    VALID_LINEAR_2,
-    VALID_LINEAR_3,
-    VALID_DIAMOND_4,
-    VALID_PARALLEL_2,
-    VALID_MAX_8,
-    INVALID_1_TASK,
-    INVALID_9_TASKS,
-    INVALID_SELF_DEP,
-    INVALID_CYCLE_AB,
-    INVALID_CYCLE_ABC,
-    INVALID_DEP_OUT_OF_RANGE,
-)
-
+from research.gepa.validators import MAX_TASKS, MIN_TASKS, validate_decomposition
+from research.gepa.verify_labels import _find_cycles, verify
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_task(raw_seed='Book a flight', context=None):
     return ClarifiedTask(
@@ -141,10 +139,14 @@ def _write_mock_data(tmp_path, labels, candidates_cache, task_files=None):
         (tasks_dir / filename).write_text(json.dumps(data))
 
     state_path = tmp_path / 'labeler_state.json'
-    state_path.write_text(json.dumps({
-        'candidates_cache': candidates_cache,
-        'task_files': list(candidates_cache.keys()),
-    }))
+    state_path.write_text(
+        json.dumps(
+            {
+                'candidates_cache': candidates_cache,
+                'task_files': list(candidates_cache.keys()),
+            }
+        )
+    )
 
     labels_path = tmp_path / 'preference_labels.json'
     labels_path.write_text(json.dumps(labels))
@@ -155,6 +157,7 @@ def _write_mock_data(tmp_path, labels, candidates_cache, task_files=None):
 # ============================================================================
 # 1. TYPES — data structures hold correct shapes
 # ============================================================================
+
 
 class TestTypes:
     def test_validation_error_types(self):
@@ -177,20 +180,32 @@ class TestTypes:
         for pref in ['A', 'B', 'TIE']:
             for source in ['human', 'synthetic']:
                 pair = PreferencePair(
-                    id='p1', task=_make_task(),
-                    candidate_a=DecompositionCandidate(planner_response=VALID_LINEAR_2, validation_errors=[]),
-                    candidate_b=DecompositionCandidate(planner_response=VALID_LINEAR_2, validation_errors=[]),
-                    preference=pref, source=source,
+                    id='p1',
+                    task=_make_task(),
+                    candidate_a=DecompositionCandidate(
+                        planner_response=VALID_LINEAR_2, validation_errors=[]
+                    ),
+                    candidate_b=DecompositionCandidate(
+                        planner_response=VALID_LINEAR_2, validation_errors=[]
+                    ),
+                    preference=pref,
+                    source=source,
                 )
                 assert pair.preference == pref
                 assert pair.source == source
 
     def test_preference_pair_weight_defaults(self):
         pair = PreferencePair(
-            id='p1', task=_make_task(),
-            candidate_a=DecompositionCandidate(planner_response=VALID_LINEAR_2, validation_errors=[]),
-            candidate_b=DecompositionCandidate(planner_response=VALID_LINEAR_2, validation_errors=[]),
-            preference='A', source='human',
+            id='p1',
+            task=_make_task(),
+            candidate_a=DecompositionCandidate(
+                planner_response=VALID_LINEAR_2, validation_errors=[]
+            ),
+            candidate_b=DecompositionCandidate(
+                planner_response=VALID_LINEAR_2, validation_errors=[]
+            ),
+            preference='A',
+            source='human',
         )
         assert pair.weight == 1.0
 
@@ -198,6 +213,7 @@ class TestTypes:
 # ============================================================================
 # 2. VALIDATORS — decomposition validation
 # ============================================================================
+
 
 class TestValidation:
     def test_valid_plans_pass(self):
@@ -236,21 +252,21 @@ class TestValidation:
         assert errors[0].type == 'INVALID_DEPENDENCY_INDEX'
 
     def test_task_count_boundary_min(self):
-        pr = make_planner_response(tasks=[
-            {'goal': f'Task {i}', 'depends_on': []} for i in range(MIN_TASKS)
-        ])
+        pr = make_planner_response(
+            tasks=[{'goal': f'Task {i}', 'depends_on': []} for i in range(MIN_TASKS)]
+        )
         assert validate_decomposition(pr) == []
 
     def test_task_count_boundary_max(self):
-        pr = make_planner_response(tasks=[
-            {'goal': f'Task {i}', 'depends_on': []} for i in range(MAX_TASKS)
-        ])
+        pr = make_planner_response(
+            tasks=[{'goal': f'Task {i}', 'depends_on': []} for i in range(MAX_TASKS)]
+        )
         assert validate_decomposition(pr) == []
 
     def test_task_count_over_max(self):
-        pr = make_planner_response(tasks=[
-            {'goal': f'Task {i}', 'depends_on': []} for i in range(MAX_TASKS + 1)
-        ])
+        pr = make_planner_response(
+            tasks=[{'goal': f'Task {i}', 'depends_on': []} for i in range(MAX_TASKS + 1)]
+        )
         errors = validate_decomposition(pr)
         assert len(errors) == 1
         assert errors[0].type == 'INVALID_TASK_COUNT'
@@ -267,6 +283,7 @@ class TestValidation:
 # ============================================================================
 # 3. SCORING — hard gates, soft penalties, final scorer
 # ============================================================================
+
 
 class TestScoring:
     def test_hard_gate_valid_returns_zero(self):
@@ -293,7 +310,7 @@ class TestScoring:
 
     def test_final_score_multiplicative(self):
         s = final_score(0.8, me_score=0.9, ce_score=0.7, cx_score=0.95)
-        expected = 0.8 * (0.9 ** ALPHA) * (0.7 ** BETA) * (0.95 ** GAMMA)
+        expected = 0.8 * (0.9**ALPHA) * (0.7**BETA) * (0.95**GAMMA)
         assert s == pytest.approx(expected)
 
     def test_final_score_zero_collapses(self):
@@ -369,7 +386,14 @@ class TestCriticSerialization:
         assert 'CX: pass' in result
 
     def test_serialize_candidate_no_evals(self):
-        cand = {'title': 'T', 'content': 'C', 'tasks': [], 'me': None, 'ce': None, 'complexity': None}
+        cand = {
+            'title': 'T',
+            'content': 'C',
+            'tasks': [],
+            'me': None,
+            'ce': None,
+            'complexity': None,
+        }
         result = serialize_candidate(cand)
         assert 'Title: T' in result
         assert 'Evaluations:' not in result
@@ -400,24 +424,51 @@ class TestPrepareRewardPairs:
             },
         }
         labels = [
-            {'pair_id': 'p1', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 5.0, 'timestamp': 1.0},
-            {'pair_id': 'p2', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 2, 'candidate_b_idx': 3, 'preference': 'B',
-             'label_time_s': 3.0, 'timestamp': 2.0},
-            {'pair_id': 'p3', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 0, 'candidate_b_idx': 2, 'preference': 'TIE',
-             'label_time_s': 2.0, 'timestamp': 3.0},
-            {'pair_id': 'p4', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 1, 'candidate_b_idx': 3, 'preference': 'SKIP',
-             'label_time_s': 1.0, 'timestamp': 4.0},
+            {
+                'pair_id': 'p1',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 5.0,
+                'timestamp': 1.0,
+            },
+            {
+                'pair_id': 'p2',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 2,
+                'candidate_b_idx': 3,
+                'preference': 'B',
+                'label_time_s': 3.0,
+                'timestamp': 2.0,
+            },
+            {
+                'pair_id': 'p3',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 2,
+                'preference': 'TIE',
+                'label_time_s': 2.0,
+                'timestamp': 3.0,
+            },
+            {
+                'pair_id': 'p4',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 3,
+                'preference': 'SKIP',
+                'label_time_s': 1.0,
+                'timestamp': 4.0,
+            },
         ]
         if extra_labels:
             labels.extend(extra_labels)
 
-        labels_path, state_path, tasks_dir = _write_mock_data(
-            tmp_path, labels, cache, task_files)
+        labels_path, state_path, tasks_dir = _write_mock_data(tmp_path, labels, cache, task_files)
         return prepare_reward_pairs(labels_path, state_path, tasks_dir)
 
     def test_correct_columns(self, tmp_path):
@@ -448,12 +499,30 @@ class TestPrepareRewardPairs:
 
     def test_min_confidence_filter(self, tmp_path):
         llm_labels = [
-            {'pair_id': 's1', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 0, 'candidate_b_idx': 3, 'preference': 'A',
-             'label_time_s': 0, 'timestamp': 7.0, 'source': 'llm_labeled', 'confidence': 85.0},
-            {'pair_id': 's2', 'task_id': 'task-aaa', 'task_seed': 'Buy beanie',
-             'candidate_a_idx': 1, 'candidate_b_idx': 2, 'preference': 'B',
-             'label_time_s': 0, 'timestamp': 8.0, 'source': 'llm_labeled', 'confidence': 20.0},
+            {
+                'pair_id': 's1',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 3,
+                'preference': 'A',
+                'label_time_s': 0,
+                'timestamp': 7.0,
+                'source': 'llm_labeled',
+                'confidence': 85.0,
+            },
+            {
+                'pair_id': 's2',
+                'task_id': 'task-aaa',
+                'task_seed': 'Buy beanie',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 2,
+                'preference': 'B',
+                'label_time_s': 0,
+                'timestamp': 8.0,
+                'source': 'llm_labeled',
+                'confidence': 20.0,
+            },
         ]
         # Without filter: 2 human + 2 LLM = 4
         rows_all = self._setup(tmp_path, extra_labels=llm_labels)
@@ -461,9 +530,16 @@ class TestPrepareRewardPairs:
 
     def test_missing_task_id_skipped(self, tmp_path):
         extra = [
-            {'pair_id': 'p5', 'task_id': 'task-missing', 'task_seed': 'Unknown',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 1.0, 'timestamp': 5.0},
+            {
+                'pair_id': 'p5',
+                'task_id': 'task-missing',
+                'task_seed': 'Unknown',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 5.0,
+            },
         ]
         rows = self._setup(tmp_path, extra_labels=extra)
         # Still only 2 usable from task-aaa
@@ -473,6 +549,7 @@ class TestPrepareRewardPairs:
 # ============================================================================
 # 5. EMBEDDINGS — cache, similarity, retrieval
 # ============================================================================
+
 
 class TestEmbeddings:
     def test_cosine_identical(self):
@@ -541,28 +618,71 @@ class TestEmbeddings:
 # 6. VERIFY LABELS — label integrity checks
 # ============================================================================
 
+
 class TestVerifyLabels:
     def test_clean_labels(self):
         """Consistent total ordering 0 > 1 > 2 > 3 should produce zero issues."""
         labels = [
-            {'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 5.0, 'timestamp': 1.0},
-            {'pair_id': 'p2', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 2, 'preference': 'A',
-             'label_time_s': 3.0, 'timestamp': 2.0},
-            {'pair_id': 'p3', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 3, 'preference': 'A',
-             'label_time_s': 2.0, 'timestamp': 3.0},
-            {'pair_id': 'p4', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 1, 'candidate_b_idx': 2, 'preference': 'A',
-             'label_time_s': 4.0, 'timestamp': 4.0},
-            {'pair_id': 'p5', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 1, 'candidate_b_idx': 3, 'preference': 'A',
-             'label_time_s': 3.0, 'timestamp': 5.0},
-            {'pair_id': 'p6', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 2, 'candidate_b_idx': 3, 'preference': 'A',
-             'label_time_s': 2.0, 'timestamp': 6.0},
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 5.0,
+                'timestamp': 1.0,
+            },
+            {
+                'pair_id': 'p2',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 2,
+                'preference': 'A',
+                'label_time_s': 3.0,
+                'timestamp': 2.0,
+            },
+            {
+                'pair_id': 'p3',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 3,
+                'preference': 'A',
+                'label_time_s': 2.0,
+                'timestamp': 3.0,
+            },
+            {
+                'pair_id': 'p4',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 2,
+                'preference': 'A',
+                'label_time_s': 4.0,
+                'timestamp': 4.0,
+            },
+            {
+                'pair_id': 'p5',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 3,
+                'preference': 'A',
+                'label_time_s': 3.0,
+                'timestamp': 5.0,
+            },
+            {
+                'pair_id': 'p6',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 2,
+                'candidate_b_idx': 3,
+                'preference': 'A',
+                'label_time_s': 2.0,
+                'timestamp': 6.0,
+            },
         ]
         issues = verify(labels)
         total = sum(len(v) for v in issues.values())
@@ -570,50 +690,81 @@ class TestVerifyLabels:
 
     def test_detects_missing_fields(self):
         """Label with task_id but missing other required fields is flagged as malformed."""
-        labels = [{
-            'pair_id': 'p1', 'task_id': 't1', 'preference': 'A',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1,
-            'timestamp': 1.0,
-            # missing: task_seed, label_time_s
-        }]
+        labels = [
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'preference': 'A',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'timestamp': 1.0,
+                # missing: task_seed, label_time_s
+            }
+        ]
         issues = verify(labels)
         assert len(issues['malformed']) > 0
 
     def test_detects_invalid_preference(self):
-        labels = [{
-            'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'INVALID',
-            'label_time_s': 1.0, 'timestamp': 1.0,
-        }]
+        labels = [
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'INVALID',
+                'label_time_s': 1.0,
+                'timestamp': 1.0,
+            }
+        ]
         issues = verify(labels)
         malformed = [m for m in issues['malformed'] if 'preference' in m.lower() or 'INVALID' in m]
         assert len(malformed) > 0
 
     def test_detects_reversed_indices(self):
-        labels = [{
-            'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-            'candidate_a_idx': 2, 'candidate_b_idx': 1, 'preference': 'A',
-            'label_time_s': 1.0, 'timestamp': 1.0,
-        }]
+        labels = [
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 2,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 1.0,
+            }
+        ]
         issues = verify(labels)
         malformed = [m for m in issues['malformed'] if 'a_idx' in m or '>=' in m]
         assert len(malformed) > 0
 
     def test_detects_negative_label_time(self):
-        labels = [{
-            'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-            'label_time_s': -1.0, 'timestamp': 1.0,
-        }]
+        labels = [
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': -1.0,
+                'timestamp': 1.0,
+            }
+        ]
         issues = verify(labels)
         malformed = [m for m in issues['malformed'] if 'label_time' in m]
         assert len(malformed) > 0
 
     def test_detects_duplicates(self):
         label = {
-            'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-            'label_time_s': 1.0, 'timestamp': 1.0,
+            'pair_id': 'p1',
+            'task_id': 't1',
+            'task_seed': 'X',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'label_time_s': 1.0,
+            'timestamp': 1.0,
         }
         labels = [label, {**label, 'pair_id': 'p2', 'timestamp': 2.0}]
         issues = verify(labels)
@@ -622,37 +773,79 @@ class TestVerifyLabels:
     def test_detects_missing_pairs(self):
         # Only 2 of 6 pairs → 4 missing
         labels = [
-            {'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 1.0, 'timestamp': 1.0},
-            {'pair_id': 'p2', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 2, 'candidate_b_idx': 3, 'preference': 'B',
-             'label_time_s': 1.0, 'timestamp': 2.0},
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 1.0,
+            },
+            {
+                'pair_id': 'p2',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 2,
+                'candidate_b_idx': 3,
+                'preference': 'B',
+                'label_time_s': 1.0,
+                'timestamp': 2.0,
+            },
         ]
         issues = verify(labels)
         assert len(issues['missing_pairs']) > 0
 
     def test_skip_task_suppresses_missing_pairs(self):
-        labels = [{
-            'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-            'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'SKIP_TASK',
-            'label_time_s': 0.5, 'timestamp': 1.0,
-        }]
+        labels = [
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'SKIP_TASK',
+                'label_time_s': 0.5,
+                'timestamp': 1.0,
+            }
+        ]
         issues = verify(labels)
         assert len(issues['missing_pairs']) == 0
 
     def test_detects_hard_cycle(self):
         # 0 > 1, 1 > 2, 2 > 0 → hard cycle
         labels = [
-            {'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 1.0, 'timestamp': 1.0},
-            {'pair_id': 'p2', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 1, 'candidate_b_idx': 2, 'preference': 'A',
-             'label_time_s': 1.0, 'timestamp': 2.0},
-            {'pair_id': 'p3', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 2, 'preference': 'B',
-             'label_time_s': 1.0, 'timestamp': 3.0},
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 1.0,
+            },
+            {
+                'pair_id': 'p2',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 2,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 2.0,
+            },
+            {
+                'pair_id': 'p3',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 2,
+                'preference': 'B',
+                'label_time_s': 1.0,
+                'timestamp': 3.0,
+            },
         ]
         issues = verify(labels)
         assert len(issues['hard_cycles']) > 0
@@ -660,15 +853,36 @@ class TestVerifyLabels:
     def test_detects_soft_cycle(self):
         # 0 > 1, 1 == 2, 2 > 0 → soft cycle (tie in chain)
         labels = [
-            {'pair_id': 'p1', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 1, 'preference': 'A',
-             'label_time_s': 1.0, 'timestamp': 1.0},
-            {'pair_id': 'p2', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 1, 'candidate_b_idx': 2, 'preference': 'TIE',
-             'label_time_s': 1.0, 'timestamp': 2.0},
-            {'pair_id': 'p3', 'task_id': 't1', 'task_seed': 'X',
-             'candidate_a_idx': 0, 'candidate_b_idx': 2, 'preference': 'B',
-             'label_time_s': 1.0, 'timestamp': 3.0},
+            {
+                'pair_id': 'p1',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 1,
+                'preference': 'A',
+                'label_time_s': 1.0,
+                'timestamp': 1.0,
+            },
+            {
+                'pair_id': 'p2',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 1,
+                'candidate_b_idx': 2,
+                'preference': 'TIE',
+                'label_time_s': 1.0,
+                'timestamp': 2.0,
+            },
+            {
+                'pair_id': 'p3',
+                'task_id': 't1',
+                'task_seed': 'X',
+                'candidate_a_idx': 0,
+                'candidate_b_idx': 2,
+                'preference': 'B',
+                'label_time_s': 1.0,
+                'timestamp': 3.0,
+            },
         ]
         issues = verify(labels)
         assert len(issues['soft_cycles']) > 0
@@ -699,6 +913,7 @@ class TestFindCycles:
 # 7. GEPA OPTIMIZER — strategy extraction + prompt composition
 # ============================================================================
 
+
 class TestGEPAOptimizer:
     def test_extract_strategy_has_content(self):
         strategy = get_initial_strategy()
@@ -717,6 +932,7 @@ class TestGEPAOptimizer:
     def test_compose_prompt_roundtrip(self):
         from helpers.prompts import build_planner_system_prompt
         from tools.set_plan import _get_planner_tools_description
+
         tools_desc = _get_planner_tools_description()
         original = build_planner_system_prompt(tools_desc)
         strategy = extract_strategy(original)
@@ -735,7 +951,8 @@ class TestGEPAOptimizer:
 
     def test_parse_plan_valid_json(self):
         plan = {
-            'title': 'Test', 'content': 'C',
+            'title': 'Test',
+            'content': 'C',
             'tasks': [
                 {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
                 {'goal': 'b', 'tool_name': 'reasoning', 'depends_on': [0]},
@@ -774,9 +991,11 @@ class TestGEPAOptimizer:
         assert result == 'ok'
 
     def test_retry_persistent_failure(self):
-        with patch('research.gepa.pipelines.gepa_optimizer.RETRY_DELAY_S', 0.0):
-            with pytest.raises(RuntimeError, match='failed after'):
-                _retry(lambda: (_ for _ in ()).throw(RuntimeError('boom')), 'test')
+        with (
+            patch('research.gepa.pipelines.gepa_optimizer.RETRY_DELAY_S', 0.0),
+            pytest.raises(RuntimeError, match='failed after'),
+        ):
+            _retry(lambda: (_ for _ in ()).throw(RuntimeError('boom')), 'test')
 
 
 class TestGepaMetricEdgeCases:
@@ -789,7 +1008,8 @@ class TestGepaMetricEdgeCases:
     def test_single_task_returns_zero(self):
         metric = make_gepa_metric()
         plan = {
-            'title': 'Bad', 'content': 'Bad',
+            'title': 'Bad',
+            'content': 'Bad',
             'tasks': [{'goal': 'only', 'tool_name': 'spawn_explore_agent', 'depends_on': []}],
             'dependencies_graph': [{'task_idx': '0', 'depends_on': []}],
             'join': 'all',
@@ -801,7 +1021,8 @@ class TestGepaMetricEdgeCases:
     def test_cycle_returns_zero(self):
         metric = make_gepa_metric()
         plan = {
-            'title': 'Cycle', 'content': 'Cycle',
+            'title': 'Cycle',
+            'content': 'Cycle',
             'tasks': [
                 {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': [1]},
                 {'goal': 'b', 'tool_name': 'spawn_explore_agent', 'depends_on': [0]},
@@ -819,7 +1040,8 @@ class TestGepaMetricEdgeCases:
     def test_markdown_fence_stripping(self):
         """Plan wrapped in markdown fences still parses."""
         plan = {
-            'title': 'OK', 'content': 'C',
+            'title': 'OK',
+            'content': 'C',
             'tasks': [
                 {'goal': 'a', 'tool_name': 'spawn_explore_agent', 'depends_on': []},
                 {'goal': 'b', 'tool_name': 'reasoning', 'depends_on': [0]},
@@ -835,11 +1057,13 @@ class TestGepaMetricEdgeCases:
         pred = SimpleNamespace(plan_json=fenced)
         # Mocks must be in place BEFORE make_gepa_metric() because it does
         # `from .benchmark import _eval_me` which binds the name at call time.
-        with patch('research.gepa.pipelines.gepa_optimizer.score_candidates', return_value=[0.5]), \
-             patch('research.gepa.pipelines.gepa_optimizer.RETRY_DELAY_S', 0.0), \
-             patch('research.gepa.pipelines.benchmark._eval_me', new_callable=AsyncMock) as m_me, \
-             patch('research.gepa.pipelines.benchmark._eval_ce', new_callable=AsyncMock) as m_ce, \
-             patch('research.gepa.pipelines.benchmark._eval_cx', new_callable=AsyncMock) as m_cx:
+        with (
+            patch('research.gepa.pipelines.gepa_optimizer.score_candidates', return_value=[0.5]),
+            patch('research.gepa.pipelines.gepa_optimizer.RETRY_DELAY_S', 0.0),
+            patch('research.gepa.pipelines.benchmark._eval_me', new_callable=AsyncMock) as m_me,
+            patch('research.gepa.pipelines.benchmark._eval_ce', new_callable=AsyncMock) as m_ce,
+            patch('research.gepa.pipelines.benchmark._eval_cx', new_callable=AsyncMock) as m_cx,
+        ):
             mock_eval = EvalResult(passed=True, score=0.9, reasoning='ok')
             m_me.return_value = (mock_eval, {})
             m_ce.return_value = (mock_eval, {})
@@ -853,51 +1077,72 @@ class TestGepaMetricEdgeCases:
 # 8. EXPANSION — seed extraction, filename generation
 # ============================================================================
 
+
 class TestExpansion:
     def test_extract_seeds_from_labeled_tasks(self, tmp_path):
         cand = {
-            'title': 'T', 'content': 'C',
+            'title': 'T',
+            'content': 'C',
             'tasks': [
                 {'goal': 'Book flight', 'tool_name': 'spawn_sub_agent', 'depends_on': []},
             ],
         }
         cache = {'task_001.json': [cand]}
-        labels = [{'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}]
+        labels = [
+            {'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}
+        ]
         labels_path, state_path, tasks_dir = _write_mock_data(tmp_path, labels, cache)
         seeds = extract_expansion_seeds(state_path, labels_path, tasks_dir)
         assert 'Book flight' in seeds
 
     def test_ignores_unlabeled_tasks(self, tmp_path):
-        cand = {'title': 'T', 'content': 'C',
-                'tasks': [{'goal': 'X', 'tool_name': 'spawn_sub_agent', 'depends_on': []}]}
+        cand = {
+            'title': 'T',
+            'content': 'C',
+            'tasks': [{'goal': 'X', 'tool_name': 'spawn_sub_agent', 'depends_on': []}],
+        }
         cache = {'task_001.json': [cand]}
         labels_path, state_path, tasks_dir = _write_mock_data(tmp_path, [], cache)
         seeds = extract_expansion_seeds(state_path, labels_path, tasks_dir)
         assert len(seeds) == 0
 
     def test_ignores_non_spawn_sub_agent(self, tmp_path):
-        cand = {'title': 'T', 'content': 'C',
-                'tasks': [{'goal': 'X', 'tool_name': 'spawn_browser_agent', 'depends_on': []}]}
+        cand = {
+            'title': 'T',
+            'content': 'C',
+            'tasks': [{'goal': 'X', 'tool_name': 'spawn_browser_agent', 'depends_on': []}],
+        }
         cache = {'task_001.json': [cand]}
-        labels = [{'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}]
+        labels = [
+            {'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}
+        ]
         labels_path, state_path, tasks_dir = _write_mock_data(tmp_path, labels, cache)
         seeds = extract_expansion_seeds(state_path, labels_path, tasks_dir)
         assert len(seeds) == 0
 
     def test_deduplicates_seeds(self, tmp_path):
-        cand1 = {'title': 'T', 'content': 'C',
-                 'tasks': [{'goal': 'Same', 'tool_name': 'spawn_sub_agent', 'depends_on': []}]}
-        cand2 = {'title': 'T2', 'content': 'C',
-                 'tasks': [{'goal': 'Same', 'tool_name': 'spawn_sub_agent', 'depends_on': []}]}
+        cand1 = {
+            'title': 'T',
+            'content': 'C',
+            'tasks': [{'goal': 'Same', 'tool_name': 'spawn_sub_agent', 'depends_on': []}],
+        }
+        cand2 = {
+            'title': 'T2',
+            'content': 'C',
+            'tasks': [{'goal': 'Same', 'tool_name': 'spawn_sub_agent', 'depends_on': []}],
+        }
         cache = {'task_001.json': [cand1, cand2]}
-        labels = [{'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}]
+        labels = [
+            {'task_id': 'task-000', 'preference': 'A', 'candidate_a_idx': 0, 'candidate_b_idx': 1}
+        ]
         labels_path, state_path, tasks_dir = _write_mock_data(tmp_path, labels, cache)
         seeds = extract_expansion_seeds(state_path, labels_path, tasks_dir)
         assert seeds.count('Same') == 1
 
     def test_get_existing_seeds(self, tmp_path):
-        (tmp_path / 'a.json').write_text(json.dumps({
-            'id': '1', 'raw_seed': 'Hello', 'agent_context': [], 'set_plan_args': {}}))
+        (tmp_path / 'a.json').write_text(
+            json.dumps({'id': '1', 'raw_seed': 'Hello', 'agent_context': [], 'set_plan_args': {}})
+        )
         seeds = _get_existing_seeds(tmp_path)
         assert 'hello' in seeds
 
@@ -911,6 +1156,7 @@ class TestExpansion:
 # ============================================================================
 # 9. SYNTHETIC PAIRS — judge helpers
 # ============================================================================
+
 
 class TestSyntheticPairs:
     def test_flip_winner_a_to_b(self):
@@ -932,20 +1178,35 @@ class TestSyntheticPairs:
         assert 'Plan A' in text
 
     def test_format_few_shot_missing_task(self):
-        label = {'task_id': 'missing', 'candidate_a_idx': 0, 'candidate_b_idx': 1,
-                 'preference': 'A', 'task_seed': 'test'}
+        label = {
+            'task_id': 'missing',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'test',
+        }
         assert format_few_shot_example(label, {}, {}) is None
 
     def test_format_few_shot_null_candidate(self):
-        label = {'task_id': 't1', 'candidate_a_idx': 0, 'candidate_b_idx': 1,
-                 'preference': 'A', 'task_seed': 'test'}
+        label = {
+            'task_id': 't1',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'test',
+        }
         cache = {'f.json': [None, {'title': 'T', 'content': 'C', 'tasks': []}]}
         assert format_few_shot_example(label, cache, {'t1': 'f.json'}) is None
 
     def test_format_few_shot_valid(self):
         cand = {'title': 'P', 'content': 'C', 'tasks': []}
-        label = {'task_id': 't1', 'candidate_a_idx': 0, 'candidate_b_idx': 1,
-                 'preference': 'A', 'task_seed': 'Goal'}
+        label = {
+            'task_id': 't1',
+            'candidate_a_idx': 0,
+            'candidate_b_idx': 1,
+            'preference': 'A',
+            'task_seed': 'Goal',
+        }
         result = format_few_shot_example(label, {'f.json': [cand, cand]}, {'t1': 'f.json'})
         assert result is not None
         assert 'Goal' in result
@@ -954,13 +1215,14 @@ class TestSyntheticPairs:
     def test_judge_verdict_validation(self):
         JudgeVerdict(overall_winner='A', overall_reasoning='ok', confidence=50.0)
         JudgeVerdict(overall_winner='TIE', overall_reasoning='close', confidence=30.0)
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             JudgeVerdict(overall_winner='C', overall_reasoning='bad', confidence=50.0)
 
 
 # ============================================================================
 # 10. DECOMPOSER — message building
 # ============================================================================
+
 
 class TestDecomposer:
     def test_build_planner_messages_starts_with_goal(self):
@@ -971,7 +1233,8 @@ class TestDecomposer:
 
     def test_build_planner_messages_maps_roles(self):
         task = ClarifiedTask(
-            id='t1', raw_seed='Goal',
+            id='t1',
+            raw_seed='Goal',
             agent_context=[
                 {'role': 'user', 'content': 'I want X'},
                 {'role': 'assistant', 'content': 'OK I will do X'},
@@ -995,6 +1258,7 @@ class TestDecomposer:
 # ============================================================================
 # 11. LABELER HELPERS
 # ============================================================================
+
 
 class TestLabelerHelpers:
     """Tests for pure labeler helpers: _canonicalize and _get_pairs.
@@ -1028,11 +1292,9 @@ class TestLabelerHelpers:
         mod.STATE_PATH = tmp_path / 'state.json'
         mod.LABELS_PATH = tmp_path / 'labels.json'
         sys.modules[mod_name] = mod
-        try:
+        # If module init fails, still keep the module so we can access the functions
+        with contextlib.suppress(Exception):
             spec.loader.exec_module(mod)
-        except Exception:
-            # If module init fails, still keep the module so we can access the functions
-            pass
         TestLabelerHelpers._mod = mod
 
     def test_canonicalize_no_swap(self):
@@ -1071,6 +1333,7 @@ class TestLabelerHelpers:
 # 12. INVARIANT: read-after-write for embedding cache
 # ============================================================================
 
+
 class TestReadAfterWrite:
     def test_embedding_cache_write_then_read(self, tmp_path):
         cache = EmbeddingCache(tmp_path / 'c.json')
@@ -1085,6 +1348,7 @@ class TestReadAfterWrite:
 # ============================================================================
 # 13. INVARIANT: same-input reproducibility
 # ============================================================================
+
 
 class TestReproducibility:
     def test_validate_decomposition_deterministic(self):

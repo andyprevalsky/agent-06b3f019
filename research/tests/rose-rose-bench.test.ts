@@ -2,38 +2,38 @@
  * Tests for POST /rose-bench
  */
 
-import { assertEquals } from "https://deno.land/std@0.190.0/testing/asserts.ts";
-import { testClient } from "./utils/test-client.ts";
+import { assertEquals } from 'https://deno.land/std@0.190.0/testing/asserts.ts';
+import { testClient } from './utils/test-client.ts';
 import {
-  assertStatusCode,
   assertHasProperty,
   assertIsArray,
+  assertStatusCode,
   sampleBenchmarkConfig,
-} from "./utils/fixtures.ts";
+} from './utils/fixtures.ts';
 
-Deno.test("POST /rose-bench - runs benchmark", async () => {
-  const response = await testClient.post("/rose-bench", sampleBenchmarkConfig);
+Deno.test('POST /rose-bench - runs benchmark', async () => {
+  const response = await testClient.post('/rose-bench', sampleBenchmarkConfig);
 
   // May fail if API key is invalid
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key in benchmark config");
+    console.log('⚠️  Test requires valid API key in benchmark config');
     return;
   }
 
   if (response.status === 200) {
-    assertHasProperty(response.data, "benchmarkName");
-    assertHasProperty(response.data, "totalQuestions");
-    assertHasProperty(response.data, "sampledQuestions");
-    assertHasProperty(response.data, "correctAnswers");
-    assertHasProperty(response.data, "accuracy");
-    assertHasProperty(response.data, "totalCostCents");
-    assertHasProperty(response.data, "totalDurationSeconds");
-    assertHasProperty(response.data, "results");
-    assertHasProperty(response.data, "isSampled");
-    assertHasProperty(response.data, "modelConfig");
+    assertHasProperty(response.data, 'benchmarkName');
+    assertHasProperty(response.data, 'totalQuestions');
+    assertHasProperty(response.data, 'sampledQuestions');
+    assertHasProperty(response.data, 'correctAnswers');
+    assertHasProperty(response.data, 'accuracy');
+    assertHasProperty(response.data, 'totalCostCents');
+    assertHasProperty(response.data, 'totalDurationSeconds');
+    assertHasProperty(response.data, 'results');
+    assertHasProperty(response.data, 'isSampled');
+    assertHasProperty(response.data, 'modelConfig');
 
     assertIsArray(response.data.results);
-    assertEquals(typeof response.data.accuracy, "number");
+    assertEquals(typeof response.data.accuracy, 'number');
     assertEquals(
       response.data.accuracy >= 0 && response.data.accuracy <= 100,
       true,
@@ -41,16 +41,16 @@ Deno.test("POST /rose-bench - runs benchmark", async () => {
   }
 });
 
-Deno.test("POST /rose-bench - respects seed", async () => {
+Deno.test('POST /rose-bench - respects seed', async () => {
   const config = {
     ...sampleBenchmarkConfig,
     seed: 999,
   };
 
-  const response = await testClient.post("/rose-bench", config);
+  const response = await testClient.post('/rose-bench', config);
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
@@ -58,73 +58,73 @@ Deno.test("POST /rose-bench - respects seed", async () => {
   assertStatusCode(response.status, 200, 500);
 });
 
-Deno.test("POST /rose-bench - returns 400 for missing url", async () => {
+Deno.test('POST /rose-bench - returns 400 for missing url', async () => {
   const config = { ...sampleBenchmarkConfig };
   delete (config as any).url;
 
-  const response = await testClient.post("/rose-bench", config);
+  const response = await testClient.post('/rose-bench', config);
 
   assertStatusCode(response.status, 400);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });
 
 Deno.test(
-  "POST /rose-bench - returns 400 for missing modelConfig",
+  'POST /rose-bench - returns 400 for missing modelConfig',
   async () => {
     const config = { ...sampleBenchmarkConfig };
     delete (config as any).modelConfig;
 
-    const response = await testClient.post("/rose-bench", config);
+    const response = await testClient.post('/rose-bench', config);
 
     assertStatusCode(response.status, 400);
-    assertHasProperty(response.data, "error");
+    assertHasProperty(response.data, 'error');
   },
 );
 
-Deno.test("POST /rose-bench - returns 400 for missing benchmark", async () => {
+Deno.test('POST /rose-bench - returns 400 for missing benchmark', async () => {
   const config = { ...sampleBenchmarkConfig };
   delete (config as any).benchmark;
 
-  const response = await testClient.post("/rose-bench", config);
+  const response = await testClient.post('/rose-bench', config);
 
   assertStatusCode(response.status, 400);
-  assertHasProperty(response.data, "error");
+  assertHasProperty(response.data, 'error');
 });
 
 Deno.test(
-  "POST /rose-bench - returns 400 for invalid benchmark type",
+  'POST /rose-bench - returns 400 for invalid benchmark type',
   async () => {
     const config = {
       ...sampleBenchmarkConfig,
-      benchmark: "invalid-benchmark-xyz",
+      benchmark: 'invalid-benchmark-xyz',
     };
 
-    const response = await testClient.post("/rose-bench", config);
+    const response = await testClient.post('/rose-bench', config);
 
     assertStatusCode(response.status, 400);
-    assertHasProperty(response.data, "error");
-    assertHasProperty(response.data, "availableBenchmarks");
+    assertHasProperty(response.data, 'error');
+    assertHasProperty(response.data, 'availableBenchmarks');
   },
 );
 
-Deno.test("POST /rose-bench - accepts full benchmark type", async () => {
+Deno.test('POST /rose-bench - accepts full benchmark type', async () => {
   const config = {
     ...sampleBenchmarkConfig,
-    benchmark: "full",
+    benchmark: 'full',
   };
 
-  const response = await testClient.post("/rose-bench", config);
+  const response = await testClient.post('/rose-bench', config);
 
   if (response.status === 401) {
-    console.log("⚠️  Test requires valid API key");
+    console.log('⚠️  Test requires valid API key');
     return;
   }
 
   if (response.status === 200) {
-    assertHasProperty(response.data, "totalDurationSeconds");
-    assertHasProperty(response.data, "totalCostCents");
-    assertHasProperty(response.data, "benchmarks");
-    assertHasProperty(response.data, "aggregateAccuracy");
+    assertHasProperty(response.data, 'totalDurationSeconds');
+    assertHasProperty(response.data, 'totalCostCents');
+    assertHasProperty(response.data, 'benchmarks');
+    assertHasProperty(response.data, 'aggregateAccuracy');
 
     assertIsArray(response.data.benchmarks);
   }
