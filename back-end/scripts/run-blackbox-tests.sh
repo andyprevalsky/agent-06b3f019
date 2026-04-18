@@ -66,8 +66,14 @@ if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
 EOF
   echo "Artifacts: $ARTIFACT_DIR"
   echo "Using existing backend at $TEST_BASE_URL"
+  set +e
   "${RUNNER_CMD[@]}" "$@" 2>&1 | tee "$RUNNER_LOG"
-  exit $?
+  RUNNER_EXIT=${PIPESTATUS[0]}
+  set -e
+  if [[ "$RUNNER_EXIT" -ne 0 ]]; then
+    echo "❌ Black-box tests failed (exit $RUNNER_EXIT). Runner log: $RUNNER_LOG"
+  fi
+  exit "$RUNNER_EXIT"
 fi
 
 # Conductor.run uses BACKEND_PORT=CONDUCTOR_PORT. For black-box tests we keep branch affinity
@@ -156,7 +162,14 @@ if [[ "$READY" -ne 1 ]]; then
 fi
 
 echo "Backend ready at $TEST_BASE_URL"
-if ! "${RUNNER_CMD[@]}" "$@" 2>&1 | tee "$RUNNER_LOG"; then
-  echo "❌ Black-box tests failed. Artifacts: $ARTIFACT_DIR"
-  exit 1
+set +e
+"${RUNNER_CMD[@]}" "$@" 2>&1 | tee "$RUNNER_LOG"
+RUNNER_EXIT=${PIPESTATUS[0]}
+set -e
+if [[ "$RUNNER_EXIT" -ne 0 ]]; then
+  echo "❌ Black-box tests failed (exit $RUNNER_EXIT)."
+  echo "   Runner log:  $RUNNER_LOG"
+  echo "   Backend log: $BACKEND_LOG"
+  echo "   Artifacts:   $ARTIFACT_DIR"
+  exit "$RUNNER_EXIT"
 fi
