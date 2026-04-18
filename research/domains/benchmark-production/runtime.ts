@@ -15,11 +15,12 @@
 import { parse } from 'https://deno.land/std/flags/mod.ts';
 
 import {
-  DEFAULT_BASE_URL,
   DEFAULT_BENCHMARKS,
   DEFAULT_COT_STEPS,
   DEFAULT_MODELS,
   DEFAULT_SAMPLES,
+  getBaseUrl,
+  getRoseApiKey,
 } from './config.ts';
 import { runBenchmarkSuite } from './service.ts';
 import type { BenchmarkSuiteOptions } from './types.ts';
@@ -39,10 +40,10 @@ function parseOptions(): BenchmarkSuiteOptions {
     },
   });
 
-  const baseUrl = Deno.env.get('BASE_URL') ?? DEFAULT_BASE_URL;
-  const apiKey = Deno.env.get('ROSE_API_KEY');
+  const baseUrl = getBaseUrl();
+  const apiKey = getRoseApiKey();
 
-  if (apiKey === undefined || apiKey === '') {
+  if (apiKey === '') {
     console.error('❌ Error: ROSE_API_KEY required');
     Deno.exit(1);
   }

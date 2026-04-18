@@ -8,8 +8,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import { YUTORI_API_URL, YUTORI_MODEL } from '../config.ts';
-import { slog, truncateForLogging } from '../utils.ts';
+import { truncateForLogging } from '../utils.ts';
 import type { ActionHistoryEntry, BrowserUseRequest, UnifiedAction } from '../types.ts';
 
 // ---------------------------------------------------------------------------

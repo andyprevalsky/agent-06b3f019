@@ -12,15 +12,17 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import {
   ANTHROPIC_API_URL,
   DOM_ONLY_MODELS,
+  getAnthropicApiKey,
   LATENCY_PROBE_MAX_TOKENS,
   LATENCY_PROBE_MESSAGES,
 } from '../config.ts';
 import { updateLatencyCache } from '../repo.ts';
 import type { BrowserUseRequest, SupabaseClient, UnifiedAction } from '../types.ts';
-import { extractJSON, slog } from '../utils.ts';
+import { extractJSON } from '../utils.ts';
 import { transformToBrowserUseFormat } from './browser-use-native.ts';
 import { getAnthropicModelName } from './cost.ts';
 import { isAnthropicModel } from './anthropic.ts';
@@ -341,7 +343,7 @@ export async function fireLatencyProbes(
 
       // Call Anthropic directly for Claude models (same as race)
       if (isAnthropicModel(model)) {
-        const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+        const anthropicKey = getAnthropicApiKey();
         if (!anthropicKey) {
           slog('error', `Probe skipped for ${model}: no ANTHROPIC_API_KEY`);
           return;

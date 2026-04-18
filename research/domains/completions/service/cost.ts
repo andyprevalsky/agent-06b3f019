@@ -19,7 +19,7 @@ import {
   MODEL_PREFERENCES,
   type ModelPreferenceName,
 } from '../config.ts';
-import { slog } from '../utils.ts';
+import { slog } from '../../../providers/logger.ts';
 
 // ---------------------------------------------------------------------------
 // Cost

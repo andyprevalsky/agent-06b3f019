@@ -13,17 +13,19 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import {
   ANTHROPIC_API_URL,
   ANTHROPIC_BETA_HEADER,
   CEREBRAS_API_URL,
   corsHeaders,
+  getAnthropicApiKey,
+  getCerebrasApiKey,
 } from '../config.ts';
 import type { RoseCompletionChunk } from '../types.ts';
 import {
   escapeForJsonString,
   parseRetryAfterMs,
-  slog,
   truncateForLogging,
   withTimeout,
 } from '../utils.ts';
@@ -127,7 +129,7 @@ export async function handleStreaming(
 
   if (isCerebras) {
     // Call Cerebras API directly for rose-hyper
-    const cerebrasKey = Deno.env.get('CEREBRAS_API_KEY');
+    const cerebrasKey = getCerebrasApiKey();
     slog('info', `Streaming from Cerebras API with model: ${actualModel}`);
 
     // Build Cerebras streaming request - supports tools with gpt-oss-120b
@@ -288,7 +290,7 @@ export async function handleStreaming(
       anthropicHeaders['x-app'] = 'cli';
       anthropicHeaders['User-Agent'] = 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)';
     } else {
-      const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+      const anthropicKey = getAnthropicApiKey();
       if (!anthropicKey) {
         throw new Error(`ANTHROPIC_API_KEY required for ${actualModel}`);
       }

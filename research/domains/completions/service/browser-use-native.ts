@@ -8,8 +8,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import { BROWSER_USE_API_URL } from '../config.ts';
-import { slog, truncateForLogging } from '../utils.ts';
+import { truncateForLogging } from '../utils.ts';
 import type { BrowserUseRequest } from '../types.ts';
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,8 @@
  */
 
 import {
-  DEFAULT_HTTP_REFERER,
+  getHttpReferer,
+  getOpenRouterApiKey,
   OPENROUTER_MODELS_URL,
   OPENROUTER_TIMEOUT_MS,
   OPENROUTER_X_TITLE,
@@ -20,8 +21,8 @@ export async function fetchOpenRouterModels(): Promise<OpenRouterModel[]> {
   try {
     const response = await fetch(OPENROUTER_MODELS_URL, {
       headers: {
-        'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
-        'HTTP-Referer': Deno.env.get('SUPABASE_URL') ?? DEFAULT_HTTP_REFERER,
+        'Authorization': `Bearer ${getOpenRouterApiKey()}`,
+        'HTTP-Referer': getHttpReferer(),
         'X-Title': OPENROUTER_X_TITLE,
       },
       signal: controller.signal,

@@ -22,9 +22,14 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@~2.39.3';
 
+import { randomUUID } from '../../../providers/crypto.ts';
+import { slog } from '../../../providers/logger.ts';
 import {
   ANTHROPIC_MAX_ANYOF_BRANCHES,
   corsHeaders,
+  getOpenRouterApiKey,
+  getProdSupabaseServiceKey,
+  getProdSupabaseUrl,
   MODEL_POOLS,
   WATERFALL_POOLS,
 } from '../config.ts';
@@ -33,7 +38,6 @@ import {
   filterPoolByFileSize,
   getMaxBase64FileSizeBytes,
   isBrowserUseRequest,
-  slog,
   truncateForLogging,
 } from '../utils.ts';
 import {
@@ -66,7 +70,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
   }
 
   // Extract request ID from header (sent by agent) or generate one
-  const requestId = req.headers.get('x-request-id') || crypto.randomUUID().slice(0, 8);
+  const requestId = req.headers.get('x-request-id') || randomUUID().slice(0, 8);
   const agentId = req.headers.get('x-agent-id') || undefined;
   const callSite = req.headers.get('x-call-site') || undefined;
   slog('info', 'REQUEST START', { request_id: requestId, agent_id: agentId, call_site: callSite });
@@ -86,14 +90,10 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
       });
     }
 
-    // Initialize Supabase client
-    // Use PROD_ prefixed vars if available, otherwise hardcoded production values for local dev
-    // (Supabase CLI overrides SUPABASE_URL to local instance, so we need explicit prod values)
-    const supabaseUrl = Deno.env.get('PROD_SUPABASE_URL') ||
-      'https://kzlurqihzaolhzsbkctf.supabase.co';
-    const supabaseServiceKey = Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') ||
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTg4OTMzNiwiZXhwIjoyMDc1NDY1MzM2fQ.Iff9HtO2szAAKIpOmzGacxMgMZeeqXQfLzQTxrakF9g';
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    // Initialize Supabase client (prod endpoint; getters fall back to hardcoded
+    // prod values when PROD_* env vars are unset so local dev still works).
+    const supabaseUrl = getProdSupabaseUrl();
+    const supabase = createClient(supabaseUrl, getProdSupabaseServiceKey());
 
     // Validate API key
     slog('info', `[${requestId}] Validating API key...`, {
@@ -285,7 +285,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
           tool_choice,
           response_format,
           cappedReasoning,
-          Deno.env.get('OPENROUTER_API_KEY') ?? '',
+          getOpenRouterApiKey(),
           supabaseUrl,
           model,
           false, // isCerebras
@@ -314,7 +314,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+          'Authorization': `Bearer ${getOpenRouterApiKey()}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': supabaseUrl,
           'X-Title': 'Rose Direct Passthrough',
@@ -383,7 +383,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
           tool_choice,
           response_format,
           cappedReasoning,
-          Deno.env.get('OPENROUTER_API_KEY') ?? '',
+          getOpenRouterApiKey(),
           supabaseUrl,
           model,
           selection.isCerebras,
@@ -423,7 +423,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
             tool_choice,
             response_format,
             reasoning,
-            Deno.env.get('OPENROUTER_API_KEY') ?? '',
+            getOpenRouterApiKey(),
             supabaseUrl,
             model,
             false, // Not Cerebras
@@ -446,7 +446,7 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
 
     // Handle streaming with trio racing or waterfall
     if (stream && !selectedModel) {
-      const openRouterKey = Deno.env.get('OPENROUTER_API_KEY') ?? '';
+      const openRouterKey = getOpenRouterApiKey();
 
       // ===== SHARED POOL FILTERING =====
       // Apply filters before both waterfall and racing paths
@@ -472,7 +472,12 @@ export async function handleCompletionsRequest(req: Request): Promise<Response> 
       // Filter out models that can't handle file attachments based on size
       const maxFileSize = getMaxBase64FileSizeBytes(messages);
       if (maxFileSize > 0) {
-        effectivePool = filterPoolByFileSize(effectivePool, maxFileSize);
+        const { filtered, excluded } = filterPoolByFileSize(effectivePool, maxFileSize);
+        effectivePool = filtered;
+        if (excluded.length > 0) {
+          const sizeMb = (maxFileSize / 1024 / 1024).toFixed(2);
+          slog('info', `File size ${sizeMb}MB, excluded models: ${excluded.join(', ')}`);
+        }
       }
 
       if (effectivePool.length === 0) {

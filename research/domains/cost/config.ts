@@ -16,6 +16,16 @@ export const OPENROUTER_TIMEOUT_MS = 10_000;
 /** Default HTTP-Referer header value when SUPABASE_URL is not set. */
 export const DEFAULT_HTTP_REFERER = 'https://rose-benchmark.supabase.co';
 
+/** OpenRouter API key (blank if unset — surfaces as 401 from OpenRouter). */
+export function getOpenRouterApiKey(): string {
+  return Deno.env.get('OPENROUTER_API_KEY') ?? '';
+}
+
+/** HTTP-Referer value for OpenRouter attribution; falls back to DEFAULT_HTTP_REFERER. */
+export function getHttpReferer(): string {
+  return Deno.env.get('SUPABASE_URL') ?? DEFAULT_HTTP_REFERER;
+}
+
 /** X-Title header sent on OpenRouter calls for attribution. */
 export const OPENROUTER_X_TITLE = 'Rose Benchmark Suite';
 

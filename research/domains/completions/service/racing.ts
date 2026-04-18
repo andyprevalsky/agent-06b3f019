@@ -15,10 +15,12 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import {
   ANTHROPIC_API_URL,
   ANTHROPIC_BETA_HEADER,
   corsHeaders,
+  getAnthropicApiKey,
   MAX_DELAY_CAP_MS,
   MAX_LATENCY_CAP_MS,
   TRIO_SIZE,
@@ -26,7 +28,7 @@ import {
 } from '../config.ts';
 import { incrementLoserLatency, saveConversationModel, updateLatencyCache } from '../repo.ts';
 import type { RacingConfig, RacingModel, SupabaseClient, UnifiedAction } from '../types.ts';
-import { slog, truncateForLogging, withTimeout } from '../utils.ts';
+import { truncateForLogging, withTimeout } from '../utils.ts';
 import {
   isAnthropicModel,
   transformMessagesForAnthropic,
@@ -330,7 +332,7 @@ export async function raceModels(
 
         // Call Anthropic directly for Claude models (structured outputs require beta header)
         if (isAnthropicModel(model)) {
-          const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+          const anthropicKey = getAnthropicApiKey();
           if (!anthropicKey) {
             slog('error', `${model} requires ANTHROPIC_API_KEY`);
             return null;

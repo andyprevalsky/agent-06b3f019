@@ -20,10 +20,11 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@~2.39.3';
 
-import { ANTHROPIC_API_URL, corsHeaders, MODEL_POOLS } from '../config.ts';
-import { parseRetryAfterMs, slog } from '../utils.ts';
+import { ANTHROPIC_API_URL, corsHeaders, getOpenRouterApiKey, MODEL_POOLS } from '../config.ts';
+import { parseRetryAfterMs } from '../utils.ts';
 import { getCachedLatencies } from '../repo.ts';
 import {
   applyAnthropicToolConfig,
@@ -135,7 +136,7 @@ export async function tryClaudeTokenPassthrough(
               agent_id: agentId,
               call_site: callSite,
             });
-            const openRouterKey = Deno.env.get('OPENROUTER_API_KEY') ?? '';
+            const openRouterKey = getOpenRouterApiKey();
             const { latencies } = await getCachedLatencies(supabase, poolName, fallbackPool);
             const racingTrio = selectRacingTrio(fallbackPool, latencies);
             const timings: Record<string, number> = {};

@@ -11,7 +11,7 @@
 
 import { ANTHROPIC_API_URL, ANTHROPIC_CUA_BETA, ANTHROPIC_CUA_MODEL } from '../config.ts';
 import type { BrowserUseRequest, UnifiedAction } from '../types.ts';
-import { slog } from '../utils.ts';
+import { slog } from '../../../providers/logger.ts';
 
 // Anthropic CUA system prompt (minimal, role-setting)
 const ANTHROPIC_CUA_SYSTEM_PROMPT =

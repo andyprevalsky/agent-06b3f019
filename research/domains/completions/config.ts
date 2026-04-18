@@ -143,3 +143,53 @@ export const LATENCY_PROBE_MAX_TOKENS = 16;
 
 export const COST_PER_MILLION_INPUT = 0.5;
 export const COST_PER_MILLION_OUTPUT = 1.5;
+
+// ---------------------------------------------------------------------------
+// Env-backed values
+//
+// Every env read for this domain goes through a getter in this file so the
+// other completions service/repo files stay pure. Mirrors the backend
+// `src/domains/*/config.ts` convention.
+// ---------------------------------------------------------------------------
+
+/** Hard-coded production Supabase fallback (used when PROD_* env vars are unset
+ * in local dev, because the Supabase CLI remaps SUPABASE_URL to the local stack). */
+const FALLBACK_PROD_SUPABASE_URL = 'https://kzlurqihzaolhzsbkctf.supabase.co';
+const FALLBACK_PROD_SUPABASE_SERVICE_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTg4OTMzNiwiZXhwIjoyMDc1NDY1MzM2fQ.Iff9HtO2szAAKIpOmzGacxMgMZeeqXQfLzQTxrakF9g';
+
+export function getProdSupabaseUrl(): string {
+  return Deno.env.get('PROD_SUPABASE_URL') || FALLBACK_PROD_SUPABASE_URL;
+}
+
+export function getProdSupabaseServiceKey(): string {
+  return Deno.env.get('PROD_SUPABASE_SERVICE_ROLE_KEY') || FALLBACK_PROD_SUPABASE_SERVICE_KEY;
+}
+
+export function getOpenRouterApiKey(): string {
+  return Deno.env.get('OPENROUTER_API_KEY') ?? '';
+}
+
+export function getAnthropicApiKey(): string {
+  return Deno.env.get('ANTHROPIC_API_KEY') ?? '';
+}
+
+export function getCerebrasApiKey(): string {
+  return Deno.env.get('CEREBRAS_API_KEY') ?? '';
+}
+
+export function getBrowserUseApiKey(): string {
+  return Deno.env.get('BROWSER_USE_API_KEY') ?? '';
+}
+
+export function getYutoriApiKey(): string {
+  return Deno.env.get('YUTORI_API_KEY') ?? '';
+}
+
+export function getBackendApiUrl(): string {
+  return Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
+}
+
+export function getBackendApiKey(): string {
+  return Deno.env.get('BACKEND_API_KEY') ?? '';
+}

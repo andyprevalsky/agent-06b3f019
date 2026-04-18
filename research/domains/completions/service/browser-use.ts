@@ -19,6 +19,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import {
   ANTHROPIC_API_URL,
   BU_DEFAULT_LATENCY_MS,
@@ -27,11 +28,15 @@ import {
   BU_RACE_TIMEOUT_MS,
   corsHeaders,
   DOM_ONLY_MODELS,
+  getAnthropicApiKey,
+  getBrowserUseApiKey,
+  getOpenRouterApiKey,
+  getYutoriApiKey,
   MODEL_POOLS,
   TRIO_SIZE,
 } from '../config.ts';
 import type { BrowserUseContext, UnifiedAction } from '../types.ts';
-import { extractJSON, slog, truncateForLogging, withTimeout } from '../utils.ts';
+import { extractJSON, truncateForLogging, withTimeout } from '../utils.ts';
 import { getCachedLatencies } from '../repo.ts';
 import { isAnthropicModel, transformMessagesForAnthropic } from './anthropic.ts';
 import { callAnthropicCUA, normalizeAnthropicCUAResponse } from './anthropic-cua.ts';
@@ -95,7 +100,7 @@ function makeCallProvider(
     let actualModel: string;
 
     if (provider === 'browser-use') {
-      const browserUseApiKey = Deno.env.get('BROWSER_USE_API_KEY');
+      const browserUseApiKey = getBrowserUseApiKey();
       if (!browserUseApiKey) throw new Error('BROWSER_USE_API_KEY not configured');
 
       slog('info', `[${requestId}] [${provider}] Calling browser-use API...`, {
@@ -107,7 +112,7 @@ function makeCallProvider(
       normalizedAction = normalizeBrowserUseResponse(result.response);
       actualModel = 'browser-use/bu-1-0';
     } else if (provider === 'yutori/n1') {
-      const yutoriApiKey = Deno.env.get('YUTORI_API_KEY');
+      const yutoriApiKey = getYutoriApiKey();
       if (!yutoriApiKey) throw new Error('YUTORI_API_KEY not configured');
       if (!browserUseReq.browser_state.screenshot) {
         throw new Error('Yutori requires screenshot');
@@ -125,7 +130,7 @@ function makeCallProvider(
       );
       actualModel = 'yutori/n1';
     } else if (provider === 'anthropic/claude-cua') {
-      const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
+      const anthropicApiKey = getAnthropicApiKey();
       if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY not configured');
       if (browserUseReq.browser_state.screenshot?.startsWith('http')) {
         throw new Error('Anthropic CUA requires base64 screenshot');
@@ -141,7 +146,7 @@ function makeCallProvider(
       actualModel = 'anthropic/claude-sonnet-4-cua';
     } else if (isAnthropicModel(provider)) {
       // Direct Anthropic API call (matching streaming race pattern)
-      const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+      const anthropicKey = getAnthropicApiKey();
       if (!anthropicKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
       const isDomOnly = DOM_ONLY_MODELS.includes(provider);
@@ -218,7 +223,7 @@ function makeCallProvider(
       actualModel = provider;
     } else {
       // Generic LLM via OpenRouter (e.g. openai/gpt-5.2)
-      const openRouterKey = Deno.env.get('OPENROUTER_API_KEY');
+      const openRouterKey = getOpenRouterApiKey();
       if (!openRouterKey) throw new Error('OPENROUTER_API_KEY not configured');
 
       slog('info', `[${requestId}] [${provider}] Calling OpenRouter API...`, {

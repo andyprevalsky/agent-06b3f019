@@ -19,6 +19,16 @@ export const DEFAULT_SAMPLES = '100';
 /** Default base URL if BASE_URL env is unset. */
 export const DEFAULT_BASE_URL = 'http://localhost:3000';
 
+/** Rose API base URL; falls back to DEFAULT_BASE_URL when unset. */
+export function getBaseUrl(): string {
+  return Deno.env.get('BASE_URL') ?? DEFAULT_BASE_URL;
+}
+
+/** Rose API key; empty string when unset (caller should exit). */
+export function getRoseApiKey(): string {
+  return Deno.env.get('ROSE_API_KEY') ?? '';
+}
+
 /** Deterministic seed for benchmark sampling. */
 export const BENCHMARK_SEED = 42;
 

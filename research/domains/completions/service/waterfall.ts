@@ -10,10 +10,11 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { slog } from '../../../providers/logger.ts';
 import type { SupabaseClient } from '../types.ts';
 import { corsHeaders, WATERFALL_TIMEOUT_MS } from '../config.ts';
 import { saveConversationModel } from '../repo.ts';
-import { slog, withTimeout } from '../utils.ts';
+import { withTimeout } from '../utils.ts';
 import { handleStreaming } from './streaming.ts';
 
 /**

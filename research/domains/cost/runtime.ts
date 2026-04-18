@@ -5,6 +5,7 @@
  * May import from: own service, own config, own types.
  */
 
+import { slog } from '../../providers/logger.ts';
 import { CORS_HEADERS } from './config.ts';
 import { computeCost, CostError, parseModelName } from './service.ts';
 import type { CostResponse } from './types.ts';
@@ -27,8 +28,7 @@ function jsonOk(body: CostResponse): Response {
 
 /** Convert an unknown thrown value to a 500 Response with CORS + details. */
 function internalError(error: unknown): Response {
-  // deno-lint-ignore no-console
-  console.error('Cost calculation error:', error);
+  slog('error', 'Cost calculation error', { data: error });
   const errorMessage = error instanceof Error ? error.message : 'Unknown error';
   return new Response(
     JSON.stringify({ error: 'Failed to calculate cost', details: errorMessage }),

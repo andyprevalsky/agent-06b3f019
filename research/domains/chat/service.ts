@@ -12,6 +12,7 @@
  * and returns a {@link Response}. The runtime layer is the sole caller.
  */
 
+import { slog } from '../../providers/logger.ts';
 import { ALLOWED_SUBPATHS, CHAT_PATH_PREFIX, CORS_HEADERS, getCompletionsUrl } from './config.ts';
 import type { ChatProxyRequest } from './types.ts';
 
@@ -52,8 +53,7 @@ export async function handleChatRequest(req: ChatProxyRequest): Promise<Response
       headers: upstream.headers,
     });
   } catch (error) {
-    // deno-lint-ignore no-console -- Edge function error logging (Deno has no other logging API)
-    console.error('Error proxying to completions:', error);
+    slog('error', 'Error proxying to completions', { data: error });
     return jsonError('Internal server error', 500);
   }
 }

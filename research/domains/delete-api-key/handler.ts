@@ -5,13 +5,7 @@
  * errors to HTTP responses. No DB or business logic lives here.
  */
 
-import {
-  BEARER_PREFIX,
-  corsHeaders,
-  ENV_SUPABASE_SERVICE_ROLE_KEY,
-  ENV_SUPABASE_URL,
-  jsonContentTypeHeaders,
-} from './config.ts';
+import { BEARER_PREFIX, corsHeaders, jsonContentTypeHeaders, readSupabaseEnv } from './config.ts';
 import { deleteApiKeyForCaller } from './service.ts';
 import { type CreateClientFn, DeleteApiKeyError } from './types.ts';
 
@@ -60,15 +54,14 @@ export function createHandler(
       }
       const token = authHeader.substring(BEARER_PREFIX.length);
 
-      const supabaseUrl = Deno.env.get(ENV_SUPABASE_URL);
-      const supabaseServiceKey = Deno.env.get(ENV_SUPABASE_SERVICE_ROLE_KEY);
-      if (!supabaseUrl || !supabaseServiceKey) {
+      const env = readSupabaseEnv();
+      if (!env) {
         return jsonResponse(
           { error: 'Server misconfiguration: missing Supabase credentials' },
           500,
         );
       }
-      const supabase = createClient(supabaseUrl, supabaseServiceKey);
+      const supabase = createClient(env.url, env.serviceKey);
 
       const keyId = await readKeyIdFromBody(req);
       if (!keyId) {

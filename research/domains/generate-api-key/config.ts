@@ -20,6 +20,15 @@ export const API_KEY_TABLE = 'RoseApiKey';
 /** Columns selected after the insert to build the response body. */
 export const API_KEY_RESPONSE_COLUMNS = 'id, apiKey, createdAt';
 
-/** Env var names read at request time. */
-export const ENV_SUPABASE_URL = 'SUPABASE_URL';
-export const ENV_SUPABASE_SERVICE_ROLE_KEY = 'SUPABASE_SERVICE_ROLE_KEY';
+export interface SupabaseEnv {
+  url: string;
+  serviceKey: string;
+}
+
+/** Read Supabase credentials from env, or null if either is missing. */
+export function readSupabaseEnv(): SupabaseEnv | null {
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return null;
+  return { url, serviceKey };
+}

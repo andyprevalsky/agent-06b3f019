@@ -18,8 +18,8 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@~2.39.3';
 
-import { corsHeaders } from '../config.ts';
-import { slog } from '../utils.ts';
+import { corsHeaders, getOpenRouterApiKey } from '../config.ts';
+import { slog } from '../../../providers/logger.ts';
 import { saveConversationModel } from '../repo.ts';
 import { isAnthropicModel } from './anthropic.ts';
 import { fireLatencyProbes } from './generic.ts';
@@ -233,7 +233,7 @@ export async function runTrioRaceStream(params: TrioStreamParams): Promise<Respo
       tool_choice,
       response_format,
       cappedReasoning,
-      Deno.env.get('OPENROUTER_API_KEY') ?? '',
+      getOpenRouterApiKey(),
       supabaseUrl,
       model,
       false,

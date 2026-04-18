@@ -12,8 +12,9 @@
  *   - RoseConversationModel (rw)   : conversation-pinned winner model
  */
 
+import { randomUUID } from '../../providers/crypto.ts';
 import { LATENCY_CACHE_TTL_MS, LOSER_LATENCY_INCREMENT_MS } from './config.ts';
-import { slog } from './utils.ts';
+import { slog } from '../../providers/logger.ts';
 import type { SupabaseClient } from './types.ts';
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ export async function logUsage(
   const { error } = await supabase
     .from('RoseApiKeyLog')
     .insert({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       apiKeyId,
       userId,
       input,
@@ -145,7 +146,7 @@ export async function updateLatencyCache(
     return;
   }
 
-  const id = crypto.randomUUID();
+  const id = randomUUID();
 
   const { error } = await supabase
     .from('RoseModelLatency')
@@ -259,7 +260,7 @@ export async function saveConversationModel(
 ): Promise<void> {
   slog('info', `Saving model ${model} for conversation ${conversationId}`);
 
-  const id = crypto.randomUUID();
+  const id = randomUUID();
 
   const { error } = await supabase
     .from('RoseConversationModel')

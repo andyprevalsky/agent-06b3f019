@@ -15,9 +15,18 @@ export const jsonContentTypeHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
 };
 
-/** Env var keys read by the service layer at runtime. */
-export const ENV_SUPABASE_URL = 'SUPABASE_URL';
-export const ENV_SUPABASE_SERVICE_ROLE_KEY = 'SUPABASE_SERVICE_ROLE_KEY';
+export interface SupabaseEnv {
+  url: string;
+  serviceKey: string;
+}
+
+/** Read Supabase credentials from env, or null if either is missing. */
+export function readSupabaseEnv(): SupabaseEnv | null {
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!url || !serviceKey) return null;
+  return { url, serviceKey };
+}
 
 /** Table storing API keys. */
 export const API_KEY_TABLE = 'RoseApiKey';

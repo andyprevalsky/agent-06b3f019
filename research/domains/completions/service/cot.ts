@@ -14,8 +14,14 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-import { CEREBRAS_API_URL, corsHeaders } from '../config.ts';
-import { slog, truncateForLogging } from '../utils.ts';
+import { slog } from '../../../providers/logger.ts';
+import {
+  CEREBRAS_API_URL,
+  corsHeaders,
+  getCerebrasApiKey,
+  getOpenRouterApiKey,
+} from '../config.ts';
+import { truncateForLogging } from '../utils.ts';
 import { transformSchemaForCerebras } from './streaming.ts';
 import { getMessagesForModel } from './vision.ts';
 
@@ -160,7 +166,7 @@ function makeApiCallFactory(
       return await fetch(CEREBRAS_API_URL, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${Deno.env.get('CEREBRAS_API_KEY')}`,
+          'Authorization': `Bearer ${getCerebrasApiKey()}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(cerebrasBody),
@@ -169,7 +175,7 @@ function makeApiCallFactory(
     return await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')}`,
+        'Authorization': `Bearer ${getOpenRouterApiKey()}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': supabaseUrl,
         'X-Title': 'Rose Benchmark Suite',

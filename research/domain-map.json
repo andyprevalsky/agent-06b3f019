@@ -445,8 +445,7 @@
       "gepa/pipelines/expansion.py",
       "gepa/pipelines/simulate_user.py",
       "gepa/tests/__init__.py",
-      "gepa/verify_labels.py",
-      "shared/types.ts"
+      "gepa/verify_labels.py"
     ]
   }
 }

@@ -12,12 +12,8 @@
       "domains/",
       "providers/",
       "utils/",
-      "shared/",
       "scripts/",
-      "tests/",
-      "domains/",
-      "providers/",
-      "utils/"
+      "tests/"
     ],
     "exclude": [
       "node_modules/",
@@ -31,12 +27,8 @@
       "domains/",
       "providers/",
       "utils/",
-      "shared/",
       "scripts/",
-      "tests/",
-      "domains/",
-      "providers/",
-      "utils/"
+      "tests/"
     ],
     "exclude": [
       "node_modules/",

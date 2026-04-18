@@ -46,6 +46,10 @@ echo "=== Structural checks (layer dependencies) ==="
 npx tsx "$ROOT/tests/structural/layer-deps.ts" || FAIL=1
 
 echo ""
+echo "=== Canonical utility enforcement ==="
+bash "$ROOT/scripts/lint-canonical.sh" || FAIL=1
+
+echo ""
 echo "=== Python (ruff format + ruff check) ==="
 if $FIX; then
   ruff format .

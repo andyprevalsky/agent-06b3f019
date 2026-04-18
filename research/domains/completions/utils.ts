@@ -1,8 +1,8 @@
 /**
  * Completions Domain Utilities
  *
- * Pure helpers with no side effects: logging, JSON extraction, timeout wrapper,
- * array shuffling, base64 truncation for logs, file-size filtering, Retry-After
+ * Pure helpers with no side effects: JSON extraction, timeout wrapper, array
+ * shuffling, base64 truncation for logs, file-size filtering, Retry-After
  * parsing, and the browser-use request-shape discriminator.
  */
 
@@ -25,31 +25,6 @@ export function parseRetryAfterMs(raw: string | null, fallbackMs = 2000): number
     return delayMs > 0 ? delayMs : fallbackMs;
   }
   return fallbackMs;
-}
-
-// ---------------------------------------------------------------------------
-// Structured logging
-// ---------------------------------------------------------------------------
-
-export function slog(
-  level: 'info' | 'warn' | 'error',
-  message: string,
-  extra: Record<string, unknown> = {},
-): void {
-  const entry = {
-    timestamp: new Date().toISOString(),
-    level,
-    component: 'Rose',
-    message,
-    ...extra,
-  };
-  if (level === 'error') {
-    // deno-lint-ignore no-console
-    console.error(JSON.stringify(entry));
-  } else {
-    // deno-lint-ignore no-console
-    console.log(JSON.stringify(entry));
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,23 +201,20 @@ export function getMaxBase64FileSizeBytes(messages: any[]): number {
   return maxSize;
 }
 
-/** Filter a model pool based on max base64 file size in the request. */
+/**
+ * Filter a model pool based on max base64 file size in the request.
+ * Returns both the filtered pool and the excluded models so callers can log
+ * without this pure helper needing a logger dependency.
+ */
 export function filterPoolByFileSize(
   pool: string[],
   maxFileSizeBytes: number,
-): string[] {
-  if (maxFileSizeBytes === 0) return pool;
+): { filtered: string[]; excluded: string[] } {
+  if (maxFileSizeBytes === 0) return { filtered: pool, excluded: [] };
   let filtered = pool.filter((m) => !NO_VISION_MODELS.has(m));
   if (maxFileSizeBytes > FIVE_MB) {
     filtered = filtered.filter((m) => !MAX_5MB_MODELS.has(m));
   }
   const excluded = pool.filter((m) => !filtered.includes(m));
-  if (excluded.length > 0) {
-    const sizeMb = (maxFileSizeBytes / 1024 / 1024).toFixed(2);
-    slog(
-      'info',
-      `File size ${sizeMb}MB, excluded models: ${excluded.join(', ')}`,
-    );
-  }
-  return filtered;
+  return { filtered, excluded };
 }

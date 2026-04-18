@@ -4,7 +4,7 @@
  *   research/domains/benchmark-runner/types.ts
  *
  * This shim preserves the legacy import path used by the read-only blackbox
- * test file and by research/shared/types.ts.
+ * test file.
  */
 
 export type {

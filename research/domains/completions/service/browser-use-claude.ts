@@ -11,8 +11,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-import { ANTHROPIC_API_URL, corsHeaders } from '../config.ts';
-import { extractJSON, slog, truncateForLogging } from '../utils.ts';
+import { slog } from '../../../providers/logger.ts';
+import { ANTHROPIC_API_URL, corsHeaders, getBackendApiKey, getBackendApiUrl } from '../config.ts';
+import { extractJSON, truncateForLogging } from '../utils.ts';
 import { logUsage } from '../repo.ts';
 import { transformContentBlockForAnthropic } from './anthropic.ts';
 import { transformToBrowserUseFormat } from './browser-use-native.ts';
@@ -37,8 +38,8 @@ export async function handleClaudeMode(ctx: BrowserUseContext): Promise<Response
   );
 
   // Fetch Claude Code OAuth token from backend
-  const backendUrl = Deno.env.get('BACKEND_API_URL') || 'https://navi-j9a9.onrender.com';
-  const backendApiKey = Deno.env.get('BACKEND_API_KEY');
+  const backendUrl = getBackendApiUrl();
+  const backendApiKey = getBackendApiKey();
   if (!backendApiKey) {
     return new Response(
       JSON.stringify({ error: 'BACKEND_API_KEY not configured for claude mode' }),
