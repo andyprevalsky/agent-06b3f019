@@ -63,32 +63,31 @@ fi
 
 # ── 2. Docker (Linux only — macOS uses Docker Desktop) ───────────────────
 # Backend needs Docker for the per-workspace Postgres container (see run.sh).
+# Cord's build phase runs as root (no sudo binary); interactive Conductor/dev
+# shells have passwordless sudo. Pick a privilege wrapper that works in both.
 if ! $IS_MAC; then
-    have_sudo() { command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; }
+    if [ "$(id -u)" = "0" ]; then
+        SUDO=""                                     # already root (Cord build)
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        SUDO="sudo"                                 # passwordless sudo
+    else
+        SUDO=""                                     # no privilege — best-effort, will fail loudly
+        echo "⚠️  No root or passwordless sudo — Docker setup may fail."
+    fi
 
     if docker info >/dev/null 2>&1; then
         echo "✅ Docker daemon reachable"
     elif command -v docker >/dev/null 2>&1; then
         echo "🐳 Docker installed — starting daemon..."
-        if have_sudo; then
-            sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
-            sudo usermod -aG docker "$USER" 2>/dev/null || true
-            sudo docker info >/dev/null 2>&1 && echo "   ✅ Daemon running (re-login for group membership to drop sudo)"
-        else
-            echo "⚠️  No passwordless sudo — start Docker daemon manually"
-        fi
+        $SUDO systemctl start docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
+        [ -n "$SUDO" ] && [ "$USER" != "root" ] && $SUDO usermod -aG docker "$USER" 2>/dev/null || true
+        $SUDO docker info >/dev/null 2>&1 && echo "   ✅ Daemon running"
     else
         echo "🐳 Installing Docker..."
-        if have_sudo; then
-            curl -fsSL https://get.docker.com | sudo sh >/dev/null
-            sudo usermod -aG docker "$USER" 2>/dev/null || true
-            sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null || true
-            echo "   Installed: $(sudo docker --version 2>/dev/null || echo docker)"
-            echo "   NOTE: docker group membership takes effect on next shell login"
-        else
-            echo "❌ Docker not installed and no passwordless sudo available."
-            echo "   Install manually: curl -fsSL https://get.docker.com | sudo sh"
-        fi
+        curl -fsSL https://get.docker.com | $SUDO sh >/dev/null
+        [ -n "$SUDO" ] && [ "$USER" != "root" ] && $SUDO usermod -aG docker "$USER" 2>/dev/null || true
+        $SUDO systemctl start docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
+        echo "   Installed: $($SUDO docker --version 2>/dev/null || echo docker)"
     fi
 fi
 
