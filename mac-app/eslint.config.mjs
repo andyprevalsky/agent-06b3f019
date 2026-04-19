@@ -69,6 +69,7 @@ const STRICT_DOMAIN_FILES = [
   'main/preload.ts',
   'main/domains/electron-preload/**/*.ts',
   'main/services/browserPasswordReader.ts',
+  'main/domains/browser-password-reader/**/*.ts',
   'main/services/contactsReaderNative.ts',
   'main/services/indexedDBReader.ts',
   'main/services/iMessageSender.ts',
