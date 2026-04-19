@@ -11,7 +11,7 @@ AI agent platform with model racing infrastructure.
 front-end/     → React/TypeScript/Vite (Vercel)
 back-end/      → Express/TypeScript/Prisma (Render)
 agents/        → Python Temporal workers (Fly.io)
-research/      → Model development (rose-1-lite, rose-1-ultra)
+research/gepa/ → Offline reward-model pipeline (no runtime services)
 mac-app/       → Electron desktop app (macOS only)
 docs/          → API documentation (Mintlify)
 ```
@@ -22,7 +22,8 @@ docs/          → API documentation (Mintlify)
 - `agents/worker.py` - Temporal worker
 - `agents/workflows/agent_workflow.py` - Core agent logic
 - `back-end/prisma/schema.prisma` - Database schema (source of truth)
-- `research/supabase/functions/completions/index.ts` - Rose model racing endpoint
+- `back-end/src/providers/rose/client.ts` - In-process Rose completions (chat path)
+- `agents/providers/rose/client.py` - In-process Rose completions (agents path)
 - `mac-app/main/index.ts` - Electron main process
 - `docs/mint.json` - Mintlify docs config
 
@@ -59,10 +60,9 @@ cd agents && bash scripts/run-coverage.sh --html     # HTML report in htmlcov/
 - **Backend** requires minimum 88% line/statement, 87% function, 76% branch (see `back-end/.c8rc.json`).
 - **Front-end** requires 80% lines, 75% statements/functions, 70% branches (see `front-end/vitest.config.ts` → `coverage.thresholds`). Current: ~80% lines, ~79% statements, ~77% functions, ~72% branches. Target: 80% across all four.
 - **Agents** requires 80% line+branch (see `agents/pyproject.toml` → `[tool.coverage.report]`). Current: 81%.
-- **Research** enforces coverage via `bash research/scripts/coverage-check.sh` (auto-invoked by `research/scripts/lint-check.sh`). TS domains: 95% line floor (baseline 96.6%). Python gepa: 80% line floor (baseline 99.66%, set in `research/domains/gepa/pyproject.toml`).
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents + research; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
+**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
 
 ## Log Files
 
@@ -72,13 +72,11 @@ Check these when errors occur:
 - **Frontend:** `front-end/frontend-logs.log`
 - **Mac App (console):** `mac-app/mac-app-console-logs.log`
 - **Mac App (IPC):** `mac-app/mac-app-ipc-logs.log`
-- **Research (edge functions):** `research/research-logs.log`
 - **Docs:** `docs/docs-logs.log`
 
-**Prod logs (for benchmark agents):** Benchmark runs auto-collect logs from 3 prod sources into the result JSON (`agents/benchmarks/runs/*.json`):
+**Prod logs (for benchmark agents):** Benchmark runs auto-collect logs from 2 prod sources into the result JSON (`agents/benchmarks/runs/*.json`):
 - **Render (backend):** HTTP request logs filtered by `agent_id` — via `RENDER_API_KEY` in `back-end/.env`
 - **Fly.io (worker):** Agent execution logs (structlog JSON with `agent_id`) — streamed in real-time via `flyctl logs` during benchmark runs, needs `FLY_API_TOKEN` in `agents/.env`
-- **Supabase (research):** Rose API gateway logs (completions, API key validation) — via `SUPABASE_ACCESS_TOKEN` in `agents/.env`
 
 See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippets to inspect these.
 
@@ -94,20 +92,20 @@ python benchmarks/agent_latency.py <agent_id>
 # Flags: -v (verbose/full tree), --speedscope OUT.json, --stall-threshold N,
 #        --slow-threshold MS, --no-color
 
-# "What errors happened where?" — event-timeline tree across worker/backend/research/messages
+# "What errors happened where?" — event-timeline tree across worker/backend/messages
 python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
-# Expand per-source: --source worker|backend|research|messages  (add --url <BASE> for prod)
+# Expand per-source: --source worker|backend|messages  (add --url <BASE> for prod)
 ```
 
-**`agent_latency.py`** reads `agents/navi-worker-log.txt`, `back-end/backend-logs.log`, and `research/research-logs.log`, builds a span tree from `span.start`/`span.end`/`db.query`/`broadcast.span` events (correlated by `span_id`/`parent_span_id`, falling back to `request_id` + time-window containment), and prints:
+**`agent_latency.py`** reads `agents/navi-worker-log.txt` and `back-end/backend-logs.log`, builds a span tree from `span.start`/`span.end`/`db.query`/`broadcast.span` events (correlated by `span_id`/`parent_span_id`, falling back to `request_id` + time-window containment), and prints:
 - Executive summary: re-run command, total duration, span count, error count.
 - **Top 10 slowest paths**, **Slowest LLM Calls**, **Slowest Backend HTTP Requests**, **Errors** (deduped with counts).
-- A hierarchical waterfall (`offset | dur | trace`) nesting sub-agents under their spawn call and research-side breakdowns under each LLM call. Inline `IDLE` markers for gaps above `--stall-threshold`.
+- A hierarchical waterfall (`offset | dur | trace`) nesting sub-agents under their spawn call. Inline `IDLE` markers for gaps above `--stall-threshold`.
 - `-v` expands every span (DB, broadcasts, HTTP internals).
 
-**`agent_logs.py`** dumps the cross-source event timeline (including prod via Render/Fly/Supabase APIs with `--url`), grouped into a tree with errors highlighted. Best for reading the exact error message + stack + surrounding context after `agent_latency.py` points at a layer.
+**`agent_logs.py`** dumps the cross-source event timeline (including prod via Render/Fly APIs with `--url`), grouped into a tree with errors highlighted. Best for reading the exact error message + stack + surrounding context after `agent_latency.py` points at a layer.
 
-Typical signatures to look for: 502/546 from `localhost:55003` (Supabase edge function CPU cap), `peer closed connection` during streaming (same root cause), `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to racing).
+Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall).
 
 ## Critical Rules
 
@@ -220,20 +218,15 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 
 All realtime and tool message types are defined in `front-end/src/lib/realtime-types.ts`.
 
-## Rose API
+## Rose Completions
 
-Public API for agents and completions. Docs: https://docs.roselabs.ai (localhost:3002 in dev)
+In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP hop.
 
-- `docs/` - Mintlify API documentation
-- `research/supabase/functions/completions/index.ts` - Completions endpoint (model racing)
+- `back-end/src/providers/rose/` - TS client (chat path: router/generator/supervisor)
+- `agents/providers/rose/` - Python client (agent/browser-use path)
+- `back-end/src/providers/rose/pools.ts` / `agents/providers/rose/pools.py` - Canonical pool registry (`rose-1-lite`, `rose-1-ultra`, `rose-1-browser-use`)
 - `back-end/src/routes/agents.ts` - Agents API (create, poll, pause/resume)
 - `back-end/src/middleware/hybridAuth.ts` - API key authentication
-
-**Test files:**
-- `research/supabase/functions/completions/test-curl-example.txt` - curl example for rose-1-lite
-- `research/supabase/functions/completions/test-browser-use-usage.mjs` - rose-1-browser-use test
-- `research/supabase/functions/completions/test-exact-payload-replay.mjs` - replays a real captured structured-streaming request body from `test-prod-request-body.json`
-- `research/supabase/functions/completions/test-prod-request-body.json` - real captured request-body fixture used by `test-exact-payload-replay.mjs`
 
 ## Production Logs (Render)
 

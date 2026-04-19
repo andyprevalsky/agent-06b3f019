@@ -61,9 +61,6 @@ if $LIST; then
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo "    (semantic — requires --smoke):"
   (cd front-end && bash scripts/run-semantic-tests.sh --list 2>/dev/null) | sed 's/^/    /'
-  echo ""
-  echo "  research"
-  (cd research && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   exit 0
 fi
 
@@ -214,27 +211,6 @@ if should_run "front-end"; then
     bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
     bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
-  fi
-fi
-
-if should_run "research"; then
-  if ! command -v deno &>/dev/null && ! [ -x "${DENO_BIN:-$HOME/.deno/bin/deno}" ]; then
-    echo "ERROR: Deno is not installed. Research tests require Deno."
-    echo "  Install: curl -fsSL https://deno.land/install.sh | sh"
-    exit 1
-  fi
-
-  bg_suite "Research Structural" bash -c "cd research && bash scripts/lint-check.sh"
-
-  # Derive RESEARCH_PORT from --port if available (port + 3 matches run.sh fan-out)
-  RESEARCH_PORT_EXPORT=""
-  if [ -n "$PORT" ]; then
-    RESEARCH_PORT_EXPORT="RESEARCH_PORT=$((PORT + 3))"
-  fi
-  if [ -n "$DOMAIN" ] && [ "$REPO" = "research" ]; then
-    bg_suite "Research Blackbox ($DOMAIN)" bash -c "cd research && $RESEARCH_PORT_EXPORT bash scripts/run-blackbox-tests.sh $DOMAIN"
-  else
-    bg_suite "Research Blackbox" bash -c "cd research && $RESEARCH_PORT_EXPORT bash scripts/run-blackbox-tests.sh"
   fi
 fi
 

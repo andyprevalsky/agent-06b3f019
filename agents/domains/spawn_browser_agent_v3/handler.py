@@ -45,8 +45,10 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
+from browser_tools.schemas import AVAILABLE_ACTIONS
+from providers.rose import ClaudeAuthContext, RoseClient
+
 from .repo import (
-    call_rose_browser_use,
     close_browser_session,
     fetch_claude_token,
     fetch_session_info,
@@ -75,12 +77,118 @@ from .service_crypto import (
     build_autopay_prompt_section,
     build_passwords_prompt_section,
     decrypt_payment_info,
-    extract_rate_limited_until,
     fetch_recent_otps,
 )
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+
+
+async def _call_browser_use_with_rotation(  # noqa: C901
+    *,
+    rose_client: RoseClient,
+    task: str,
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    config: Any,
+    user_id: str,
+    agent_id: str,
+    iteration: int,
+    token_state: ClaudeTokenState,
+    browser_use_mode: Optional[str],
+) -> Dict[str, Any]:
+    """Call rose-1-browser-use with in-activity claudeAuth rotation.
+
+    The workflow normally owns claude-token rotation, but browser-use is the
+    loop (no per-iteration workflow boundary), so the activity drives rotation
+    here. On `auth_error` / `rate_limit`, mark the offending token, fetch a
+    replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
+    exhaust (or there's no token to start), fall through to racing.
+    """
+    rose_kwargs = dict(
+        task=task,
+        browser_state=browser_state,
+        action_history=action_entries,
+        available_actions=AVAILABLE_ACTIONS,
+        agent_id=agent_id,
+        call_site=f"browser_use_step_{iteration}",
+    )
+
+    use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
+    claude_auth = (
+        ClaudeAuthContext(
+            token=token_state.access_token or "",
+            source=token_state.source or "user",  # type: ignore[arg-type]
+            user_id=user_id,
+            pool_token_id=token_state.pool_token_id,
+            max_rotations=0,  # activity drives rotation; client does one attempt
+        )
+        if use_claude
+        else None
+    )
+
+    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, **rose_kwargs)
+
+    if not use_claude:
+        return llm_result
+
+    rotations = 0
+    while (
+        llm_result.get("claude_token_error") in ("auth_error", "rate_limit")
+        and rotations < MAX_CLAUDE_TOKEN_ROTATIONS
+    ):
+        rotations += 1
+        current_source = token_state.source
+        current_pool_id = token_state.pool_token_id
+
+        await report_claude_token_rate_limited(
+            config,
+            user_id=user_id,
+            source=current_source,
+            pool_token_id=current_pool_id,
+            rate_limited_until=None,
+        )
+
+        token_state.access_token = None
+        if current_pool_id:
+            token_state.excluded_pool_ids.append(current_pool_id)
+            token_state.pool_token_id = None
+
+        new_token = await fetch_claude_token(
+            config,
+            user_id,
+            force_pool=True,
+            exclude_pool_ids=token_state.excluded_pool_ids or None,
+        )
+        if not new_token:
+            logger.warning(
+                "[ClaudeAuth] No replacement token available after rate-limit",
+                rotations=rotations,
+                source=current_source,
+            )
+            break
+
+        token_state.access_token = new_token.get("accessToken")
+        token_state.source = new_token.get("source")
+        token_state.pool_token_id = new_token.get("poolTokenId")
+        logger.info(
+            "[ClaudeAuth] Retrying browser-use with rotated token",
+            source=token_state.source,
+            pool_token_id=token_state.pool_token_id,
+            rotations=rotations,
+        )
+
+        activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
+        rotated_auth = ClaudeAuthContext(
+            token=token_state.access_token or "",
+            source=token_state.source or "user",  # type: ignore[arg-type]
+            user_id=user_id,
+            pool_token_id=token_state.pool_token_id,
+            max_rotations=0,
+        )
+        llm_result = await rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
+
+    return llm_result
 
 
 # ========================================
@@ -645,6 +753,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         logger.info("\n".join(timing_lines))
 
         # ===== MAIN AGENT LOOP =====
+        rose_client = RoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
 
@@ -747,88 +856,22 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
-                llm_result = await call_rose_browser_use(
+                llm_result = await _call_browser_use_with_rotation(
+                    rose_client=rose_client,
                     task=enriched_task,
                     browser_state=browser_state,
-                    action_history=action_entries,
+                    action_entries=action_entries,
                     config=config,
-                    mode=browser_use_mode,
                     user_id=user_id,
-                    oauth_token=token_state.access_token if browser_use_mode == "claude" else None,
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    token_state=token_state,
+                    browser_use_mode=browser_use_mode,
                 )
-
-                # Handle claude auth rate-limit fallback
-                if llm_result.get("fallback") == "racing" and browser_use_mode == "claude":
-                    rotations = 0
-
-                    while llm_result.get("fallback") == "racing" and rotations < MAX_CLAUDE_TOKEN_ROTATIONS:
-                        rotations += 1
-
-                        rate_limited_until = extract_rate_limited_until(llm_result)
-                        current_source = token_state.source
-                        current_pool_id = token_state.pool_token_id
-
-                        await report_claude_token_rate_limited(
-                            config,
-                            user_id=user_id,
-                            source=current_source,
-                            pool_token_id=current_pool_id,
-                            rate_limited_until=rate_limited_until,
-                        )
-
-                        token_state.access_token = None
-                        if current_pool_id:
-                            token_state.excluded_pool_ids.append(current_pool_id)
-                            token_state.pool_token_id = None
-
-                        new_token = await fetch_claude_token(
-                            config,
-                            user_id,
-                            force_pool=True,
-                            exclude_pool_ids=token_state.excluded_pool_ids or None,
-                        )
-                        if not new_token:
-                            logger.warning(
-                                "[ClaudeAuth] No replacement token available after rate-limit",
-                                rotations=rotations,
-                                source=current_source,
-                            )
-                            break
-
-                        token_state.access_token = new_token.get("accessToken")
-                        token_state.source = new_token.get("source")
-                        token_state.pool_token_id = new_token.get("poolTokenId")
-                        logger.info(
-                            "[ClaudeAuth] Retrying with rotated token",
-                            source=token_state.source,
-                            pool_token_id=token_state.pool_token_id,
-                            rotations=rotations,
-                        )
-
-                        activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
-                        llm_result = await call_rose_browser_use(
-                            task=enriched_task,
-                            browser_state=browser_state,
-                            action_history=action_entries,
-                            config=config,
-                            mode=browser_use_mode,
-                            user_id=user_id,
-                            oauth_token=token_state.access_token,
-                        )
-
-                    if llm_result.get("fallback") == "racing":
-                        logger.warning("[ClaudeAuth] All Claude tokens exhausted, falling back to racing mode")
-                        browser_use_mode = None
-                        token_state.fallen_back_to_racing = True
-                        activity.heartbeat(f"Step {iteration} - falling back to racing mode")
-                        llm_result = await call_rose_browser_use(
-                            task=enriched_task,
-                            browser_state=browser_state,
-                            action_history=action_entries,
-                            config=config,
-                            mode=None,
-                            user_id=user_id,
-                        )
+                # Track racing fall-back so subsequent iterations skip claudeAuth.
+                if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
+                    browser_use_mode = None
+                    token_state.fallen_back_to_racing = True
 
                 usage = llm_result.get("usage", {})
                 response_mode = llm_result.get("mode", "")

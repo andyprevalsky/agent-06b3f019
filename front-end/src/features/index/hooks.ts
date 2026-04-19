@@ -36,19 +36,22 @@ export function useTypewriter(): string {
     let currentCharIndex = 0;
     let isDeleting = false;
     let isFirstType = true;
+    let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
 
     const typeText = () => {
+      if (cancelled) return;
       const currentWord = HERO_ROTATING_WORDS[currentWordIndex];
 
       if (!isDeleting) {
         if (currentCharIndex === 0 && isFirstType) {
           let baseIndex = 0;
           const typeBase = () => {
+            if (cancelled) return;
             if (baseIndex <= HERO_BASE_TEXT.length) {
               setTypedText(HERO_BASE_TEXT.slice(0, baseIndex));
               baseIndex++;
-              setTimeout(typeBase, HERO_TYPE_BASE_SPEED);
+              timeoutId = setTimeout(typeBase, HERO_TYPE_BASE_SPEED);
             } else {
               isFirstType = false;
               typeText();
@@ -82,7 +85,10 @@ export function useTypewriter(): string {
     };
 
     typeText();
-    return () => clearTimeout(timeoutId);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, []);
 
   return typedText;

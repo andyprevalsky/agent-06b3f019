@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { createStreamingCompletion } from './supabaseCompletions';
+import { createStreamingCompletion } from '../rose';
 import { ROUTER_SYSTEM_PROMPT } from './chatPrompts';
 import {
   broadcastAssistantStream,

@@ -27,6 +27,14 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from providers.rose import (
+    RoseClient,
+    RoseError,
+    StreamChunk,
+    claude_auth_from_token,
+    pool_for_model,
+)
+from providers.rose.transforms import reconstruct_agent_response
 from helpers.tracing import backend_api_headers, current_request_id, rose_api_headers, traced
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
@@ -790,392 +798,342 @@ async def call_llm_structured_streaming(  # noqa: C901
     """
     config = load_config()
 
-    # Check if this is a Rose model - route to Supabase edge function with streaming
-    is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
+    # Check if this is a Rose model — route in-process via RoseClient (replaces
+    # the Supabase edge function).
+    pool = pool_for_model(model) if model else None
 
-    if is_rose_model:
+    if pool is not None:
         # Prefer the request_id already bound to the trace context so research
         # spans nest under the caller; only mint when nothing is bound.
         request_id = current_request_id() or str(uuid.uuid4())[:8]
         logger.info(
-            f"📤 [{request_id}] [{call_site}] Streaming Rose model via Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
+            f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
         )
 
         # Build JSON schema from Pydantic model
         schema = prepare_schema_for_openai(response_model)
-
-        request_body = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,  # Enable SSE streaming
-            "stream_options": {"include_usage": True},  # Get token usage in final chunk
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": response_model.__name__, "schema": schema, "strict": True},
-            },
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": response_model.__name__, "schema": schema, "strict": True},
         }
 
-        if model_preference:
-            request_body["model_preference"] = model_preference
-            logger.info(f"🎯 Streaming with model_preference: {model_preference}")
-
-        if model_seed is not None:
-            request_body["model_seed"] = model_seed
-            logger.info(f"🎯 Streaming with model_seed: {model_seed}")
-
-        if claude_token:
-            request_body["claude_token"] = claude_token
-            logger.info("🔑 Passing claude_token to Rose endpoint for direct Anthropic call")
-
-        if skip_cache:
-            request_body["skip_cache"] = True
-
-        # Add reasoning config for reasoning models (Gemini, Anthropic, etc.)
-        if reasoning_max_tokens:
-            request_body["reasoning"] = {"max_tokens": reasoning_max_tokens}
-            logger.info(f"🧠 Streaming with reasoning max_tokens: {reasoning_max_tokens}")
-
-        # Stream SSE from Rose endpoint
+        # Stream state
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
-        accumulated_json = ""  # JSON content for parsing
+        accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
         actual_model = "unknown"
-        actual_model_logged = False
         pool_name = "unknown"
-        pool_size = 0
-        claude_token_error = None  # Set when claude_token call failed (auth_error, rate_limit, stall, server_error)
-        final_finish_reason = ""  # Captured from last chunk with finish_reason
+        pool_size = 0  # No longer surfaced by RoseClient; preserved in usage shape for compat
+        claude_token_error: Optional[str] = None  # Set when claudeAuth fell through to waterfall
+        final_finish_reason = ""  # From usage chunk (parsers normalize to OpenAI vocabulary)
         was_cancelled = False
         chunk_count = 0
-        stream_usage = None  # Captured from final chunk with stream_options
+        stream_usage: Optional[Dict[str, Any]] = None
+
+        # claudeAuth-vs-waterfall path tracking. When the active path is
+        # claudeAuth (Anthropic native tools), `text_buffer` collects the raw
+        # assistant text and `tool_use_blocks` collects native tool_use payloads;
+        # we rebuild the {reasoning, response, tool_calls} envelope into
+        # `accumulated_json` after the stream so the existing parser works.
+        using_claude_auth = False
+        text_buffer = ""
+        tool_use_blocks: List[Dict[str, Any]] = []
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
-        detected_tool_positions: Dict[
-            str, int
-        ] = {}  # tool_name -> count detected (for tracking multiple same-name tools)
+        detected_tool_positions: Dict[str, int] = {}
 
         # State transition tracking for debugging
         first_reasoning_chunk: Optional[int] = None
         first_response_chunk: Optional[int] = None
         first_tool_calls_chunk: Optional[int] = None
 
-        # Attention message streaming tracking (for send_message_to_user)
+        # Attention message streaming tracking (for send_message_to_user — waterfall only)
         attention_tool_call_id: Optional[str] = None
         last_attention_message = ""
 
+        SKIP_EARLY_PROGRESS = {"send_message_to_user", "attempt_completion"}
+
+        _safe_heartbeat("Starting Rose LLM stream...")
+        request_start_time = _safe_time()
+        ttft_logged = False
+
+        rose_client = RoseClient()
+
         try:
-            # Log outbound request summary for debugging 400s
-            logger.debug(
-                "📤 Rose streaming request payload",
-                model=request_body.get("model"),
-                message_count=len(messages),
-                has_response_format=bool(request_body.get("response_format")),
-                has_reasoning=bool(request_body.get("reasoning")),
-                messages_summary=[
-                    {
-                        "index": i,
-                        "role": m.get("role"),
-                        "has_content": bool(m.get("content")),
-                        "tool_calls": [
-                            {
-                                "id": tc.get("id"),
-                                "name": tc.get("function", {}).get("name"),
-                                "has_arguments": "arguments" in tc.get("function", {}),
-                                "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
-                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50]
-                                if tc.get("function", {}).get("arguments")
-                                else "MISSING",
-                            }
-                            for tc in m.get("tool_calls", [])
-                        ]
-                        if m.get("tool_calls")
-                        else None,
-                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None,
-                    }
-                    for i, m in enumerate(messages)
-                ],
-            )
+            async for chunk in rose_client.complete(
+                pool=pool,
+                messages=messages,
+                response_format=response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                skip_cache=skip_cache,
+                claude_auth=claude_auth_from_token(claude_token),
+                agent_id=agent_id,
+                request_id=request_id,
+                call_site=call_site,
+            ):
+                chunk_count += 1
 
-            # Log FULL request for replay/debugging slow requests
-            log_body = {k: v for k, v in request_body.items() if k != "claude_token"}
-            logger.info(
-                "📋 Rose structured request FULL (for replay)",
-                url=config.rose.api_url,
-                request_body_json=json.dumps(log_body, default=str),
-            )
+                if not ttft_logged:
+                    ttft_ms = int((_safe_time() - request_start_time) * 1000)
+                    logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
+                    ttft_logged = True
 
-            # Heartbeat before starting - catches cancellation if pause was already clicked
-            _safe_heartbeat("Starting Rose LLM stream...")
+                kind = chunk.kind
 
-            request_start_time = _safe_time()
-            ttft_logged = False
+                if kind == "metadata":
+                    if chunk.data.get("actual_model"):
+                        actual_model = chunk.data["actual_model"]
+                        using_claude_auth = actual_model.endswith("-claude")
+                        logger.info(
+                            f"🎯 Rose model selected: {actual_model} (claudeAuth={using_claude_auth})"
+                        )
+                        if on_model_detected:
+                            on_model_detected(actual_model)
+                    if chunk.data.get("pool_name"):
+                        pool_name = chunk.data["pool_name"]
+                    if chunk.data.get("claude_token_error") and not claude_token_error:
+                        claude_token_error = chunk.data["claude_token_error"]
+                        logger.warning(f"⚠️ Claude token error from Rose: {claude_token_error}")
+                    continue
 
-            last_chunk_time = _safe_time()  # Track time since last chunk for stall detection
-            async with httpx.AsyncClient(timeout=httpx.Timeout(130.0, connect=30.0)) as http_client:  # noqa: SIM117
-                async with http_client.stream(
-                    "POST",
-                    config.rose.api_url,
-                    json=request_body,
-                    headers=rose_api_headers(
-                        api_key=config.rose.api_key,
-                        anon_key=config.rose.supabase_anon_key,
-                        call_site=call_site,
-                        fallback_request_id=request_id,
-                        fallback_agent_id=agent_id,
-                    ),
-                ) as stream_response:
-                    stream_response.raise_for_status()
-
-                    # Heartbeat after connection established - catches cancellation during initial request
-                    _safe_heartbeat("Rose stream connected, waiting for chunks...")
+                if kind == "usage":
+                    stream_usage = dict(chunk.data)
+                    final_finish_reason = stream_usage.get("finish_reason", "") or final_finish_reason
+                    cache_read = stream_usage.get("cache_read_input_tokens", 0) or 0
+                    cache_write = stream_usage.get("cache_creation_input_tokens", 0) or 0
+                    prompt_tokens = stream_usage.get("prompt_tokens", 0) or 0
+                    total_input = prompt_tokens + cache_read + cache_write
+                    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
                     logger.info(
-                        f"🔄 [{request_id}] Rose streaming response started, status={stream_response.status_code}"
+                        f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} "
+                        f"cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}% "
+                        f"finish={final_finish_reason}"
+                    )
+                    continue
+
+                if kind == "done":
+                    continue
+
+                if kind == "tool_call":
+                    # Native Anthropic tool from claudeAuth — buffer for envelope rebuild.
+                    args_raw = chunk.data.get("arguments", "")
+                    try:
+                        parsed_args = json.loads(args_raw) if args_raw else {}
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                    if not isinstance(parsed_args, dict):
+                        parsed_args = {}
+                    tool_name = chunk.data.get("name", "") or ""
+                    tool_use_blocks.append({"name": tool_name, "input": parsed_args})
+
+                    if first_tool_calls_chunk is None:
+                        first_tool_calls_chunk = chunk_count
+                        logger.info(f"🔧 C{chunk_count} TOOL_CALLS started (native)")
+
+                    # Fire on_tool_detected for non-attention tools.
+                    if on_tool_detected and tool_name and tool_name not in SKIP_EARLY_PROGRESS:
+                        tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
+                        position = detected_tool_positions.get(tool_name, 0)
+                        detected_tool_positions[tool_name] = position + 1
+                        logger.info(
+                            f"🔧 Tool detected (native): {tool_name} #{position + 1}, tool_call_id={tool_call_id}"
+                        )
+                        await on_tool_detected(tool_name, tool_call_id)
+
+                    # send_message_to_user on the claudeAuth path arrives complete; emit
+                    # the full message immediately rather than streaming partials.
+                    if on_attention_stream and tool_name == "send_message_to_user":
+                        attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        detected_tools_ordered.append(
+                            ("send_message_to_user", attention_tool_call_id, _safe_time())
+                        )
+                        message_text = parsed_args.get("message", "") or ""
+                        is_question = parsed_args.get("is_question", True)
+                        if not isinstance(is_question, bool):
+                            is_question = True
+                        if message_text:
+                            await on_attention_stream(attention_tool_call_id, message_text, is_question)
+                            last_attention_message = message_text
+                    continue
+
+                reasoning_delta = chunk.data.get("text", "") if kind == "reasoning" else ""
+                content = chunk.data.get("text", "") if kind == "content" else ""
+
+                if reasoning_delta:
+                    if first_reasoning_chunk is None:
+                        first_reasoning_chunk = chunk_count
+                        logger.info(f"🧠 C{chunk_count} REASONING started")
+                    accumulated_reasoning += reasoning_delta
+
+                if content:
+                    if using_claude_auth:
+                        # claudeAuth text precedes any tool_use blocks; treat as
+                        # the eventual response text and emit incrementally.
+                        text_buffer += content
+                        if first_response_chunk is None:
+                            first_response_chunk = chunk_count
+                            logger.info(f"💬 C{chunk_count} RESPONSE started (native text)")
+                    else:
+                        accumulated_json += content
+                        if first_response_chunk is None and '"response"' in accumulated_json:
+                            first_response_chunk = chunk_count
+                            logger.info(f"💬 C{chunk_count} RESPONSE started")
+                        if first_tool_calls_chunk is None and '"tool_calls"' in accumulated_json:
+                            first_tool_calls_chunk = chunk_count
+                            logger.info(f"🔧 C{chunk_count} TOOL_CALLS started")
+
+                token_count = (
+                    len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer)
+                ) // 4
+
+                # Periodic state log (every 50 chunks).
+                if chunk_count % 50 == 0:
+                    has_tool_calls = bool(tool_use_blocks) or '"tool_calls"' in accumulated_json
+                    has_response = bool(text_buffer) or '"response"' in accumulated_json
+                    state = (
+                        "reasoning"
+                        if reasoning_delta
+                        else ("tool_call" if has_tool_calls else ("response" if has_response else "json"))
+                    )
+                    logger.info(
+                        f"🔍 C{chunk_count} state={state} r_len={len(accumulated_reasoning)} "
+                        f"json_len={len(accumulated_json)} text_buf={len(text_buffer)} "
+                        f"has_tools={has_tool_calls}"
                     )
 
-                    # Watchdog task: heartbeat independently of stream data arrival
-                    # so Temporal doesn't timeout during true socket stalls
-                    watchdog_running = True
-
-                    async def _heartbeat_watchdog():
-                        while watchdog_running:
-                            await asyncio.sleep(30)
-                            if not watchdog_running:
-                                break
-                            elapsed_since_chunk = _safe_time() - last_chunk_time
-                            if elapsed_since_chunk > 30:
-                                logger.warning(f"⚠️ Stream stall detected ({int(elapsed_since_chunk)}s no data)")
-                                _safe_heartbeat(f"Stream stall {int(elapsed_since_chunk)}s")
-                            else:
-                                _safe_heartbeat("Streaming...")
-
-                    watchdog_task = asyncio.create_task(_heartbeat_watchdog())
-                    try:
-                      async for line in stream_response.aiter_lines():
-                        chunk_count += 1
-
-                        # Log TTFT on first chunk
-                        if not ttft_logged:
-                            ttft_ms = int((_safe_time() - request_start_time) * 1000)
-                            logger.info(f"⏱️ Rose structured TTFT: {ttft_ms}ms")
-                            ttft_logged = True
-
-                        last_chunk_time = _safe_time()
-
-
-                        if chunk_count == 1:
-                            logger.info("📦 First streaming line received")
-
-                        if not line or not line.startswith("data: "):
+                # Tool detection on waterfall path — regex-scan accumulated_json.
+                if (
+                    not using_claude_auth
+                    and on_tool_detected
+                    and '"tool_calls"' in accumulated_json
+                ):
+                    tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
+                    for tool_name in tool_matches:
+                        if tool_name in SKIP_EARLY_PROGRESS:
                             continue
-
-                        data_str = line[6:]  # Remove 'data: ' prefix
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk_data = json.loads(data_str)
-                            # logger.info(f"📊 Streaming chunk data: {chunk_data}")
-                            # Extract model info from first chunk
-                            if chunk_data.get("actual_model") and not actual_model_logged:
-                                actual_model = chunk_data["actual_model"]
-                                actual_model_logged = True
-                                logger.info(f"🎯 Rose model selected: {actual_model}")
-                                if on_model_detected:
-                                    on_model_detected(actual_model)
-                            if chunk_data.get("pool_name"):
-                                pool_name = chunk_data["pool_name"]
-                            if chunk_data.get("pool_size"):
-                                pool_size = chunk_data["pool_size"]
-                            if chunk_data.get("claude_token_error") and not claude_token_error:
-                                claude_token_error = chunk_data["claude_token_error"]
-                                logger.warning(f"⚠️ Claude token error from Rose: {claude_token_error}")
-
-                            # Capture usage from final chunk (sent when stream_options.include_usage=true)
-                            if chunk_data.get("usage"):
-                                stream_usage = chunk_data["usage"]
-                                cache_read = stream_usage.get("cache_read_input_tokens", 0)
-                                cache_write = stream_usage.get("cache_creation_input_tokens", 0)
-                                prompt_tokens = stream_usage.get("prompt_tokens", 0)
-                                total_input = prompt_tokens + cache_read + cache_write
-                                cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
-                                logger.info(
-                                    f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}%"
-                                )
-
-                            # Extract delta content
-                            choices = chunk_data.get("choices", [])
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta", {})
-
-                            # Extract reasoning from delta.reasoning (GPT-5.2, Gemini, DeepSeek use this)
-                            # NOTE: For structured streaming, reasoning is logged but NOT added to accumulated_content
-                            # because accumulated_content must be valid JSON for parsing at the end
-                            reasoning_delta = delta.get("reasoning") or ""
-                            content = delta.get("content") or ""
-                            fin = choices[0].get("finish_reason") or ""
-                            if fin:
-                                final_finish_reason = fin
-
-                            # DEBUG: Log every 50 chunks with state info
-                            if chunk_count % 50 == 0 or fin:
-                                # Determine current state based on content
-                                has_tool_calls = '"tool_calls"' in accumulated_json
-                                has_response = '"response"' in accumulated_json
-                                state = (
-                                    "reasoning"
-                                    if reasoning_delta
-                                    else ("tool_call" if has_tool_calls else ("response" if has_response else "json"))
-                                )
-                                logger.info(
-                                    f"🔍 C{chunk_count} state={state} r_len={len(accumulated_reasoning)} json_len={len(accumulated_json)} has_tools={has_tool_calls} fin={fin}"
-                                )
-
-                            # Accumulate reasoning and JSON separately
-                            if reasoning_delta:
-                                if first_reasoning_chunk is None:
-                                    first_reasoning_chunk = chunk_count
-                                    logger.info(f"🧠 C{chunk_count} REASONING started")
-                                accumulated_reasoning += reasoning_delta
-                            if content:
-                                accumulated_json += content
-                                # Track state transitions
-                                if first_response_chunk is None and '"response"' in accumulated_json:
-                                    first_response_chunk = chunk_count
-                                    logger.info(f"💬 C{chunk_count} RESPONSE started")
-                                if first_tool_calls_chunk is None and '"tool_calls"' in accumulated_json:
-                                    first_tool_calls_chunk = chunk_count
-                                    logger.info(f"🔧 C{chunk_count} TOOL_CALLS started")
-
-                            # Estimate tokens (rough: ~4 chars per token)
-                            token_count = (len(accumulated_reasoning) + len(accumulated_json)) // 4
-
-                            # Detect any tool calls and emit early IN_PROGRESS
-                            # Look for "tool": "tool_name" patterns in the JSON content
-                            # Skip tools that shouldn't show early IN_PROGRESS (direct user communication)
-                            SKIP_EARLY_PROGRESS = {"send_message_to_user", "attempt_completion"}
-
-                            if on_tool_detected and '"tool_calls"' in accumulated_json:
-                                tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
-                                for tool_name in tool_matches:
-                                    # Skip tools that shouldn't have early progress messages
-                                    if tool_name in SKIP_EARLY_PROGRESS:
-                                        continue
-
-                                    # Track position for this tool name (handles multiple same-name tools)
-                                    current_position = detected_tool_positions.get(tool_name, 0)
-                                    # Count how many of this tool we've already detected
-                                    existing_count = sum(1 for t, _, _ in detected_tools_ordered if t == tool_name)
-
-                                    # Only detect if this is a new occurrence
-                                    if (
-                                        existing_count < tool_matches.count(tool_name)
-                                        and existing_count == current_position
-                                    ):
-                                        # Log previous tool's params before emitting IN_PROGRESS for this tool
-                                        if len(detected_tools_ordered) > 0:
-                                            completed_tools = _extract_completed_tool_calls(accumulated_json)
-                                            prev_tool_idx = len(detected_tools_ordered) - 1
-                                            if prev_tool_idx < len(completed_tools):
-                                                prev_tool = completed_tools[prev_tool_idx]
-                                                logger.info(
-                                                    f"📋 Tool #{prev_tool_idx + 1} params captured before tool #{len(detected_tools_ordered) + 1} IN_PROGRESS: "
-                                                    f"name={prev_tool.get('tool')} params={prev_tool}"
-                                                )
-                                            else:
-                                                logger.warning(
-                                                    f"⚠️ Could not parse tool #{prev_tool_idx + 1} params before tool #{len(detected_tools_ordered) + 1} detection. "
-                                                    f"accumulated_json_tail={accumulated_json[-500:] if len(accumulated_json) > 500 else accumulated_json}"
-                                                )
-
-                                        tool_call_id = str(uuid.uuid4())
-                                        detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
-                                        detected_tool_positions[tool_name] = current_position + 1
-                                        logger.info(
-                                            f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}"
-                                        )
-                                        await on_tool_detected(tool_name, tool_call_id)
-
-                            # Stream send_message_to_user content progressively
-                            if on_attention_stream and '"send_message_to_user"' in accumulated_json:
-                                # Assign tool_call_id if not yet assigned
-                                if not attention_tool_call_id:
-                                    attention_tool_call_id = str(uuid.uuid4())
-                                    detected_tools_ordered.append(
-                                        ("send_message_to_user", attention_tool_call_id, _safe_time())
+                        current_position = detected_tool_positions.get(tool_name, 0)
+                        existing_count = sum(1 for t, _, _ in detected_tools_ordered if t == tool_name)
+                        if (
+                            existing_count < tool_matches.count(tool_name)
+                            and existing_count == current_position
+                        ):
+                            if len(detected_tools_ordered) > 0:
+                                completed_tools = _extract_completed_tool_calls(accumulated_json)
+                                prev_tool_idx = len(detected_tools_ordered) - 1
+                                if prev_tool_idx < len(completed_tools):
+                                    prev_tool = completed_tools[prev_tool_idx]
+                                    logger.info(
+                                        f"📋 Tool #{prev_tool_idx + 1} params captured before tool "
+                                        f"#{len(detected_tools_ordered) + 1} IN_PROGRESS: "
+                                        f"name={prev_tool.get('tool')} params={prev_tool}"
                                     )
-                                    logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
-
-                                # Extract message content
-                                msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"?', accumulated_json)
-                                if msg_match:
-                                    try:
-                                        attention_message = json.loads(f'"{msg_match.group(1)}"')
-                                    except json.JSONDecodeError:
-                                        attention_message = msg_match.group(1)
-
-                                    # Extract is_question (default True)
-                                    is_question = True
-                                    iq_match = re.search(r'"is_question"\s*:\s*(true|false)', accumulated_json)
-                                    if iq_match:
-                                        is_question = iq_match.group(1) == "true"
-
-                                    # Stream if message has grown
-                                    if attention_message and attention_message != last_attention_message:
-                                        last_attention_message = attention_message
-                                        await on_attention_stream(
-                                            attention_tool_call_id, attention_message, is_question
-                                        )
-
-                            # Extract response and track for deduplication
-                            response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
-                            if response_text and response_text != last_emitted_text:
-                                last_emitted_text = response_text
-
-                                # Only emit when 18+ new chars since last emit
-                                pending_delta = len(response_text) - len(last_emitted_for_chunk)
-                                if pending_delta >= 18:
-                                    # logger.info(f"📤 Emitting to on_chunk: delta={pending_delta} chars, total_response_len={len(response_text)}")
-                                    await on_chunk(response_text, token_count)
-                                    last_emitted_for_chunk = response_text
-
-                            # Heartbeat every 5 chunks with state info (fires on reasoning chunks too)
-                            if chunk_count % 5 == 0:
-                                # Determine current phase
-                                if reasoning_delta:
-                                    phase = "reasoning"
-                                elif detected_tools_ordered:
-                                    # Get the most recently detected tool
-                                    last_tool = detected_tools_ordered[-1][0]
-                                    phase = f"tool:{last_tool}"
-                                elif '"response"' in accumulated_json:
-                                    phase = "response"
                                 else:
-                                    phase = "json"
-                                _safe_heartbeat(
-                                    f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} j={len(accumulated_json)}"
-                                )
+                                    logger.warning(
+                                        f"⚠️ Could not parse tool #{prev_tool_idx + 1} params "
+                                        f"before tool #{len(detected_tools_ordered) + 1} detection. "
+                                        f"accumulated_json_tail={accumulated_json[-500:] if len(accumulated_json) > 500 else accumulated_json}"
+                                    )
+                            tool_call_id = str(uuid.uuid4())
+                            detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
+                            detected_tool_positions[tool_name] = current_position + 1
+                            logger.info(
+                                f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}"
+                            )
+                            await on_tool_detected(tool_name, tool_call_id)
 
-                            # Raw progress callback (every chunk)
-                            if on_raw_progress:
-                                await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json))
+                # Attention streaming on waterfall path — progressive partial emit.
+                if (
+                    not using_claude_auth
+                    and on_attention_stream
+                    and '"send_message_to_user"' in accumulated_json
+                ):
+                    if not attention_tool_call_id:
+                        attention_tool_call_id = str(uuid.uuid4())
+                        detected_tools_ordered.append(
+                            ("send_message_to_user", attention_tool_call_id, _safe_time())
+                        )
+                        logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
+
+                    msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"?', accumulated_json)
+                    if msg_match:
+                        try:
+                            attention_message = json.loads(f'"{msg_match.group(1)}"')
                         except json.JSONDecodeError:
-                            logger.error(f"Failed to parse chunk: {data_str}")
-                            continue
-                    finally:
-                      watchdog_running = False
-                      watchdog_task.cancel()
-                      try:
-                          await watchdog_task
-                      except asyncio.CancelledError:
-                          pass
+                            attention_message = msg_match.group(1)
+                        is_question = True
+                        iq_match = re.search(r'"is_question"\s*:\s*(true|false)', accumulated_json)
+                        if iq_match:
+                            is_question = iq_match.group(1) == "true"
+                        if attention_message and attention_message != last_attention_message:
+                            last_attention_message = attention_message
+                            await on_attention_stream(
+                                attention_tool_call_id, attention_message, is_question
+                            )
+
+                # Streaming text deltas to caller.
+                if using_claude_auth:
+                    # claudeAuth: text_buffer is the response text directly.
+                    if text_buffer and text_buffer != last_emitted_text:
+                        last_emitted_text = text_buffer
+                        pending_delta = len(text_buffer) - len(last_emitted_for_chunk)
+                        if pending_delta >= 18:
+                            await on_chunk(text_buffer, token_count)
+                            last_emitted_for_chunk = text_buffer
+                else:
+                    response_text = _extract_response_from_partial_json(
+                        accumulated_reasoning, accumulated_json
+                    )
+                    if response_text and response_text != last_emitted_text:
+                        last_emitted_text = response_text
+                        pending_delta = len(response_text) - len(last_emitted_for_chunk)
+                        if pending_delta >= 18:
+                            await on_chunk(response_text, token_count)
+                            last_emitted_for_chunk = response_text
+
+                if chunk_count % 5 == 0:
+                    if reasoning_delta:
+                        phase = "reasoning"
+                    elif detected_tools_ordered:
+                        phase = f"tool:{detected_tools_ordered[-1][0]}"
+                    elif using_claude_auth and text_buffer:
+                        phase = "response"
+                    elif '"response"' in accumulated_json:
+                        phase = "response"
+                    else:
+                        phase = "json"
+                    _safe_heartbeat(
+                        f"C{chunk_count} [{phase}] r={len(accumulated_reasoning)} "
+                        f"j={len(accumulated_json)} t={len(text_buffer)}"
+                    )
+
+                if on_raw_progress:
+                    await on_raw_progress(
+                        len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer)
+                    )
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
+        except RoseError as exc:
+            logger.error(
+                f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}"
+            )
+            raise ValueError(f"Rose streaming failed: {exc}") from exc
+
+        # On the claudeAuth path, rebuild the agent JSON envelope from native
+        # text + tool_use blocks once the stream is fully drained. This makes
+        # the existing accumulated_json parser work unchanged.
+        if not was_cancelled and using_claude_auth:
+            if tool_use_blocks:
+                accumulated_json = reconstruct_agent_response(text_buffer, tool_use_blocks)
+            elif text_buffer:
+                # Native text only (no tool_use) — treat as the JSON envelope
+                # body; existing markdown/balanced-brace extraction handles it.
+                accumulated_json = text_buffer
 
         if was_cancelled:
             logger.info(f"🛑 Rose streaming cancelled, returning partial usage: {token_count} tokens")
@@ -1801,103 +1759,57 @@ async def call_llm(
         config = load_config()
         model = model or config.openrouter.model
 
-        # Check if this is a Rose model - route to Supabase edge function
-        is_rose_model = model is not None and ("rose-labs" in model.lower() or model.lower() in ["rose", "rose-ultra"])
+        # Check if this is a Rose model — route directly to Anthropic / OpenRouter
+        # via the in-process RoseClient (replaces the Supabase edge function).
+        pool = pool_for_model(model) if model else None
 
-        if is_rose_model:
-            # Prefer the request_id already bound to the trace context so research
-            # spans nest under the caller; only mint when nothing is bound.
+        if pool is not None:
             request_id = current_request_id() or str(uuid.uuid4())[:8]
-            # Use httpx directly for Rose models (Supabase function is at /completions, not /chat/completions)
             logger.info(
-                f"📤 [{request_id}] [{call_site}] Routing Rose model to Supabase: {model} → {config.rose.api_url} skip_cache={skip_cache}"
+                f"📤 [{request_id}] [{call_site}] Routing Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
             )
 
-            request_body = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-            if response_format:
-                request_body["response_format"] = response_format
-            if claude_token:
-                request_body["claude_token"] = claude_token
-            if skip_cache:
-                request_body["skip_cache"] = True
-
-            # Log outbound request summary for debugging 400s
-            logger.debug(
-                f"📤 [{request_id}] Rose non-streaming request payload",
-                request_id=request_id,
-                model=request_body.get("model"),
-                message_count=len(messages),
-                has_response_format=bool(response_format),
-                messages_summary=[
-                    {
-                        "index": i,
-                        "role": m.get("role"),
-                        "has_content": bool(m.get("content")),
-                        "tool_calls": [
-                            {
-                                "id": tc.get("id"),
-                                "name": tc.get("function", {}).get("name"),
-                                "has_arguments": "arguments" in tc.get("function", {}),
-                                "arguments_type": type(tc.get("function", {}).get("arguments")).__name__,
-                                "arguments_preview": str(tc.get("function", {}).get("arguments"))[:50]
-                                if tc.get("function", {}).get("arguments")
-                                else "MISSING",
-                            }
-                            for tc in m.get("tool_calls", [])
-                        ]
-                        if m.get("tool_calls")
-                        else None,
-                        "tool_call_id": m.get("tool_call_id") if m.get("role") == "tool" else None,
-                    }
-                    for i, m in enumerate(messages)
-                ],
-            )
-
-            # Log FULL request for replay/debugging slow requests
-            logger.info(
-                f"📋 [{request_id}] Rose non-streaming request FULL (for replay)",
-                request_id=request_id,
-                url=config.rose.api_url,
-                request_body_json=json.dumps(request_body, default=str),
-            )
-
-            async with httpx.AsyncClient(timeout=120.0) as http_client:
-                http_response = await http_client.post(
-                    config.rose.api_url,
-                    json=request_body,
-                    headers=rose_api_headers(
-                        api_key=config.rose.api_key,
-                        anon_key=config.rose.supabase_anon_key,
-                        call_site=call_site,
-                        fallback_request_id=request_id,
-                        fallback_agent_id=agent_id,
-                    ),
+            rose_client = RoseClient()
+            try:
+                rose_response = await rose_client.collect(
+                    pool=pool,
+                    messages=messages,
+                    response_format=response_format,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    skip_cache=skip_cache,
+                    claude_auth=claude_auth_from_token(claude_token),
+                    agent_id=agent_id,
+                    request_id=request_id,
+                    call_site=call_site,
                 )
-                http_response.raise_for_status()
+            except RoseError as exc:
+                logger.error(
+                    f"❌ [{request_id}] Rose call failed: {type(exc).__name__}: {exc}",
+                    request_id=request_id,
+                    call_site=call_site,
+                )
+                raise ValueError(f"Rose call failed: {exc}") from exc
 
-            data = http_response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = rose_response.content
+            usage = rose_response.usage or {}
 
             result = {
                 "content": content,
-                "model": data.get("model", model),
-                "finish_reason": data.get("choices", [{}])[0].get("finish_reason", "stop"),
+                "model": rose_response.actual_model or model,
+                "finish_reason": "stop",
                 "usage": {
-                    "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
-                    "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
-                    "total_tokens": data.get("usage", {}).get("total_tokens", 0),
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
                 },
             }
 
             logger.info(
                 f"📥 [{request_id}] LLM call complete (Rose)",
                 request_id=request_id,
-                model=model,
+                model=rose_response.actual_model or model,
+                pool=rose_response.pool_name or pool,
                 tokens=result["usage"]["total_tokens"],
                 content_length=len(content),
                 content_preview=content[:100] if content else "EMPTY",
@@ -1979,97 +1891,85 @@ async def _call_llm_verifier(  # noqa: C901
     Returns:
         Tuple of (parsed JSON dict with reasoning, score, and optionally output), usage dict)
     """
-    request_body = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 4096,
-        "stream": True,
-        "response_format": _build_verifier_json_schema(response_schema),
-    }
+    pool = pool_for_model(model)
+    if pool is None:
+        raise ValueError(
+            f"_call_llm_verifier requires a Rose model (got {model!r}); "
+            f"non-Rose verifier path is not supported."
+        )
 
-    if claude_token:
-        request_body["claude_token"] = claude_token
+    response_format = _build_verifier_json_schema(response_schema)
 
     accumulated_reasoning = ""
     accumulated_json = ""
     actual_model = "unknown"
     pool_name = "unknown"
-    claude_token_error = None
+    claude_token_error: Optional[str] = None
+    tool_use_blocks: List[Dict[str, Any]] = []
     chunk_count = 0
-    stream_usage = None
+    stream_usage: Optional[Dict[str, Any]] = None
 
     stream_interrupted = False
-    # Prefer request_id from trace context; mint only when nothing is bound.
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
+    rose_client = RoseClient()
     try:
-        async with (
-            httpx.AsyncClient(timeout=60.0) as http_client,
-            http_client.stream(
-                "POST",
-                config.rose.api_url,
-                json=request_body,
-                headers=rose_api_headers(
-                    api_key=config.rose.api_key,
-                    anon_key=config.rose.supabase_anon_key,
-                    call_site=call_site,
-                    fallback_request_id=verifier_request_id,
-                    fallback_agent_id=agent_id,
-                ),
-            ) as stream_response,
+        async for chunk in rose_client.complete(
+            pool=pool,
+            messages=messages,
+            response_format=response_format,
+            temperature=0.3,
+            max_tokens=4096,
+            claude_auth=claude_auth_from_token(claude_token),
+            agent_id=agent_id,
+            request_id=verifier_request_id,
+            call_site=call_site,
         ):
-            stream_response.raise_for_status()
+            chunk_count += 1
+            if chunk_count % 10 == 0:
+                _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
 
-            async for line in stream_response.aiter_lines():
-                chunk_count += 1
-
-                if chunk_count % 10 == 0:
-                    _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
-
-                if not line or not line.startswith("data: "):
-                    continue
-
-                data_str = line[6:]
-                if data_str == "[DONE]":
-                    break
-
+            kind = chunk.kind
+            if kind == "metadata":
+                actual_model = chunk.data.get("actual_model", actual_model)
+                pool_name = chunk.data.get("pool_name", pool_name)
+                if chunk.data.get("claude_token_error") and not claude_token_error:
+                    claude_token_error = chunk.data["claude_token_error"]
+                    logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
+            elif kind == "content":
+                accumulated_json += chunk.data.get("text", "")
+            elif kind == "reasoning":
+                accumulated_reasoning += chunk.data.get("text", "")
+            elif kind == "tool_call":
+                # claudeAuth path uses native tools — buffer them and rebuild
+                # the {"reasoning","response","tool_calls"} envelope at the end.
+                args_raw = chunk.data.get("arguments", "")
                 try:
-                    chunk_data = json.loads(data_str)
-
-                    if chunk_data.get("actual_model"):
-                        actual_model = chunk_data["actual_model"]
-                    if chunk_data.get("pool_name"):
-                        pool_name = chunk_data["pool_name"]
-                    if chunk_data.get("claude_token_error") and not claude_token_error:
-                        claude_token_error = chunk_data["claude_token_error"]
-                        logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
-
-                    # Capture usage from final chunk (includes cache metrics)
-                    if chunk_data.get("usage"):
-                        stream_usage = chunk_data["usage"]
-
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-
-                    # Accumulate both reasoning and content
-                    if delta.get("reasoning"):
-                        accumulated_reasoning += delta["reasoning"]
-                    if delta.get("content"):
-                        accumulated_json += delta["content"]
-
+                    parsed_args = json.loads(args_raw) if args_raw else {}
                 except json.JSONDecodeError:
-                    continue
-    except (httpx.RemoteProtocolError, httpx.ReadError) as e:
-        # Connection dropped mid-stream - try to use whatever we accumulated
+                    parsed_args = {}
+                if not isinstance(parsed_args, dict):
+                    parsed_args = {}
+                tool_use_blocks.append({
+                    "name": chunk.data.get("name", ""),
+                    "input": parsed_args,
+                })
+            elif kind == "usage":
+                stream_usage = dict(chunk.data)
+            elif kind == "done":
+                pass
+    except RoseError as e:
         stream_interrupted = True
         logger.warning(
-            f"Verifier stream interrupted after {chunk_count} chunks, "
+            f"Verifier RoseClient error after {chunk_count} chunks, "
             f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
         )
 
-    # Log cache metrics if available
+    # Native tool_use blocks from claudeAuth → rebuild the verifier JSON envelope
+    # so the existing parser (which expects a single {reasoning, score, ...} blob)
+    # finds it via accumulated_json.
+    if tool_use_blocks:
+        accumulated_json = reconstruct_agent_response(accumulated_json, tool_use_blocks)
+
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
@@ -2278,7 +2178,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 async def check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
-    model: str = "anthropic/claude-sonnet-4.5",
+    model: str = "rose-labs/rose-1-lite",
     phase: str = "EXECUTE",  # Kept for backward compat but no longer used
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,

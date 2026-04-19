@@ -635,24 +635,24 @@ async def test_set_response_schema_activity_http_error():
 
 
 async def test_call_llm_rose_path():
-    """call_llm routes Rose models through the Rose completions endpoint."""
-    setup_mock({
-        "/completions": {
-            "status": 200,
-            "json": {
-                "choices": [
-                    {
-                        "message": {"content": "hello from rose"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "model": "rose-labs/rose-1-lite",
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 20,
-                    "total_tokens": 30,
-                },
+    """call_llm routes Rose models through the in-process Rose client (waterfall via OpenRouter)."""
+    sse = _sse_body([
+        {
+            "choices": [
+                {"delta": {"content": "hello from rose"}, "finish_reason": "stop"}
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30,
             },
+        }
+    ])
+    setup_mock({
+        "openrouter.ai/api/v1/chat/completions": {
+            "status": 200,
+            "text": sse,
+            "headers": {"Content-Type": "text/event-stream"},
         },
     })
 
@@ -673,17 +673,13 @@ async def test_call_llm_rose_path():
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache():
-    """call_llm forwards claude_token and skip_cache to Rose endpoint."""
+    """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache disables prompt caching."""
+    sse = _anthropic_sse_body(text="ok")
     setup_mock({
-        "/completions": {
+        "api.anthropic.com/v1/messages": {
             "status": 200,
-            "json": {
-                "choices": [
-                    {"message": {"content": "ok"}, "finish_reason": "stop"}
-                ],
-                "model": "rose",
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
+            "text": sse,
+            "headers": {"Content-Type": "text/event-stream"},
         },
     })
 
@@ -699,17 +695,27 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache():
             call_site="tester",
         )
 
+    # Verify the claudeAuth path was taken: Anthropic was called with the
+    # OAuth Bearer token and the request body shape matches Anthropic's API.
     captures = get_captured_requests()
-    body = json.loads(captures[0]["requestBody"])
-    assert body["claude_token"] == "ct-123"
-    assert body["skip_cache"] is True
-    assert body["response_format"] == {"type": "json_object"}
+    anthropic_calls = [c for c in captures if "api.anthropic.com" in c["url"]]
+    assert anthropic_calls, f"Expected an Anthropic call, got {[c['url'] for c in captures]}"
+    call = anthropic_calls[0]
+    # Authorization header is redacted in capture; just assert it was present.
+    assert any(k.lower() == "authorization" for k in call["requestHeaders"])
+    body = json.loads(call["requestBody"])
+    assert body["model"] == "claude-sonnet-4-6"
+    assert body["stream"] is True
+    assert isinstance(body["system"], list)  # identity + disclaimer + system blocks
+    # skip_cache=True means the system text block should NOT carry cache_control.
+    user_system_blocks = [b for b in body["system"] if "cache_control" in b]
+    assert user_system_blocks == [], f"skip_cache=True should disable cache_control, got {user_system_blocks}"
 
 
 async def test_call_llm_rose_http_error_raises():
-    """Rose 500 response raises."""
+    """Persistent 5xx from every waterfall step raises RoseAllFailed."""
     setup_mock({
-        "/completions": {
+        "openrouter.ai/api/v1/chat/completions": {
             "status": 500,
             "json": {"error": "boom"},
         },
@@ -726,7 +732,7 @@ async def test_call_llm_rose_http_error_raises():
             )
             raise AssertionError("Expected error")
         except Exception:
-            pass  # expected
+            pass  # expected — all waterfall steps return 500
 
 
 async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
@@ -1010,13 +1016,129 @@ async def test_build_llm_messages_assistant_tool_call_validation_errors():
 
 
 def _sse_body(chunks: list[dict]) -> str:
-    """Build a fake SSE stream body from a list of chunk dicts."""
+    """Build a fake OpenAI/OpenRouter SSE stream body from a list of chunk dicts.
+
+    Used to mock the waterfall path (no claude_token), which goes to
+    `https://openrouter.ai/api/v1/chat/completions`.
+    """
     out = []
     for c in chunks:
         out.append(f"data: {json.dumps(c)}")
     out.append("data: [DONE]")
     out.append("")
     return "\n".join(out)
+
+
+def _anthropic_sse_body(
+    *,
+    text: str = "",
+    tool_calls: list[dict] | None = None,
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    stop_reason: str = "end_turn",
+) -> str:
+    """Build an Anthropic native SSE stream body for the claudeAuth path.
+
+    Used to mock `https://api.anthropic.com/v1/messages` when a test sets
+    `claude_token=...`. Emits message_start → content_block_start →
+    content_block_delta(s) → content_block_stop per block → message_delta →
+    message_stop in the order Anthropic produces them.
+    """
+    tool_calls = tool_calls or []
+    lines: list[str] = []
+
+    def _ev(event: str, data: dict) -> None:
+        lines.append(f"event: {event}")
+        lines.append(f"data: {json.dumps(data)}")
+        lines.append("")
+
+    _ev(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_test",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cache_creation_input_tokens": cache_creation_tokens,
+                    "cache_read_input_tokens": cache_read_tokens,
+                },
+            },
+        },
+    )
+
+    block_idx = 0
+    if text:
+        _ev(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": block_idx,
+                "content_block": {"type": "text", "text": ""},
+            },
+        )
+        _ev(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": block_idx,
+                "delta": {"type": "text_delta", "text": text},
+            },
+        )
+        _ev(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": block_idx},
+        )
+        block_idx += 1
+
+    for tc in tool_calls:
+        tc_id = tc.get("id") or f"toolu_{block_idx}"
+        tc_name = tc["name"]
+        tc_input = tc.get("input", {})
+        _ev(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": block_idx,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tc_id,
+                    "name": tc_name,
+                    "input": {},
+                },
+            },
+        )
+        _ev(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": block_idx,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(tc_input),
+                },
+            },
+        )
+        _ev(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": block_idx},
+        )
+        block_idx += 1
+
+    _ev(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": output_tokens},
+        },
+    )
+    _ev("message_stop", {"type": "message_stop"})
+    return "\n".join(lines)
 
 
 async def test_call_llm_structured_streaming_happy_path():
@@ -1077,8 +1199,9 @@ async def test_call_llm_structured_streaming_happy_path():
     assert usage["completion_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
-    assert usage["actual_model"] == "claude-sonnet-4-6"
-    assert usage["pool_name"] == "test-pool"
+    # Waterfall path uses the first model in rose-1-lite's fallback list.
+    assert usage["actual_model"] == "google/gemini-3-flash-preview"
+    assert usage["pool_name"] == "rose-1-lite"
     assert usage["cancelled"] is False
     assert detected == []
 
@@ -1091,7 +1214,6 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     from utils.tool_schemas import create_agent_action_model
 
     payload = {
-        "actual_model": "claude-opus-4-7-claude",
         "choices": [
             {
                 "delta": {
@@ -1105,7 +1227,7 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     body = _sse_body([payload])
 
     def handler(req):
-        return httpx.Response(200, text=body)
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
 
@@ -1129,7 +1251,8 @@ async def test_call_llm_structured_streaming_model_detected_callback():
         call_site="test",
     )
 
-    assert seen_models == ["claude-opus-4-7-claude"]
+    # No claude_token → routes through waterfall → first model from rose-1-lite.
+    assert seen_models == ["google/gemini-3-flash-preview"]
 
 
 async def test_call_llm_verifier_streaming_parses_score():
@@ -1140,8 +1263,6 @@ async def test_call_llm_verifier_streaming_parses_score():
     from config import load_config
 
     payload = {
-        "actual_model": "claude-sonnet-4-5",
-        "pool_name": "verifier-pool",
         "choices": [
             {"delta": {"content": '{"reasoning": "looks good", "score": 0.75}'}}
         ],
@@ -1150,7 +1271,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     body = _sse_body([payload])
 
     def handler(req):
-        return httpx.Response(200, text=body)
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
 
@@ -1159,15 +1280,16 @@ async def test_call_llm_verifier_streaming_parses_score():
     with patch("temporalio.activity.heartbeat"):
         result, usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "x"}],
-            model="anthropic/claude-sonnet-4.5",
+            model="rose",
             config=config,
         )
 
     assert result["score"] == 0.75
     assert result["reasoning"] == "looks good"
     assert usage["prompt_tokens"] == 100
-    assert usage["actual_model"] == "claude-sonnet-4-5"
-    assert usage["pool_name"] == "verifier-pool"
+    # Waterfall path → first model from rose-1-lite.
+    assert usage["actual_model"] == "google/gemini-3-flash-preview"
+    assert usage["pool_name"] == "rose-1-lite"
 
 
 async def test_call_llm_verifier_claude_token_and_schema():
@@ -1177,17 +1299,18 @@ async def test_call_llm_verifier_claude_token_and_schema():
     from helpers.llm import _call_llm_verifier
     from config import load_config
 
-    payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "r", "score": 1.0, "output": {"summary": "ok"}}'}}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-    body = _sse_body([payload])
+    # claude_token is set → routes through claudeAuth path → Anthropic native SSE.
+    body = _anthropic_sse_body(
+        text='{"reasoning": "r", "score": 1.0, "output": {"summary": "ok"}}',
+    )
 
     captured: dict = {}
 
     def handler(req):
-        captured["body"] = json.loads(req.content.decode("utf-8"))
-        return httpx.Response(200, text=body)
+        if "api.anthropic.com" in str(req.url):
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+            captured["headers"] = dict(req.headers)
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
     config = load_config()
@@ -1195,14 +1318,17 @@ async def test_call_llm_verifier_claude_token_and_schema():
     with patch("temporalio.activity.heartbeat"):
         result, _usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "go"}],
-            model="model-x",
+            model="rose",
             config=config,
             response_schema={"fields": [{"name": "summary", "type": "str"}]},
             claude_token="ct-99",
         )
 
-    assert captured["body"]["claude_token"] == "ct-99"
-    assert "response_format" in captured["body"]
+    # Bearer token forwarded to Anthropic as-is.
+    assert captured["headers"].get("authorization") == "Bearer ct-99"
+    # Anthropic body uses claudeAuth model from rose-1-lite pool.
+    assert captured["body"]["model"] == "claude-sonnet-4-6"
+    assert captured["body"]["stream"] is True
     assert result["score"] == 1.0
     assert result["output"]["summary"] == "ok"
 
@@ -1226,7 +1352,7 @@ async def test_check_progress_happy_path():
     body = _sse_body([payload])
 
     def handler(req):
-        return httpx.Response(200, text=body)
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
 
@@ -1234,7 +1360,7 @@ async def test_check_progress_happy_path():
         result = await check_progress(
             context=[{"role": "USER", "text": "goal", "timestamp": "2024-01-01T00:00:00Z"}],
             verifier_system_prompt="VERIFY",
-            model="anthropic/claude-sonnet-4.5",
+            model="rose",
             response_schema={"fields": [{"name": "summary", "type": "str"}]},
         )
 
@@ -1294,11 +1420,8 @@ async def test_call_planner_llm_activity_happy_path():
         "dependencies_graph": [{"task_idx": "0", "depends_on": []}],
         "join": "all",
     })
-    payload = {
-        "choices": [{"delta": {"content": plan_json}}],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
-    }
-    body = _sse_body([payload])
+    # claude_max_token is set → routes through Anthropic claudeAuth path.
+    body = _anthropic_sse_body(text=plan_json, input_tokens=100, output_tokens=50)
 
     captured = {"calls": []}
 
@@ -1308,9 +1431,9 @@ async def test_call_planner_llm_activity_happy_path():
             parsed_body = json.loads(req.content.decode())
         except Exception:
             parsed_body = None
-        captured["calls"].append({"url": url, "body": parsed_body})
-        if "/completions" in url:
-            return httpx.Response(200, text=body)
+        captured["calls"].append({"url": url, "headers": dict(req.headers), "body": parsed_body})
+        if "api.anthropic.com" in url:
+            return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
         # Broadcast/realtime endpoints: return 200 empty
         return httpx.Response(200, json={"ok": True})
 
@@ -1331,15 +1454,23 @@ async def test_call_planner_llm_activity_happy_path():
     assert len(result["result"]["tasks"]) == 1
     assert result["usage"]["llm"][0]["tokens_in"] == 100
     assert result["usage"]["llm"][0]["tokens_out"] == 50
-    # Find the completions call specifically
-    completions_calls = [
-        c for c in captured["calls"] if "/completions" in c["url"] and c["body"]
+    anthropic_calls = [
+        c for c in captured["calls"] if "api.anthropic.com" in c["url"] and c["body"]
     ]
-    assert len(completions_calls) >= 1, f"No completions call captured; got {[c['url'] for c in captured['calls']]}"
-    planner_body = completions_calls[0]["body"]
-    # Planner should skip cache and forward claude_token
-    assert planner_body.get("skip_cache") is True, f"body keys: {list(planner_body.keys())}"
-    assert planner_body["claude_token"] == "ct-planner-123"
+    assert len(anthropic_calls) >= 1, (
+        f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
+    )
+    planner_body = anthropic_calls[0]["body"]
+    # Planner skips cache → no cache_control on user system blocks.
+    user_system_blocks = [
+        b for b in planner_body.get("system", []) if "cache_control" in b
+    ]
+    assert user_system_blocks == [], "skip_cache=True should disable cache_control"
+    # claude_token is forwarded as the Anthropic Bearer token, not in the body.
+    assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
+    # Anthropic uses the claudeAuth model from the rose-1-lite pool.
+    assert planner_body["model"] == "claude-sonnet-4-6"
+    assert planner_body["stream"] is True
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():
@@ -1665,29 +1796,30 @@ async def test_safe_heartbeat_no_raise_when_no_activity():
 
 
 async def test_call_llm_rose_with_usage_and_cache_fields():
-    """call_llm completes a non-streaming Rose request and returns usage."""
+    """call_llm streams a Rose response over OpenRouter SSE and returns content + usage."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm
 
-    payload = {
-        "id": "resp-1",
-        "choices": [{"message": {"content": "hi back"}}],
-        "usage": {
-            "prompt_tokens": 50,
-            "completion_tokens": 30,
-            "total_tokens": 80,
-            "cache_read_input_tokens": 10,
-            "cache_creation_input_tokens": 5,
+    sse = _sse_body([
+        {
+            "choices": [{"delta": {"content": "hi back"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 30,
+                "total_tokens": 80,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 5,
+            },
         },
-        "actual_model": "claude-sonnet-4-6",
-        "pool_name": "cache-pool",
-    }
+    ])
 
     def handler(req):
         url = str(req.url)
-        if "/completions" in url:
-            return httpx.Response(200, json=payload)
+        if "openrouter.ai/api/v1/chat/completions" in url:
+            return httpx.Response(
+                200, text=sse, headers={"Content-Type": "text/event-stream"}
+            )
         return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
@@ -1698,10 +1830,8 @@ async def test_call_llm_rose_with_usage_and_cache_fields():
         temperature=0.5,
         max_tokens=256,
     )
-    # call_llm returns a dict with content + usage
-    assert response is not None
-    # Either a raw dict shape or a content-based shape
     assert isinstance(response, dict)
+    assert response.get("content") == "hi back"
 
 
 async def test_convert_context_to_messages_non_terminal_tool_becomes_user():
@@ -1892,24 +2022,30 @@ async def test_call_llm_openrouter_path():
 
 
 async def test_call_llm_verifier_claude_token_error_surfaces():
-    """_call_llm_verifier captures claude_token_error from stream chunks."""
+    """When claudeAuth Anthropic call fails 401, RoseClient falls through to
+    waterfall and surfaces `claude_token_error` on the metadata chunk."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import _call_llm_verifier
     from config import load_config
 
-    chunks = [
+    waterfall_body = _sse_body([
         {
-            "claude_token_error": "401 Unauthorized",
-            "actual_model": "claude-sonnet-4-6",
             "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 0.5}'}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
-        },
-    ]
-    body = _sse_body(chunks)
+        }
+    ])
 
     def handler(req):
-        return httpx.Response(200, text=body)
+        url = str(req.url)
+        if "api.anthropic.com" in url:
+            # 401 from Anthropic → RoseAuthError → fall through to waterfall.
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+        if "openrouter.ai/api/v1/chat/completions" in url:
+            return httpx.Response(
+                200, text=waterfall_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
     config = load_config()
@@ -1923,7 +2059,8 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
             call_site="verifier-err",
         )
 
-    assert usage["claude_token_error"] == "401 Unauthorized"
+    # auth failure on claudeAuth path is classified as auth_error.
+    assert usage.get("claude_token_error") == "auth_error"
     assert result["score"] == 0.5
 
 
@@ -2363,6 +2500,7 @@ async def test_call_llm_structured_streaming_no_json_content_raises():
     async def on_chunk(text, tokens):
         pass
 
+    # An empty stream stalls in the waterfall; both pool steps fail → RoseAllFailed.
     raised = False
     try:
         await call_llm_structured_streaming(
@@ -2374,8 +2512,14 @@ async def test_call_llm_structured_streaming_no_json_content_raises():
             on_chunk=on_chunk,
             call_site="empty",
         )
-    except ValueError as e:
-        assert "No JSON" in str(e) or "Failed to parse" in str(e)
+    except Exception as e:
+        msg = str(e)
+        assert (
+            "No JSON" in msg
+            or "Failed to parse" in msg
+            or "waterfall" in msg
+            or "stream closed" in msg
+        ), f"unexpected error: {msg}"
         raised = True
     assert raised
 
@@ -2681,7 +2825,8 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
             call_site="verifier-test",
         )
     assert parsed["score"] == 0.9
-    assert usage["actual_model"] == "claude-sonnet-4"
+    # Waterfall path → first model from rose-1-lite pool.
+    assert usage["actual_model"] == "google/gemini-3-flash-preview"
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 1
 

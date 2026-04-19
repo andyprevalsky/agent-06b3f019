@@ -21,7 +21,7 @@ import {
   createStreamingCompletion,
   CompletionMessage,
   CompletionChunk,
-} from '../chat/supabaseCompletions';
+} from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
 import { TOOL_SCHEMAS, executeToolCall, ToolCall, ToolResult } from './supervisorTools';

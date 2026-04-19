@@ -7,14 +7,13 @@ import { z } from 'zod';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
+import {
+  createStreamingCompletion,
+  RoseAuthError,
+  RoseInvalidRequest,
+} from './rose';
 
 const log = createLogger('ResponseSchema');
-
-// Use local Supabase functions in development, production URL otherwise
-const SUPABASE_FUNCTIONS_URL =
-  process.env.NODE_ENV === 'production'
-    ? 'https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1'
-    : `http://localhost:${process.env.RESEARCH_PORT || '54321'}/functions/v1`;
 
 // Schema field types supported
 const FieldTypeSchema = z.enum([
@@ -113,20 +112,11 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
 };
 
 function isRetryableSchemaError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return true;
-  }
-
-  // These are generally configuration issues and should fail fast.
-  const nonRetryableStatuses = [
-    'Rose API error: 400',
-    'Rose API error: 401',
-    'Rose API error: 403',
-  ];
-  if (nonRetryableStatuses.some((status) => error.message.startsWith(status))) {
+  // Auth / bad-request errors from the Rose provider are configuration
+  // issues — fail fast rather than burning retries.
+  if (error instanceof RoseAuthError || error instanceof RoseInvalidRequest) {
     return false;
   }
-
   return true;
 }
 
@@ -136,7 +126,6 @@ function isRetryableSchemaError(error: unknown): boolean {
  */
 export async function generateResponseSchema(goal: string): Promise<GenerateResult> {
   const startTime = Date.now();
-  const roseApiUrl = `${SUPABASE_FUNCTIONS_URL}/completions`;
   const maxGenerationAttempts = 3;
 
   const systemPrompt = `You are an expert at analyzing agent goals and determining what structured output they should produce.
@@ -164,45 +153,36 @@ SUPPORTED TYPES:
 
   for (let attempt = 1; attempt <= maxGenerationAttempts; attempt++) {
     try {
-      const response = await fetch(roseApiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
-          'x-api-key': process.env.ROSE_API_KEY!,
-        },
-        body: JSON.stringify({
-          model: 'rose-labs/rose-1-lite',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Goal: ${goal}` },
-          ],
-          temperature: 0.3,
-          max_tokens: 2000,
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'response_schema',
-              strict: true,
-              schema: RESPONSE_SCHEMA_JSON_SCHEMA,
-            },
+      const stream = await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Goal: ${goal}` },
+        ],
+        temperature: 0.3,
+        max_tokens: 2000,
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'response_schema',
+            strict: true,
+            schema: RESPONSE_SCHEMA_JSON_SCHEMA,
           },
-        }),
+        },
       });
 
-      if (!response.ok) {
-        const errorBody = await response.text().catch(() => '');
-        throw new Error(
-          `Rose API error: ${response.status} ${response.statusText}${errorBody ? ` - ${errorBody.substring(0, 200)}` : ''}`
-        );
+      let content = '';
+      let tokensIn = 0;
+      let tokensOut = 0;
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta;
+        if (delta?.content) content += delta.content;
+        if (chunk.usage) {
+          tokensIn = chunk.usage.prompt_tokens ?? tokensIn;
+          tokensOut = chunk.usage.completion_tokens ?? tokensOut;
+        }
       }
 
-      const data = (await response.json()) as {
-        choices: Array<{ message: { content: string } }>;
-        usage?: { prompt_tokens: number; completion_tokens: number };
-      };
-
-      const content = data.choices[0]?.message?.content;
       if (!content) {
         throw new Error('LLM returned no content');
       }
@@ -219,9 +199,6 @@ SUPPORTED TYPES:
 
       // Validate with Zod
       const result = ResponseSchemaSchema.parse(parsed);
-
-      const tokensIn = data.usage?.prompt_tokens || 0;
-      const tokensOut = data.usage?.completion_tokens || 0;
 
       const durationMs = Date.now() - startTime;
       log.info('Generated response schema via Rose Lite', {

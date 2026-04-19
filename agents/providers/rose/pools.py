@@ -1,0 +1,86 @@
+"""Model pool registry — single source of truth for Rose's pool definitions.
+
+Both rose-1-lite and rose-1-ultra share the same code path (claudeAuth ->
+waterfall); the only difference is which models are tried at each layer.
+
+Model contract (P1):
+
+    rose-1-lite:
+        claudeAuth = claude-sonnet-4-6
+        waterfall  = google/gemini-3-flash-preview -> moonshotai/kimi-k2.5
+
+    rose-1-ultra:
+        claudeAuth = claude-opus-4-7
+        waterfall  = anthropic/claude-opus-4.7 -> google/gemini-3.1-pro-preview
+                     (opus via OpenRouter — different stack from claudeAuth's
+                      direct Anthropic call, so a real fallback)
+
+Note: today's research/.../claude-token.ts hardcodes claudeAuth to
+claude-sonnet-4-6 for *both* pools. The ultra->opus mapping below is a
+behavioral change introduced in P1 (per the user spec), not a port.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Literal, Tuple
+
+PoolName = Literal["rose-1-lite", "rose-1-ultra", "rose-1-browser-use"]
+
+
+@dataclass(frozen=True)
+class PoolSpec:
+    """One pool's claudeAuth model + ordered waterfall fallback list."""
+
+    name: PoolName
+    claude_auth_model: str
+    """Anthropic model ID used when a Claude OAuth token is supplied."""
+
+    waterfall: Tuple[str, ...]
+    """Provider-prefixed model IDs tried in order if claudeAuth fails (or
+    is unavailable). Format matches OpenRouter's `provider/model` convention,
+    which the transport layer maps to the right endpoint."""
+
+
+POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
+    "rose-1-lite": PoolSpec(
+        name="rose-1-lite",
+        claude_auth_model="claude-sonnet-4-6",
+        waterfall=(
+            "google/gemini-3-flash-preview",
+            "moonshotai/kimi-k2.5",
+        ),
+    ),
+    "rose-1-ultra": PoolSpec(
+        name="rose-1-ultra",
+        claude_auth_model="claude-opus-4-7",
+        waterfall=(
+            "anthropic/claude-opus-4.7",
+            "google/gemini-3.1-pro-preview",
+        ),
+    ),
+    # Browser-use shares the claudeAuth + waterfall machinery; the only
+    # browser-specific bits live in transforms (Anthropic-native tool schemas
+    # for AVAILABLE_ACTIONS) and the response extractor (tool_use -> UnifiedAction).
+    "rose-1-browser-use": PoolSpec(
+        name="rose-1-browser-use",
+        claude_auth_model="claude-opus-4-7",
+        waterfall=(
+            "anthropic/claude-opus-4.7",
+            "openai/gpt-5.4",
+        ),
+    ),
+}
+
+
+def get_pool(name: str) -> PoolSpec:
+    """Resolve a pool name to its spec. Raises ValueError on unknown pool."""
+    if name not in POOL_REGISTRY:
+        valid = ", ".join(sorted(POOL_REGISTRY.keys()))
+        raise ValueError(f"Unknown Rose pool {name!r} (valid: {valid})")
+    return POOL_REGISTRY[name]  # type: ignore[index]
+
+
+def all_pool_names() -> List[str]:
+    """Stable-ordered list of supported pool names (for validation / docs)."""
+    return sorted(POOL_REGISTRY.keys())

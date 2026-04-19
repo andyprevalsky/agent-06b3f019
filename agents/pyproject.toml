@@ -81,7 +81,6 @@ known-first-party = [
 "helpers.error_utils".msg = "Moved to utils.error_utils — use `from utils.error_utils import ...`."
 "helpers.format_tool_display".msg = "Moved to utils.format_tool_display — use `from utils.format_tool_display import ...`."
 "helpers.prompts".msg = "Moved to utils.prompts — use `from utils.prompts import ...`."
-"helpers.rose_types".msg = "Moved to utils.rose_types — use `from utils.rose_types import ...`."
 "helpers.terminal_filter".msg = "Moved to utils.terminal_filter — use `from utils.terminal_filter import ...`."
 "helpers.usage".msg = "Moved to utils.usage — use `from utils.usage import ...`."
 "helpers.utils".msg = "Moved to utils.utils — use `from utils.utils import ...`."

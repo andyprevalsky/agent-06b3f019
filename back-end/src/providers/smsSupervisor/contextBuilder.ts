@@ -9,7 +9,7 @@
  */
 
 import { prisma } from '../database';
-import { CompletionMessage } from '../chat/supabaseCompletions';
+import { CompletionMessage } from '../rose';
 import { getAgentUrl } from '../smsTemplates';
 
 // Tool names whose messages are visible to users in the frontend

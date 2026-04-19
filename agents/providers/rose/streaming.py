@@ -1,0 +1,465 @@
+"""SSE parsing for the Rose client.
+
+Single replacement for the three duplicated SSE parsers that previously lived
+inline in `helpers/llm.py` (`call_llm`, `call_llm_structured_streaming`,
+`_call_llm_verifier`). Both Anthropic-native and OpenAI/OpenRouter-compatible
+event streams collapse to one normalized output: an `AsyncIterator[StreamChunk]`
+that begins with a `metadata` chunk, yields any number of `content` /
+`tool_call` / `reasoning` chunks, then exactly one `usage` chunk and one `done`
+chunk on clean completion.
+
+Behavior is intentionally identical to
+`research/domains/completions/service/streaming.ts`:
+  - Anthropic `message_start` carries `input_tokens` + cache metrics; the
+    final `message_delta` carries `output_tokens`. Both are folded into a
+    single OpenAI-shaped usage dict.
+  - Anthropic `tool_use` content blocks yield raw `tool_call` chunks
+    (id + name + accumulated `input_json_delta` fragments). Native-tool
+    JSON-envelope reconstruction is the caller's responsibility, not ours.
+  - OpenAI tool_calls stream as deltas keyed by `index`; we accumulate
+    arguments per index and flush one `tool_call` chunk per call when the
+    stream ends or `finish_reason` arrives.
+  - Idle timeout: if more than `idle_timeout_s` elapses between SSE lines,
+    the response is closed and `RoseStallError` is raised. An empty stream
+    (no content, no tool_call) raises `RoseStallError` for the same reason
+    the TS waterfall counts an empty stream as a failed step.
+
+The functions are Temporal-free: no `temporalio`, no `helpers.llm` imports.
+This keeps them unit-testable in plain `pytest` and avoids circular deps when
+`helpers/llm.py` migrates to call this module.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, AsyncIterator, Dict, Optional, Protocol
+
+import structlog
+
+from providers.rose.errors import RoseStallError
+from providers.rose.types import StreamChunk
+
+logger = structlog.get_logger()
+
+
+class _LineStream(Protocol):
+    """Minimal interface we need from `httpx.Response` for SSE parsing.
+
+    Declared as a Protocol so tests can pass a fake stream without standing
+    up an httpx server.
+    """
+
+    def aiter_lines(self) -> AsyncIterator[str]: ...
+
+    async def aclose(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+async def parse_anthropic_sse(
+    response: _LineStream,
+    *,
+    actual_model: str,
+    pool_name: str,
+    request_id: str,
+    idle_timeout_s: float = 60.0,
+) -> AsyncIterator[StreamChunk]:
+    """Parse Anthropic's native SSE format into normalized StreamChunks.
+
+    Yields, in order:
+      1. one `metadata` chunk (actual_model, pool_name, request_id)
+      2. zero or more `content`, `reasoning`, `tool_call` chunks
+      3. one `usage` chunk (prompt/completion/total + cache metrics)
+      4. one `done` chunk
+
+    Args:
+        response: streaming response exposing `aiter_lines()` + `aclose()`
+        actual_model: model name resolved by the orchestrator (e.g.
+            `claude-sonnet-4-6-claude` for the claudeAuth path)
+        pool_name: pool the model was selected from (e.g. `claude-token`)
+        request_id: caller-provided correlation id for logging
+        idle_timeout_s: max seconds between SSE lines before stalling
+
+    Raises:
+        RoseStallError: if the stream goes idle past `idle_timeout_s`, or
+            closes without emitting any content / tool_call chunks.
+    """
+    yield StreamChunk(
+        kind="metadata",
+        data={
+            "actual_model": actual_model,
+            "pool_name": pool_name,
+            "request_id": request_id,
+        },
+    )
+
+    input_tokens = 0
+    output_tokens = 0
+    cache_creation_tokens = 0
+    cache_read_tokens = 0
+    finish_reason: str = ""
+
+    # Per-content-block state. Anthropic streams blocks one-at-a-time so a
+    # single mutable slot is sufficient.
+    current_block_kind: Optional[str] = None  # "text" | "thinking" | "tool_use"
+    current_tool_id: Optional[str] = None
+    current_tool_name: Optional[str] = None
+    current_tool_args: list[str] = []
+
+    emitted_content_or_tool = False
+
+    try:
+        async for line in _iter_with_idle_timeout(response, idle_timeout_s, request_id):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                # Anthropic sends "event: <name>" + "data: <json>" pairs;
+                # the JSON's own `type` field carries the same info, so the
+                # event line is redundant — skip cleanly.
+                continue
+            if not line.startswith("data: "):
+                continue
+
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                # Anthropic does not normally emit [DONE], but tolerate it
+                # in case a proxy injects one.
+                break
+
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "rose.sse.parse_error",
+                    request_id=request_id,
+                    provider="anthropic",
+                    error=str(exc),
+                    snippet=data_str[:200],
+                )
+                continue
+
+            event_type = event.get("type")
+
+            if event_type == "message_start":
+                msg_usage = (event.get("message") or {}).get("usage") or {}
+                input_tokens = msg_usage.get("input_tokens", 0) or 0
+                cache_creation_tokens = msg_usage.get("cache_creation_input_tokens", 0) or 0
+                cache_read_tokens = msg_usage.get("cache_read_input_tokens", 0) or 0
+                continue
+
+            if event_type == "message_delta":
+                delta_usage = event.get("usage") or {}
+                if delta_usage.get("output_tokens"):
+                    output_tokens = delta_usage["output_tokens"]
+                stop_reason = (event.get("delta") or {}).get("stop_reason")
+                if stop_reason:
+                    # Map Anthropic stop_reason -> OpenAI-style finish_reason so
+                    # callers can branch on a single vocabulary.
+                    finish_reason = {
+                        "end_turn": "stop",
+                        "max_tokens": "length",
+                        "stop_sequence": "stop",
+                        "tool_use": "tool_calls",
+                    }.get(stop_reason, stop_reason)
+                continue
+
+            if event_type == "content_block_start":
+                block = event.get("content_block") or {}
+                block_type = block.get("type")
+                if block_type == "tool_use":
+                    current_block_kind = "tool_use"
+                    current_tool_id = block.get("id")
+                    current_tool_name = block.get("name") or ""
+                    current_tool_args = []
+                elif block_type == "thinking":
+                    current_block_kind = "thinking"
+                elif block_type == "text":
+                    current_block_kind = "text"
+                else:
+                    current_block_kind = None
+                continue
+
+            if event_type == "content_block_delta":
+                delta = event.get("delta") or {}
+                delta_type = delta.get("type")
+
+                if delta_type == "text_delta":
+                    text = delta.get("text") or ""
+                    if text:
+                        emitted_content_or_tool = True
+                        yield StreamChunk(kind="content", data={"text": text})
+                elif delta_type == "thinking_delta":
+                    text = delta.get("thinking") or ""
+                    if text:
+                        emitted_content_or_tool = True
+                        yield StreamChunk(kind="reasoning", data={"text": text})
+                elif delta_type == "input_json_delta":
+                    fragment = delta.get("partial_json") or ""
+                    if fragment:
+                        current_tool_args.append(fragment)
+                continue
+
+            if event_type == "content_block_stop":
+                if current_block_kind == "tool_use" and current_tool_name is not None:
+                    arguments = "".join(current_tool_args)
+                    emitted_content_or_tool = True
+                    yield StreamChunk(
+                        kind="tool_call",
+                        data={
+                            "id": current_tool_id or "",
+                            "name": current_tool_name,
+                            "arguments": arguments,
+                        },
+                    )
+                current_block_kind = None
+                current_tool_id = None
+                current_tool_name = None
+                current_tool_args = []
+                continue
+
+            if event_type == "message_stop":
+                # Wait for the loop to drain naturally so any trailing
+                # `message_delta` usage event is captured first.
+                continue
+
+            if event_type == "error":
+                err = event.get("error") or {}
+                logger.warning(
+                    "rose.sse.provider_error",
+                    request_id=request_id,
+                    provider="anthropic",
+                    message=err.get("message"),
+                    error_type=err.get("type"),
+                )
+                continue
+    finally:
+        await _close_quietly(response)
+
+    if not emitted_content_or_tool:
+        raise RoseStallError(
+            f"Anthropic stream closed without content or tool_call (request_id={request_id})"
+        )
+
+    yield StreamChunk(
+        kind="usage",
+        data={
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cache_creation_input_tokens": cache_creation_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
+            "finish_reason": finish_reason,
+        },
+    )
+    yield StreamChunk(kind="done", data={})
+
+
+async def parse_openai_sse(
+    response: _LineStream,
+    *,
+    actual_model: str = "",
+    pool_name: str = "",
+    request_id: str,
+    idle_timeout_s: float = 60.0,
+) -> AsyncIterator[StreamChunk]:
+    """Parse OpenAI / OpenRouter SSE format into normalized StreamChunks.
+
+    Same output contract as `parse_anthropic_sse`, so callers don't need to
+    branch on provider when consuming the stream.
+
+    Tool-call accumulation: OpenAI streams tool_calls as deltas with an
+    integer `index` and partial `arguments` strings. We accumulate per
+    index and flush one `tool_call` chunk per index when the stream
+    finishes (or when a `finish_reason` arrives — see streaming.ts for
+    the matching TS behavior).
+
+    `reasoning_content` (Gemini 3 Pro thinking) and `reasoning` (Anthropic
+    via OpenRouter, GPT-5.2, DeepSeek) are both folded into `reasoning`
+    chunks. The TS edge function emits `delta.reasoning`; some providers
+    use the `reasoning_content` key on the raw upstream response.
+    """
+    yield StreamChunk(
+        kind="metadata",
+        data={
+            "actual_model": actual_model,
+            "pool_name": pool_name,
+            "request_id": request_id,
+        },
+    )
+
+    usage: Dict[str, Any] = {}
+    finish_reason: str = ""
+    # tool_calls keyed by streaming index — matches OpenAI's contract that
+    # the same index refers to the same call across deltas.
+    tool_calls: Dict[int, Dict[str, Any]] = {}
+    flushed_tool_indices: set[int] = set()
+    emitted_content_or_tool = False
+    saw_done = False
+
+    def _flush_tool_calls() -> list[StreamChunk]:
+        chunks: list[StreamChunk] = []
+        for idx in sorted(tool_calls.keys()):
+            if idx in flushed_tool_indices:
+                continue
+            tc = tool_calls[idx]
+            chunks.append(
+                StreamChunk(
+                    kind="tool_call",
+                    data={
+                        "id": tc.get("id", ""),
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("arguments", ""),
+                    },
+                )
+            )
+            flushed_tool_indices.add(idx)
+        return chunks
+
+    try:
+        async for line in _iter_with_idle_timeout(response, idle_timeout_s, request_id):
+            if not line or not line.startswith("data: "):
+                continue
+
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                saw_done = True
+                break
+
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "rose.sse.parse_error",
+                    request_id=request_id,
+                    provider="openai",
+                    error=str(exc),
+                    snippet=data_str[:200],
+                )
+                continue
+
+            # Capture cumulative usage. OpenRouter/OpenAI either deliver
+            # this on a final dedicated chunk (stream_options.include_usage)
+            # or interleave it; either way the latest value wins.
+            if event.get("usage"):
+                usage = event["usage"]
+
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+
+            content = delta.get("content")
+            if content:
+                emitted_content_or_tool = True
+                yield StreamChunk(kind="content", data={"text": content})
+
+            # Two key spellings exist in the wild:
+            #   - `reasoning`         (TS edge function transforms to this)
+            #   - `reasoning_content` (Gemini 3 Pro thinking, raw upstream)
+            reasoning_text = delta.get("reasoning") or delta.get("reasoning_content")
+            if reasoning_text:
+                emitted_content_or_tool = True
+                yield StreamChunk(kind="reasoning", data={"text": reasoning_text})
+
+            for tc_delta in delta.get("tool_calls") or []:
+                index = tc_delta.get("index", 0)
+                slot = tool_calls.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""}
+                )
+                if tc_delta.get("id"):
+                    slot["id"] = tc_delta["id"]
+                fn = tc_delta.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
+
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+                # Flush any tool_calls that completed under this finish so
+                # downstream consumers see them before the usage chunk.
+                for chunk in _flush_tool_calls():
+                    emitted_content_or_tool = True
+                    yield chunk
+    finally:
+        await _close_quietly(response)
+
+    # Flush any tool_calls that streamed without a finish_reason landing
+    # before the [DONE] sentinel.
+    for chunk in _flush_tool_calls():
+        emitted_content_or_tool = True
+        yield chunk
+
+    if not emitted_content_or_tool:
+        # An empty stream is a stall in the TS waterfall sense: the
+        # connection opened, no content arrived, the connection closed.
+        raise RoseStallError(
+            f"OpenAI/OpenRouter stream closed without content or tool_call "
+            f"(request_id={request_id}, saw_done={saw_done})"
+        )
+
+    yield StreamChunk(
+        kind="usage",
+        data={
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+            "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+            "finish_reason": finish_reason,
+        },
+    )
+    yield StreamChunk(kind="done", data={})
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+async def _iter_with_idle_timeout(
+    response: _LineStream,
+    idle_timeout_s: float,
+    request_id: str,
+) -> AsyncIterator[str]:
+    """Yield SSE lines from `response`, raising `RoseStallError` if more
+    than `idle_timeout_s` elapses between consecutive lines.
+
+    Mirrors the per-read `withTimeout` pattern in streaming.ts, where the
+    timer is reset only when the next read returns. We resolve the iterator
+    once, then call `__anext__` per loop so each await can be wrapped in
+    `asyncio.wait_for` independently.
+    """
+    iterator = response.aiter_lines().__aiter__()
+    while True:
+        try:
+            line = await asyncio.wait_for(iterator.__anext__(), timeout=idle_timeout_s)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "rose.sse.idle_timeout",
+                request_id=request_id,
+                idle_timeout_s=idle_timeout_s,
+            )
+            raise RoseStallError(
+                f"SSE stream idle for >{idle_timeout_s}s (request_id={request_id})"
+            ) from exc
+        yield line
+
+
+async def _close_quietly(response: _LineStream) -> None:
+    """Close the response, swallowing any error. The stream may already be
+    closed (clean EOF) or in a half-broken state (idle timeout); either way
+    we want the caller to see the original failure, not a close error.
+    """
+    try:
+        await response.aclose()
+    except Exception as exc:
+        logger.debug("rose.sse.close_error", error=str(exc))

@@ -5,7 +5,7 @@
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
-import { createStreamingCompletion } from './supabaseCompletions';
+import { createStreamingCompletion } from '../rose';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { downloadFromStorage } from '../storage';
