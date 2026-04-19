@@ -54,6 +54,8 @@ cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawn
 cd agents && bash scripts/run-coverage.sh            # Agents coverage check (enforces fail_under)
 cd agents && bash scripts/run-coverage.sh --report   # Detailed report without threshold
 cd agents && bash scripts/run-coverage.sh --html     # HTML report in htmlcov/
+cd mac-app && npm run test                   # Mac-app blackbox suite (vitest + MSW, jsdom)
+cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: single domain
 ```
 
 **Code coverage:**

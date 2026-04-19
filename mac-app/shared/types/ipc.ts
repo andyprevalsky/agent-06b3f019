@@ -63,7 +63,10 @@ export interface IPC {
 
   // Browser cookies (multi-browser support)
   getInstalledBrowsers: () => Promise<BrowserInfo[]>;
-  readBrowserCookies: (browser: BrowserType, config?: ReadBrowserCookiesConfig) => Promise<CookieData[]>;
+  readBrowserCookies: (
+    browser: BrowserType,
+    config?: ReadBrowserCookiesConfig
+  ) => Promise<CookieData[]>;
   uploadBrowserCookies: (browser: BrowserType, data: CookieData[]) => Promise<UploadResult>;
 
   // Full browser sync (cookies + localStorage + IndexedDB + permissions + Cache Storage in parallel)
@@ -71,7 +74,10 @@ export interface IPC {
 
   // Password-only sync (just reads and uploads passwords, not full browser state)
   // For Atlas, pass keychainPassword in config
-  syncBrowserPasswords: (browser: BrowserType, config?: { keychainPassword?: string }) => Promise<UploadResult>;
+  syncBrowserPasswords: (
+    browser: BrowserType,
+    config?: { keychainPassword?: string }
+  ) => Promise<UploadResult>;
 
   // Fingerprint
   collectFingerprint: () => Promise<FingerprintData | null>;
@@ -112,7 +118,7 @@ export interface IPC {
   };
 
   // Claude Code setup status events
-  onClaudeSetupStatus?: (callback: (status: string) => void) => (() => void);
+  onClaudeSetupStatus?: (callback: (status: string) => void) => () => void;
 
   // Atlas credentials
   atlas?: {
@@ -132,7 +138,7 @@ export interface IPC {
   };
 
   // WhatsApp events
-  onWhatsAppQRCode?: (callback: (qr: string) => void) => (() => void);
+  onWhatsAppQRCode?: (callback: (qr: string) => void) => () => void;
 
   // Telegram
   telegram?: {
@@ -142,7 +148,9 @@ export interface IPC {
     connectWithExistingSession: () => Promise<{ success: boolean; error?: string }>;
     disconnect: () => Promise<{ success: boolean; error?: string }>;
     logout: () => Promise<{ success: boolean; error?: string }>;
-    syncHistorical: (messagesPerDialog?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
+    syncHistorical: (
+      messagesPerDialog?: number
+    ) => Promise<{ success: boolean; count?: number; error?: string }>;
     // Auth flow methods
     startAuth: (phoneNumber: string) => Promise<{ success: boolean; error?: string }>;
     submitCode: (code: string) => Promise<{ success: boolean; error?: string }>;
@@ -161,7 +169,7 @@ export interface IPC {
 export interface AuthSession {
   access_token: string;
   refresh_token: string;
-  user: any;
+  user: unknown;
   expires_at: number;
 }
 
@@ -330,4 +338,3 @@ export interface UpdateStatusPayload {
   message?: string;
   percent?: number;
 }
-

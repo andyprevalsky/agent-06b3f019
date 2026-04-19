@@ -1,9 +1,15 @@
 import { EventEmitter } from 'events';
 import { TelegramClient as GramClient } from 'telegram';
+import { StringSession } from 'telegram/sessions';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { Api } from 'telegram/tl';
 import { TelegramAuth } from './TelegramAuth';
-import type { NormalizedMessage, SyncEvent, ConnectionState, TelegramAuthCallbacks } from '../../types';
+import type {
+  NormalizedMessage,
+  SyncEvent,
+  ConnectionState,
+  TelegramAuthCallbacks,
+} from '../../types';
 
 // Telegram API credentials - these should be obtained from https://my.telegram.org
 // For now using placeholder values that need to be configured
@@ -29,6 +35,9 @@ export class TelegramClient extends EventEmitter {
   private pendingCodeResolve: ((code: string) => void) | null = null;
   private pendingPasswordResolve: ((password: string) => void) | null = null;
   private authError: Error | null = null;
+  // Monotonic auth attempt id — used to guard async callbacks from
+  // mutating state when the user has since cancelled or restarted auth.
+  private authAttemptId = 0;
 
   constructor() {
     super();
@@ -74,7 +83,11 @@ export class TelegramClient extends EventEmitter {
     }
 
     if (!TelegramClient.hasApiCredentials()) {
-      return { success: false, error: 'Telegram API credentials not configured. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env' };
+      return {
+        success: false,
+        error:
+          'Telegram API credentials not configured. Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env',
+      };
     }
 
     this.isConnecting = true;
@@ -82,69 +95,86 @@ export class TelegramClient extends EventEmitter {
     this.authError = null;
     this.setConnectionState('connecting');
 
+    const attemptId = ++this.authAttemptId;
+
     try {
       const session = TelegramAuth.loadSession();
 
       this.client = new GramClient(session, API_ID, API_HASH, {
         connectionRetries: 5,
       });
+      const authClient = this.client;
 
       console.log(`[TelegramClient] Starting auth for ${phoneNumber}`);
 
       // Start auth in background - don't await, it will wait for code/password
-      this.client.start({
-        phoneNumber: async () => {
-          console.log('[TelegramClient] Phone number callback called');
-          return phoneNumber;
-        },
-        phoneCode: async () => {
-          console.log('[TelegramClient] Code callback called - waiting for user input');
-          this.authState = 'awaiting_code';
-          this.emit('auth:needCode');
+      authClient
+        .start({
+          phoneNumber: async () => {
+            console.log('[TelegramClient] Phone number callback called');
+            return phoneNumber;
+          },
+          phoneCode: async () => {
+            if (attemptId !== this.authAttemptId || this.client !== authClient) {
+              throw new Error('Auth attempt superseded');
+            }
+            console.log('[TelegramClient] Code callback called - waiting for user input');
+            this.authState = 'awaiting_code';
+            this.emit('auth:needCode');
 
-          // Wait for code to be submitted via submitCode()
-          return new Promise<string>((resolve) => {
-            this.pendingCodeResolve = resolve;
-          });
-        },
-        password: async () => {
-          console.log('[TelegramClient] Password callback called - waiting for user input');
-          this.authState = 'awaiting_password';
-          this.emit('auth:needPassword');
+            // Wait for code to be submitted via submitCode()
+            return new Promise<string>((resolve) => {
+              this.pendingCodeResolve = resolve;
+            });
+          },
+          password: async () => {
+            if (attemptId !== this.authAttemptId || this.client !== authClient) {
+              throw new Error('Auth attempt superseded');
+            }
+            console.log('[TelegramClient] Password callback called - waiting for user input');
+            this.authState = 'awaiting_password';
+            this.emit('auth:needPassword');
 
-          // Wait for password to be submitted via submitPassword()
-          return new Promise<string>((resolve) => {
-            this.pendingPasswordResolve = resolve;
-          });
-        },
-        onError: (err) => {
-          console.error('[TelegramClient] Auth error:', err);
+            // Wait for password to be submitted via submitPassword()
+            return new Promise<string>((resolve) => {
+              this.pendingPasswordResolve = resolve;
+            });
+          },
+          onError: (err) => {
+            if (attemptId !== this.authAttemptId || this.client !== authClient) return;
+            console.error('[TelegramClient] Auth error:', err);
+            this.authError = err;
+            this.emit('auth:error', err.message);
+          },
+        })
+        .then(() => {
+          if (attemptId !== this.authAttemptId || this.client !== authClient) return;
+          // Auth completed successfully
+          console.log('[TelegramClient] Auth completed successfully');
+          this.authState = 'authenticated';
+          TelegramAuth.saveSession(authClient.session as StringSession);
+          this.setConnectionState('connected');
+          this.setupMessageHandler();
+
+          this.emit('auth:complete');
+          this.emit('sync', {
+            type: 'connection_change',
+            channel: 'TELEGRAM',
+            connected: true,
+          } satisfies SyncEvent);
+        })
+        .catch((err) => {
+          if (attemptId !== this.authAttemptId || this.client !== authClient) return;
+          console.error('[TelegramClient] Auth failed:', err);
+          this.authState = 'idle';
           this.authError = err;
+          this.setConnectionState('error');
           this.emit('auth:error', err.message);
-        },
-      }).then(() => {
-        // Auth completed successfully
-        console.log('[TelegramClient] Auth completed successfully');
-        this.authState = 'authenticated';
-        TelegramAuth.saveSession(this.client!.session as any);
-        this.setConnectionState('connected');
-        this.setupMessageHandler();
-
-        this.emit('auth:complete');
-        this.emit('sync', {
-          type: 'connection_change',
-          channel: 'TELEGRAM',
-          connected: true,
-        } satisfies SyncEvent);
-      }).catch((err) => {
-        console.error('[TelegramClient] Auth failed:', err);
-        this.authState = 'idle';
-        this.authError = err;
-        this.setConnectionState('error');
-        this.emit('auth:error', err.message);
-      }).finally(() => {
-        this.isConnecting = false;
-      });
+        })
+        .finally(() => {
+          if (attemptId !== this.authAttemptId || this.client !== authClient) return;
+          this.isConnecting = false;
+        });
 
       // Return success - the auth process has started
       // Caller should listen for auth:needCode event
@@ -191,6 +221,7 @@ export class TelegramClient extends EventEmitter {
    * Cancel ongoing auth flow.
    */
   cancelAuth(): void {
+    this.authAttemptId++;
     this.authState = 'idle';
     this.pendingCodeResolve = null;
     this.pendingPasswordResolve = null;
@@ -222,7 +253,9 @@ export class TelegramClient extends EventEmitter {
     }
 
     if (!TelegramClient.hasApiCredentials()) {
-      throw new Error('Telegram API credentials not configured. Set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables.');
+      throw new Error(
+        'Telegram API credentials not configured. Set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables.'
+      );
     }
 
     this.isConnecting = true;
@@ -246,7 +279,7 @@ export class TelegramClient extends EventEmitter {
       });
 
       // Save the session
-      TelegramAuth.saveSession(this.client.session as any);
+      TelegramAuth.saveSession(this.client.session as StringSession);
 
       this.setConnectionState('connected');
       console.log('[TelegramClient] Connected');
@@ -296,7 +329,7 @@ export class TelegramClient extends EventEmitter {
       await this.client.connect();
 
       // Check if authorized
-      if (!await this.client.isUserAuthorized()) {
+      if (!(await this.client.isUserAuthorized())) {
         console.log('[TelegramClient] Session invalid, need re-auth');
         this.client = null;
         this.setConnectionState('disconnected');
@@ -384,7 +417,9 @@ export class TelegramClient extends EventEmitter {
 
     try {
       const minDateStr = minDate ? ` (since ${minDate.toISOString()})` : '';
-      console.log(`[TelegramClient] Fetching ${limit} historical messages for dialog ${dialogId}${minDateStr}`);
+      console.log(
+        `[TelegramClient] Fetching ${limit} historical messages for dialog ${dialogId}${minDateStr}`
+      );
 
       const messages = await this.client.getMessages(dialogId, {
         limit,
@@ -419,14 +454,16 @@ export class TelegramClient extends EventEmitter {
   /**
    * Get list of dialogs (chats/conversations).
    */
-  async getDialogs(limit: number = 100): Promise<{ id: string; name: string; isGroup: boolean; isChannel: boolean }[]> {
+  async getDialogs(
+    limit: number = 100
+  ): Promise<{ id: string; name: string; isGroup: boolean; isChannel: boolean }[]> {
     if (!this.client || !this.isConnected()) {
       return [];
     }
 
     try {
       const dialogs = await this.client.getDialogs({ limit });
-      return dialogs.map(dialog => ({
+      return dialogs.map((dialog) => ({
         id: String(dialog.id),
         name: dialog.title || dialog.name || 'Unknown',
         isGroup: dialog.isGroup,
@@ -443,7 +480,10 @@ export class TelegramClient extends EventEmitter {
    * @param messagesPerDialog - Max messages to fetch per dialog
    * @param minDate - Only fetch messages after this date (for incremental sync)
    */
-  async fetchAllHistoricalMessages(messagesPerDialog: number = 100, minDate?: Date): Promise<NormalizedMessage[]> {
+  async fetchAllHistoricalMessages(
+    messagesPerDialog: number = 100,
+    minDate?: Date
+  ): Promise<NormalizedMessage[]> {
     if (!this.client || !this.isConnected()) {
       return [];
     }
@@ -456,7 +496,12 @@ export class TelegramClient extends EventEmitter {
 
     for (const dialog of dialogs) {
       try {
-        const messages = await this.fetchHistoricalMessages(dialog.id, messagesPerDialog, undefined, minDate);
+        const messages = await this.fetchHistoricalMessages(
+          dialog.id,
+          messagesPerDialog,
+          undefined,
+          minDate
+        );
         allMessages.push(...messages);
       } catch (error) {
         console.warn(`[TelegramClient] Error fetching from dialog ${dialog.id}:`, error);
@@ -473,12 +518,9 @@ export class TelegramClient extends EventEmitter {
   private setupMessageHandler(): void {
     if (!this.client) return;
 
-    this.client.addEventHandler(
-      (event: NewMessageEvent) => {
-        this.handleNewMessage(event);
-      },
-      new NewMessage({})
-    );
+    this.client.addEventHandler((event: NewMessageEvent) => {
+      this.handleNewMessage(event);
+    }, new NewMessage({}));
 
     console.log('[TelegramClient] Message handler set up');
   }

@@ -7,6 +7,43 @@
 
 import type { FilePointer } from '@/lib/api';
 
+// ─── App Sidebar ──────────────────────────────────────────────────────────
+
+/** Sidebar top-level view identifier. */
+export type SidebarView = 'agents' | 'integrations' | 'settings' | 'usage' | 'network';
+
+/** One bottom-navigation entry in the sidebar. */
+export interface SidebarNavItem {
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  isActive?: boolean;
+}
+
+/** Drip styles passed through to the sidebar for liquid-glass backdrop effects. */
+export interface SidebarDripStyles {
+  blur: number;
+  bgOpacity: number;
+  saturation: number;
+  brightness: number;
+  borderRgb: string;
+  shadowIntensity: number;
+}
+
+/** Credits usage data returned by GET /api/credits/usage. */
+export interface UsageData {
+  total: number;
+  used: number;
+  remaining: number;
+  tier: number | null;
+  upgradeOptions: Array<{
+    tier: number;
+    name: string;
+    url: string;
+  }>;
+}
+
 // ─── Explore Agent ────────────────────────────────────────────────────────
 
 export interface ExploreStep {
@@ -62,6 +99,27 @@ export interface FeedbackData {
   issueType?: string;
   comment?: string;
   helpImprove: boolean;
+}
+
+// ─── Claude Code Chip ─────────────────────────────────────────────────────
+
+/** Incoming WebSocket message from the Claude Code terminal stream. */
+export type WsMessage =
+  | { type: 'buffer'; data: string }
+  | { type: 'stdout'; data: string }
+  | { type: 'stderr'; data: string }
+  | { type: 'stdin_echo'; data: string }
+  | { type: 'exit'; code: number }
+  | { type: 'error'; data: string };
+
+/** Visible lifecycle state for a ClaudeCodeChip. */
+export type ChipState = 'spinning_up' | 'live' | 'verifying' | 'completed' | 'failed';
+
+export interface ClaudeCodeChipProps {
+  taskId: string;
+  wsUrl?: string;
+  /** Always show terminal regardless of state. */
+  forceShow?: boolean;
 }
 
 // ─── Completion Summary Card ──────────────────────────────────────────────

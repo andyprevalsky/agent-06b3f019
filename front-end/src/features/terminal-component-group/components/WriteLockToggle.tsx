@@ -18,7 +18,7 @@
  */
 
 import { Lock, Unlock } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { updateAgent } from '../hooks';
@@ -30,6 +30,39 @@ interface WriteLockToggleProps {
   onLocalChange?: (locked: boolean) => void;
 }
 
+function LockedTooltip() {
+  return (
+    <div className="text-xs space-y-1">
+      <p>
+        <span className="font-semibold">Write lock enabled.</span> Rose will ask permission before
+        committing writes to the internet:
+      </p>
+      <ul className="list-disc list-inside text-muted-foreground">
+        <li>Sending emails or texts</li>
+        <li>Submitting payment details</li>
+        <li>Posting on social media</li>
+      </ul>
+    </div>
+  );
+}
+
+function UnlockedTooltip() {
+  return (
+    <div className="text-xs space-y-1">
+      <p>
+        <span className="font-semibold text-red-500">Write lock disabled.</span> Rose can act
+        autonomously without asking:
+      </p>
+      <ul className="list-disc list-inside text-muted-foreground">
+        <li>Send emails or texts</li>
+        <li>Submit payment details</li>
+        <li>Post on social media</li>
+      </ul>
+      <p className="text-red-500">Click to enable protection.</p>
+    </div>
+  );
+}
+
 export default function WriteLockToggle({
   agentId,
   writeLockEnabled,
@@ -39,40 +72,35 @@ export default function WriteLockToggle({
   const [isUpdating, setIsUpdating] = useState(false);
   const [localLocked, setLocalLocked] = useState(true);
 
-  // Sync local state with agent state when agent changes
   useEffect(() => {
     if (agentId) {
       setLocalLocked(writeLockEnabled);
     }
   }, [agentId, writeLockEnabled]);
 
-  const handleToggle = async () => {
-    if (isUpdating) return;
+  const isLocked = agentId ? writeLockEnabled : localLocked;
 
+  const handleToggle = useCallback(() => {
+    if (isUpdating) return;
     const newValue = !isLocked;
 
     if (agentId) {
-      // Update agent via API
       setIsUpdating(true);
-      try {
-        await updateAgent(agentId, {
-          write_lock_enabled: newValue,
+      updateAgent(agentId, { write_lock_enabled: newValue })
+        .then(() => {
+          onUpdate?.();
+        })
+        .catch((error: unknown) => {
+          console.error('Failed to update write lock:', error);
+        })
+        .finally(() => {
+          setIsUpdating(false);
         });
-        onUpdate?.();
-      } catch (error) {
-        console.error('Failed to update write lock:', error);
-      } finally {
-        setIsUpdating(false);
-      }
     } else {
-      // Update local state (no agent yet)
       setLocalLocked(newValue);
       onLocalChange?.(newValue);
     }
-  };
-
-  // Use agent state if available, otherwise use local state
-  const isLocked = agentId ? writeLockEnabled : localLocked;
+  }, [agentId, isLocked, isUpdating, onLocalChange, onUpdate]);
 
   return (
     <Tooltip>
@@ -93,32 +121,7 @@ export default function WriteLockToggle({
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[300px] z-[100]">
-        {isLocked ? (
-          <div className="text-xs space-y-1">
-            <p>
-              <span className="font-semibold">Write lock enabled.</span> Rose will ask permission
-              before committing writes to the internet:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground">
-              <li>Sending emails or texts</li>
-              <li>Submitting payment details</li>
-              <li>Posting on social media</li>
-            </ul>
-          </div>
-        ) : (
-          <div className="text-xs space-y-1">
-            <p>
-              <span className="font-semibold text-red-500">Write lock disabled.</span> Rose can act
-              autonomously without asking:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground">
-              <li>Send emails or texts</li>
-              <li>Submit payment details</li>
-              <li>Post on social media</li>
-            </ul>
-            <p className="text-red-500">Click to enable protection.</p>
-          </div>
-        )}
+        {isLocked ? <LockedTooltip /> : <UnlockedTooltip />}
       </TooltipContent>
     </Tooltip>
   );

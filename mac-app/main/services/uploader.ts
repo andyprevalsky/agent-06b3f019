@@ -9,13 +9,15 @@ import type {
   IMessageUploadPayload,
 } from '../../shared/types/ipc';
 
-const buildIMessagePayload = (data: IMessageData[] | IMessageUploadContact[]): IMessageUploadPayload => {
+const buildIMessagePayload = (
+  data: IMessageData[] | IMessageUploadContact[]
+): IMessageUploadPayload => {
   if (!Array.isArray(data)) {
     return { contacts: [] };
   }
 
-  const isAlreadyStructured = (item: any): item is IMessageUploadContact =>
-    item && typeof item === 'object' && Array.isArray(item.messages);
+  const isAlreadyStructured = (item: unknown): item is IMessageUploadContact =>
+    !!item && typeof item === 'object' && Array.isArray((item as { messages?: unknown }).messages);
 
   if (data.every(isAlreadyStructured)) {
     return { contacts: data as IMessageUploadContact[] };
@@ -80,20 +82,20 @@ const buildIMessagePayload = (data: IMessageData[] | IMessageUploadContact[]): I
 export class Uploader {
   static async uploadData(
     integrationType: string,
-    data: any,
+    data: unknown,
     accessToken: string,
     window: BrowserWindow | null
   ): Promise<UploadResult> {
     try {
       const isIMessage = integrationType === 'imessage';
       let response: Response;
-      
+
       // Upload with progress
       window?.webContents.send('upload:progress', {
         type: integrationType,
         percent: 50,
       });
-      
+
       if (isIMessage) {
         const payload = buildIMessagePayload(data as IMessageData[] | IMessageUploadContact[]);
         const body: IMessageUploadPayload & { accessedAt: string } = {
@@ -104,7 +106,7 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/imessage/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
@@ -120,7 +122,7 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/whatsapp/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
@@ -136,12 +138,25 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/telegram/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
         });
-      } else if (['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'].includes(integrationType)) {
+      } else if (
+        [
+          'chrome',
+          'edge',
+          'brave',
+          'arc',
+          'opera',
+          'vivaldi',
+          'chromium',
+          'atlas',
+          'safari',
+          'firefox',
+        ].includes(integrationType)
+      ) {
         // Browser cookies go to the dedicated cookie endpoint
         // Integration type is the browser name (e.g., 'chrome', 'edge', 'atlas')
         const { encrypted, iv, key } = Crypto.encrypt(data);
@@ -155,7 +170,7 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/cookies/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
@@ -171,7 +186,7 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/localStorage/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
@@ -187,7 +202,7 @@ export class Uploader {
         response = await fetch(`${config.apiUrl}/api/integrations/fingerprint/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
@@ -199,25 +214,25 @@ export class Uploader {
         formData.append('data', encrypted);
         formData.append('iv', iv);
         formData.append('key', key);
-        
+
         response = await fetch(`${config.apiUrl}/api/integrations/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
       }
-      
+
       window?.webContents.send('upload:progress', {
         type: integrationType,
         percent: 100,
       });
-      
+
       if (!response.ok) {
         throw new Error(`Upload failed: ${response.statusText}`);
       }
-      
+
       return { success: true };
     } catch (error) {
       return {
@@ -227,4 +242,3 @@ export class Uploader {
     }
   }
 }
-

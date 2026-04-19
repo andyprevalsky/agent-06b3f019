@@ -30,7 +30,9 @@ export class IMessageSync {
     const contacts = MessageTransformer.toContactWithMessages(messages);
     const stats = MessageTransformer.getStats(messages);
 
-    console.log(`[IMessageSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`);
+    console.log(
+      `[IMessageSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`
+    );
 
     const result = await BatchUploader.uploadInBatches(
       'imessage',
@@ -51,7 +53,11 @@ export class IMessageSync {
       return;
     }
 
-    if (event.type === 'new_messages' && event.messages?.length) {
+    if (
+      event.type === 'new_messages' &&
+      event.messages !== undefined &&
+      event.messages.length > 0
+    ) {
       // Check if integration is still connected
       const isConnected = await this.isIntegrationConnected();
       if (!isConnected) {
@@ -78,7 +84,7 @@ export class IMessageSync {
 
     if (rawMessages.length > 0) {
       // Update lastSyncRowId
-      const maxId = Math.max(...rawMessages.map(m => m.id));
+      const maxId = Math.max(...rawMessages.map((m) => m.id));
       if (maxId > this.lastSyncRowId) {
         this.lastSyncRowId = maxId;
       }
@@ -91,7 +97,7 @@ export class IMessageSync {
    * Start real-time file watching for iMessage database changes.
    */
   static startRealTimeSync(): void {
-    if (this.watcher?.isActive()) {
+    if (this.watcher?.isActive() === true) {
       console.log('[IMessageSync] Real-time sync already running');
       return;
     }
@@ -107,7 +113,7 @@ export class IMessageSync {
 
     this.watcher = new IMessageWatcher(() => this.queryNewMessagesForWatcher());
     this.watcher.on('sync', (event: SyncEvent) => {
-      this.handleSyncEvent(event).catch(err => {
+      this.handleSyncEvent(event).catch((err) => {
         console.error('[IMessageSync] Error handling sync event:', err);
       });
     });
@@ -154,22 +160,32 @@ export class IMessageSync {
       }
 
       // If SYNCING and last sync was < 1 hour ago, skip (sync is likely still in progress)
-      if (integration.status === 'SYNCING' && integration.lastSyncAt) {
+      if (
+        integration.status === 'SYNCING' &&
+        integration.lastSyncAt !== null &&
+        integration.lastSyncAt !== undefined
+      ) {
         const lastSyncAge = Date.now() - new Date(integration.lastSyncAt).getTime();
         const ONE_HOUR = 60 * 60 * 1000;
         if (lastSyncAge < ONE_HOUR) {
-          console.log(`[IMessageSync] Skipping sync - already syncing (last sync ${Math.round(lastSyncAge / 60000)}m ago)`);
+          console.log(
+            `[IMessageSync] Skipping sync - already syncing (last sync ${Math.round(lastSyncAge / 60000)}m ago)`
+          );
           return;
         }
-        console.log(`[IMessageSync] Re-syncing - SYNCING status stale (last sync ${Math.round(lastSyncAge / 60000)}m ago)`);
+        console.log(
+          `[IMessageSync] Re-syncing - SYNCING status stale (last sync ${Math.round(lastSyncAge / 60000)}m ago)`
+        );
       }
 
       const integrationConfig = integration.config as { lastFrontendAccessAt?: string } | undefined;
       const lastAccessedAt = integrationConfig?.lastFrontendAccessAt;
 
       // Read messages (filtered by timestamp if available)
-      const isIncrementalSync = !!lastAccessedAt;
-      console.log(`[IMessageSync] Reading messages${lastAccessedAt ? ` since ${lastAccessedAt}` : ' (full sync)'}`);
+      const isIncrementalSync = lastAccessedAt !== undefined && lastAccessedAt !== '';
+      console.log(
+        `[IMessageSync] Reading messages${isIncrementalSync ? ` since ${lastAccessedAt}` : ' (full sync)'}`
+      );
       const messages = await IMessageReader.readMessages(lastAccessedAt, isIncrementalSync);
 
       if (messages.length === 0) {
@@ -189,7 +205,7 @@ export class IMessageSync {
         console.log('[IMessageSync] Sync complete');
         // Update lastSyncRowId for real-time watcher
         if (messages.length > 0) {
-          const maxId = Math.max(...messages.map(m => m.id));
+          const maxId = Math.max(...messages.map((m) => m.id));
           if (maxId > this.lastSyncRowId) {
             this.lastSyncRowId = maxId;
           }

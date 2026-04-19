@@ -3,394 +3,36 @@
  *
  * [CLOSED] <-- isOpen: false
  *     |
- *     | (click trigger)
+ *     | (click trigger / mouse enter)
  *     v
  * [OPEN] <-- isOpen: true (shows test prompts popover)
  *     |
- *     | (select prompt or click outside)
+ *     | (select prompt or mouse leave)
  *     v
  * [CLOSED]
  *
  * State:
  * - isOpen: boolean (popover open state)
+ * - isLoading: boolean (while resolving attachment URLs into File objects)
  *
- * Only visible in development mode.
+ * Only visible in development mode (gated by the parent `TopBar`).
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { useState, useEffect, useRef } from 'react';
-
-interface TestPrompt {
-  title: string;
-  description: string;
-  prompt: string;
-  attachmentUrls?: string[]; // Optional URLs to files in public folder to attach
-}
-
-const TEST_PROMPTS: TestPrompt[] = [
-  {
-    title: 'Build New Boxing Payment Flow',
-    description:
-      'Tests building and hosting a full payment site with waivers, Stripe, and email confirmations',
-    prompt: `My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.
-We need to create and host a site that can be accessed via QR code or direct link.
-
-The site should include:
-- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, Adult Sparring Consent, Minor Sparring Consent). Signing is required for the liability waivers (adult and minor). The sparring consent waivers are included for reference but don't need to be part of the payment flow.
-- I've also attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.
-- The classes are:
-  Boxing $225/month
-  Muay Thai $225/month
-  MMA $245/month
-  Jiujitsu $185/month
-  Kids Program $185/month
-  Unlimited classes $285/month
-- We need to support discount codes for Boxing & Muay Thai
-
-The flow will be:
-1. Pick your classes
-2. Sign your waivers and agree to the billing & membership terms (required checkboxes)
-3. Pay for the classes
-4. Get a confirmation email
-5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers
-
-Stripe API keys (test and production, secret and publishable) are injected server-side via PROMPT_SECRET env vars when run through the E2E/benchmark harness.
-
-You can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).
-
-Make sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.
-
-Return to me:
-- A link to the hosted site
-- A QR Code for the hosted site
-- A discount code that can be used exclusively for Boxing & Muay Thai purchases`,
-    attachmentUrls: [
-      '/test-assets/dallasmmaboxing-waivers/waiver_release_liability_adult.pdf',
-      '/test-assets/dallasmmaboxing-waivers/waiver_release_liability_minor.pdf',
-      '/test-assets/dallasmmaboxing-waivers/sparring_consent_adult.pdf',
-      '/test-assets/dallasmmaboxing-waivers/sparring_consent_minor.pdf',
-      '/test-assets/dallasmmaboxing-waivers/membership_terms_updated.pdf',
-      '/test-assets/dallasmmaboxing-waivers/billing_payment_terms_final.pdf',
-    ],
-  },
-  {
-    title: 'Test Automatic LinkedIn Connection',
-    description: 'Tests browser agent with LinkedIn data download',
-    prompt: 'go to linkedin.com and trigger a download for my data',
-  },
-  {
-    title: 'Test Chat Mode',
-    description: 'Tests chat mode web search flow',
-    prompt: 'whats the latest news?',
-  },
-  {
-    title: 'Test Browser Agent',
-    description: 'Tests browser agent with Amazon shopping task',
-    prompt: 'Buy me any black carhartt beanie < 35$ and well-made from amazon\nNo questions asked',
-  },
-  {
-    title: 'Test Spawn Sub Agents',
-    description: 'Tests recursive sub-agent spawning with depth parameter',
-    prompt:
-      'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.',
-  },
-  {
-    title: 'Test Web Search',
-    description: 'Tests web search tool with a news query',
-    prompt: 'Get me the latest news.',
-  },
-  {
-    title: 'Test People Search',
-    description: 'Tests Exa people search tool',
-    prompt: 'Use people_search to get me info about Andy Prevalsky',
-  },
-  {
-    title: 'Test Parallel Tool Calls',
-    description: 'Tests parallel execution of multiple tools in one turn',
-    prompt:
-      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',
-  },
-  {
-    title: 'Test Claude Code Agent',
-    description: 'Tests Claude Code agent in ephemeral E2B sandbox',
-    prompt:
-      'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
-  },
-  {
-    title: 'Test DAG Executor',
-    description: 'Tests DAG executor with plan mode (no web searches during planning)',
-    prompt:
-      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
-  },
-  {
-    title: 'Test Image Handling',
-    description: 'Tests image attachment processing with rs.jpeg',
-    prompt: 'make this red',
-    attachmentUrls: ['/test-assets/rs.jpeg'],
-  },
-  {
-    title: 'Test Files in Sub Agents',
-    description: 'Tests file_pointer output schema with sub-agents creating color variants',
-    prompt:
-      'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation',
-    attachmentUrls: ['/test-assets/rs.jpeg'],
-  },
-  {
-    title: 'Test Files in Browser Agent',
-    description: 'Tests browser agent file upload with TinyPNG',
-    prompt: 'upload this image to tinypng.com and compress it\n\nno sub agents\nno questions asked',
-    attachmentUrls: ['/test-assets/rs.jpeg'],
-  },
-  {
-    title: 'Test Code Gen',
-    description: 'Tests Claude Code with GitHub repo cloning - Dallas MMA Boxing site rebuild',
-    prompt: `Understand the entire structure of https://dallasmmaboxing.com
-This is my Dad's old website.
-But it needs a full revamp.
-
-I've initialized a github repo that your claude code agents can use
-https://github.com/andyprevalsky/dallasmmaboxing
--> pass this link to all claude code agents
-
-Rebuild the site in a modern stack with
--> React
--> Vercel
--> Render for BE
--> Stripe
-
-The site should contain the exact same content, the exact same structure, but the styling should be updated to feel refined, high-quality, modern, cohesive, responsive, and trustworthy.
-
-We will add one additional feature which will be a checkout option
-The checkout will be on a hidden url that is givin via QR Code in the gym
-Clients will
-1. select the classes that they want to attend
-2. sign a release form
-3. be directed to stripe to complete payment
-4. once payment is completed we will create a new row in the database that details the clients information, a link to their signed form, we wil text 972-977-5605 and send georgeprevalsky@gmail.com (and the user email and sms) a link to a confirmation page that will contain their confirmation page + a link to their signed released form
-
-For any services that require a API Key or Credential, mock the service for now and then return back to me a list of API keys I need to give to you in order to finish the implementation.`,
-  },
-  {
-    title: 'Test Call Phone Number',
-    description: 'Tests phone call tool with Vapi voice AI',
-    prompt:
-      'Call Billy @ 1-972-977-7432, get his full name and the time he will be arriving for the Rose Labs Party on Sunday. This is for debugging purposes.',
-  },
-  {
-    title: 'Test Event Planning',
-    description: 'Tests coordination of event planning with budget constraints',
-    prompt:
-      'I want to play volleyball with some friends this weekend in san francisco.\nCan you figure out who would be down and coordinate the space & procurment of equipment?\nEnsure its less then 30$ total',
-  },
-  {
-    title: 'Test Wait For',
-    description: 'Tests wait_for with price trigger and phone call action',
-    prompt: 'Once bitcoin reaches 72K, call my phone number and tell me.',
-  },
-  {
-    title: 'Test Explore Agent',
-    description: 'Tests explore agent with network search, sorting, and external research',
-    prompt:
-      'Get me all VCs I know, sort them by most recently contacted, then find a piece of information about them that you didnt get from my messages. Use Explore Agent',
-  },
-  {
-    title: 'Test Message Person',
-    description: 'Tests unified message_person tool with email and iMessage channels',
-    prompt:
-      "Send an email and a imessage to myself, 972-977-7432, for testing purposes, don't ask any questions. The message should try to get me to launch this product.",
-  },
-  {
-    title: 'Test Website Mapping',
-    description: 'Tests Claude Code agents rebuilding a website with sub-agents',
-    prompt: `recreate https://dallasmmaboxing.com w a modern stack using claude code agents and sub agents
-- first understand the content there comprehensively
-- secondly, add a additional link to signup for memberships that is hidden at /memberships
-- make sure u test your changes as needed`,
-  },
-  {
-    title: 'Raise My Round',
-    description: 'Fundraising outreach with pitch deck and VC/angel CSV',
-    prompt: `Run a world class fundraising process to close my round by March
-- Assume we are starting from 0
-- Aman has already done intros, I'm handling those manually
-- Pitch deck DocSend link: https://docsend.com/view/kdimuw6dfjf6k3si
-- I've attached a list of angels & vcs to contact, it is not comprehensive so please make sure the process is exhaustive
-- dont apply to spc or osv grant, that's already done
-- I've attached my pitch deck & a list of investors to get started`,
-    attachmentUrls: [
-      '/test-assets/vcs-and-angels.csv',
-      '/test-assets/pitch-deck/rose-labs-pitch-deck.pdf',
-    ],
-  },
-  {
-    title: 'Outreach In Batch',
-    description: 'Batch outreach to 0-10 angels for ML research feedback with resume attached',
-    prompt: `I've attached a CSV of ~700 angels.
-Reach out to 0-10
-
-Each message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
-
-We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent per row.
-
-PROCESS GUIDELINES
-===
-0. Use spawn_sub_agent_for_each when spawning a sub agent per row.
-1. At the start, do research for best practices on cold email outreach.
-2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).
-3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.
-4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.
-
-REFERENCE MATERIALS FOR INFORMATION ABOUT ME
-===
-I've attached my resume for reference.
-
-Pitchdeck text:
-
-Rose Labs — Personal Superintelligence
-Andy Prevalsky, Founder, andy@roselabs.ai, San Francisco
-
-Problem: Users want their AI assistant to solve complex, real-world problems but no existing harness:
-1. Integrates with the necessary tools + context pipelines
-2. Is built to scale the number of agents necessary to accomplish these tasks in a generalizable and cost-efficient way
-
-Solution (Live at roselabs.ai):
-- Real users completing real tasks. Autonomous agents running in production daily.
-- Computer-to-Cloud Sync: Seamless state sync between local and cloud execution environments.
-- SOTA Browser Agent: Custom prompt-braiding algorithm for escaping single-model-provider minima.
-- Live Integrations: SMS, phone calling, and Claude Code.
-- SOTA Task Decomposer: Rose-Decompose outperforms every frontier model at breaking complex goals into parallelizable sub-tasks. 45x higher success rate than Opus 4.6 on deep recursive plans.
-
-Rose-Decompose: a fine-tuned model that recursively breaks complex goals into parallelizable sub-tasks.
-Trained on 500 real user tasks collected via roselabs.ai.
-Rose-Decompose ELO 1251, All-3 Pass 85.6%, Tree Pass (d=3) 13.25% vs Opus 4.6 ELO 1000, All-3 Pass 63.8%, Tree Pass 0.29%
-
-The Founder:
-Andy Prevalsky, CEO
-- Founded Hotplate (YC S20), led engineering, product & strategy from zero to PMF. Now 7-figure ARR and profitable.
-- 10 years ML experience. HFT models (LSTMs, RNNs, Markov Chains), custom pipelines at Hotplate that found 90% of users, voice pipelines as Staff Eng @ Vapi.
-- Ex Google, Ex Meta AI.
-- Backed by Michael Seibel, Connie Chan (A16Z), YC. Mentored by Seibel for 6 years.
-
-LinkedIn:
-- Rose Labs: Founder, CEO (Oct 2025 - Present) — Pioneering Mass Agent Networks
-- Vapi: Staff Software Engineer (2024-2025)
-- Hotplate: Co-Founder, CTO (2019-2023) — $50M+ total transactions, backed by Connie Chan (A16Z), Michael Seibel, YC
-- Meta: ML/AI Intern (2020) — Accepted, declined to start YC backed company
-- Google: Software Engineer Intern (2020) — Built Flutter & iOS SDK for Google's ML libraries`,
-    attachmentUrls: [
-      '/test-assets/vcs-and-angels.csv',
-      '/test-assets/andy-prevalsky-resume-2026.pdf',
-    ],
-  },
-  {
-    title: 'Family Office & Angel Outreach',
-    description: 'Personalized outreach to 700 angels for ML research feedback calls',
-    prompt: `I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.
-
-Each message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
-
-We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.
-
-Since you are limited on the sub-agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.`,
-    attachmentUrls: ['/test-assets/vcs-and-angels.csv'],
-  },
-  {
-    title: 'Test Agent For Each',
-    description: 'Tests sub-agent for_each processing 12 CSV entities in parallel',
-    prompt: 'Get me one interesting fact about each entity on the csv.',
-    attachmentUrls: ['/test-assets/entities-12.csv'],
-  },
-  {
-    title: 'Get Jessie a Job',
-    description: 'Job application blitz for executive assistant and childcare roles in Harlem',
-    prompt: `Get my friend a job as an executive assistant or in childcare.
-She is currently in Harlem, NYC.
-Her email is testapplicant+bench@example.com
-
-- Shooting for $30/hr, but will take $20/hr minimum.
-- She needs to get a job ASAP.
-- Remote is ideal but not mandatory.
-- Since she needs a job really badly, we can sacrifice specificity for throughput.
-- We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.`,
-    attachmentUrls: [
-      '/test-assets/test-exec-assistant-resume.pdf',
-      '/test-assets/test-childcare-resume.pdf',
-    ],
-  },
-];
-
-// Dev default prompt — auto-loaded into QueryInput on mount in dev mode
-const DEV_DEFAULT_PROMPT_TITLE = 'Family Office & Angel Outreach';
-
-/** Fetch attachment files for a test prompt from the public folder */
-async function fetchTestPromptFiles(attachmentUrls: string[]): Promise<File[]> {
-  const isFileProtocol = window.location.protocol === 'file:';
-  const files = await Promise.all(
-    attachmentUrls.map(async (assetPath) => {
-      const url = isFileProtocol ? assetPath.replace(/^\//, '') : assetPath;
-      const response = await fetch(url);
-      if (!response.ok) {
-        console.error(`Test asset ${url} failed: ${response.status} ${response.statusText}`);
-        return null;
-      }
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        console.error(`Test asset ${url} returned HTML — file missing from public/ folder`);
-        return null;
-      }
-      const blob = await response.blob();
-      const filename = url.split('/').pop() || 'attachment';
-      const ext = filename.split('.').pop()?.toLowerCase();
-      const mimeByExt: Record<string, string> = {
-        jpeg: 'image/jpeg',
-        jpg: 'image/jpeg',
-        png: 'image/png',
-        gif: 'image/gif',
-        webp: 'image/webp',
-        svg: 'image/svg+xml',
-        pdf: 'application/pdf',
-        csv: 'text/csv',
-        txt: 'text/plain',
-      };
-      const mimeType = (ext && mimeByExt[ext]) || blob.type;
-      return new File([blob], filename, { type: mimeType });
-    }),
-  );
-  return files.filter((f): f is File => f !== null);
-}
-
-interface TestPromptsSelectorProps {
-  onSelectPrompt: (prompt: string, files?: File[]) => void;
-}
+import { useState } from 'react';
+import PromptList from './test-prompts-selector/PromptList';
+import { fetchTestPromptFiles } from './test-prompts-selector/fetchTestPromptFiles';
+import { useAutoLoadDefaultPrompt } from './test-prompts-selector/useAutoLoadDefaultPrompt';
+import { TEST_PROMPTS } from './test-prompts-selector/prompts';
+import type { TestPrompt, TestPromptsSelectorProps } from './test-prompts-selector/types';
 
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const hasAutoLoaded = useRef(false);
 
-  // Auto-load default dev prompt on mount (skip during tests — vitest runs in DEV mode)
-  useEffect(() => {
-    if (import.meta.env.VITEST) return;
-    if (!import.meta.env.DEV || hasAutoLoaded.current) return;
-    hasAutoLoaded.current = true;
+  useAutoLoadDefaultPrompt(onSelectPrompt);
 
-    const defaultPrompt = TEST_PROMPTS.find((p) => p.title === DEV_DEFAULT_PROMPT_TITLE);
-    if (!defaultPrompt) return;
-
-    (async () => {
-      try {
-        const files = defaultPrompt.attachmentUrls
-          ? await fetchTestPromptFiles(defaultPrompt.attachmentUrls)
-          : undefined;
-        onSelectPrompt(defaultPrompt.prompt, files);
-      } catch (error) {
-        console.error('Failed to auto-load default dev prompt:', error);
-        onSelectPrompt(defaultPrompt.prompt);
-      }
-    })();
-  }, [onSelectPrompt]);
-
-  const handleSelectPrompt = async (testPrompt: TestPrompt) => {
+  const handleSelectPrompt = async (testPrompt: TestPrompt): Promise<void> => {
     setIsLoading(true);
     try {
       const files =
@@ -399,9 +41,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
           : undefined;
 
       onSelectPrompt(testPrompt.prompt, files);
-    } catch (error) {
-      console.error('Failed to load test prompt attachment:', error);
-      // Fall back to just the prompt without attachment
+    } catch {
       onSelectPrompt(testPrompt.prompt);
     } finally {
       setIsLoading(false);
@@ -431,26 +71,11 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
       >
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">Dev test prompts for tool testing</p>
-          <div className="space-y-2">
-            {TEST_PROMPTS.map((testPrompt) => (
-              <button
-                key={testPrompt.title}
-                className="w-full text-left flex flex-col gap-1 p-2 rounded-md hover:bg-muted/50 transition-colors cursor-pointer disabled:opacity-50"
-                onClick={() => handleSelectPrompt(testPrompt)}
-                disabled={isLoading}
-              >
-                <span className="font-medium text-sm text-foreground">
-                  {testPrompt.title}
-                  {testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0 && (
-                    <span className="ml-2 text-xs text-muted-foreground">📎</span>
-                  )}
-                </span>
-                <span className="text-xs text-muted-foreground leading-snug">
-                  {testPrompt.description}
-                </span>
-              </button>
-            ))}
-          </div>
+          <PromptList
+            prompts={TEST_PROMPTS}
+            disabled={isLoading}
+            onSelect={(p) => void handleSelectPrompt(p)}
+          />
         </div>
       </PopoverContent>
     </Popover>

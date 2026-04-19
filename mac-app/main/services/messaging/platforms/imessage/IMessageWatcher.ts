@@ -1,4 +1,4 @@
-import { watch, FSWatcher } from 'fs';
+import { watch, type FSWatcher } from 'fs';
 import { app } from 'electron';
 import path from 'path';
 import { EventEmitter } from 'events';
@@ -99,7 +99,7 @@ export class IMessageWatcher extends EventEmitter {
           console.log(`[IMessageWatcher] Detected ${newMessages.length} new message(s)`);
 
           // Update lastMessageRowId from the highest ID in new messages
-          const maxId = Math.max(...newMessages.map(m => parseInt(m.id, 10)));
+          const maxId = Math.max(...newMessages.map((m) => parseInt(m.id, 10)));
           if (maxId > this.lastMessageRowId) {
             this.lastMessageRowId = maxId;
           }

@@ -49,7 +49,7 @@ export class IntegrationCache {
    */
   static async getIntegration(integrationName: string): Promise<Integration | undefined> {
     const { all } = await this.getIntegrations();
-    return all.find(i => i.name === integrationName);
+    return all.find((i) => i.name === integrationName);
   }
 
   /**
@@ -70,7 +70,7 @@ export class IntegrationCache {
     const now = Date.now();
 
     // Return cached if still valid
-    if (this.cache && (now - this.cache.timestamp) < this.CACHE_TTL_MS) {
+    if (this.cache && now - this.cache.timestamp < this.CACHE_TTL_MS) {
       return this.cache;
     }
 
@@ -104,7 +104,7 @@ export class IntegrationCache {
     try {
       const response = await fetch(`${config.apiUrl}/api/integrations`, {
         headers: {
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
       });
 
@@ -114,13 +114,14 @@ export class IntegrationCache {
         return this.cache ?? { connected: new Set(), all: [], timestamp: Date.now() };
       }
 
-      const data = await response.json() as { integrations?: Integration[] };
+      const data = (await response.json()) as { integrations?: Integration[] };
       const all = data.integrations ?? [];
-      const connected = new Set(
-        all.filter(i => i.status !== 'NOT_CONNECTED').map(i => i.name)
-      );
+      const connected = new Set(all.filter((i) => i.status !== 'NOT_CONNECTED').map((i) => i.name));
 
-      logConsole('IntegrationCache', `Fetched ${all.length} integrations, ${connected.size} connected`);
+      logConsole(
+        'IntegrationCache',
+        `Fetched ${all.length} integrations, ${connected.size} connected`
+      );
 
       return { connected, all, timestamp: Date.now() };
     } catch (error) {

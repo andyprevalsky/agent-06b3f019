@@ -1,0 +1,135 @@
+/**
+ * Pure helpers for SubAgentTree and its sub-components.
+ *
+ * Extracted from SubAgentTree.tsx to keep that file under the strict
+ * `max-lines: 300` budget. No React imports — only value/shape utilities.
+ */
+
+import { type TreeNode, type FilePointer, type OutputSchemaField } from '../hooks';
+
+// ── Tree drawing characters ────────────────────────────────────────────────
+export const TREE_BRANCH = '├─'; // non-last sibling
+export const TREE_LAST = '└─'; // last sibling
+export const TREE_VERT = '│'; // vertical continuation
+
+/** Format a field type from the backend schema for user display. */
+export function formatFieldType(type: OutputSchemaField['type']): string {
+  switch (type) {
+    case 'str':
+      return 'string';
+    case 'int':
+      return 'integer';
+    case 'float':
+      return 'number';
+    case 'bool':
+      return 'boolean';
+    case 'list[str]':
+      return 'string[]';
+    case 'list[int]':
+      return 'integer[]';
+    case 'file_pointer':
+      return 'file';
+    case 'list[file_pointer]':
+      return 'file[]';
+    default:
+      return type;
+  }
+}
+
+/** Duck-type check: does this value look like a FilePointer? */
+export function isFilePointer(value: unknown): value is FilePointer {
+  if (!value || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.id === 'string' &&
+    typeof obj.storage_path === 'string' &&
+    typeof obj.original_filename === 'string'
+  );
+}
+
+/** Format a structured-output value for display, handling FilePointers specially. */
+export function formatValue(value: unknown, fieldType?: OutputSchemaField['type']): string {
+  if (isFilePointer(value)) {
+    return `📄 ${value.original_filename}`;
+  }
+
+  if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
+    const filePointers = value.filter(isFilePointer);
+    if (filePointers.length > 0) {
+      return filePointers.map((fp) => `📄 ${fp.original_filename}`).join(', ');
+    }
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+/** Get all leaf nodes (no children) reachable from the given start node. */
+export function getLeafNodes(
+  startNode: TreeNode,
+  getChildren: (parentId: string) => TreeNode[],
+): TreeNode[] {
+  const children = getChildren(startNode.agentId);
+  if (children.length === 0) {
+    return [startNode];
+  }
+  return children.flatMap((child) => getLeafNodes(child, getChildren));
+}
+
+/**
+ * Get all intermediary (non-leaf) descendants below the start node.
+ * Does NOT include the start node itself.
+ */
+export function getIntermediaryNodes(
+  startNode: TreeNode,
+  getChildren: (parentId: string) => TreeNode[],
+): TreeNode[] {
+  const children = getChildren(startNode.agentId);
+  if (children.length === 0) {
+    return [];
+  }
+  const intermediaries: TreeNode[] = [];
+  for (const child of children) {
+    const grandchildren = getChildren(child.agentId);
+    if (grandchildren.length > 0) {
+      intermediaries.push(child);
+      intermediaries.push(...getIntermediaryNodes(child, getChildren));
+    }
+  }
+  return intermediaries;
+}
+
+/** Calculate tree depth (number of levels) from the given start node. */
+export function getTreeDepth(
+  startNode: TreeNode,
+  getChildren: (parentId: string) => TreeNode[],
+): number {
+  const children = getChildren(startNode.agentId);
+  if (children.length === 0) {
+    return 1;
+  }
+  return 1 + Math.max(...children.map((child) => getTreeDepth(child, getChildren)));
+}
+
+// Extended_Pictographic covers the full pictographic-emoji block; we pair it
+// with the ZWJ and VS16 codepoints that stitch sequences (family, flags, etc.)
+// and use the `v` flag so ESLint's `no-misleading-character-class` is happy.
+const EMOJI_REGEX = /^(\p{Extended_Pictographic}(?:\p{Extended_Pictographic}|\u200D|\uFE0F)*)\s*/v;
+
+/** Extract leading emoji run from text, returning the emoji and remaining text. */
+export function extractEmoji(text: string): { emoji: string; text: string } {
+  const match = text.match(EMOJI_REGEX);
+  if (match) {
+    const emoji = match[0];
+    const remainingText = text.slice(emoji.length).trim();
+    return { emoji, text: remainingText };
+  }
+  return { emoji: '', text };
+}
+
+/** A node is terminal when its workflow has finished (successfully or not). */
+export function isTerminalNode(node: TreeNode): boolean {
+  return node.status === 'COMPLETED' || node.status === 'FAILED';
+}

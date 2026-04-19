@@ -41,12 +41,12 @@ export interface ReadPasswordsConfig {
  * Password entry data structure
  */
 export interface PasswordData {
-  origin: string;           // e.g., "https://amazon.com"
-  username: string;         // e.g., "user@email.com"
-  password: string;         // Decrypted plaintext password
-  dateLastUsed: number;     // Chromium timestamp (microseconds since 1601)
-  dateCreated: number;      // Chromium timestamp
-  browserSource: string;    // Which browser this came from
+  origin: string; // e.g., "https://amazon.com"
+  username: string; // e.g., "user@email.com"
+  password: string; // Decrypted plaintext password
+  dateLastUsed: number; // Chromium timestamp (microseconds since 1601)
+  dateCreated: number; // Chromium timestamp
+  browserSource: string; // Which browser this came from
 }
 
 /**
@@ -55,9 +55,9 @@ export interface PasswordData {
  */
 export interface EncryptedPasswordEnvelope {
   version: 1;
-  encrypted_aes_key: string;  // Base64-encoded RSA-encrypted AES key
-  iv: string;                  // Base64-encoded AES-GCM IV
-  ciphertext: string;          // Base64-encoded AES-encrypted password
+  encrypted_aes_key: string; // Base64-encoded RSA-encrypted AES key
+  iv: string; // Base64-encoded AES-GCM IV
+  ciphertext: string; // Base64-encoded AES-encrypted password
 }
 
 const HOME = app.getPath('home');
@@ -73,28 +73,40 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   edge: {
     type: 'edge',
     name: 'Microsoft Edge',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/Microsoft Edge/Default/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/Microsoft Edge/Default/Login Data'
+    ),
     keychainEntry: 'Microsoft Edge Safe Storage',
     keychainAccount: 'Microsoft Edge',
   },
   brave: {
     type: 'brave',
     name: 'Brave',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/BraveSoftware/Brave-Browser/Default/Login Data'
+    ),
     keychainEntry: 'Brave Safe Storage',
     keychainAccount: 'Brave',
   },
   arc: {
     type: 'arc',
     name: 'Arc',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/Arc/User Data/Default/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/Arc/User Data/Default/Login Data'
+    ),
     keychainEntry: 'Arc Safe Storage',
     keychainAccount: 'Arc',
   },
   opera: {
     type: 'opera',
     name: 'Opera',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/com.operasoftware.Opera/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/com.operasoftware.Opera/Login Data'
+    ),
     keychainEntry: 'Opera Safe Storage',
     keychainAccount: 'Opera',
   },
@@ -108,7 +120,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   chromium: {
     type: 'chromium',
     name: 'Chromium',
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/Chromium/Default/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/Chromium/Default/Login Data'
+    ),
     keychainEntry: 'Chromium Safe Storage',
     keychainAccount: 'Chromium',
   },
@@ -116,7 +131,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
     type: 'atlas',
     name: 'ChatGPT Atlas',
     // Atlas stores passwords in browser-data/host/user-*/Login Data (wildcard for user profile)
-    loginDataPathPattern: path.join(HOME, 'Library/Application Support/com.openai.atlas/browser-data/host/user-*/Login Data'),
+    loginDataPathPattern: path.join(
+      HOME,
+      'Library/Application Support/com.openai.atlas/browser-data/host/user-*/Login Data'
+    ),
     keychainEntry: 'ChatGPT Safe Storage',
     keychainAccount: 'ChatGPT',
   },
@@ -158,7 +176,7 @@ export class BrowserPasswordReader {
     }
 
     const sorted = matches
-      .map(p => ({ path: p, mtime: fs.statSync(p).mtime.getTime() }))
+      .map((p) => ({ path: p, mtime: fs.statSync(p).mtime.getTime() }))
       .sort((a, b) => b.mtime - a.mtime);
 
     return sorted[0].path;
@@ -168,17 +186,22 @@ export class BrowserPasswordReader {
    * Get list of installed browsers with their configurations.
    */
   static getInstalledBrowsers(): BrowserInfo[] {
-    const results = Object.values(BROWSERS).map(browser => {
+    const results = Object.values(BROWSERS).map((browser) => {
       const resolvedPath = this.resolveLoginDataPath(browser.loginDataPathPattern);
-      console.log(`[BrowserPasswordReader] Checking ${browser.name}: pattern=${browser.loginDataPathPattern}, resolved=${resolvedPath}`);
+      console.log(
+        `[BrowserPasswordReader] Checking ${browser.name}: pattern=${browser.loginDataPathPattern}, resolved=${resolvedPath}`
+      );
       return {
         ...browser,
         isInstalled: resolvedPath !== null,
         resolvedLoginDataPath: resolvedPath ?? undefined,
       };
     });
-    const installed = results.filter(b => b.isInstalled);
-    console.log(`[BrowserPasswordReader] Found ${installed.length} installed browsers with Login Data:`, installed.map(b => b.type));
+    const installed = results.filter((b) => b.isInstalled);
+    console.log(
+      `[BrowserPasswordReader] Found ${installed.length} installed browsers with Login Data:`,
+      installed.map((b) => b.type)
+    );
     return installed;
   }
 
@@ -194,14 +217,21 @@ export class BrowserPasswordReader {
    * @param browser - Browser configuration
    * @param manualPassword - Optional manual password (for browsers like Atlas that require it)
    */
-  private static async getEncryptionKey(browser: BrowserConfig, manualPassword?: string): Promise<Buffer> {
+  private static async getEncryptionKey(
+    browser: BrowserConfig,
+    manualPassword?: string
+  ): Promise<Buffer> {
     let password: string;
 
-    console.log(`[BrowserPasswordReader] getEncryptionKey called for ${browser.name}, manualPassword provided: ${!!manualPassword}`);
+    console.log(
+      `[BrowserPasswordReader] getEncryptionKey called for ${browser.name}, manualPassword provided: ${!!manualPassword}`
+    );
 
     if (manualPassword) {
       // Use the manually provided keychain password
-      console.log(`[BrowserPasswordReader] Using manual password (length: ${manualPassword.length})`);
+      console.log(
+        `[BrowserPasswordReader] Using manual password (length: ${manualPassword.length})`
+      );
       password = manualPassword;
     } else {
       // Try to get the password from the keychain automatically
@@ -210,10 +240,10 @@ export class BrowserPasswordReader {
           `security find-generic-password -wa "${browser.keychainAccount}"`
         );
         password = stdout.trim();
-      } catch (error) {
+      } catch {
         throw new Error(
           `Failed to get ${browser.name} encryption key from keychain. ` +
-          `Make sure ${browser.name} is installed and has been run at least once.`
+            `Make sure ${browser.name} is installed and has been run at least once.`
         );
       }
     }
@@ -272,10 +302,7 @@ export class BrowserPasswordReader {
       const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
       decipher.setAutoPadding(false);
 
-      const decrypted = Buffer.concat([
-        decipher.update(ciphertext),
-        decipher.final()
-      ]);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
       const unpadded = this.removePKCS7Padding(decrypted);
 
@@ -300,23 +327,13 @@ export class BrowserPasswordReader {
    * Returns base64-encoded envelope.
    */
   static async encryptPassword(password: string): Promise<string> {
-    // 1. Parse RSA public key
-    const pemContents = RSA_PUBLIC_KEY_PEM
-      .replace('-----BEGIN PUBLIC KEY-----', '')
-      .replace('-----END PUBLIC KEY-----', '')
-      .replace(/\s/g, '');
-    const publicKeyDer = Buffer.from(pemContents, 'base64');
-
-    // 2. Generate random AES-256 key and IV
+    // 1. Generate random AES-256 key and IV
     const aesKey = crypto.randomBytes(32);
     const iv = crypto.randomBytes(12);
 
     // 3. Encrypt password with AES-256-GCM
     const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-    const encrypted = Buffer.concat([
-      cipher.update(password, 'utf8'),
-      cipher.final()
-    ]);
+    const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
     const authTag = cipher.getAuthTag();
     const ciphertext = Buffer.concat([encrypted, authTag]);
 
@@ -371,7 +388,9 @@ export class BrowserPasswordReader {
     try {
       const key = await this.getEncryptionKey(browser, config?.keychainPassword);
 
-      const rows = db.prepare(`
+      const rows = db
+        .prepare(
+          `
         SELECT
           origin_url,
           username_value,
@@ -381,7 +400,15 @@ export class BrowserPasswordReader {
         FROM logins
         WHERE blacklisted_by_user = 0
         ORDER BY date_last_used DESC
-      `).all() as any[];
+      `
+        )
+        .all() as Array<{
+        origin_url: string;
+        username_value: string;
+        password_value: Buffer;
+        date_last_used: number;
+        date_created: number;
+      }>;
 
       const passwords: PasswordData[] = [];
       let emptyEntries = 0;
@@ -413,12 +440,14 @@ export class BrowserPasswordReader {
 
       console.log(
         `[BrowserPasswordReader] Read ${passwords.length} ${browser.name} passwords ` +
-        `(empty: ${emptyEntries}, decryption failures: ${decryptionFailures})`
+          `(empty: ${emptyEntries}, decryption failures: ${decryptionFailures})`
       );
 
       // If we had encrypted entries but ALL decryption failed, likely wrong keychain password
       if (passwords.length === 0 && decryptionFailures > 0 && config?.keychainPassword) {
-        throw new Error('Failed to decrypt passwords. Please check that you entered the correct keychain password.');
+        throw new Error(
+          'Failed to decrypt passwords. Please check that you entered the correct keychain password.'
+        );
       }
 
       return passwords;
@@ -452,7 +481,9 @@ export class BrowserPasswordReader {
       })
     );
 
-    console.log(`[BrowserPasswordReader] Encrypted ${encryptedPasswords.length} passwords for upload`);
+    console.log(
+      `[BrowserPasswordReader] Encrypted ${encryptedPasswords.length} passwords for upload`
+    );
     return encryptedPasswords;
   }
 }

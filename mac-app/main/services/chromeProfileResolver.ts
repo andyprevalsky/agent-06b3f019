@@ -27,7 +27,7 @@ export function resolveChromeProfileDir(): string | null {
 
   // Pick the most recently modified profile
   const sorted = matches
-    .map(p => ({ dir: path.dirname(p), mtime: fs.statSync(p).mtime.getTime() }))
+    .map((p) => ({ dir: path.dirname(p), mtime: fs.statSync(p).mtime.getTime() }))
     .sort((a, b) => b.mtime - a.mtime);
 
   const chosen = sorted[0].dir;
@@ -42,7 +42,7 @@ export function resolveChromeProfileDir(): string | null {
  */
 export function resolveChromeProfilePath(...segments: string[]): string | null {
   const profileDir = resolveChromeProfileDir();
-  if (!profileDir) return null;
+  if (profileDir === null) return null;
   const target = path.join(profileDir, ...segments);
   return fs.existsSync(target) ? target : null;
 }

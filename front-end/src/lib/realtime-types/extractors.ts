@@ -1,0 +1,184 @@
+import type { FilePointer } from '../api';
+import type { RealtimeBroadcastWrapper } from './wrapper';
+import type {
+  DeleteMessagePayload,
+  InsertMessagePayload,
+  UpdateAgentPayload,
+} from './message-payloads';
+import type {
+  AgentModeStartedPayload,
+  AssistantStreamPayload,
+  AttentionStreamPayload,
+  PlanStreamPayload,
+  ToolStreamPayload,
+} from './stream-payloads';
+import type { AgentStateChangedPayload } from './bus-channel';
+import {
+  validateAgentModeStartedPayload,
+  validateAgentStateChangedPayload,
+  validateAssistantStreamPayload,
+  validateAttentionStreamPayload,
+  validateInsertMessagePayload,
+  validatePlanStreamPayload,
+  validateToolStreamPayload,
+  validateUpdateAgentPayload,
+} from './validators';
+
+// =============================================================================
+// Strict Extraction Functions (with validation + error logging)
+// =============================================================================
+
+/**
+ * Extract and validate the record from a Supabase Realtime broadcast wrapper.
+ * Logs error and returns null if the payload structure is invalid.
+ */
+function extractAndValidate<T>(
+  wrapper: unknown,
+  eventType: string,
+  validator: (payload: unknown) => string | null,
+): T | null {
+  // First extract from wrapper
+  const w = wrapper as RealtimeBroadcastWrapper<T>;
+  if (
+    typeof w !== 'object' ||
+    w === null ||
+    typeof w.payload !== 'object' ||
+    w.payload === null ||
+    !('record' in w.payload)
+  ) {
+    console.error(
+      `❌ [Realtime] Unknown Message Type for ${eventType}: Invalid wrapper structure`,
+      wrapper,
+    );
+    return null;
+  }
+
+  const record = w.payload.record;
+  const error = validator(record);
+  if (error) {
+    console.error(`❌ [Realtime] Unknown Message Type for ${eventType}: ${error}`, record);
+    return null;
+  }
+
+  return record;
+}
+
+/**
+ * Extract and validate INSERT message payload.
+ * Transforms DB column names to API format (filePointer -> file_pointer).
+ */
+export function extractInsertPayload(wrapper: unknown): InsertMessagePayload | null {
+  const record = extractAndValidate<InsertMessagePayload>(
+    wrapper,
+    'INSERT',
+    validateInsertMessagePayload,
+  );
+  if (!record) return null;
+
+  // Transform DB column name (camelCase) to API format (snake_case)
+  const dbRecord = record as unknown as Record<string, unknown>;
+  if (dbRecord.filePointer !== undefined) {
+    record.file_pointer = dbRecord.filePointer as FilePointer | null;
+  }
+
+  return record;
+}
+
+/**
+ * Extract and validate UPDATE agent payload.
+ */
+export function extractUpdatePayload(wrapper: unknown): UpdateAgentPayload | null {
+  return extractAndValidate<UpdateAgentPayload>(wrapper, 'UPDATE', validateUpdateAgentPayload);
+}
+
+/**
+ * Extract and validate DELETE payload.
+ */
+export function extractDeletePayload(wrapper: unknown): DeleteMessagePayload | null {
+  return extractAndValidate<DeleteMessagePayload>(wrapper, 'DELETE', (p) => {
+    if (typeof p !== 'object' || p === null) return 'Payload is not an object';
+    if (typeof (p as Record<string, unknown>).id !== 'string') return 'Missing or invalid id';
+    return null;
+  });
+}
+
+/**
+ * Extract and validate ASSISTANT_STREAM payload.
+ */
+export function extractAssistantStreamPayload(wrapper: unknown): AssistantStreamPayload | null {
+  return extractAndValidate<AssistantStreamPayload>(
+    wrapper,
+    'ASSISTANT_STREAM',
+    validateAssistantStreamPayload,
+  );
+}
+
+/**
+ * Extract and validate PLAN_STREAM payload.
+ */
+export function extractPlanStreamPayload(wrapper: unknown): PlanStreamPayload | null {
+  return extractAndValidate<PlanStreamPayload>(wrapper, 'PLAN_STREAM', validatePlanStreamPayload);
+}
+
+/**
+ * Extract and validate TOOL_STREAM payload.
+ */
+export function extractToolStreamPayload(wrapper: unknown): ToolStreamPayload | null {
+  return extractAndValidate<ToolStreamPayload>(wrapper, 'TOOL_STREAM', validateToolStreamPayload);
+}
+
+/**
+ * Extract and validate ATTENTION_STREAM payload.
+ */
+export function extractAttentionStreamPayload(wrapper: unknown): AttentionStreamPayload | null {
+  return extractAndValidate<AttentionStreamPayload>(
+    wrapper,
+    'ATTENTION_STREAM',
+    validateAttentionStreamPayload,
+  );
+}
+
+/**
+ * Extract and validate AGENT_STATE_CHANGED payload.
+ */
+export function extractAgentStateChangedPayload(wrapper: unknown): AgentStateChangedPayload | null {
+  return extractAndValidate<AgentStateChangedPayload>(
+    wrapper,
+    'AGENT_STATE_CHANGED',
+    validateAgentStateChangedPayload,
+  );
+}
+
+/**
+ * Extract and validate AGENT_MODE_STARTED payload.
+ */
+export function extractAgentModeStartedPayload(wrapper: unknown): AgentModeStartedPayload | null {
+  return extractAndValidate<AgentModeStartedPayload>(
+    wrapper,
+    'AGENT_MODE_STARTED',
+    validateAgentModeStartedPayload,
+  );
+}
+
+// =============================================================================
+// Legacy Utility (for backwards compatibility - prefer typed extractors above)
+// =============================================================================
+
+/**
+ * @deprecated Use typed extractors (extractInsertPayload, extractUpdatePayload, etc.) instead.
+ * Extract the record from a Supabase Realtime broadcast wrapper without validation.
+ */
+export function extractRecord<T>(wrapper: unknown): T | null {
+  const w = wrapper as RealtimeBroadcastWrapper<T>;
+  if (
+    typeof w === 'object' &&
+    w !== null &&
+    typeof w.payload === 'object' &&
+    w.payload !== null &&
+    'record' in w.payload
+  ) {
+    return w.payload.record;
+  }
+  console.error('❌ [Realtime] Unknown Message Type: Invalid wrapper structure', wrapper);
+  return null;
+}

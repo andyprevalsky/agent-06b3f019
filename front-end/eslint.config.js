@@ -37,60 +37,6 @@ function loadStrictFiles() {
 }
 
 const strictFiles = loadStrictFiles();
-const LEGACY_STRICT_EXEMPT_FILES = [
-  'src/contexts/AgentContext.tsx',
-  'src/main.tsx',
-  'src/pages/Integrations.tsx',
-  'src/pages/Terminal.tsx',
-  'src/pages/Usage.tsx',
-  // Terminal domain: composed orchestration hook with many sub-hooks
-  'src/features/terminal/hooks/useTerminalAgents.ts',
-  // Index domain: large video/animation components with complex browser-interop code
-  'src/features/index/components/FeatureVideoStage.tsx',
-  'src/features/index/components/HeroSection.tsx',
-  'src/features/index/components/FeaturesSection.tsx',
-  'src/features/index/components/PreOrderSection.tsx',
-  'src/features/index/components/WaitlistSection.tsx',
-  'src/features/index/components/WaitlistForm.tsx',
-  'src/features/index/components/VideoPlayer.tsx',
-  'src/features/index/components/VideoLoadingAnimation.tsx',
-  'src/features/index/components/ProgressiveImage.tsx',
-  'src/features/index/components/PoweredByTicker.tsx',
-  // Terminal-component-group: all UI components are legacy (moved from src/components/terminal/)
-  'src/features/terminal-component-group/components/AgentListItem.tsx',
-  'src/features/terminal-component-group/components/AgentSettingsDialog.tsx',
-  'src/features/terminal-component-group/components/AppSidebar.tsx',
-  'src/features/terminal-component-group/components/ApprovalChip.tsx',
-  'src/features/terminal-component-group/components/AsciiLoader.tsx',
-  'src/features/terminal-component-group/components/AttentionInbox.tsx',
-  'src/features/terminal-component-group/components/BrowserBorderGlow.tsx',
-  'src/features/terminal-component-group/components/BrowserCursorOverlay.tsx',
-  'src/features/terminal-component-group/components/BrowserStatusBar.tsx',
-  'src/features/terminal-component-group/components/BrowserStatusBarCarousel.tsx',
-  'src/features/terminal-component-group/components/BrowserViewPanel.tsx',
-  'src/features/terminal-component-group/components/ClaudeCodeChip.tsx',
-  'src/features/terminal-component-group/components/CompletionSummaryCard.tsx',
-  'src/features/terminal-component-group/components/CostLimitModal.tsx',
-  'src/features/terminal-component-group/components/CreateAgentModal.tsx',
-  'src/features/terminal-component-group/components/ExploreAgentBubble.tsx',
-  'src/features/terminal-component-group/components/FeedbackBanner.tsx',
-  'src/features/terminal-component-group/components/MarkdownText.tsx',
-  'src/features/terminal-component-group/components/MessageBubble.tsx',
-  'src/features/terminal-component-group/components/MessageList.tsx',
-  'src/features/terminal-component-group/components/NetworkView.tsx',
-  'src/features/terminal-component-group/components/PhoneCallCard.tsx',
-  'src/features/terminal-component-group/components/PlanArtifact.tsx',
-  'src/features/terminal-component-group/components/PlanChip.tsx',
-  'src/features/terminal-component-group/components/QueryInput.tsx',
-  'src/features/terminal-component-group/components/RoseToolSetChip.tsx',
-  'src/features/terminal-component-group/components/SignupPromptBubble.tsx',
-  'src/features/terminal-component-group/components/SmallTileAnimationCanvas.tsx',
-  'src/features/terminal-component-group/components/SubAgentToolBubble.tsx',
-  'src/features/terminal-component-group/components/SubAgentTree.tsx',
-  'src/features/terminal-component-group/components/TestPromptsSelector.tsx',
-  'src/features/terminal-component-group/components/WaitForChip.tsx',
-  'src/features/terminal-component-group/components/WriteLockToggle.tsx',
-];
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 export default tseslint.config(
@@ -113,6 +59,10 @@ export default tseslint.config(
       ...reactHooks.configs.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
       '@typescript-eslint/no-unused-vars': 'off',
+      // Base file-size ceiling for every TS/TSX file. The strict overlay below
+      // tightens this to 300 for opted-in domains; blackbox/test suites can
+      // opt out via a top-of-file `/* eslint-disable max-lines */`.
+      'max-lines': ['error', { max: 600, skipBlankLines: true, skipComments: true }],
     },
   },
 
@@ -275,28 +225,6 @@ export default tseslint.config(
       'no-restricted-syntax': 'off',
     },
   },
-
-  // ── Legacy strict exemptions (temporary, refactor targets) ─────────────
-  ...(LEGACY_STRICT_EXEMPT_FILES.length > 0
-    ? [
-        {
-          files: LEGACY_STRICT_EXEMPT_FILES,
-          rules: {
-            'max-lines': 'off',
-            'max-lines-per-function': 'off',
-            '@typescript-eslint/no-floating-promises': 'off',
-            '@typescript-eslint/no-misused-promises': 'off',
-            '@typescript-eslint/no-explicit-any': 'off',
-            '@typescript-eslint/no-unused-vars': 'off',
-            'no-console': 'off',
-            'no-useless-catch': 'off',
-            'no-empty': 'off',
-            'no-restricted-imports': 'off',
-            'no-restricted-syntax': 'off',
-          },
-        },
-      ]
-    : []),
 
   // ── Storybook ──────────────────────────────────────────────────────────
   ...storybook.configs['flat/recommended'],

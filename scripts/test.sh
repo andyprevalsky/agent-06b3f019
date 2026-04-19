@@ -12,11 +12,17 @@ set -euo pipefail
 #   bash scripts/test.sh back-end                      # backend tests only
 #   bash scripts/test.sh back-end auth                 # backend blackbox: auth domain
 #   bash scripts/test.sh front-end                     # frontend tests only
+#   bash scripts/test.sh mac-app                       # mac-app tests only
+#   bash scripts/test.sh mac-app onboarding            # mac-app blackbox: onboarding domain
 #   bash scripts/test.sh --list                        # list available repos/domains
 #   bash scripts/test.sh -v                            # verbose — show all output
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# mac-app is Electron + macOS-only; skip its build on non-Darwin hosts.
+IS_MAC=false
+[ "$(uname)" = "Darwin" ] && IS_MAC=true
 
 # ── Parse flags ──
 REPO=""
@@ -61,6 +67,9 @@ if $LIST; then
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo "    (semantic — requires --smoke):"
   (cd front-end && bash scripts/run-semantic-tests.sh --list 2>/dev/null) | sed 's/^/    /'
+  echo ""
+  echo "  mac-app"
+  (cd mac-app && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   exit 0
 fi
 
@@ -174,7 +183,7 @@ if should_run "front-end"; then
   BUILD_LOGS+=("$FE_BUILD_LOG")
 fi
 
-if should_run "mac-app"; then
+if should_run "mac-app" && $IS_MAC; then
   MAC_BUILD_LOG="$TMPDIR_BASE/mac_build.log"
   bash -c "cd mac-app && npx vite build && npx tsc -p tsconfig.main.json" > "$MAC_BUILD_LOG" 2>&1 &
   BUILD_PIDS+=($!)
@@ -213,6 +222,15 @@ if should_run "front-end"; then
     bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
   fi
 fi
+
+if should_run "mac-app"; then
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
+    bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  else
+    bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
+  fi
+fi
+
 
 # ── Wait for all blackbox suites ──
 collect_bg_suites

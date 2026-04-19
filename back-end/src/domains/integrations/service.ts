@@ -78,7 +78,7 @@ import {
   GmailAccountNotFoundError,
   GmailTokenExpiredError,
   GmailAuthFailedError,
-  ClaudeCodeCredentialsNotFoundError,
+  // ClaudeCodeCredentialsNotFoundError, // TEMP: unused while onboarding gate is disabled
   NoTokensAvailableError,
 } from './service.errors';
 
@@ -331,10 +331,11 @@ export async function getClaudeCodeToken(
       return { accessToken: userToken, source: 'user' as const };
     }
   }
-  const user = await repo.findUserById(userId);
-  if (user?.onboardingCompletedAt === null || user?.onboardingCompletedAt === undefined) {
-    throw new ClaudeCodeCredentialsNotFoundError();
-  }
+  // TEMP: onboarding gate disabled — pool is open to all authenticated users (incl. anon)
+  // const user = await repo.findUserById(userId);
+  // if (user?.onboardingCompletedAt === null || user?.onboardingCompletedAt === undefined) {
+  //   throw new ClaudeCodeCredentialsNotFoundError();
+  // }
   const poolResult = await fetchPoolToken(excludePoolTokenIds);
   if (poolResult === null || poolResult === undefined) throw new NoTokensAvailableError();
   return {

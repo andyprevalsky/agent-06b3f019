@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 
 import { submitWaitlist } from './api';
@@ -13,6 +13,90 @@ import {
   PRE_ORDER_CHECKOUT_URLS,
 } from './config';
 import type { WaitlistFormState } from './types';
+
+// ---------------------------------------------------------------------------
+// Progressive image loader
+// ---------------------------------------------------------------------------
+
+type FetchPriority = 'high' | 'low' | 'auto';
+
+interface ImageWithPriority extends HTMLImageElement {
+  fetchpriority?: 'high' | 'low';
+}
+
+function preloadImage(src: string, priority?: 'high' | 'low'): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const img = new Image() as ImageWithPriority;
+    if (priority) {
+      img.fetchpriority = priority;
+    }
+    img.onload = () => resolve();
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+interface ProgressiveImageOptions {
+  lowSrc: string;
+  medSrc: string;
+  highSrc: string;
+  fetchPriority: FetchPriority;
+}
+
+/** Loads low/medium/high versions of an image, returning the best available src. */
+export function useProgressiveImageSrc({
+  lowSrc,
+  medSrc,
+  highSrc,
+  fetchPriority,
+}: ProgressiveImageOptions): string {
+  const [currentSrc, setCurrentSrc] = useState(lowSrc);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    // Tier: 1=low, 2=med, 3=high. Only upgrade, never downgrade if med resolves after high.
+    let currentTier = 0;
+    const upgradeTo = (tier: number, src: string) => {
+      if (cancelledRef.current || tier <= currentTier) return;
+      currentTier = tier;
+      setCurrentSrc(src);
+    };
+
+    const lowPriority = fetchPriority === 'high' ? 'high' : undefined;
+
+    const run = async () => {
+      try {
+        await preloadImage(lowSrc, lowPriority);
+        upgradeTo(1, lowSrc);
+      } catch (error) {
+        console.warn('Failed to load low resolution image:', error);
+        return;
+      }
+
+      // Load medium and high in parallel; high overwrites medium if it arrives later.
+      const medP = preloadImage(medSrc, 'low')
+        .then(() => upgradeTo(2, medSrc))
+        .catch((error: unknown) => {
+          console.warn('Failed to load medium resolution image:', error);
+        });
+      const highP = preloadImage(highSrc, 'low')
+        .then(() => upgradeTo(3, highSrc))
+        .catch((error: unknown) => {
+          console.warn('Failed to load high resolution image:', error);
+        });
+      await Promise.all([medP, highP]);
+    };
+
+    void run();
+
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, [lowSrc, medSrc, highSrc, fetchPriority]);
+
+  return currentSrc;
+}
 
 // ---------------------------------------------------------------------------
 // Early access

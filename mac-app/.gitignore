@@ -29,6 +29,9 @@ Thumbs.db
 # electron-builder output
 /dist_electron
 
+# Blackbox test artifacts
+.context/test-runs/
+
 # Package managers
 package-lock.json
 yarn.lock

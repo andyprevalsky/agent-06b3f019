@@ -1351,13 +1351,16 @@ async function testClaudeCodeUpload_happyPath() {
 }
 
 async function testClaudeCodeToken_notFound() {
-  // Anonymous user without credentials → 404
+  // TEMP: onboarding gate in getClaudeCodeToken is disabled — anon users get pool token (200).
+  // Restore 404 assertion when service.ts guard is uncommented.
   const { accessToken } = await createAnonSession();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
     headers: authHeaders(accessToken),
   });
-  assertStatus(res.status, 404, res.data);
-  assertSchema(ErrorResponse, res.data, 'claude-code token not found');
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { accessToken: string; source: string };
+  assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
+  assert(typeof body.accessToken === 'string' && body.accessToken.length > 0, 'Expected pool accessToken');
 }
 
 async function testClaudeCodeRateLimited_forbidden() {
@@ -2366,13 +2369,15 @@ async function testClaudeCodeCredentials_upload() {
 
 // 17. Claude Code credentials get token: returns 404 for anon user without onboarding
 async function testClaudeCodeCredentials_getToken() {
+  // TEMP: onboarding gate in getClaudeCodeToken is disabled — anon users get pool token (200).
+  // Restore 404 assertion when service.ts guard is uncommented.
   const { accessToken } = await createAnonSession();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
     headers: authHeaders(accessToken),
   });
-  // Anonymous users without onboarding → 404
-  assertStatus(res.status, 404, res.data);
-  assertSchema(ErrorResponse, res.data, 'claude-code get token');
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { accessToken: string; source: string };
+  assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
 }
 
 // 18. Claude Code token rate-limited: with API key (internal auth)
@@ -3378,13 +3383,14 @@ async function testPasswordRequest_happy() {
 
 // 10. Claude Code credentials token for user without onboarding
 async function testClaudeCodeToken_noOnboarding() {
+  // TEMP: onboarding gate in getClaudeCodeToken is disabled — no-onboarding users get pool token (200).
+  // Restore 404/400 assertion when service.ts guard is uncommented.
   const session = await createAnonSession();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
     headers: authHeaders(session.accessToken),
   });
-  // Should return error about credentials not found (user hasn't completed onboarding)
-  if (res.status !== 404 && res.status !== 400) {
-    throw new Error(`Expected 404/400 for no onboarding, got ${res.status}`);
+  if (res.status !== 200) {
+    throw new Error(`Expected 200 (gate disabled) for no onboarding, got ${res.status}`);
   }
 }
 

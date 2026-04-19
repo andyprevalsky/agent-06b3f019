@@ -21,9 +21,48 @@
  * - hasError: boolean
  */
 
-import { useEffect, useRef, useState, forwardRef, isValidElement, cloneElement } from 'react';
+import { forwardRef, isValidElement, cloneElement, useMemo, useRef } from 'react';
+import type { MutableRefObject, ReactElement } from 'react';
 
 import type { VideoPlayerProps } from '../types';
+import {
+  useBrowserDetection,
+  useDeferredVideoLoad,
+  useVideoAutoplay,
+} from '../hooks/videoPlayerHooks';
+
+const getHevcSrc = (webmSrc: string): string => webmSrc.replace('.webm', '-hevc.mov');
+
+type FallbackProps = {
+  className?: string;
+  style?: React.CSSProperties;
+};
+
+const renderFallback = (
+  fallbackContent: React.ReactNode,
+  finalClassName: string,
+  style: React.CSSProperties,
+): React.ReactElement => {
+  if (isValidElement(fallbackContent)) {
+    const element = fallbackContent as ReactElement<FallbackProps>;
+    const existingProps = element.props;
+    const mergedClass = `${existingProps.className ?? ''} ${finalClassName}`.trim();
+    const mergedStyle: React.CSSProperties = {
+      ...existingProps.style,
+      ...style,
+      backgroundColor: 'transparent',
+    };
+    return cloneElement(element, {
+      className: mergedClass,
+      style: mergedStyle,
+    });
+  }
+  return (
+    <div className={finalClassName} style={style}>
+      {fallbackContent}
+    </div>
+  );
+};
 
 const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
   (
@@ -44,165 +83,22 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
     },
     ref,
   ) => {
-    const videoRef = useRef<HTMLVideoElement>(null);
-    const actualVideoRef = ref || videoRef;
-    const [shouldLoadVideo, setShouldLoadVideo] = useState(priority);
-    const [isSafari, setIsSafari] = useState(false);
-    const [isIOS, setIsIOS] = useState(false);
+    const internalRef = useRef<HTMLVideoElement>(null);
+    const videoRef = (ref ?? internalRef) as MutableRefObject<HTMLVideoElement | null>;
 
-    // Detect Safari and iOS browsers
-    useEffect(() => {
-      const detectSafari = () => {
-        const userAgent = navigator.userAgent.toLowerCase();
-        return (
-          userAgent.includes('safari') &&
-          !userAgent.includes('chrome') &&
-          !userAgent.includes('firefox')
-        );
-      };
+    const { isSafari, isIOS } = useBrowserDetection();
+    const shouldLoadVideo = useDeferredVideoLoad(priority);
+    useVideoAutoplay(videoRef, shouldLoadVideo, autoPlay, onLoad, onFirstFrame);
 
-      const detectIOS = () => {
-        const userAgent = navigator.userAgent.toLowerCase();
-        return /iphone|ipad|ipod/.test(userAgent);
-      };
-
-      setIsSafari(detectSafari());
-      setIsIOS(detectIOS());
-    }, []);
-
-    // Generate HEVC source URL for Safari/iOS
-    const getHevcSrc = (webmSrc: string) => {
-      return webmSrc.replace('.webm', '-hevc.mov');
-    };
-
-    // Prioritize loading strategy
-    useEffect(() => {
-      if (!priority) {
-        requestAnimationFrame(() => {
-          setShouldLoadVideo(true);
-        });
-      }
-    }, [priority]);
-
-    // Simple safe autoplay implementation based on your example
-    useEffect(() => {
-      if (!shouldLoadVideo) return;
-
-      const video = (actualVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current;
-      if (!video) return;
-
-      let hasAttemptedPlay = false;
-      let notifiedFirstFrame = false;
-
-      function safeAutoplay() {
-        if (!video || !autoPlay) return;
-
-        // Prevent spamming play()
-        if (hasAttemptedPlay) return;
-        hasAttemptedPlay = true;
-
-        // Ensure video is muted (required by autoplay policy)
-        video.muted = true;
-
-        // Small timeout ensures the video is attached & rendered
-        setTimeout(() => {
-          video.play().catch((err) => {
-            console.warn('[Autoplay failed]', err);
-            hasAttemptedPlay = false; // allow retry later if needed
-          });
-        }, 0);
-      }
-
-      function maybeNotifyFirstFrame() {
-        if (!video || notifiedFirstFrame) return;
-        if (video.currentTime > 0 || video.readyState >= 2) {
-          notifiedFirstFrame = true;
-          onFirstFrame?.();
-        }
-      }
-
-      // Handle all relevant lifecycle events
-      const handleVideoLoad = () => {
-        safeAutoplay();
-        onLoad?.();
-        // Sometimes loadeddata already means first frame is available
-        maybeNotifyFirstFrame();
-      };
-
-      const handlePageShow = () => safeAutoplay();
-
-      const handleVisibilityChange = () => {
-        if (document.visibilityState === 'visible') safeAutoplay();
-      };
-
-      const handleFocus = () => safeAutoplay();
-
-      const handleDOMContentLoaded = () => safeAutoplay();
-
-      const handleWindowLoad = () => safeAutoplay();
-
-      const handlePlaying = () => {
-        maybeNotifyFirstFrame();
-      };
-
-      const handleTimeUpdate = () => {
-        maybeNotifyFirstFrame();
-      };
-
-      // Add event listeners
-      video.addEventListener('loadeddata', handleVideoLoad);
-      video.addEventListener('playing', handlePlaying);
-      video.addEventListener('timeupdate', handleTimeUpdate);
-      window.addEventListener('load', handleWindowLoad);
-      window.addEventListener('pageshow', handlePageShow);
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-      window.addEventListener('focus', handleFocus);
-      document.addEventListener('DOMContentLoaded', handleDOMContentLoaded);
-
-      // Initial attempt if video is already ready
-      if (video.readyState >= 2) {
-        safeAutoplay();
-      }
-
-      return () => {
-        video.removeEventListener('loadeddata', handleVideoLoad);
-        video.removeEventListener('playing', handlePlaying);
-        video.removeEventListener('timeupdate', handleTimeUpdate);
-        window.removeEventListener('load', handleWindowLoad);
-        window.removeEventListener('pageshow', handlePageShow);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-        window.removeEventListener('focus', handleFocus);
-        document.removeEventListener('DOMContentLoaded', handleDOMContentLoaded);
-      };
-    }, [shouldLoadVideo, autoPlay, onLoad]);
-
-    const finalClassName = `${className} object-${objectFit}`;
+    const finalClassName = useMemo(() => `${className} object-${objectFit}`, [className, objectFit]);
 
     if (!shouldLoadVideo && fallbackContent) {
-      if (isValidElement(fallbackContent)) {
-        const existingProps: Record<string, any> = fallbackContent.props ?? {};
-        const mergedClass = `${existingProps.className ?? ''} ${finalClassName}`.trim();
-        const mergedStyle = {
-          ...existingProps.style,
-          ...style,
-          backgroundColor: 'transparent',
-        } as React.CSSProperties;
-        return cloneElement(fallbackContent as any, {
-          ...existingProps,
-          className: mergedClass,
-          style: mergedStyle,
-        });
-      }
-      return (
-        <div className={finalClassName} style={style}>
-          {fallbackContent}
-        </div>
-      );
+      return renderFallback(fallbackContent, finalClassName, style);
     }
 
     return (
       <video
-        ref={actualVideoRef}
+        ref={videoRef}
         autoPlay={autoPlay}
         loop={loop}
         muted={muted}

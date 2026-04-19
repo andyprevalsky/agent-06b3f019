@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Blackbox tests for the landing page components + hooks.
  *

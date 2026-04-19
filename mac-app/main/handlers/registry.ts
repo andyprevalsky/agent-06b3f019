@@ -1,3 +1,4 @@
+/* eslint-disable max-lines, max-lines-per-function -- TODO: split into per-domain handler modules; tracked for a follow-up refactor. */
 import { ipcMain, BrowserWindow, shell, globalShortcut } from 'electron';
 import Store from 'electron-store';
 import { exec } from 'child_process';
@@ -18,7 +19,7 @@ import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppS
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
 import { IntegrationCache } from '../services/sync/IntegrationCache';
-import { logIpc, logConsole, logConsoleError } from '../base/logger';
+import { logIpc, logConsole, logConsoleError, getErrorMessage } from '../base/logger';
 import { config } from '../base/config';
 import type { ShortcutConfig, ReadBrowserCookiesConfig } from '../../shared/types/ipc';
 
@@ -54,7 +55,7 @@ const configToAccelerator = (config: ShortcutConfig): string => {
     Shift: 'Shift',
   };
 
-  const mods = config.modifiers.map(m => modMap[m] || m).join('+');
+  const mods = config.modifiers.map((m) => modMap[m] || m).join('+');
   return `${mods}+${config.key}`;
 };
 
@@ -84,9 +85,15 @@ export function registerHandlers() {
     logConsole('IPC Auth', 'Session saved to store');
 
     // Trigger syncs after successful auth (all run in parallel)
-    IMessageSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err));
-    CookieSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth cookie sync error', err));
-    BrowserStateSync.sync().catch(err => logConsoleError('IPC Auth', 'Post-auth browser state sync error', err));
+    IMessageSync.sync().catch((err) =>
+      logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err)
+    );
+    CookieSync.sync().catch((err) =>
+      logConsoleError('IPC Auth', 'Post-auth cookie sync error', err)
+    );
+    BrowserStateSync.sync().catch((err) =>
+      logConsoleError('IPC Auth', 'Post-auth browser state sync error', err)
+    );
 
     logIpc('OUT', 'auth:save', { success: true });
     return { success: true };
@@ -99,7 +106,7 @@ export function registerHandlers() {
     logIpc('OUT', 'auth:clear', { success: true });
     return { success: true };
   });
-  
+
   // iMessage handlers
   ipcMain.handle('imessage:checkAccess', () => {
     logIpc('IN', 'imessage:checkAccess');
@@ -115,7 +122,10 @@ export function registerHandlers() {
     // Check access
     if (!IMessageReader.checkAccess()) {
       logConsoleError('IPC', 'No access to iMessage database');
-      logIpc('OUT', 'imessage:startUpload', { success: false, message: 'Full Disk Access required' });
+      logIpc('OUT', 'imessage:startUpload', {
+        success: false,
+        message: 'Full Disk Access required',
+      });
       return { success: false, message: 'Full Disk Access required' };
     }
 
@@ -132,8 +142,11 @@ export function registerHandlers() {
     logConsole('IPC', `Read ${messages.length} messages from database`);
 
     // Count unique contacts
-    const contacts = new Set(messages.map((m: any) => m.contact_id));
-    logConsole('IPC', `Sending ${messages.length} messages from ${contacts.size} contacts to backend`);
+    const contacts = new Set(messages.map((m) => m.contact_id));
+    logConsole(
+      'IPC',
+      `Sending ${messages.length} messages from ${contacts.size} contacts to backend`
+    );
 
     const window = BrowserWindow.fromWebContents(event.sender);
     const result = await BatchUploader.uploadInBatches(
@@ -154,13 +167,13 @@ export function registerHandlers() {
       await IMessageSender.send(payload);
       logIpc('OUT', 'imessage:sendDirect', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('IPC', 'Failed to send direct iMessage', error);
-      logIpc('OUT', 'imessage:sendDirect', { success: false, message: error?.message });
-      return { success: false, message: error?.message || 'Failed to send iMessage' };
+      logIpc('OUT', 'imessage:sendDirect', { success: false, message: getErrorMessage(error) });
+      return { success: false, message: getErrorMessage(error) || 'Failed to send iMessage' };
     }
   });
-  
+
   // Cookie handlers
   ipcMain.handle('cookies:readChrome', async () => {
     logIpc('IN', 'cookies:readChrome');
@@ -180,7 +193,12 @@ export function registerHandlers() {
 
     const window = BrowserWindow.fromWebContents(event.sender);
     // Use batch uploader for cookies too
-    const result = await BatchUploader.uploadInBatches('chrome', data, session.access_token, window);
+    const result = await BatchUploader.uploadInBatches(
+      'chrome',
+      data,
+      session.access_token,
+      window
+    );
     logIpc('OUT', 'cookies:upload', result);
     return result;
   });
@@ -190,23 +208,29 @@ export function registerHandlers() {
     logIpc('IN', 'cookies:getInstalledBrowsers');
     const browsers = BrowserCookieReader.getInstalledBrowsers();
     logConsole('BrowserCookieReader', `Found ${browsers.length} installed browsers`);
-    logIpc('OUT', 'cookies:getInstalledBrowsers', { browsers: browsers.map(b => b.type) });
+    logIpc('OUT', 'cookies:getInstalledBrowsers', { browsers: browsers.map((b) => b.type) });
     return browsers;
   });
 
-  ipcMain.handle('cookies:readBrowser', async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
-    logIpc('IN', 'cookies:readBrowser', { browser, hasPassword: !!config?.keychainPassword });
-    try {
-      const cookies = await BrowserCookieReader.readCookies(browser, config);
-      logConsole('BrowserCookieReader', `Read ${cookies.length} ${browser} cookies`);
-      logIpc('OUT', 'cookies:readBrowser', { browser, count: cookies.length });
-      return cookies;
-    } catch (error: any) {
-      logConsoleError('BrowserCookieReader', `Failed to read ${browser} cookies`, error);
-      logIpc('OUT', 'cookies:readBrowser', { browser, error: error.message });
-      throw error;
+  ipcMain.handle(
+    'cookies:readBrowser',
+    async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
+      logIpc('IN', 'cookies:readBrowser', {
+        browser,
+        hasPassword: Boolean(config?.keychainPassword),
+      });
+      try {
+        const cookies = await BrowserCookieReader.readCookies(browser, config);
+        logConsole('BrowserCookieReader', `Read ${cookies.length} ${browser} cookies`);
+        logIpc('OUT', 'cookies:readBrowser', { browser, count: cookies.length });
+        return cookies;
+      } catch (error) {
+        logConsoleError('BrowserCookieReader', `Failed to read ${browser} cookies`, error);
+        logIpc('OUT', 'cookies:readBrowser', { browser, error: getErrorMessage(error) });
+        throw error;
+      }
     }
-  });
+  );
 
   ipcMain.handle('cookies:uploadBrowser', async (event, browser: BrowserType, data) => {
     logIpc('IN', 'cookies:uploadBrowser', { browser, count: data?.length });
@@ -219,53 +243,70 @@ export function registerHandlers() {
     const window = BrowserWindow.fromWebContents(event.sender);
     // Use browser-specific integration name (e.g., 'chrome', 'atlas')
     const integrationName = browser;
-    const result = await BatchUploader.uploadInBatches(integrationName, data, session.access_token, window);
+    const result = await BatchUploader.uploadInBatches(
+      integrationName,
+      data,
+      session.access_token,
+      window
+    );
     logIpc('OUT', 'cookies:uploadBrowser', result);
     return result;
   });
 
   // Full browser sync handler (cookies + localStorage + IndexedDB + permissions + Cache Storage)
-  ipcMain.handle('browser:sync', async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
-    logIpc('IN', 'browser:sync', { browser, hasPassword: !!config?.keychainPassword });
-    try {
-      const result = await BrowserStateSync.syncBrowser(browser, config);
-      logConsole('BrowserStateSync', `syncBrowser(${browser}) complete`, result);
-      logIpc('OUT', 'browser:sync', result);
-      return result;
-    } catch (error: any) {
-      logConsoleError('BrowserStateSync', `syncBrowser(${browser}) failed`, error);
-      logIpc('OUT', 'browser:sync', { success: false, error: error.message });
-      return { success: false, message: error.message };
+  ipcMain.handle(
+    'browser:sync',
+    async (_, browser: BrowserType, config?: ReadBrowserCookiesConfig) => {
+      logIpc('IN', 'browser:sync', { browser, hasPassword: Boolean(config?.keychainPassword) });
+      try {
+        const result = await BrowserStateSync.syncBrowser(browser, config);
+        logConsole('BrowserStateSync', `syncBrowser(${browser}) complete`, result);
+        logIpc('OUT', 'browser:sync', result);
+        return result;
+      } catch (error) {
+        logConsoleError('BrowserStateSync', `syncBrowser(${browser}) failed`, error);
+        logIpc('OUT', 'browser:sync', { success: false, error: getErrorMessage(error) });
+        return { success: false, message: getErrorMessage(error) };
+      }
     }
-  });
+  );
 
   // Password-only sync handler (just passwords, not full browser state)
   // For Atlas, pass keychainPassword in config
-  ipcMain.handle('browser:syncPasswords', async (_, browser: BrowserType, config?: { keychainPassword?: string }) => {
-    logIpc('IN', 'browser:syncPasswords', { browser, hasKeychainPassword: !!config?.keychainPassword });
-    try {
-      const result = await BrowserStateSync.syncBrowserPasswordsOnly(browser, config);
-      logConsole('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) complete`, result);
-      logIpc('OUT', 'browser:syncPasswords', result);
-      return result;
-    } catch (error: any) {
-      logConsoleError('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) failed`, error);
-      logIpc('OUT', 'browser:syncPasswords', { success: false, error: error.message });
-      return { success: false, message: error.message };
+  ipcMain.handle(
+    'browser:syncPasswords',
+    async (_, browser: BrowserType, config?: { keychainPassword?: string }) => {
+      logIpc('IN', 'browser:syncPasswords', {
+        browser,
+        hasKeychainPassword: Boolean(config?.keychainPassword),
+      });
+      try {
+        const result = await BrowserStateSync.syncBrowserPasswordsOnly(browser, config);
+        logConsole('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) complete`, result);
+        logIpc('OUT', 'browser:syncPasswords', result);
+        return result;
+      } catch (error) {
+        logConsoleError('BrowserStateSync', `syncBrowserPasswordsOnly(${browser}) failed`, error);
+        logIpc('OUT', 'browser:syncPasswords', { success: false, error: getErrorMessage(error) });
+        return { success: false, message: getErrorMessage(error) };
+      }
     }
-  });
+  );
 
   // Fingerprint handlers
   ipcMain.handle('fingerprint:collect', async () => {
     logIpc('IN', 'fingerprint:collect');
     try {
       const fingerprint = await FingerprintReader.collectFingerprint();
-      logConsole('FingerprintReader', `Collected fingerprint: ${fingerprint ? 'success' : 'failed'}`);
+      logConsole(
+        'FingerprintReader',
+        `Collected fingerprint: ${fingerprint ? 'success' : 'failed'}`
+      );
       logIpc('OUT', 'fingerprint:collect', { success: !!fingerprint });
       return fingerprint;
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('FingerprintReader', 'Error collecting fingerprint', error);
-      logIpc('OUT', 'fingerprint:collect', { success: false, error: error?.message });
+      logIpc('OUT', 'fingerprint:collect', { success: false, error: getErrorMessage(error) });
       return null;
     }
   });
@@ -280,7 +321,12 @@ export function registerHandlers() {
 
     const window = BrowserWindow.fromWebContents(event.sender);
     // Use batch uploader for fingerprint
-    const result = await BatchUploader.uploadInBatches('browser_fingerprint', data, session.access_token, window);
+    const result = await BatchUploader.uploadInBatches(
+      'browser_fingerprint',
+      data,
+      session.access_token,
+      window
+    );
     logIpc('OUT', 'fingerprint:upload', result);
     return result;
   });
@@ -289,7 +335,9 @@ export function registerHandlers() {
   ipcMain.handle('system:openFullDiskAccess', async () => {
     logIpc('IN', 'system:openFullDiskAccess');
     // Opens directly to Full Disk Access pane
-    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
+    );
     logIpc('OUT', 'system:openFullDiskAccess', { success: true });
     return { success: true };
   });
@@ -297,7 +345,7 @@ export function registerHandlers() {
   ipcMain.handle('system:openKeychainAccess', async (_, searchQuery?: string) => {
     logIpc('IN', 'system:openKeychainAccess', { searchQuery });
     try {
-      if (searchQuery) {
+      if (searchQuery !== undefined && searchQuery !== '') {
         // Open Keychain Access and populate search field using AppleScript
         await execAsync(`osascript -e '
           tell application "Keychain Access" to activate
@@ -316,7 +364,7 @@ export function registerHandlers() {
       }
       logIpc('OUT', 'system:openKeychainAccess', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('System', 'Failed to open Keychain Access', error);
       // Fall back to just opening Keychain Access without search
       try {
@@ -336,7 +384,7 @@ export function registerHandlers() {
       await shell.openPath('/System/Applications/Passwords.app');
       logIpc('OUT', 'system:openPasswordsApp', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('System', 'Failed to open Passwords app', error);
       logIpc('OUT', 'system:openPasswordsApp', { success: false });
       return { success: false };
@@ -350,10 +398,10 @@ export function registerHandlers() {
       await shell.openExternal(url);
       logIpc('OUT', 'shell:openExternal', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Shell', 'Failed to open external URL', error);
-      logIpc('OUT', 'shell:openExternal', { success: false, message: error?.message });
-      return { success: false, message: error?.message || 'Failed to open URL' };
+      logIpc('OUT', 'shell:openExternal', { success: false, message: getErrorMessage(error) });
+      return { success: false, message: getErrorMessage(error) || 'Failed to open URL' };
     }
   });
 
@@ -459,10 +507,10 @@ export function registerHandlers() {
       const result = await ClaudeCredentialSync.syncCredentials(window);
       logIpc('OUT', 'claude:syncCredentials', result);
       return result;
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('ClaudeCredentialSync', 'Sync failed', error);
-      logIpc('OUT', 'claude:syncCredentials', { success: false, message: error.message });
-      return { success: false, message: error.message };
+      logIpc('OUT', 'claude:syncCredentials', { success: false, message: getErrorMessage(error) });
+      return { success: false, message: getErrorMessage(error) };
     }
   });
 
@@ -506,10 +554,10 @@ export function registerHandlers() {
       });
       logIpc('OUT', 'whatsapp:connect', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('WhatsApp', 'Connect failed', error);
-      logIpc('OUT', 'whatsapp:connect', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Connection failed' };
+      logIpc('OUT', 'whatsapp:connect', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Connection failed' };
     }
   });
 
@@ -519,10 +567,10 @@ export function registerHandlers() {
       await WhatsAppSync.disconnect();
       logIpc('OUT', 'whatsapp:disconnect', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('WhatsApp', 'Disconnect failed', error);
-      logIpc('OUT', 'whatsapp:disconnect', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Disconnect failed' };
+      logIpc('OUT', 'whatsapp:disconnect', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Disconnect failed' };
     }
   });
 
@@ -532,10 +580,10 @@ export function registerHandlers() {
       await WhatsAppSync.logout();
       logIpc('OUT', 'whatsapp:logout', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('WhatsApp', 'Logout failed', error);
-      logIpc('OUT', 'whatsapp:logout', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Logout failed' };
+      logIpc('OUT', 'whatsapp:logout', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Logout failed' };
     }
   });
 
@@ -574,7 +622,7 @@ export function registerHandlers() {
             const response = await fetch(`${config.apiUrl}/api/integrations/telegram/connect`, {
               method: 'POST',
               headers: {
-                'Authorization': `Bearer ${session.access_token}`,
+                Authorization: `Bearer ${session.access_token}`,
                 'Content-Type': 'application/json',
               },
             });
@@ -584,7 +632,7 @@ export function registerHandlers() {
               // Invalidate cache so subsequent checks see the new integration
               IntegrationCache.invalidate();
               // Trigger historical sync now that we're connected
-              TelegramSync.syncHistorical().catch(err =>
+              TelegramSync.syncHistorical().catch((err) =>
                 logConsoleError('Telegram', 'Historical sync error', err)
               );
             } else {
@@ -598,10 +646,13 @@ export function registerHandlers() {
 
       logIpc('OUT', 'telegram:connectWithExistingSession', { success });
       return { success };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Connect with existing session failed', error);
-      logIpc('OUT', 'telegram:connectWithExistingSession', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Connection failed' };
+      logIpc('OUT', 'telegram:connectWithExistingSession', {
+        success: false,
+        error: getErrorMessage(error),
+      });
+      return { success: false, error: getErrorMessage(error) || 'Connection failed' };
     }
   });
 
@@ -611,10 +662,10 @@ export function registerHandlers() {
       await TelegramSync.disconnect();
       logIpc('OUT', 'telegram:disconnect', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Disconnect failed', error);
-      logIpc('OUT', 'telegram:disconnect', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Disconnect failed' };
+      logIpc('OUT', 'telegram:disconnect', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Disconnect failed' };
     }
   });
 
@@ -624,10 +675,10 @@ export function registerHandlers() {
       await TelegramSync.logout();
       logIpc('OUT', 'telegram:logout', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Logout failed', error);
-      logIpc('OUT', 'telegram:logout', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Logout failed' };
+      logIpc('OUT', 'telegram:logout', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Logout failed' };
     }
   });
 
@@ -637,10 +688,10 @@ export function registerHandlers() {
       const count = await TelegramSync.syncHistorical(messagesPerDialog);
       logIpc('OUT', 'telegram:syncHistorical', { success: true, count });
       return { success: true, count };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Historical sync failed', error);
-      logIpc('OUT', 'telegram:syncHistorical', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Historical sync failed' };
+      logIpc('OUT', 'telegram:syncHistorical', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Historical sync failed' };
     }
   });
 
@@ -666,38 +717,47 @@ export function registerHandlers() {
             window?.webContents.send('telegram:needPassword');
           });
 
-          client.on('auth:complete', async () => {
+          client.on('auth:complete', () => {
             logConsole('Telegram', 'Auth: complete');
 
-            // Register the integration with the backend
-            try {
-              const session = await AuthService.getSession();
-              if (session) {
-                const response = await fetch(`${config.apiUrl}/api/integrations/telegram/connect`, {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${session.access_token}`,
-                    'Content-Type': 'application/json',
-                  },
-                });
-
-                if (response.ok) {
-                  logConsole('Telegram', 'Integration registered with backend');
-                  // Invalidate cache so subsequent checks see the new integration
-                  IntegrationCache.invalidate();
-                  // Trigger historical sync now that we're connected
-                  TelegramSync.syncHistorical().catch(err =>
-                    logConsoleError('Telegram', 'Historical sync error', err)
-                  );
-                } else {
-                  logConsoleError('Telegram', 'Failed to register integration', await response.text());
-                }
-              }
-            } catch (err) {
-              logConsoleError('Telegram', 'Error registering integration', err);
-            }
-
+            // Notify renderer immediately; background register with backend.
             window?.webContents.send('telegram:authComplete');
+
+            void (async () => {
+              try {
+                const session = await AuthService.getSession();
+                if (session) {
+                  const response = await fetch(
+                    `${config.apiUrl}/api/integrations/telegram/connect`,
+                    {
+                      method: 'POST',
+                      headers: {
+                        Authorization: `Bearer ${session.access_token}`,
+                        'Content-Type': 'application/json',
+                      },
+                    }
+                  );
+
+                  if (response.ok) {
+                    logConsole('Telegram', 'Integration registered with backend');
+                    // Invalidate cache so subsequent checks see the new integration
+                    IntegrationCache.invalidate();
+                    // Trigger historical sync now that we're connected
+                    TelegramSync.syncHistorical().catch((err) =>
+                      logConsoleError('Telegram', 'Historical sync error', err)
+                    );
+                  } else {
+                    logConsoleError(
+                      'Telegram',
+                      'Failed to register integration',
+                      await response.text()
+                    );
+                  }
+                }
+              } catch (err) {
+                logConsoleError('Telegram', 'Error registering integration', err);
+              }
+            })();
           });
 
           client.on('auth:error', (errorMessage: string) => {
@@ -709,10 +769,10 @@ export function registerHandlers() {
 
       logIpc('OUT', 'telegram:startAuth', result);
       return result;
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Start auth failed', error);
-      logIpc('OUT', 'telegram:startAuth', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Start auth failed' };
+      logIpc('OUT', 'telegram:startAuth', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Start auth failed' };
     }
   });
 
@@ -722,10 +782,10 @@ export function registerHandlers() {
       TelegramSync.submitCode(code);
       logIpc('OUT', 'telegram:submitCode', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Submit code failed', error);
-      logIpc('OUT', 'telegram:submitCode', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Submit code failed' };
+      logIpc('OUT', 'telegram:submitCode', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Submit code failed' };
     }
   });
 
@@ -735,10 +795,10 @@ export function registerHandlers() {
       TelegramSync.submitPassword(password);
       logIpc('OUT', 'telegram:submitPassword', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Submit password failed', error);
-      logIpc('OUT', 'telegram:submitPassword', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Submit password failed' };
+      logIpc('OUT', 'telegram:submitPassword', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Submit password failed' };
     }
   });
 
@@ -748,10 +808,10 @@ export function registerHandlers() {
       TelegramSync.cancelAuth();
       logIpc('OUT', 'telegram:cancelAuth', { success: true });
       return { success: true };
-    } catch (error: any) {
+    } catch (error) {
       logConsoleError('Telegram', 'Cancel auth failed', error);
-      logIpc('OUT', 'telegram:cancelAuth', { success: false, error: error?.message });
-      return { success: false, error: error?.message || 'Cancel auth failed' };
+      logIpc('OUT', 'telegram:cancelAuth', { success: false, error: getErrorMessage(error) });
+      return { success: false, error: getErrorMessage(error) || 'Cancel auth failed' };
     }
   });
 }
@@ -764,5 +824,4 @@ registerHandlers();
 // - Startup syncs for connected integrations
 // - Periodic sync every 5 minutes
 // - Real-time watchers (fs.watch, MTProto events, Baileys events)
-SyncManager.startAll().catch(err => logConsoleError('Startup', 'SyncManager startup error', err));
-
+SyncManager.startAll().catch((err) => logConsoleError('Startup', 'SyncManager startup error', err));

@@ -148,8 +148,13 @@ async function sync() {
     ).map((p) => p.id);
     if (personIds.length === 0) return 0;
 
+    // Cap at the latest 10k messages across all contacts to keep seed fast and
+    // local DB lean; older history isn't needed for dev/testing.
+    const MESSAGE_LIMIT = 10_000;
     const messages = await remote.messageRecord.findMany({
       where: { personId: { in: personIds } },
+      orderBy: { timestamp: 'desc' },
+      take: MESSAGE_LIMIT,
     });
 
     // Batch in groups of 500 for large datasets

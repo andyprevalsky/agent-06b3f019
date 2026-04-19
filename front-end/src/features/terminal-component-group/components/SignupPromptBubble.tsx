@@ -30,7 +30,7 @@
  * - typingComplete: boolean
  */
 
-import { useState, useEffect, useRef, memo } from 'react';
+import { useState, useEffect, useRef, memo, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { signalSignupCompleted, signalSignupDismissed } from '../hooks';
 import { useAuth } from '../hooks';
@@ -45,51 +45,90 @@ interface SignupPromptBubbleProps {
   onOpenAuthModal?: () => void;
 }
 
+interface WaitingActionsProps {
+  agentId: string;
+  onSignup: () => void;
+}
+
+function WaitingActions({ agentId, onSignup }: WaitingActionsProps) {
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleContinueAsGuest = useCallback(() => {
+    setIsLoading(true);
+    signalSignupDismissed(agentId)
+      .catch((error: unknown) => {
+        console.error('Failed to signal signup dismissed:', error);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [agentId]);
+
+  return (
+    <>
+      <div className="flex items-center gap-3">
+        <Button
+          onClick={onSignup}
+          disabled={isLoading}
+          className="bg-navi-black hover:bg-navi-black/90 text-white"
+        >
+          Login / Signup
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={handleContinueAsGuest}
+          disabled={isLoading}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          {isLoading ? 'Continuing...' : 'Continue as Guest'}
+        </Button>
+      </div>
+
+      {/* Yellow pulsing indicator while agent is blocked */}
+      <div className="flex items-center gap-2 text-amber-500">
+        <div
+          className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
+          style={{ animation: 'spin 3s linear infinite' }}
+        />
+        <span className="text-xs font-medium">Your agent is waiting for your choice</span>
+      </div>
+    </>
+  );
+}
+
 const SignupPromptBubble = memo(function SignupPromptBubble({
   reason,
   agentId,
   isWaiting,
-  shouldType = false,
+  shouldType: _shouldType = false,
   onComplete,
   onOpenAuthModal,
 }: SignupPromptBubbleProps) {
   const [hasAnimated, setHasAnimated] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
   const { isAnonymous } = useAuth();
   const hasSignaledRef = useRef(false);
 
-  const handleAnimationComplete = () => {
+  const handleAnimationComplete = useCallback(() => {
     setHasAnimated(true);
     if (onComplete) {
       requestAnimationFrame(() => {
         onComplete();
       });
     }
-  };
+  }, [onComplete]);
 
-  const handleSignup = async () => {
+  const handleSignup = useCallback(() => {
     if (onOpenAuthModal) {
       onOpenAuthModal();
     }
-  };
-
-  const handleContinueAsGuest = async () => {
-    setIsLoading(true);
-    try {
-      await signalSignupDismissed(agentId);
-    } catch (error) {
-      console.error('Failed to signal signup dismissed:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  }, [onOpenAuthModal]);
 
   // If user is already authenticated (not anonymous), auto-signal completion
   // This handles the case where user signed up in another tab or the state changed
   useEffect(() => {
     if (!isAnonymous && isWaiting && !hasSignaledRef.current) {
       hasSignaledRef.current = true;
-      signalSignupCompleted(agentId).catch((error) => {
+      signalSignupCompleted(agentId).catch((error: unknown) => {
         console.error('Failed to signal signup completed:', error);
         // Don't reset hasSignaledRef - avoid infinite retry loop on persistent errors
       });
@@ -99,7 +138,6 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1 space-y-3">
-        {/* Render reason message as markdown text */}
         <div className="text-sm">
           <MarkdownText
             text={reason}
@@ -108,39 +146,10 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
           />
         </div>
 
-        {/* Action buttons - only show while waiting and user is anonymous */}
         {isWaiting && isAnonymous && (
-          <>
-            <div className="flex items-center gap-3">
-              <Button
-                onClick={handleSignup}
-                disabled={isLoading}
-                className="bg-navi-black hover:bg-navi-black/90 text-white"
-              >
-                Login / Signup
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={handleContinueAsGuest}
-                disabled={isLoading}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                {isLoading ? 'Continuing...' : 'Continue as Guest'}
-              </Button>
-            </div>
-
-            {/* Yellow pulsing indicator while agent is blocked */}
-            <div className="flex items-center gap-2 text-amber-500">
-              <div
-                className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
-                style={{ animation: 'spin 3s linear infinite' }}
-              />
-              <span className="text-xs font-medium">Your agent is waiting for your choice</span>
-            </div>
-          </>
+          <WaitingActions agentId={agentId} onSignup={handleSignup} />
         )}
 
-        {/* Show completed state if not waiting */}
         {!isWaiting && (
           <div className="text-xs text-muted-foreground">
             {isAnonymous ? 'Continued as guest' : 'Signed in'}

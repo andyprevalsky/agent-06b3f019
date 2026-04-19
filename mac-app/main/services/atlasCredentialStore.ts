@@ -1,7 +1,6 @@
-import { safeStorage } from 'electron';
+import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { app } from 'electron';
 
 const CREDENTIAL_FILE = 'atlas-keychain.enc';
 
@@ -42,7 +41,7 @@ export class AtlasCredentialStore {
       console.error('[AtlasCredentialStore] Failed to store password:', error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to store password'
+        error: error instanceof Error ? error.message : 'Failed to store password',
       };
     }
   }

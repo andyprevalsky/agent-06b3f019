@@ -15,6 +15,15 @@ import {
   VH_REMEASURE_DELAY_MS,
 } from './config';
 
+/**
+ * Logs the current app mode (development/production) at startup.
+ * Uses a wrapped console.warn so domain callers stay clean of console.log.
+ */
+export function logStartupMode(): void {
+  // eslint-disable-next-line no-console -- intentional single startup message
+  console.log(`[Frontend] Mode: ${IS_DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
+}
+
 /** Patches console.log/warn/error to forward logs to the backend in dev mode. */
 export function initDevLogging(): void {
   if (!IS_DEV) return;
