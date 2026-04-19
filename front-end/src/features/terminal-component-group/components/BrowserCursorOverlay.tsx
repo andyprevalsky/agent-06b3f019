@@ -14,7 +14,7 @@
  * Browser viewport is 1280x800, uses percentage positioning for immediate rendering
  */
 
-import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback, type RefObject } from 'react';
 import type { Message } from '../hooks';
 
 // Steel browser dimensions
@@ -50,57 +50,57 @@ interface CursorPosition {
   y: number;
 }
 
-export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursorOverlayProps) {
-  const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 }); // Center
-  const lastProcessedMessageRef = useRef<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [viewportBounds, setViewportBounds] = useState({
+interface ViewportBounds {
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+}
+
+function computeViewportBounds(container: HTMLDivElement): ViewportBounds {
+  const containerWidth = container.clientWidth;
+  const containerHeight = container.clientHeight;
+  const containerAspect = containerWidth / containerHeight;
+
+  let windowWidth: number;
+  let windowHeight: number;
+  let windowOffsetX: number;
+  let windowOffsetY: number;
+
+  if (containerAspect > WINDOW_ASPECT) {
+    windowHeight = containerHeight;
+    windowWidth = containerHeight * WINDOW_ASPECT;
+    windowOffsetX = (containerWidth - windowWidth) / 2;
+    windowOffsetY = 0;
+  } else {
+    windowWidth = containerWidth;
+    windowHeight = containerWidth / WINDOW_ASPECT;
+    windowOffsetX = 0;
+    windowOffsetY = (containerHeight - windowHeight) / 2;
+  }
+
+  const scale = windowWidth / BROWSER_WINDOW_WIDTH;
+  return {
+    offsetX: windowOffsetX + CHROME_OFFSET_X * scale,
+    offsetY: windowOffsetY + CHROME_OFFSET_Y * scale,
+    width: CONTENT_VIEWPORT_WIDTH * scale,
+    height: CONTENT_VIEWPORT_HEIGHT * scale,
+  };
+}
+
+function useViewportBounds(containerRef: RefObject<HTMLDivElement | null>): ViewportBounds {
+  const [viewportBounds, setViewportBounds] = useState<ViewportBounds>({
     offsetX: 0,
     offsetY: 0,
     width: 0,
     height: 0,
   });
 
-  // Calculate viewport bounds within container (fit-contain logic)
-  // Step 1: Calculate where the browser WINDOW fits (1288x891)
-  // Step 2: Within that, calculate where the content viewport is (1280x800 offset by chrome)
   const updateViewportBounds = useCallback(() => {
     if (!containerRef.current) return;
-    const container = containerRef.current;
-    const containerWidth = container.clientWidth;
-    const containerHeight = container.clientHeight;
-    const containerAspect = containerWidth / containerHeight;
+    setViewportBounds(computeViewportBounds(containerRef.current));
+  }, [containerRef]);
 
-    // First, calculate browser window bounds (fit-contain for 1288x891)
-    let windowWidth: number, windowHeight: number, windowOffsetX: number, windowOffsetY: number;
-
-    if (containerAspect > WINDOW_ASPECT) {
-      // Container is wider - window fills height, pillarboxed horizontally
-      windowHeight = containerHeight;
-      windowWidth = containerHeight * WINDOW_ASPECT;
-      windowOffsetX = (containerWidth - windowWidth) / 2;
-      windowOffsetY = 0;
-    } else {
-      // Container is taller - window fills width, letterboxed vertically
-      windowWidth = containerWidth;
-      windowHeight = containerWidth / WINDOW_ASPECT;
-      windowOffsetX = 0;
-      windowOffsetY = (containerHeight - windowHeight) / 2;
-    }
-
-    // Scale factor from original window to rendered window
-    const scale = windowWidth / BROWSER_WINDOW_WIDTH;
-
-    // Content viewport position within the rendered window
-    const vpOffsetX = windowOffsetX + CHROME_OFFSET_X * scale;
-    const vpOffsetY = windowOffsetY + CHROME_OFFSET_Y * scale;
-    const vpWidth = CONTENT_VIEWPORT_WIDTH * scale;
-    const vpHeight = CONTENT_VIEWPORT_HEIGHT * scale;
-
-    setViewportBounds({ offsetX: vpOffsetX, offsetY: vpOffsetY, width: vpWidth, height: vpHeight });
-  }, []);
-
-  // Update bounds on mount and resize
   useEffect(() => {
     updateViewportBounds();
     const observer = new ResizeObserver(updateViewportBounds);
@@ -108,9 +108,15 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
       observer.observe(containerRef.current);
     }
     return () => observer.disconnect();
-  }, [updateViewportBounds]);
+  }, [updateViewportBounds, containerRef]);
 
-  // Filter for this browser's messages with coordinates
+  return viewportBounds;
+}
+
+function useCursorPosition(taskId: string, messages: Message[]): CursorPosition {
+  const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 });
+  const lastProcessedMessageRef = useRef<string | null>(null);
+
   const latestWithCoords = useMemo(() => {
     const browserMessages = messages.filter(
       (m) => m.metadata?.task_id === taskId && m.metadata?.auxiliary?.coordinates,
@@ -118,7 +124,6 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
     return browserMessages[browserMessages.length - 1];
   }, [messages, taskId]);
 
-  // Update cursor position when new coordinates arrive
   useEffect(() => {
     if (!latestWithCoords) return;
 
@@ -126,13 +131,22 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
     if (messageId === lastProcessedMessageRef.current) return;
     lastProcessedMessageRef.current = messageId;
 
-    const coords = latestWithCoords.metadata?.auxiliary?.coordinates as CursorPosition | undefined;
+    const coords = latestWithCoords.metadata?.auxiliary?.coordinates as
+      | CursorPosition
+      | undefined;
     if (coords?.x !== undefined && coords?.y !== undefined) {
       setCursorPos({ x: coords.x, y: coords.y });
     }
   }, [latestWithCoords]);
 
-  // Convert browser coords (in content viewport space 1280x800) to pixel position
+  return cursorPos;
+}
+
+export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursorOverlayProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const viewportBounds = useViewportBounds(containerRef);
+  const cursorPos = useCursorPosition(taskId, messages);
+
   const cursorLeft =
     viewportBounds.offsetX + (cursorPos.x / CONTENT_VIEWPORT_WIDTH) * viewportBounds.width;
   const cursorTop =
@@ -148,11 +162,9 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
         height: '100%',
         pointerEvents: 'none',
         overflow: 'visible',
-        zIndex: 10, // Above BrowserBorderGlow
+        zIndex: 10,
       }}
     >
-      {/* Cursor - always visible, positioned relative to viewport bounds */}
-      {/* translateX(-28px) aligns tip (on right edge of flipped SVG) with click point */}
       <div
         style={{
           position: 'absolute',

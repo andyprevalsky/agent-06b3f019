@@ -1,0 +1,114 @@
+// -----------------------------------------------------------------------------
+// ASSISTANT_STREAM Event - LLM streaming chunks
+// -----------------------------------------------------------------------------
+
+/**
+ * ASSISTANT_STREAM payload - Streaming text from LLM.
+ *
+ * The worker sends DELTAS (incremental text), not accumulated text.
+ * Frontend accumulates deltas into streamingBubbles state.
+ */
+export interface AssistantStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
+  /** Unique ID for this streaming session */
+  stream_id: string;
+  /** New text chunk (delta, NOT accumulated) */
+  delta: string;
+  /** True when streaming is complete */
+  done: boolean;
+  /** Sequence number for ordering and deduplication */
+  sequence: number;
+  /** Routes to sub-agent's MessageList (e.g., browser panel) */
+  subAgentId?: string;
+  /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
+  is_claude?: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// PLAN_STREAM Event - Plan generation indicator
+// -----------------------------------------------------------------------------
+
+/**
+ * PLAN_STREAM payload - Shows PlanChip with shimmer during planning.
+ *
+ * This is ephemeral (not persisted to DB). The final plan arrives via
+ * INSERT with toolName="set_plan" and toolStatus="FINISHED".
+ */
+export interface PlanStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
+  /** Unique ID for this streaming session */
+  stream_id: string;
+  /** Links to the eventual set_plan tool execution */
+  tool_call_id: string;
+  /** Display title (e.g., "Creating Plan") */
+  title: string;
+  /** Current character count of plan content being generated */
+  char_count?: number;
+}
+
+// -----------------------------------------------------------------------------
+// TOOL_STREAM Event - Early tool detection indicator
+// -----------------------------------------------------------------------------
+
+/**
+ * TOOL_STREAM payload - Shows tool indicator during LLM streaming.
+ *
+ * This is ephemeral (not persisted to DB). Broadcast when LLM starts
+ * generating a tool call, before parameters are fully parsed.
+ * Cleared when the real TOOL INSERT arrives with matching toolCallId.
+ */
+export interface ToolStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
+  /** Unique ID for this streaming session */
+  stream_id: string;
+  /** Links to the eventual tool execution */
+  tool_call_id: string;
+  /** Name of the tool being called */
+  tool_name: string;
+  /** Display title (e.g., "Starting web_search...") */
+  title: string;
+}
+
+// -----------------------------------------------------------------------------
+// ATTENTION_STREAM Event - send_message_to_user streaming
+// -----------------------------------------------------------------------------
+
+/**
+ * ATTENTION_STREAM payload - Streams send_message_to_user content.
+ *
+ * Unlike ASSISTANT_STREAM, this sends accumulated message (not delta)
+ * because attention messages need to be displayed as a complete unit.
+ */
+export interface AttentionStreamPayload {
+  /** Agent ID for filtering messages to correct agent */
+  agentId: string;
+  /** Unique ID for this streaming session */
+  stream_id: string;
+  /** Links to the send_message_to_user tool execution */
+  tool_call_id: string;
+  /** Current message content (accumulated, NOT delta) */
+  message: string;
+  /** True if this is a blocking question requiring response */
+  is_question: boolean;
+  /** True when streaming is complete */
+  done: boolean;
+  /** Sequence number for ordering */
+  sequence: number;
+}
+
+// -----------------------------------------------------------------------------
+// AGENT_MODE_STARTED Event - Chat escalated to agent mode
+// -----------------------------------------------------------------------------
+
+/**
+ * AGENT_MODE_STARTED payload - Chat mode escalated to full agent.
+ *
+ * Sent when the backend creates a Temporal workflow for a chat-mode agent.
+ * Frontend should set isChatMode=false when received.
+ */
+export interface AgentModeStartedPayload {
+  agentId: string;
+}

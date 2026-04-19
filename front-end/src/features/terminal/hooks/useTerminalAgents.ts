@@ -3,26 +3,27 @@
  *
  * Composes focused sub-hooks into a single return value
  * consumed by TerminalContent. Each sub-hook handles a
- * specific concern (list, actions, messaging, auth).
+ * specific concern (list, actions, messaging, auth, modals).
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import * as amplitude from '@amplitude/analytics-browser';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { useAuth } from '@/features/auth';
-import { signOut, clearStoredSession } from '@/lib/supabase';
 import { getClientSource } from '@/lib/clientSource';
 import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
-import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 
-import { fetchAncestors as fetchAncestorsAPI } from '../api';
-import type { AncestorNode, TerminalView } from '../types';
+import type { TerminalView } from '../types';
 
 import { useAgentList } from './useAgentList';
-import { useAgentActions } from './useAgentActions';
-import { useMessageSending } from './useMessageSending';
+import type { useAgentActions } from './useAgentActions';
+import type { useMessageSending } from './useMessageSending';
 import { useLoadingNetwork } from './useLoadingNetwork';
+import { useAncestors } from './useAncestors';
+import { useTerminalAuth } from './useTerminalAuth';
+import { useTerminalModals } from './useTerminalModals';
+import { useAgentOps } from './useAgentOps';
+import { useQuickQuery } from './useQuickQuery';
 
 export function useTerminalAgents(
   _currentView: TerminalView,
@@ -31,76 +32,26 @@ export function useTerminalAgents(
 ) {
   const { toast } = useToast();
   const auth = useAuth();
-  const user = auth.isFullySignedIn ? auth.user : null;
   const canSubmitGoals = auth.isAuthenticated;
   const clientSource = useMemo(() => getClientSource(), []);
-
   const ctx = useAgentContext();
+
   const agentList = useAgentList(canSubmitGoals);
-
-  // Modal state
-  const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [loginModalOpen, setLoginModalOpen] = useState(false);
-  const [showCreditModal, setShowCreditModal] = useState(false);
-  const [showCostLimitModal, setShowCostLimitModal] = useState(false);
-
-  // Loading network
+  const modals = useTerminalModals();
   const loading = useLoadingNetwork(ctx.selectedAgentId, ctx.isLoadingAgent, ctx.agent?.status);
+  const ancestors = useAncestors(ctx.selectedAgentId);
 
-  // Ancestors
-  const [ancestors, setAncestors] = useState<AncestorNode[]>([]);
-  useEffect(() => {
-    if (!ctx.selectedAgentId) {
-      setAncestors([]);
-      return;
-    }
-    let active = true;
-    fetchAncestorsAPI(ctx.selectedAgentId)
-      .then((result) => {
-        if (active) setAncestors(result);
-      })
-      .catch(() => {
-        if (active) setAncestors([]);
-      });
-    return () => {
-      active = false;
-    };
-  }, [ctx.selectedAgentId]);
-
-  // Amplitude
-  useEffect(() => {
-    if (!auth.isAuthenticated || !auth.user) return;
-    amplitude.setUserId(auth.user.phone || auth.user.id);
-  }, [auth.isAuthenticated, auth.user]);
-
-  // Agent actions
-  const actions = useAgentActions({
-    selectedAgentId: ctx.selectedAgentId,
-    agentDetail: ctx.agent,
-    setAgentDetail: ctx.setAgent,
-    setMessages: ctx.setMessages,
-    setSelectedModel: () => {}, // handled by messaging hook
-    setSelectedAgentIdContext: ctx.setSelectedAgentId,
-    setCurrentView,
-    clientSource,
-    loadAgents: agentList.loadAgents,
-  });
-
-  // Messaging
-  const messaging = useMessageSending({
-    selectedAgentId: ctx.selectedAgentId,
-    agentDetail: ctx.agent,
+  const { actions, messaging } = useAgentOps({
+    auth,
     canSubmitGoals,
-    isFullySignedIn: auth.isFullySignedIn,
     clientSource,
-    setSelectedAgentIdContext: ctx.setSelectedAgentId,
+    ctx,
+    agentList,
+    loading,
     setCurrentView,
-    setLoginModalOpen,
-    setIsLoadingNetwork: loading.setIsLoadingNetwork,
-    loadAgents: agentList.loadAgents,
+    setLoginModalOpen: modals.setLoginModalOpen,
   });
 
-  // Sync model from agent detail (override messaging default)
   const isInitialLoadRef = useRef(false);
   useEffect(() => {
     if (ctx.agent?.model) {
@@ -109,7 +60,6 @@ export function useTerminalAgents(
     }
   }, [ctx.agent?.model, messaging.setSelectedModel]);
 
-  // Cleanup
   const cleanupAgentState = useCallback(() => {
     ctx.setSelectedAgentId(null);
     isInitialLoadRef.current = false;
@@ -117,33 +67,15 @@ export function useTerminalAgents(
     messaging.setMessageInput('');
   }, [ctx.setSelectedAgentId, messaging]);
 
-  const handleCreateNewAgent = useCallback(() => {
-    cleanupAgentState();
-    resetAnimationState();
-    setCurrentView('agents');
-  }, [cleanupAgentState, resetAnimationState, setCurrentView]);
+  const { handleLogout } = useTerminalAuth({
+    auth,
+    setAgents: agentList.setAgents,
+    setSelectedAgentId: ctx.setSelectedAgentId,
+    setMessageInput: messaging.setMessageInput,
+    setCurrentView,
+  });
 
-  // Logout
-  const handleLogout = useCallback(async () => {
-    try {
-      await signOut();
-      clearStoredSession();
-      await auth.refreshAuthState('logout');
-      agentList.setAgents([]);
-      ctx.setSelectedAgentId(null);
-      messaging.setMessageInput('');
-      setCurrentView('agents');
-      amplitude.reset();
-    } catch (err: unknown) {
-      console.error('[Auth] Logout failed', err);
-      toast({ title: 'Error', description: 'Failed to log out', variant: 'destructive' });
-    }
-  }, [auth, agentList, ctx, messaging, setCurrentView, toast]);
-
-  const handleLoginClick = useCallback(() => setLoginModalOpen(true), []);
-
-  // Quick query
-  useQuickQueryListener({
+  useQuickQuery({
     selectedModel: messaging.selectedModel,
     canSubmitGoals,
     clientSource,
@@ -152,156 +84,112 @@ export function useTerminalAgents(
     setMessageInput: messaging.setMessageInput,
     setIsSendingMessage: messaging.setIsSendingMessage,
     setIsLoadingNetwork: loading.setIsLoadingNetwork,
-    setLoginModalOpen,
+    setLoginModalOpen: modals.setLoginModalOpen,
     setSelectedAgentIdContext: ctx.setSelectedAgentId,
     loadAgents: agentList.loadAgents,
     toast,
   });
 
-  return {
-    user,
-    authUser: auth.user,
-    isFullySignedIn: auth.isFullySignedIn,
-    isAuthenticated: auth.isAuthenticated,
-    isAnonymous: auth.isAnonymous,
-    refreshAuthState: auth.refreshAuthState,
-    realtimeReady: auth.realtimeReady,
+  return buildReturn({
+    auth,
     canSubmitGoals,
-    agentDetail: ctx.agent,
-    selectedAgentId: ctx.selectedAgentId,
-    messages: ctx.messages,
-    contextStreamingBubbles: ctx.streamingBubbles,
-    contextStreamingPlan: ctx.streamingPlan,
-    contextStreamingAttention: ctx.streamingAttention,
-    isLoadingAgent: ctx.isLoadingAgent,
-    forceResubscribeContext: ctx.forceResubscribe,
-    isChatMode: ctx.isChatMode,
-    agents: agentList.agents,
-    isLoadingAgents: agentList.isLoadingAgents,
-    resumingAgentId: actions.resumingAgentId,
-    isPausing: actions.isPausing,
-    ancestors,
     clientSource,
-    messageInput: messaging.messageInput,
-    setMessageInput: messaging.setMessageInput,
-    isSendingMessage: messaging.isSendingMessage,
-    selectedModel: messaging.selectedModel,
-    setSelectedModel: messaging.setSelectedModel,
-    pendingPriceLimitCents: messaging.pendingPriceLimitCents,
-    setPendingPriceLimitCents: messaging.setPendingPriceLimitCents,
-    createModalOpen,
-    setCreateModalOpen,
-    loginModalOpen,
-    setLoginModalOpen,
-    showCreditModal,
-    setShowCreditModal,
-    showCostLimitModal,
-    setShowCostLimitModal,
-    isLoadingNetwork: loading.isLoadingNetwork,
-    loadingDots: loading.loadingDots,
+    ctx,
+    agentList,
+    actions,
+    messaging,
+    loading,
+    ancestors,
+    modals,
     isInitialLoadRef,
-    loadAgents: agentList.loadAgents,
-    refreshAgentDetail: actions.refreshAgentDetail,
     cleanupAgentState,
-    handleSelectAgent: actions.handleSelectAgent,
-    handleCreateAgent: actions.handleCreateAgent,
-    handleResumeAgent: actions.handleResumeAgent,
-    handlePauseAgent: actions.handlePauseAgent,
-    handleSendMessage: messaging.handleSendMessage,
     handleLogout,
-    handleLoginClick,
-    handleCreateNewAgent,
-    handleSubmitFeedback: actions.handleSubmitFeedback,
     resetAnimationState,
-  };
+    setCurrentView,
+  });
 }
 
-// ── Quick query listener (separated to keep main hook small) ────────────
+// ── Return-shape builder (keeps the main hook function short) ─────────────
 
-function useQuickQueryListener(deps: {
-  selectedModel: string;
+type BuildArgs = {
+  auth: ReturnType<typeof useAuth>;
   canSubmitGoals: boolean;
   clientSource: string;
-  pendingPriceLimitCents: number;
+  ctx: ReturnType<typeof useAgentContext>;
+  agentList: ReturnType<typeof useAgentList>;
+  actions: ReturnType<typeof useAgentActions>;
+  messaging: ReturnType<typeof useMessageSending>;
+  loading: ReturnType<typeof useLoadingNetwork>;
+  ancestors: ReturnType<typeof useAncestors>;
+  modals: ReturnType<typeof useTerminalModals>;
+  isInitialLoadRef: React.MutableRefObject<boolean>;
+  cleanupAgentState: () => void;
+  handleLogout: () => Promise<void>;
+  resetAnimationState: () => void;
   setCurrentView: (v: TerminalView) => void;
-  setMessageInput: (v: string) => void;
-  setIsSendingMessage: (v: boolean) => void;
-  setIsLoadingNetwork: (v: boolean) => void;
-  setLoginModalOpen: (v: boolean) => void;
-  setSelectedAgentIdContext: (id: string | null) => void;
-  loadAgents: () => Promise<void>;
-  toast: ReturnType<typeof useToast>['toast'];
-}) {
-  const depsRef = useRef(deps);
-  depsRef.current = deps;
+};
 
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<QuickLauncherPayload>).detail;
-      if (!detail?.query?.trim()) return;
-      void handleQuickQuery(depsRef.current, detail.query.trim());
-    };
-    window.addEventListener(QUICK_QUERY_EVENT, handler as EventListener);
-    return () => window.removeEventListener(QUICK_QUERY_EVENT, handler as EventListener);
-  }, []);
-}
-
-async function handleQuickQuery(
-  d: {
-    selectedModel: string;
-    canSubmitGoals: boolean;
-    clientSource: string;
-    pendingPriceLimitCents: number;
-    setCurrentView: (v: TerminalView) => void;
-    setMessageInput: (v: string) => void;
-    setIsSendingMessage: (v: boolean) => void;
-    setIsLoadingNetwork: (v: boolean) => void;
-    setLoginModalOpen: (v: boolean) => void;
-    setSelectedAgentIdContext: (id: string | null) => void;
-    loadAgents: () => Promise<void>;
-    toast: ReturnType<typeof useToast>['toast'];
-  },
-  trimmed: string,
-) {
-  d.setCurrentView('agents');
-  d.setMessageInput(trimmed);
-  amplitude.track('goal_submitted', {
-    goal_length: trimmed.length,
-    model: d.selectedModel,
-    source: 'quick_launcher',
-  });
-
-  if (!d.canSubmitGoals) {
-    d.setLoginModalOpen(true);
-    d.toast({ title: 'Authentication required', description: 'Please log in to continue' });
-    return;
-  }
-
-  try {
-    d.setIsSendingMessage(true);
-    d.setIsLoadingNetwork(true);
-    const newAgent = await createAgent({
-      goal: trimmed,
-      model: d.selectedModel,
-      source: d.clientSource,
-      price_limit_cents: d.pendingPriceLimitCents,
-    });
-    await d.loadAgents();
-    d.setCurrentView('agents');
-    d.setSelectedAgentIdContext(newAgent.agent_id);
-    d.setMessageInput('');
-    d.toast({
-      title: 'Agent created',
-      description: 'Your new agent has been created and is starting',
-    });
-  } catch (error: unknown) {
-    d.toast({
-      title: 'Error',
-      description: error instanceof Error ? error.message : 'Failed to send message',
-      variant: 'destructive',
-    });
-  } finally {
-    d.setIsSendingMessage(false);
-    d.setIsLoadingNetwork(false);
-  }
+function buildReturn(a: BuildArgs) {
+  const handleLoginClick = () => a.modals.setLoginModalOpen(true);
+  const handleCreateNewAgent = () => {
+    a.cleanupAgentState();
+    a.resetAnimationState();
+    a.setCurrentView('agents');
+  };
+  return {
+    user: a.auth.isFullySignedIn ? a.auth.user : null,
+    authUser: a.auth.user,
+    isFullySignedIn: a.auth.isFullySignedIn,
+    isAuthenticated: a.auth.isAuthenticated,
+    isAnonymous: a.auth.isAnonymous,
+    refreshAuthState: a.auth.refreshAuthState,
+    realtimeReady: a.auth.realtimeReady,
+    canSubmitGoals: a.canSubmitGoals,
+    agentDetail: a.ctx.agent,
+    selectedAgentId: a.ctx.selectedAgentId,
+    messages: a.ctx.messages,
+    contextStreamingBubbles: a.ctx.streamingBubbles,
+    contextStreamingPlan: a.ctx.streamingPlan,
+    contextStreamingAttention: a.ctx.streamingAttention,
+    isLoadingAgent: a.ctx.isLoadingAgent,
+    forceResubscribeContext: a.ctx.forceResubscribe,
+    isChatMode: a.ctx.isChatMode,
+    agents: a.agentList.agents,
+    isLoadingAgents: a.agentList.isLoadingAgents,
+    resumingAgentId: a.actions.resumingAgentId,
+    isPausing: a.actions.isPausing,
+    ancestors: a.ancestors,
+    clientSource: a.clientSource,
+    messageInput: a.messaging.messageInput,
+    setMessageInput: a.messaging.setMessageInput,
+    isSendingMessage: a.messaging.isSendingMessage,
+    selectedModel: a.messaging.selectedModel,
+    setSelectedModel: a.messaging.setSelectedModel,
+    pendingPriceLimitCents: a.messaging.pendingPriceLimitCents,
+    setPendingPriceLimitCents: a.messaging.setPendingPriceLimitCents,
+    createModalOpen: a.modals.createModalOpen,
+    setCreateModalOpen: a.modals.setCreateModalOpen,
+    loginModalOpen: a.modals.loginModalOpen,
+    setLoginModalOpen: a.modals.setLoginModalOpen,
+    showCreditModal: a.modals.showCreditModal,
+    setShowCreditModal: a.modals.setShowCreditModal,
+    showCostLimitModal: a.modals.showCostLimitModal,
+    setShowCostLimitModal: a.modals.setShowCostLimitModal,
+    isLoadingNetwork: a.loading.isLoadingNetwork,
+    loadingDots: a.loading.loadingDots,
+    isInitialLoadRef: a.isInitialLoadRef,
+    loadAgents: a.agentList.loadAgents,
+    refreshAgentDetail: a.actions.refreshAgentDetail,
+    cleanupAgentState: a.cleanupAgentState,
+    handleSelectAgent: a.actions.handleSelectAgent,
+    handleCreateAgent: a.actions.handleCreateAgent,
+    handleResumeAgent: a.actions.handleResumeAgent,
+    handlePauseAgent: a.actions.handlePauseAgent,
+    handleSendMessage: a.messaging.handleSendMessage,
+    handleLogout: a.handleLogout,
+    handleLoginClick,
+    handleCreateNewAgent,
+    handleSubmitFeedback: a.actions.handleSubmitFeedback,
+    resetAnimationState: a.resetAnimationState,
+  };
 }

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Blackbox tests covering hook + lib modules that don't easily fit other
  * blackbox suites. Targets:

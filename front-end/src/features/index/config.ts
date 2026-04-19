@@ -112,6 +112,21 @@ export const HERO_BLACK = '#272725';
 
 export const MASTER_SRC_WEBM = '/navi-features.webm';
 export const MASTER_SRC_HEVC = '/navi-features-hevc.mov';
+export const MARKERS_URL = '/navi-features-markers.json';
+
+// ---------------------------------------------------------------------------
+// Feature-video debug flags (query-params + localStorage keys)
+// ---------------------------------------------------------------------------
+
+export const FV_DEBUG_QUERY_KEY = 'debugVideo';
+export const FV_NO_BLOB_QUERY_KEY = 'noBlob';
+export const FV_DISABLE_RAMP_QUERY_KEY = 'disableRamp';
+export const FV_DISABLE_WARMUP_QUERY_KEY = 'disableWarmup';
+
+export const FV_DEBUG_STORAGE_KEY = 'featuresVideoDebug';
+export const FV_NO_BLOB_STORAGE_KEY = 'featuresVideoNoBlob';
+export const FV_DISABLE_RAMP_STORAGE_KEY = 'featuresVideoDisableRamp';
+export const FV_DISABLE_WARMUP_STORAGE_KEY = 'featuresVideoDisableWarmup';
 
 export function mapIndexToKey(index: number): FeatureKey {
   switch (index) {

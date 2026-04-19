@@ -24,6 +24,102 @@ interface AgentListItemProps {
   isCompact?: boolean;
 }
 
+const PROGRESS_RADIUS = 8;
+const PROGRESS_CIRCUMFERENCE = 2 * Math.PI * PROGRESS_RADIUS;
+
+function ProgressWheel({ progress }: { progress: number }) {
+  const progressOffset = PROGRESS_CIRCUMFERENCE - progress * PROGRESS_CIRCUMFERENCE;
+  return (
+    <div className="flex items-center gap-2 flex-shrink-0">
+      <span className="text-xs text-gray-500">{Math.round(progress * 100)}%</span>
+      <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
+        <circle
+          className="fill-none stroke-gray-300 opacity-70"
+          cx="10"
+          cy="10"
+          r={PROGRESS_RADIUS}
+          strokeWidth="3"
+        />
+        <circle
+          className="fill-none stroke-gray-500"
+          cx="10"
+          cy="10"
+          r={PROGRESS_RADIUS}
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeDasharray={PROGRESS_CIRCUMFERENCE}
+          strokeDashoffset={progressOffset}
+          style={{
+            transition: 'stroke-dashoffset 500ms ease',
+            stroke: 'url(#progress-gradient)',
+          }}
+        />
+        <defs>
+          <linearGradient id="progress-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="#FE7503" />
+            <stop offset="20%" stopColor="#FC585C" />
+            <stop offset="40%" stopColor="#FD5776" />
+            <stop offset="60%" stopColor="#E062CC" />
+            <stop offset="80%" stopColor="#A76CED" />
+            <stop offset="100%" stopColor="#7A6BEC" />
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+  );
+}
+
+interface StatusIndicatorProps {
+  agent: Agent;
+  isResuming: boolean;
+  onPlayClick: (e: React.MouseEvent) => void;
+}
+
+function StatusIndicator({ agent, isResuming, onPlayClick }: StatusIndicatorProps) {
+  if (agent.status === 'OUT_OF_CREDITS') {
+    return (
+      <div
+        className="flex-shrink-0 p-1.5 rounded-full border-2 border-red-400 dark:border-red-500"
+        title="Agent ran out of credits - add more to continue"
+      >
+        <CreditCard className="w-3.5 h-3.5 text-red-500" />
+      </div>
+    );
+  }
+  if (agent.status === 'COST_LIMIT_REACHED') {
+    return (
+      <div
+        className="flex-shrink-0 p-1.5 rounded-full border-2 border-amber-400 dark:border-amber-500"
+        title="Agent cost limit reached - increase limit to continue"
+      >
+        <DollarSign className="w-3.5 h-3.5 text-amber-500" />
+      </div>
+    );
+  }
+  if (agent.status === 'PAUSED') {
+    return (
+      <button
+        onClick={onPlayClick}
+        disabled={isResuming}
+        className={cn(
+          'flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600',
+          isResuming
+            ? 'cursor-not-allowed opacity-70'
+            : 'hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer',
+        )}
+        title={isResuming ? 'Resuming agent...' : 'Resume agent'}
+      >
+        {isResuming ? (
+          <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />
+        ) : (
+          <Play className="w-3.5 h-3.5 text-gray-500" fill="currentColor" />
+        )}
+      </button>
+    );
+  }
+  return <ProgressWheel progress={agent.progress} />;
+}
+
 export default function AgentListItem({
   agent,
   isSelected,
@@ -32,19 +128,13 @@ export default function AgentListItem({
   isResuming = false,
   isCompact = false,
 }: AgentListItemProps) {
-  // Calculate the progress arc for the circular progress wheel
-  const radius = 8;
-  const circumference = 2 * Math.PI * radius;
-  const progressOffset = circumference - agent.progress * circumference;
-
   const handlePlayClick = (e: React.MouseEvent) => {
-    e.stopPropagation(); // Don't trigger the parent onClick
+    e.stopPropagation();
     if (onResume) {
       onResume(agent.agent_id);
     }
   };
 
-  // Compact mode - just show an icon
   if (isCompact) {
     return (
       <div
@@ -78,78 +168,11 @@ export default function AgentListItem({
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
-
-            {/* Show play button if paused, credit icon if out of credits, dollar icon if cost limit, otherwise show progress */}
-            {agent.status === 'OUT_OF_CREDITS' ? (
-              <div
-                className="flex-shrink-0 p-1.5 rounded-full border-2 border-red-400 dark:border-red-500"
-                title="Agent ran out of credits - add more to continue"
-              >
-                <CreditCard className="w-3.5 h-3.5 text-red-500" />
-              </div>
-            ) : agent.status === 'COST_LIMIT_REACHED' ? (
-              <div
-                className="flex-shrink-0 p-1.5 rounded-full border-2 border-amber-400 dark:border-amber-500"
-                title="Agent cost limit reached - increase limit to continue"
-              >
-                <DollarSign className="w-3.5 h-3.5 text-amber-500" />
-              </div>
-            ) : agent.status === 'PAUSED' ? (
-              <button
-                onClick={handlePlayClick}
-                disabled={isResuming}
-                className={cn(
-                  'flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600',
-                  isResuming
-                    ? 'cursor-not-allowed opacity-70'
-                    : 'hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer',
-                )}
-                title={isResuming ? 'Resuming agent...' : 'Resume agent'}
-              >
-                {isResuming ? (
-                  <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />
-                ) : (
-                  <Play className="w-3.5 h-3.5 text-gray-500" fill="currentColor" />
-                )}
-              </button>
-            ) : (
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <span className="text-xs text-gray-500">{Math.round(agent.progress * 100)}%</span>
-                <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
-                  <circle
-                    className="fill-none stroke-gray-300 opacity-70"
-                    cx="10"
-                    cy="10"
-                    r={radius}
-                    strokeWidth="3"
-                  />
-                  <circle
-                    className="fill-none stroke-gray-500"
-                    cx="10"
-                    cy="10"
-                    r={radius}
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeDasharray={circumference}
-                    strokeDashoffset={progressOffset}
-                    style={{
-                      transition: 'stroke-dashoffset 500ms ease',
-                      stroke: 'url(#progress-gradient)',
-                    }}
-                  />
-                  <defs>
-                    <linearGradient id="progress-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                      <stop offset="0%" stopColor="#FE7503" />
-                      <stop offset="20%" stopColor="#FC585C" />
-                      <stop offset="40%" stopColor="#FD5776" />
-                      <stop offset="60%" stopColor="#E062CC" />
-                      <stop offset="80%" stopColor="#A76CED" />
-                      <stop offset="100%" stopColor="#7A6BEC" />
-                    </linearGradient>
-                  </defs>
-                </svg>
-              </div>
-            )}
+            <StatusIndicator
+              agent={agent}
+              isResuming={isResuming}
+              onPlayClick={handlePlayClick}
+            />
           </div>
         </div>
       </div>

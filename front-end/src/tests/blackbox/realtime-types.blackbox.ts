@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Unit tests for src/lib/realtime-types.ts
  *

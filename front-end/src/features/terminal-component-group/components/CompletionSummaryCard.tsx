@@ -21,8 +21,11 @@ import { memo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { Check, ChevronDown, Copy } from 'lucide-react';
-import { isFilePointer, FilePointerDisplay } from './ClaudeCodeChip';
-import type { CompletionSummaryData } from '../types';
+import { copyToClipboard } from '@/lib/clipboard';
+import { isFilePointer } from './claudeCodeChip.utils';
+import { FilePointerDisplay } from './FilePointerDisplay';
+import type { CompletionSummaryData, OutputField, ToolUsage } from '../types';
+import type { FilePointer } from '../hooks';
 import { TOOL_DISPLAY_NAMES } from '../config';
 
 export type { CompletionSummaryData } from '../types';
@@ -30,6 +33,207 @@ export type { CompletionSummaryData } from '../types';
 interface CompletionSummaryCardProps {
   data: CompletionSummaryData;
   className?: string;
+}
+
+function formatValue(value: OutputField['value']): string {
+  if (isFilePointer(value)) return value.original_filename;
+  if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
+    return value.map((fp) => (fp as FilePointer).original_filename).join(', ');
+  }
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+  return String(value);
+}
+
+function isFilePointerValue(value: OutputField['value']): boolean {
+  if (isFilePointer(value)) return true;
+  if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) return true;
+  return false;
+}
+
+function getToolDisplayName(toolName: string): string {
+  return (
+    TOOL_DISPLAY_NAMES[toolName] ||
+    toolName.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  );
+}
+
+function HeaderRow({ error }: { error: boolean }) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/60">
+      {error ? (
+        <>
+          <svg
+            className="w-4 h-4 text-red-600 dark:text-red-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M6 18L18 6M6 6l12 12"
+            />
+          </svg>
+          <span className="text-sm font-medium text-red-600 dark:text-red-400">Task Failed</span>
+        </>
+      ) : (
+        <>
+          <svg
+            className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M5 13l4 4L19 7"
+            />
+          </svg>
+          <span className="text-sm font-medium text-foreground">Task Complete</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+interface OutputValueProps {
+  value: OutputField['value'];
+}
+
+function OutputValue({ value }: OutputValueProps) {
+  if (isFilePointer(value)) {
+    return <FilePointerDisplay file={value} />;
+  }
+  if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {value.map((fp, idx) => (
+          <FilePointerDisplay key={idx} file={fp as FilePointer} />
+        ))}
+      </div>
+    );
+  }
+  return <>{formatValue(value)}</>;
+}
+
+interface OutputRowProps {
+  output: OutputField;
+  copiedField: string | null;
+  onCopy: (value: string, key: string) => void;
+}
+
+function OutputRow({ output, copiedField, onCopy }: OutputRowProps) {
+  const showCopy = !isFilePointerValue(output.value);
+  return (
+    <div className="group bg-card rounded-md px-3 py-2 border border-border/60 hover:border-border transition-colors">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] text-muted-foreground mb-0.5">{output.label}</div>
+          <div className="text-sm text-foreground font-medium break-words">
+            <OutputValue value={output.value} />
+          </div>
+        </div>
+        {showCopy && (
+          <button
+            onClick={() => onCopy(formatValue(output.value), output.key)}
+            className="flex-shrink-0 p-1 text-muted-foreground/50 hover:text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
+            title="Copy to clipboard"
+          >
+            {copiedField === output.key ? (
+              <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface ToolUsageSectionProps {
+  toolUsage: ToolUsage[];
+  totalTools: number;
+  toolsExpanded: boolean;
+  onToggle: () => void;
+}
+
+function ToolUsageSection({
+  toolUsage,
+  totalTools,
+  toolsExpanded,
+  onToggle,
+}: ToolUsageSectionProps) {
+  return (
+    <div className="px-3 pb-3 border-t border-border/60">
+      <button
+        onClick={onToggle}
+        className="w-full py-2.5 flex items-center justify-between hover:opacity-80 transition-opacity"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+            Tools
+          </span>
+          <span className="text-xs text-muted-foreground">{totalTools}</span>
+        </div>
+        <ChevronDown
+          className={cn(
+            'w-4 h-4 text-muted-foreground transition-transform duration-200',
+            toolsExpanded && 'rotate-180',
+          )}
+        />
+      </button>
+      <AnimatePresence initial={false}>
+        {toolsExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-1.5">
+              {toolUsage
+                .sort((a, b) => b.count - a.count)
+                .map((tool) => (
+                  <div key={tool.name} className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">{getToolDisplayName(tool.name)}</span>
+                    <span className="text-muted-foreground tabular-nums">{tool.count}</span>
+                  </div>
+                ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function FooterStats({
+  durationSeconds,
+  costDollars,
+}: {
+  durationSeconds?: number;
+  costDollars?: number;
+}) {
+  if (durationSeconds === undefined && costDollars === undefined) return null;
+  return (
+    <div className="px-3 py-2 border-t border-border/60 flex items-center gap-3 text-xs text-muted-foreground">
+      {durationSeconds !== undefined && (
+        <span>
+          {durationSeconds < 60
+            ? `${durationSeconds}s`
+            : `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`}
+        </span>
+      )}
+      {durationSeconds !== undefined && costDollars !== undefined && <span>·</span>}
+      {costDollars !== undefined && <span>${costDollars.toFixed(3)}</span>}
+    </div>
+  );
 }
 
 /**
@@ -45,43 +249,9 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
   const { summary, outputs, toolUsage, totalToolCalls, durationSeconds, costDollars } = data;
 
   const handleCopy = async (value: string, fieldKey: string) => {
-    await navigator.clipboard.writeText(value);
+    await copyToClipboard(value);
     setCopiedField(fieldKey);
     setTimeout(() => setCopiedField(null), 2000);
-  };
-
-  const formatValue = (value: OutputField['value']): string => {
-    // FilePointers are rendered as components, not text
-    if (isFilePointer(value)) {
-      return value.original_filename;
-    }
-    // Array of FilePointers
-    if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
-      return value.map((fp) => (fp as FilePointer).original_filename).join(', ');
-    }
-    // Regular array
-    if (Array.isArray(value)) {
-      return value.join(', ');
-    }
-    // Object (but not FilePointer) - JSON stringify
-    if (typeof value === 'object' && value !== null) {
-      return JSON.stringify(value);
-    }
-    return String(value);
-  };
-
-  // Check if value is a FilePointer or array of FilePointers
-  const isFilePointerValue = (value: OutputField['value']): boolean => {
-    if (isFilePointer(value)) return true;
-    if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) return true;
-    return false;
-  };
-
-  const getToolDisplayName = (toolName: string): string => {
-    return (
-      TOOL_DISPLAY_NAMES[toolName] ||
-      toolName.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-    );
   };
 
   const totalTools = totalToolCalls || toolUsage?.reduce((sum, t) => sum + t.count, 0) || 0;
@@ -98,53 +268,10 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
         )}
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
-        {/* Header */}
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/60">
-          {data.error ? (
-            <>
-              <svg
-                className="w-4 h-4 text-red-600 dark:text-red-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-              <span className="text-sm font-medium text-red-600 dark:text-red-400">
-                Task Failed
-              </span>
-            </>
-          ) : (
-            <>
-              <svg
-                className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-              <span className="text-sm font-medium text-foreground">Task Complete</span>
-            </>
-          )}
-        </div>
-
-        {/* Summary */}
+        <HeaderRow error={!!data.error} />
         <div className="px-3 py-3">
           <p className="text-sm text-muted-foreground leading-relaxed">{summary}</p>
         </div>
-
-        {/* Outputs Section */}
         {outputs && outputs.length > 0 && (
           <div className="px-3 pb-3">
             <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">
@@ -152,113 +279,25 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
             </div>
             <div className="space-y-1.5">
               {outputs.map((output) => (
-                <div
+                <OutputRow
                   key={output.key}
-                  className="group bg-card rounded-md px-3 py-2 border border-border/60 hover:border-border transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[10px] text-muted-foreground mb-0.5">{output.label}</div>
-                      <div className="text-sm text-foreground font-medium break-words">
-                        {/* Render FilePointers with download chip */}
-                        {isFilePointer(output.value) ? (
-                          <FilePointerDisplay file={output.value} />
-                        ) : Array.isArray(output.value) &&
-                          output.value.length > 0 &&
-                          isFilePointer(output.value[0]) ? (
-                          <div className="flex flex-wrap gap-1.5">
-                            {output.value.map((fp, idx) => (
-                              <FilePointerDisplay key={idx} file={fp as FilePointer} />
-                            ))}
-                          </div>
-                        ) : (
-                          formatValue(output.value)
-                        )}
-                      </div>
-                    </div>
-                    {/* Only show copy button for non-FilePointer values */}
-                    {!isFilePointerValue(output.value) && (
-                      <button
-                        onClick={() => handleCopy(formatValue(output.value), output.key)}
-                        className="flex-shrink-0 p-1 text-muted-foreground/50 hover:text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
-                        title="Copy to clipboard"
-                      >
-                        {copiedField === output.key ? (
-                          <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )}
-                      </button>
-                    )}
-                  </div>
-                </div>
+                  output={output}
+                  copiedField={copiedField}
+                  onCopy={(v, k) => void handleCopy(v, k)}
+                />
               ))}
             </div>
           </div>
         )}
-
-        {/* Tool Usage Section - Collapsible */}
         {toolUsage && toolUsage.length > 0 && (
-          <div className="px-3 pb-3 border-t border-border/60">
-            <button
-              onClick={() => setToolsExpanded(!toolsExpanded)}
-              className="w-full py-2.5 flex items-center justify-between hover:opacity-80 transition-opacity"
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                  Tools
-                </span>
-                <span className="text-xs text-muted-foreground">{totalTools}</span>
-              </div>
-              <ChevronDown
-                className={cn(
-                  'w-4 h-4 text-muted-foreground transition-transform duration-200',
-                  toolsExpanded && 'rotate-180',
-                )}
-              />
-            </button>
-
-            <AnimatePresence initial={false}>
-              {toolsExpanded && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.2, ease: 'easeOut' }}
-                  className="overflow-hidden"
-                >
-                  <div className="space-y-1.5">
-                    {toolUsage
-                      .sort((a, b) => b.count - a.count)
-                      .map((tool) => (
-                        <div key={tool.name} className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">
-                            {getToolDisplayName(tool.name)}
-                          </span>
-                          <span className="text-muted-foreground tabular-nums">{tool.count}</span>
-                        </div>
-                      ))}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
+          <ToolUsageSection
+            toolUsage={toolUsage}
+            totalTools={totalTools}
+            toolsExpanded={toolsExpanded}
+            onToggle={() => setToolsExpanded(!toolsExpanded)}
+          />
         )}
-
-        {/* Footer Stats */}
-        {(durationSeconds !== undefined || costDollars !== undefined) && (
-          <div className="px-3 py-2 border-t border-border/60 flex items-center gap-3 text-xs text-muted-foreground">
-            {durationSeconds !== undefined && (
-              <span>
-                {durationSeconds < 60
-                  ? `${durationSeconds}s`
-                  : `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`}
-              </span>
-            )}
-            {durationSeconds !== undefined && costDollars !== undefined && <span>·</span>}
-            {costDollars !== undefined && <span>${costDollars.toFixed(3)}</span>}
-          </div>
-        )}
+        <FooterStats durationSeconds={durationSeconds} costDollars={costDollars} />
       </motion.div>
     </div>
   );

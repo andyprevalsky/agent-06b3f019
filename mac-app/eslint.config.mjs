@@ -64,6 +64,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/localStorageReader.ts',
   'main/domains/local-storage-reader/**/*.ts',
   'main/services/permissionReader.ts',
+  'main/domains/permission-reader/**/*.ts',
   'main/preload.ts',
   'main/services/browserPasswordReader.ts',
   'main/services/contactsReaderNative.ts',

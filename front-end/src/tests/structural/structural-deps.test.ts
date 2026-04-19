@@ -152,6 +152,13 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     'Cross-domain import: "@/features/auth"',
     'Cross-domain import: "@/features/agent-context"',
   ],
+  'features/terminal/hooks/useAgentOps.ts': [
+    'Cross-domain import: "@/features/auth"',
+    'Cross-domain import: "@/features/agent-context"',
+  ],
+  'features/terminal/hooks/useTerminalAuth.ts': [
+    'Cross-domain import: "@/features/auth"',
+  ],
   'features/terminal-component-group/hooks.ts': [
     'Cross-domain import: "@/features/auth"',
     'Cross-domain import: "@/features/agent-context"',
@@ -211,6 +218,34 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   ],
   'features/integrations/components/BrowserCookiesSection.tsx': [
     'Cross-domain import: "@/features/integration-handlers-context"',
+  ],
+  // Terminal-component-group MessageList split (U03) — legacy violations to be cleaned up per-domain
+  'features/terminal-component-group/components/ChatModeActions.tsx': [
+    'components layer imports "../api"',
+  ],
+  'features/terminal-component-group/components/MessageList.tsx': [
+    'components layer imports "../api"',
+  ],
+  'features/terminal-component-group/components/MessageListItems.tsx': [
+    'components layer imports "../api"',
+  ],
+  'features/terminal-component-group/components/MessageListView.tsx': [
+    'components layer imports "../api"',
+  ],
+  'features/terminal-component-group/components/StatusBanners.tsx': [
+    'components layer imports "../api"',
+  ],
+  'features/terminal-component-group/components/StreamingMessageItems.tsx': [
+    'Cross-domain import: "@/features/agent-context"',
+  ],
+  'features/terminal-component-group/components/useMessageFiltering.ts': [
+    'components layer imports "../api"',
+    'Cross-domain import: "@/features/agent-context"',
+    'components layer imports "../utils"',
+  ],
+  'features/terminal-component-group/components/useMessageList.ts': [
+    'Cross-domain import: "@/features/agent-context"',
+    'components layer imports "../api"',
   ],
 };
 

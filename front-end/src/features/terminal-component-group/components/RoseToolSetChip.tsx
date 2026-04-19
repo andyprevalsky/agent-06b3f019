@@ -15,13 +15,11 @@
  * - isOpen: boolean (popover open state)
  */
 
-import { Badge } from '@/components/ui/badge';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TOOL_ICONS, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
 
-// Define Rose system tools with descriptions
 interface RoseTool {
   name: string;
   displayName: string;
@@ -121,6 +119,68 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   },
 ];
 
+function ToolIcon({ name }: { name: string }) {
+  if (isX402Tool(name)) {
+    return (
+      <img
+        src={x402IconSrc}
+        alt="x402"
+        className="h-4 w-4 opacity-50 dark:invert dark:opacity-60"
+      />
+    );
+  }
+  if (name === 'claude_code') {
+    return <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />;
+  }
+  const Icon = TOOL_ICONS[name] || TOOL_ICONS.default;
+  return <Icon className="h-4 w-4 text-muted-foreground" />;
+}
+
+function ToolRow({ tool }: { tool: RoseTool }) {
+  return (
+    <div className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors">
+      <div className="flex-shrink-0 mt-0.5">
+        <ToolIcon name={tool.name} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-0.5">
+          <span className="font-medium text-sm text-foreground">{tool.displayName}</span>
+          {tool.desktopOnly && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/5 text-primary font-medium">
+              Desktop Version Only
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-muted-foreground leading-snug mt-0.5">
+          {tool.description}
+        </div>
+        {tool.desktopOnly && (
+          <a
+            href="/download"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors"
+            onClick={(e) => e.stopPropagation()}
+          >
+            Download for Mac
+          </a>
+        )}
+        {tool.link && (
+          <a
+            href={tool.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
+            onClick={(e) => e.stopPropagation()}
+          >
+            View x402 Ecosystem →
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function RoseToolSetChip() {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -149,66 +209,9 @@ export default function RoseToolSetChip() {
             Built-in tools available to all Rose agents
           </p>
           <div className="space-y-2">
-            {ROSE_SYSTEM_TOOLS.map((tool) => {
-              const Icon = TOOL_ICONS[tool.name] || TOOL_ICONS.default;
-              return (
-                <div
-                  key={tool.name}
-                  className="flex gap-2 p-2 rounded-md hover:bg-muted/50 transition-colors"
-                >
-                  <div className="flex-shrink-0 mt-0.5">
-                    {isX402Tool(tool.name) ? (
-                      <img
-                        src={x402IconSrc}
-                        alt="x402"
-                        className="h-4 w-4 opacity-50 dark:invert dark:opacity-60"
-                      />
-                    ) : tool.name === 'claude_code' ? (
-                      <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
-                    ) : (
-                      <Icon className="h-4 w-4 text-muted-foreground" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="font-medium text-sm text-foreground">
-                        {tool.displayName}
-                      </span>
-                      {tool.desktopOnly && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/5 text-primary font-medium">
-                          Desktop Version Only
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xs text-muted-foreground leading-snug mt-0.5">
-                      {tool.description}
-                    </div>
-                    {tool.desktopOnly && (
-                      <a
-                        href="/download"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary font-medium transition-colors"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        Download for Mac
-                      </a>
-                    )}
-                    {tool.link && (
-                      <a
-                        href={tool.link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        View x402 Ecosystem →
-                      </a>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {ROSE_SYSTEM_TOOLS.map((tool) => (
+              <ToolRow key={tool.name} tool={tool} />
+            ))}
           </div>
         </div>
       </PopoverContent>

@@ -21,13 +21,24 @@ export {
   getStatusText,
   type TreeNode,
 } from '@/hooks/useAgentTree';
-export { useAgentContext, type StreamingBubble } from '@/features/agent-context';
+export {
+  useAgentContext,
+  type StreamingBubble,
+  type StreamingPlan,
+  type StreamingAttention,
+  type StreamingTool,
+  type AgentContextValue,
+} from '@/features/agent-context';
+
+// ── Pure utilities re-exported so components can reach them via hooks.ts ──
+export { deduplicateToolMessages } from './hooks/deduplicateToolMessages';
 
 // ── Imperative API functions (used by components in event handlers) ───────
 export {
   respondToAttentionRequest,
   rejectAttentionRequest,
   skipAttentionRequest,
+  getAttentionRequests,
   updateAgent,
   deleteAgent,
   postMessage,
@@ -39,17 +50,24 @@ export {
   generateLLMJudgePrompt,
   getAttachmentUrl,
   uploadAttachment,
+  resumeBrowserSession,
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
   subscribeToAttentionRequests,
   unsubscribe,
   getStoredSession,
+  fetchClaudeCodeSession,
+  fetchCreditsUsage,
+  fetchPublicAsset,
+  submitFeedback,
+  downloadAttachmentAsBlob,
 } from './api';
 
 // ── API types (used by components alongside the functions above) ──────────
 export type {
   Agent,
   AgentDetail,
+  AttentionRequest,
   Message,
   FilePointer,
   OutputSchema,
@@ -57,6 +75,7 @@ export type {
   ResponseSchemaField,
   Tool,
   PeoplePaginatedResponse,
+  Person,
   FailureContext,
   PlanTask,
 } from './api';
