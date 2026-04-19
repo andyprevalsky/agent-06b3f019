@@ -74,6 +74,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/launcher/**/*.{ts,tsx}',
   'ui/components/AgentPayModal.tsx',
   'ui/components/ApplePasswordsModal.tsx',
+  'ui/features/apple-passwords-modal/**/*.{ts,tsx}',
   'ui/components/AtlasPasswordModal.tsx',
   'ui/components/TelegramAuthModal.tsx',
   'ui/components/WhatsAppQRModal.tsx',
