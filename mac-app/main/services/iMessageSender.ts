@@ -46,7 +46,7 @@ end tell
 `;
       try {
         await execFileAsync('osascript', ['-e', altScript]);
-      } catch (altError) {
+      } catch {
         // Final fallback - create new message via URL scheme and GUI automation
         throw new Error(`Failed to send iMessage: ${error}`);
       }

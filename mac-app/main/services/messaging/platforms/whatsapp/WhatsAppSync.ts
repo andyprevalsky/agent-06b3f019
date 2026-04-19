@@ -52,7 +52,7 @@ export class WhatsAppSync {
 
     // Handle sync events from client
     this.client.on('sync', (event: SyncEvent) => {
-      this.handleSyncEvent(event).catch(err => {
+      this.handleSyncEvent(event).catch((err) => {
         console.error('[WhatsAppSync] Error handling sync event:', err);
       });
     });
@@ -125,7 +125,9 @@ export class WhatsAppSync {
     }
 
     if (event.type === 'connection_change') {
-      console.log(`[WhatsAppSync] Connection changed: ${event.connected ? 'connected' : 'disconnected'}`);
+      console.log(
+        `[WhatsAppSync] Connection changed: ${event.connected ? 'connected' : 'disconnected'}`
+      );
       return;
     }
 
@@ -170,7 +172,9 @@ export class WhatsAppSync {
     const contacts = MessageTransformer.toContactWithMessages(messages);
     const stats = MessageTransformer.getStats(messages);
 
-    console.log(`[WhatsAppSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`);
+    console.log(
+      `[WhatsAppSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`
+    );
 
     const result = await BatchUploader.uploadInBatches(
       'whatsapp',
@@ -204,7 +208,7 @@ export class WhatsAppSync {
     if (this.flushTimer) return;
 
     this.flushTimer = setInterval(() => {
-      this.flushBuffer().catch(err => {
+      this.flushBuffer().catch((err) => {
         console.error('[WhatsAppSync] Flush error:', err);
       });
     }, this.FLUSH_INTERVAL_MS);

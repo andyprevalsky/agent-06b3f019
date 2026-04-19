@@ -15,7 +15,7 @@ export interface CacheStorageOriginData {
 
 export interface CacheStorageData {
   origins: CacheStorageOriginData[];
-  hashes: Record<string, string>;  // origin -> hash
+  hashes: Record<string, string>; // origin -> hash
   originCount: number;
 }
 
@@ -64,7 +64,7 @@ function extractOriginsFromSwDatabase(): string[] {
 
           origins.add(origin);
         }
-      } catch (err) {
+      } catch {
         // Skip files we can't read
       }
     }
@@ -96,7 +96,7 @@ function computeCacheStorageDirHash(origin: string): string {
 
     const identifier = `${scheme}_${hostname}_${port}`;
     return crypto.createHash('sha1').update(identifier).digest('hex');
-  } catch (error) {
+  } catch {
     return '';
   }
 }
@@ -160,7 +160,7 @@ function parseCacheNamesFromIndex(indexPath: string): string[] {
         }
       }
     }
-  } catch (error) {
+  } catch {
     // Ignore read errors
   }
 
@@ -172,7 +172,7 @@ function parseCacheNamesFromIndex(indexPath: string): string[] {
  */
 function computeOriginHash(caches: CacheInfo[]): string {
   const sorted = [...caches].sort((a, b) => a.name.localeCompare(b.name));
-  const content = JSON.stringify(sorted.map(c => c.name));
+  const content = JSON.stringify(sorted.map((c) => c.name));
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
 }
 
@@ -227,7 +227,7 @@ export class CacheStorageReader {
         // Skip chrome-extension origins
         if (origin.startsWith('chrome-extension://')) continue;
 
-        const caches: CacheInfo[] = cacheNames.map(name => ({ name }));
+        const caches: CacheInfo[] = cacheNames.map((name) => ({ name }));
 
         origins.push({
           origin,

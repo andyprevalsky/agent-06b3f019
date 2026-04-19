@@ -11,7 +11,7 @@ export class Crypto {
    * Encrypt data using AES-256-CBC.
    * Accepts either a Buffer (for pre-compressed data) or any JSON-serializable object.
    */
-  static encrypt(data: Buffer | any): EncryptedData {
+  static encrypt(data: unknown): EncryptedData {
     const key = crypto.randomBytes(32);
     const iv = crypto.randomBytes(16);
 
@@ -33,4 +33,3 @@ export class Crypto {
     };
   }
 }
-

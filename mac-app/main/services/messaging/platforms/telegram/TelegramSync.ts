@@ -57,7 +57,7 @@ export class TelegramSync {
 
       // Forward sync events
       this.client.on('sync', (event: SyncEvent) => {
-        this.handleSyncEvent(event).catch(err => {
+        this.handleSyncEvent(event).catch((err) => {
           console.error('[TelegramSync] Error handling sync event:', err);
         });
       });
@@ -108,7 +108,7 @@ export class TelegramSync {
 
     // Handle sync events from client
     this.client.on('sync', (event: SyncEvent) => {
-      this.handleSyncEvent(event).catch(err => {
+      this.handleSyncEvent(event).catch((err) => {
         console.error('[TelegramSync] Error handling sync event:', err);
       });
     });
@@ -134,7 +134,7 @@ export class TelegramSync {
 
     // Handle sync events from client
     this.client.on('sync', (event: SyncEvent) => {
-      this.handleSyncEvent(event).catch(err => {
+      this.handleSyncEvent(event).catch((err) => {
         console.error('[TelegramSync] Error handling sync event:', err);
       });
     });
@@ -204,7 +204,9 @@ export class TelegramSync {
       : undefined;
 
     const syncType = lastSyncAt ? `incremental since ${lastSyncAt.toISOString()}` : 'full';
-    console.log(`[TelegramSync] Starting historical sync (${syncType}, ${messagesPerDialog} messages per dialog)`);
+    console.log(
+      `[TelegramSync] Starting historical sync (${syncType}, ${messagesPerDialog} messages per dialog)`
+    );
 
     const messages = await this.client.fetchAllHistoricalMessages(messagesPerDialog, lastSyncAt);
 
@@ -235,7 +237,9 @@ export class TelegramSync {
     }
 
     if (event.type === 'connection_change') {
-      console.log(`[TelegramSync] Connection changed: ${event.connected ? 'connected' : 'disconnected'}`);
+      console.log(
+        `[TelegramSync] Connection changed: ${event.connected ? 'connected' : 'disconnected'}`
+      );
       return;
     }
 
@@ -265,7 +269,9 @@ export class TelegramSync {
     const contacts = MessageTransformer.toContactWithMessages(messages);
     const stats = MessageTransformer.getStats(messages);
 
-    console.log(`[TelegramSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`);
+    console.log(
+      `[TelegramSync] Uploading ${stats.total} messages from ${stats.uniqueContacts} contacts`
+    );
 
     const result = await BatchUploader.uploadInBatches(
       'telegram',
@@ -323,7 +329,7 @@ export class TelegramSync {
     if (this.flushTimer) return;
 
     this.flushTimer = setInterval(() => {
-      this.flushBuffer().catch(err => {
+      this.flushBuffer().catch((err) => {
         console.error('[TelegramSync] Flush error:', err);
       });
     }, this.FLUSH_INTERVAL_MS);

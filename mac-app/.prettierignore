@@ -1,0 +1,8 @@
+dist
+node_modules
+assets
+public
+*.d.ts
+package-lock.json
+.context/
+*.sh

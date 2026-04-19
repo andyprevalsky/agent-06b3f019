@@ -52,7 +52,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   edge: {
     type: 'edge',
     name: 'Microsoft Edge',
-    cookiePathPattern: path.join(HOME, 'Library/Application Support/Microsoft Edge/Default/Cookies'),
+    cookiePathPattern: path.join(
+      HOME,
+      'Library/Application Support/Microsoft Edge/Default/Cookies'
+    ),
     keychainEntry: 'Microsoft Edge Safe Storage',
     keychainAccount: 'Microsoft Edge',
     needsManualPassword: false,
@@ -60,7 +63,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   brave: {
     type: 'brave',
     name: 'Brave',
-    cookiePathPattern: path.join(HOME, 'Library/Application Support/BraveSoftware/Brave-Browser/Default/Cookies'),
+    cookiePathPattern: path.join(
+      HOME,
+      'Library/Application Support/BraveSoftware/Brave-Browser/Default/Cookies'
+    ),
     keychainEntry: 'Brave Safe Storage',
     keychainAccount: 'Brave',
     needsManualPassword: false,
@@ -76,7 +82,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   opera: {
     type: 'opera',
     name: 'Opera',
-    cookiePathPattern: path.join(HOME, 'Library/Application Support/com.operasoftware.Opera/Cookies'),
+    cookiePathPattern: path.join(
+      HOME,
+      'Library/Application Support/com.operasoftware.Opera/Cookies'
+    ),
     keychainEntry: 'Opera Safe Storage',
     keychainAccount: 'Opera',
     needsManualPassword: false,
@@ -100,7 +109,10 @@ const BROWSERS: Record<BrowserType, BrowserConfig> = {
   atlas: {
     type: 'atlas',
     name: 'ChatGPT Atlas',
-    cookiePathPattern: path.join(HOME, 'Library/Application Support/com.openai.atlas/browser-data/host/user-*/Cookies'),
+    cookiePathPattern: path.join(
+      HOME,
+      'Library/Application Support/com.openai.atlas/browser-data/host/user-*/Cookies'
+    ),
     keychainEntry: 'ChatGPT Safe Storage',
     keychainAccount: 'ChatGPT',
     needsManualPassword: true,
@@ -135,29 +147,42 @@ export class BrowserCookieReader {
       return null;
     }
 
-    // Return the most recently modified match
+    // Return the most recently modified match. Guard each stat against TOCTOU —
+    // a file could disappear between glob.sync and statSync.
     const sorted = matches
-      .map(p => ({ path: p, mtime: fs.statSync(p).mtime.getTime() }))
+      .map((p) => {
+        try {
+          return { path: p, mtime: fs.statSync(p).mtime.getTime() };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { path: string; mtime: number } => x !== null)
       .sort((a, b) => b.mtime - a.mtime);
 
-    return sorted[0].path;
+    return sorted.length > 0 ? sorted[0].path : null;
   }
 
   /**
    * Get list of installed browsers with their configurations.
    */
   static getInstalledBrowsers(): BrowserInfo[] {
-    const results = Object.values(BROWSERS).map(browser => {
+    const results = Object.values(BROWSERS).map((browser) => {
       const resolvedPath = this.resolveCookiePath(browser.cookiePathPattern);
-      console.log(`[BrowserCookieReader] Checking ${browser.name}: pattern=${browser.cookiePathPattern}, resolved=${resolvedPath}`);
+      console.log(
+        `[BrowserCookieReader] Checking ${browser.name}: pattern=${browser.cookiePathPattern}, resolved=${resolvedPath}`
+      );
       return {
         ...browser,
         isInstalled: resolvedPath !== null,
         resolvedCookiePath: resolvedPath ?? undefined,
       };
     });
-    const installed = results.filter(b => b.isInstalled);
-    console.log(`[BrowserCookieReader] Found ${installed.length} installed browsers:`, installed.map(b => b.type));
+    const installed = results.filter((b) => b.isInstalled);
+    console.log(
+      `[BrowserCookieReader] Found ${installed.length} installed browsers:`,
+      installed.map((b) => b.type)
+    );
     return installed;
   }
 
@@ -184,7 +209,7 @@ export class BrowserCookieReader {
       if (!config?.keychainPassword) {
         throw new Error(
           `${browser.name} requires a keychain password. ` +
-          `Please provide the password from "${browser.keychainEntry}" in Keychain Access.`
+            `Please provide the password from "${browser.keychainEntry}" in Keychain Access.`
         );
       }
       password = config.keychainPassword;
@@ -195,10 +220,10 @@ export class BrowserCookieReader {
           `security find-generic-password -wa "${browser.keychainAccount}"`
         );
         password = stdout.trim();
-      } catch (error) {
+      } catch {
         throw new Error(
           `Failed to get ${browser.name} encryption key from keychain. ` +
-          `Make sure ${browser.name} is installed and has been run at least once.`
+            `Make sure ${browser.name} is installed and has been run at least once.`
         );
       }
     }
@@ -241,7 +266,7 @@ export class BrowserCookieReader {
       if (code < 32 && code !== 9) return false;
       if (code === 127) return false; // DEL character
       // Check for replacement character (indicates invalid UTF-8 decoding)
-      if (code === 0xFFFD) return false;
+      if (code === 0xfffd) return false;
     }
     return true;
   }
@@ -276,10 +301,7 @@ export class BrowserCookieReader {
       const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
       decipher.setAutoPadding(false);
 
-      const decrypted = Buffer.concat([
-        decipher.update(ciphertext),
-        decipher.final()
-      ]);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
       const unpadded = this.removePKCS7Padding(decrypted);
 
@@ -328,7 +350,9 @@ export class BrowserCookieReader {
     try {
       const key = await this.getEncryptionKey(browser, config);
 
-      const rows = db.prepare(`
+      const rows = db
+        .prepare(
+          `
         SELECT
           host_key,
           name,
@@ -348,7 +372,27 @@ export class BrowserCookieReader {
           source_port,
           last_update_utc
         FROM cookies
-      `).all() as any[];
+      `
+        )
+        .all() as Array<{
+        host_key: string;
+        name: string;
+        encrypted_value: Buffer;
+        path: string;
+        expires_utc: number;
+        is_secure: number;
+        is_httponly: number;
+        creation_utc: number;
+        top_frame_site_key: string | null;
+        last_access_utc: number;
+        has_expires: number;
+        is_persistent: number;
+        priority: number;
+        samesite: number;
+        source_scheme: number;
+        source_port: number;
+        last_update_utc: number;
+      }>;
 
       const cookies: CookieData[] = [];
       let skipped = 0;
@@ -392,14 +436,14 @@ export class BrowserCookieReader {
         // indicates the decryption key (password) is incorrect
         throw new Error(
           `Failed to decrypt ${browser.name} cookies. ` +
-          `The keychain password may be incorrect. ` +
-          `(${cookies.length}/${totalCookies} cookies decrypted successfully)`
+            `The keychain password may be incorrect. ` +
+            `(${cookies.length}/${totalCookies} cookies decrypted successfully)`
         );
       }
 
       console.log(
         `[BrowserCookieReader] Read ${cookies.length} ${browser.name} cookies ` +
-        `(skipped ${skipped} unreadable)`
+          `(skipped ${skipped} unreadable)`
       );
       return cookies;
     } finally {

@@ -22,40 +22,53 @@ interface AgentPayModalProps {
 const CardIcons: Record<string, React.ReactNode> = {
   visa: (
     <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none">
-      <rect width="24" height="24" rx="4" fill="#1A1F71"/>
-      <path d="M9.5 15.5L10.5 8.5H12.5L11.5 15.5H9.5Z" fill="white"/>
-      <path d="M16.5 8.7C16 8.5 15.2 8.3 14.2 8.3C12.2 8.3 10.8 9.3 10.8 10.8C10.8 11.9 11.8 12.5 12.6 12.9C13.4 13.3 13.7 13.5 13.7 13.9C13.7 14.4 13.1 14.7 12.5 14.7C11.7 14.7 11.2 14.5 10.5 14.2L10.2 14.1L9.9 16C10.5 16.3 11.5 16.5 12.5 16.5C14.6 16.5 16 15.5 16 13.9C16 13 15.5 12.3 14.4 11.8C13.7 11.4 13.2 11.2 13.2 10.7C13.2 10.3 13.6 9.9 14.5 9.9C15.2 9.9 15.8 10 16.2 10.2L16.4 10.3L16.5 8.7Z" fill="white"/>
-      <path d="M19.5 8.5H18C17.5 8.5 17.1 8.7 16.9 9.2L14 15.5H16.1L16.5 14.3H19.1L19.3 15.5H21.2L19.5 8.5ZM17.1 12.7L18.1 10.1L18.7 12.7H17.1Z" fill="white"/>
-      <path d="M8 8.5L6 13.5L5.8 12.5C5.4 11.2 4.2 9.8 2.8 9L4.6 15.5H6.8L10.2 8.5H8Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#1A1F71" />
+      <path d="M9.5 15.5L10.5 8.5H12.5L11.5 15.5H9.5Z" fill="white" />
+      <path
+        d="M16.5 8.7C16 8.5 15.2 8.3 14.2 8.3C12.2 8.3 10.8 9.3 10.8 10.8C10.8 11.9 11.8 12.5 12.6 12.9C13.4 13.3 13.7 13.5 13.7 13.9C13.7 14.4 13.1 14.7 12.5 14.7C11.7 14.7 11.2 14.5 10.5 14.2L10.2 14.1L9.9 16C10.5 16.3 11.5 16.5 12.5 16.5C14.6 16.5 16 15.5 16 13.9C16 13 15.5 12.3 14.4 11.8C13.7 11.4 13.2 11.2 13.2 10.7C13.2 10.3 13.6 9.9 14.5 9.9C15.2 9.9 15.8 10 16.2 10.2L16.4 10.3L16.5 8.7Z"
+        fill="white"
+      />
+      <path
+        d="M19.5 8.5H18C17.5 8.5 17.1 8.7 16.9 9.2L14 15.5H16.1L16.5 14.3H19.1L19.3 15.5H21.2L19.5 8.5ZM17.1 12.7L18.1 10.1L18.7 12.7H17.1Z"
+        fill="white"
+      />
+      <path
+        d="M8 8.5L6 13.5L5.8 12.5C5.4 11.2 4.2 9.8 2.8 9L4.6 15.5H6.8L10.2 8.5H8Z"
+        fill="white"
+      />
     </svg>
   ),
   mastercard: (
     <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none">
-      <rect width="24" height="24" rx="4" fill="#000"/>
-      <circle cx="9" cy="12" r="5" fill="#EB001B"/>
-      <circle cx="15" cy="12" r="5" fill="#F79E1B"/>
-      <path d="M12 8.5C13.1 9.4 13.8 10.6 13.8 12C13.8 13.4 13.1 14.6 12 15.5C10.9 14.6 10.2 13.4 10.2 12C10.2 10.6 10.9 9.4 12 8.5Z" fill="#FF5F00"/>
+      <rect width="24" height="24" rx="4" fill="#000" />
+      <circle cx="9" cy="12" r="5" fill="#EB001B" />
+      <circle cx="15" cy="12" r="5" fill="#F79E1B" />
+      <path
+        d="M12 8.5C13.1 9.4 13.8 10.6 13.8 12C13.8 13.4 13.1 14.6 12 15.5C10.9 14.6 10.2 13.4 10.2 12C10.2 10.6 10.9 9.4 12 8.5Z"
+        fill="#FF5F00"
+      />
     </svg>
   ),
   amex: (
     <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none">
-      <rect width="24" height="24" rx="4" fill="#006FCF"/>
-      <path d="M3 12L5 8H7L9 12L7 16H5L3 12Z" fill="white"/>
-      <path d="M9 8H13V10H11V11H13V13H11V14H13V16H9V8Z" fill="white"/>
-      <path d="M14 8H16L17.5 11L19 8H21L18.5 12L21 16H19L17.5 13L16 16H14L16.5 12L14 8Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#006FCF" />
+      <path d="M3 12L5 8H7L9 12L7 16H5L3 12Z" fill="white" />
+      <path d="M9 8H13V10H11V11H13V13H11V14H13V16H9V8Z" fill="white" />
+      <path
+        d="M14 8H16L17.5 11L19 8H21L18.5 12L21 16H19L17.5 13L16 16H14L16.5 12L14 8Z"
+        fill="white"
+      />
     </svg>
   ),
   discover: (
     <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none">
-      <rect width="24" height="24" rx="4" fill="#FF6000"/>
-      <circle cx="12" cy="12" r="4" fill="white"/>
-      <path d="M4 10H6V14H4V10Z" fill="white"/>
-      <path d="M18 10H20V14H18V10Z" fill="white"/>
+      <rect width="24" height="24" rx="4" fill="#FF6000" />
+      <circle cx="12" cy="12" r="4" fill="white" />
+      <path d="M4 10H6V14H4V10Z" fill="white" />
+      <path d="M18 10H20V14H18V10Z" fill="white" />
     </svg>
   ),
-  unknown: (
-    <CreditCard className="w-7 h-7 text-muted-foreground" />
-  ),
+  unknown: <CreditCard className="w-7 h-7 text-muted-foreground" />,
 };
 
 const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
@@ -140,7 +153,7 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
             if (envelope) {
               setSavedEnvelope(envelope);
               setAutopayLimitDisplay((envelope.autoagentpaylimit_cents / 100).toFixed(2));
-              setPaymentData(prev => ({
+              setPaymentData((prev) => ({
                 ...prev,
                 autoagentpaylimit_cents: envelope.autoagentpaylimit_cents,
               }));
@@ -172,23 +185,23 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
   const handleCardNumber = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 16);
     const formatted = digits.replace(/(.{4})/g, '$1 ').trim();
-    setPaymentData(prev => ({ ...prev, card_number: formatted }));
+    setPaymentData((prev) => ({ ...prev, card_number: formatted }));
   };
 
   const handleExpiry = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 4);
     const formatted = digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
-    setPaymentData(prev => ({ ...prev, card_expiry: formatted }));
+    setPaymentData((prev) => ({ ...prev, card_expiry: formatted }));
   };
 
   const handleCVV = (value: string) => {
     const digits = value.replace(/\D/g, '').slice(0, 4);
-    setPaymentData(prev => ({ ...prev, card_cvv: digits }));
+    setPaymentData((prev) => ({ ...prev, card_cvv: digits }));
   };
 
   const handleAutopayBlur = () => {
     const dollars = parseFloat(autopayLimitDisplay) || 0;
-    setPaymentData(prev => ({ ...prev, autoagentpaylimit_cents: Math.round(dollars * 100) }));
+    setPaymentData((prev) => ({ ...prev, autoagentpaylimit_cents: Math.round(dollars * 100) }));
   };
 
   const validateForm = (): boolean => {
@@ -366,10 +379,7 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={handleClose}
-      />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={handleClose} />
 
       {/* Modal */}
       <div className="relative bg-card border border-border rounded-xl shadow-xl w-full max-w-lg mx-4 overflow-hidden max-h-[90vh] flex flex-col">
@@ -401,7 +411,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                 <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
                 <div className="flex-1 space-y-1.5">
                   <p className="text-xs text-amber-800 dark:text-amber-200">
-                    <span className="font-medium">All card credentials are end-to-end encrypted.</span>{' '}
+                    <span className="font-medium">
+                      All card credentials are end-to-end encrypted.
+                    </span>{' '}
                     We recommend creating a separate card for your agent.
                   </p>
                   <a
@@ -465,7 +477,8 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                       className={`${inputClass()} max-w-[160px]`}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Payments under this amount are auto-approved. Set to $0 to require approval for all.
+                      Payments under this amount are auto-approved. Set to $0 to require approval
+                      for all.
                     </p>
                   </div>
 
@@ -474,7 +487,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                     <h3 className="text-sm font-semibold text-foreground">Card Information</h3>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Card Number</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Card Number
+                      </label>
                       <div className="relative">
                         <input
                           placeholder="4111 1111 1111 1111"
@@ -494,11 +509,15 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Cardholder Name</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Cardholder Name
+                      </label>
                       <input
                         placeholder="John Doe"
                         value={paymentData.cardholder_name}
-                        onChange={(e) => setPaymentData(prev => ({ ...prev, cardholder_name: e.target.value }))}
+                        onChange={(e) =>
+                          setPaymentData((prev) => ({ ...prev, cardholder_name: e.target.value }))
+                        }
                         disabled={saving}
                         className={inputClass('cardholder_name')}
                       />
@@ -509,7 +528,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground">Expiry Date</label>
+                        <label className="text-xs font-medium text-muted-foreground">
+                          Expiry Date
+                        </label>
                         <input
                           placeholder="MM/YY"
                           value={paymentData.card_expiry}
@@ -546,25 +567,41 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                     <h3 className="text-sm font-semibold text-foreground">Billing Address</h3>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Street Address</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Street Address
+                      </label>
                       <input
                         placeholder="123 Main Street"
                         value={paymentData.billing_street_address}
-                        onChange={(e) => setPaymentData(prev => ({ ...prev, billing_street_address: e.target.value }))}
+                        onChange={(e) =>
+                          setPaymentData((prev) => ({
+                            ...prev,
+                            billing_street_address: e.target.value,
+                          }))
+                        }
                         disabled={saving}
                         className={inputClass('billing_street_address')}
                       />
                       {paymentErrors.billing_street_address && (
-                        <p className="text-xs text-red-500">{paymentErrors.billing_street_address}</p>
+                        <p className="text-xs text-red-500">
+                          {paymentErrors.billing_street_address}
+                        </p>
                       )}
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Address Line 2 (Optional)</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Address Line 2 (Optional)
+                      </label>
                       <input
                         placeholder="Apt 4B, Suite 100, etc."
                         value={paymentData.billing_address_line2}
-                        onChange={(e) => setPaymentData(prev => ({ ...prev, billing_address_line2: e.target.value }))}
+                        onChange={(e) =>
+                          setPaymentData((prev) => ({
+                            ...prev,
+                            billing_address_line2: e.target.value,
+                          }))
+                        }
                         disabled={saving}
                         className={inputClass()}
                       />
@@ -576,7 +613,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="New York"
                           value={paymentData.billing_city}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_city: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({ ...prev, billing_city: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('billing_city')}
                         />
@@ -590,7 +629,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="NY"
                           value={paymentData.billing_state}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_state: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({ ...prev, billing_state: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('billing_state')}
                         />
@@ -602,11 +643,15 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground">ZIP Code</label>
+                        <label className="text-xs font-medium text-muted-foreground">
+                          ZIP Code
+                        </label>
                         <input
                           placeholder="10001"
                           value={paymentData.billing_zipcode}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_zipcode: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({ ...prev, billing_zipcode: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('billing_zipcode')}
                         />
@@ -620,7 +665,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="United States"
                           value={paymentData.billing_country}
-                          onChange={(e) => setPaymentData(prev => ({ ...prev, billing_country: e.target.value }))}
+                          onChange={(e) =>
+                            setPaymentData((prev) => ({ ...prev, billing_country: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('billing_country')}
                         />
@@ -657,7 +704,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                       <input
                         placeholder="John Doe"
                         value={shippingAddress.name}
-                        onChange={(e) => setShippingAddress(prev => ({ ...prev, name: e.target.value }))}
+                        onChange={(e) =>
+                          setShippingAddress((prev) => ({ ...prev, name: e.target.value }))
+                        }
                         disabled={saving}
                         className={inputClass('shipping_name')}
                       />
@@ -667,25 +716,35 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Street Address</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Street Address
+                      </label>
                       <input
                         placeholder="123 Main Street"
                         value={shippingAddress.addressLine1}
-                        onChange={(e) => setShippingAddress(prev => ({ ...prev, addressLine1: e.target.value }))}
+                        onChange={(e) =>
+                          setShippingAddress((prev) => ({ ...prev, addressLine1: e.target.value }))
+                        }
                         disabled={saving}
                         className={inputClass('shipping_addressLine1')}
                       />
                       {paymentErrors.shipping_addressLine1 && (
-                        <p className="text-xs text-red-500">{paymentErrors.shipping_addressLine1}</p>
+                        <p className="text-xs text-red-500">
+                          {paymentErrors.shipping_addressLine1}
+                        </p>
                       )}
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-muted-foreground">Address Line 2 (Optional)</label>
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Address Line 2 (Optional)
+                      </label>
                       <input
                         placeholder="Apt 4B, Suite 100, etc."
                         value={shippingAddress.addressLine2}
-                        onChange={(e) => setShippingAddress(prev => ({ ...prev, addressLine2: e.target.value }))}
+                        onChange={(e) =>
+                          setShippingAddress((prev) => ({ ...prev, addressLine2: e.target.value }))
+                        }
                         disabled={saving}
                         className={inputClass()}
                       />
@@ -697,7 +756,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="New York"
                           value={shippingAddress.city}
-                          onChange={(e) => setShippingAddress(prev => ({ ...prev, city: e.target.value }))}
+                          onChange={(e) =>
+                            setShippingAddress((prev) => ({ ...prev, city: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('shipping_city')}
                         />
@@ -711,7 +772,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="NY"
                           value={shippingAddress.state}
-                          onChange={(e) => setShippingAddress(prev => ({ ...prev, state: e.target.value }))}
+                          onChange={(e) =>
+                            setShippingAddress((prev) => ({ ...prev, state: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('shipping_state')}
                         />
@@ -723,16 +786,22 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-muted-foreground">Postal Code</label>
+                        <label className="text-xs font-medium text-muted-foreground">
+                          Postal Code
+                        </label>
                         <input
                           placeholder="10001"
                           value={shippingAddress.postalCode}
-                          onChange={(e) => setShippingAddress(prev => ({ ...prev, postalCode: e.target.value }))}
+                          onChange={(e) =>
+                            setShippingAddress((prev) => ({ ...prev, postalCode: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('shipping_postalCode')}
                         />
                         {paymentErrors.shipping_postalCode && (
-                          <p className="text-xs text-red-500">{paymentErrors.shipping_postalCode}</p>
+                          <p className="text-xs text-red-500">
+                            {paymentErrors.shipping_postalCode}
+                          </p>
                         )}
                       </div>
 
@@ -741,7 +810,9 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                         <input
                           placeholder="United States"
                           value={shippingAddress.country}
-                          onChange={(e) => setShippingAddress(prev => ({ ...prev, country: e.target.value }))}
+                          onChange={(e) =>
+                            setShippingAddress((prev) => ({ ...prev, country: e.target.value }))
+                          }
                           disabled={saving}
                           className={inputClass('shipping_country')}
                         />
@@ -755,9 +826,7 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
               </div>
 
               {/* Error message */}
-              {error && (
-                <p className="text-sm text-red-500">{error}</p>
-              )}
+              {error && <p className="text-sm text-red-500">{error}</p>}
             </>
           )}
         </div>
@@ -782,8 +851,10 @@ const AgentPayModal = ({ isOpen, onClose, onSuccess }: AgentPayModalProps) => {
                   <Loader2 className="w-3 h-3 animate-spin" />
                   {showCardForm ? 'Encrypting...' : 'Saving...'}
                 </>
+              ) : showCardForm ? (
+                'Save Payment'
               ) : (
-                showCardForm ? 'Save Payment' : 'Save'
+                'Save'
               )}
             </button>
           </div>

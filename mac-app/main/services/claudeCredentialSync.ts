@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync, execSync, spawn } from 'child_process';
-import { BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
 import { Crypto } from '../base/crypto';
 import { AuthService } from './auth';
 import { IntegrationCache } from './sync/IntegrationCache';
@@ -36,11 +36,7 @@ export class ClaudeCredentialSync {
    */
   private static getAugmentedEnv(): NodeJS.ProcessEnv {
     const home = process.env.HOME || '';
-    const extraPaths = [
-      '/usr/local/bin',
-      '/opt/homebrew/bin',
-      `${home}/.npm-global/bin`,
-    ];
+    const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', `${home}/.npm-global/bin`];
 
     // Include ALL NVM node version bin dirs (packaged Electron won't have NVM_DIR set)
     try {
@@ -61,7 +57,11 @@ export class ClaudeCredentialSync {
 
     // Also try the user's default shell PATH as a last resort
     try {
-      const shellPath = execSync('/bin/bash -ilc "echo $PATH"', { stdio: 'pipe', encoding: 'utf8', timeout: 3000 }).trim();
+      const shellPath = execSync('/bin/bash -ilc "echo $PATH"', {
+        stdio: 'pipe',
+        encoding: 'utf8',
+        timeout: 3000,
+      }).trim();
       if (shellPath) {
         extraPaths.push(...shellPath.split(':'));
       }
@@ -81,7 +81,11 @@ export class ClaudeCredentialSync {
     const env = this.getAugmentedEnv();
     try {
       // Get npm global bin directory
-      const npmBin = execSync('npm config get prefix', { stdio: 'pipe', encoding: 'utf8', env }).trim();
+      const npmBin = execSync('npm config get prefix', {
+        stdio: 'pipe',
+        encoding: 'utf8',
+        env,
+      }).trim();
       const claudePath = path.join(npmBin, 'bin', 'claude');
       if (fs.existsSync(claudePath)) {
         return claudePath;
@@ -120,7 +124,9 @@ export class ClaudeCredentialSync {
       try {
         npmPath = execSync('which npm', { stdio: 'pipe', encoding: 'utf8', env }).trim();
       } catch {
-        reject(new Error('npm not found. Please install Node.js from https://nodejs.org and try again.'));
+        reject(
+          new Error('npm not found. Please install Node.js from https://nodejs.org and try again.')
+        );
         return;
       }
 
@@ -130,7 +136,9 @@ export class ClaudeCredentialSync {
       });
 
       let stderr = '';
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stderr.on('data', (d) => {
+        stderr += d.toString();
+      });
       proc.stdout.on('data', (d) => {
         logConsole('ClaudeCredentialSync', `npm install stdout: ${d.toString().trim()}`);
       });
@@ -186,7 +194,9 @@ export class ClaudeCredentialSync {
 
       let stdout = '';
       let stderr = '';
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
+      proc.stderr.on('data', (d) => {
+        stderr += d.toString();
+      });
       proc.stdout.on('data', (d) => {
         const chunk = d.toString();
         stdout += chunk;
@@ -227,18 +237,28 @@ export class ClaudeCredentialSync {
         try {
           // Remove old entry if it exists
           try {
-            execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE], { stdio: 'pipe' });
+            execFileSync('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE], {
+              stdio: 'pipe',
+            });
           } catch {
             // No existing entry, that's fine
           }
 
           // Write new credentials to Keychain (use execFileSync to avoid shell injection)
           const username = process.env.USER || 'unknown';
-          execFileSync('security', ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', username, '-w', credentials], { stdio: 'pipe' });
+          execFileSync(
+            'security',
+            ['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', username, '-w', credentials],
+            { stdio: 'pipe' }
+          );
           logConsole('ClaudeCredentialSync', 'Long-lived token written to Keychain');
           resolve();
         } catch (err) {
-          reject(new Error(`Failed to write credentials to Keychain: ${err instanceof Error ? err.message : String(err)}`));
+          reject(
+            new Error(
+              `Failed to write credentials to Keychain: ${err instanceof Error ? err.message : String(err)}`
+            )
+          );
         }
       });
 
@@ -254,7 +274,9 @@ export class ClaudeCredentialSync {
    */
   static hasCredentials(): boolean {
     try {
-      execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" 2>/dev/null`, { stdio: 'pipe' });
+      execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" 2>/dev/null`, {
+        stdio: 'pipe',
+      });
       return true;
     } catch {
       return false;
@@ -267,10 +289,10 @@ export class ClaudeCredentialSync {
   private static readCredentials(): string | null {
     if (this._mockNoClaudeCode) return null;
     try {
-      const result = execSync(
-        `security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`,
-        { stdio: 'pipe', encoding: 'utf8' }
-      );
+      const result = execSync(`security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`, {
+        stdio: 'pipe',
+        encoding: 'utf8',
+      });
       return result.trim();
     } catch {
       return null;
@@ -289,10 +311,7 @@ export class ClaudeCredentialSync {
 
     // 2. Encrypt data with AES-256-GCM
     const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-    const encrypted = Buffer.concat([
-      cipher.update(data, 'utf8'),
-      cipher.final()
-    ]);
+    const encrypted = Buffer.concat([cipher.update(data, 'utf8'), cipher.final()]);
     const authTag = cipher.getAuthTag();
     const ciphertext = Buffer.concat([encrypted, authTag]);
 
@@ -325,16 +344,14 @@ export class ClaudeCredentialSync {
     accessToken: string
   ): Promise<{ success: boolean; message?: string }> {
     const encryptedEnvelope = this.encryptCredentials(credentialsJson);
-    const { encrypted, iv, key } = Crypto.encrypt(
-      { encryptedCredentials: encryptedEnvelope }
-    );
+    const { encrypted, iv, key } = Crypto.encrypt({ encryptedCredentials: encryptedEnvelope });
 
     const response = await fetch(
       `${config.apiUrl}/api/integrations/claude-code/credentials/upload`,
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ data: encrypted, iv, key }),
@@ -375,12 +392,19 @@ export class ClaudeCredentialSync {
       try {
         // Check if claude CLI is installed, install if needed
         const installed = this.isClaudeInstalled();
-        logConsole('ClaudeCredentialSync', `Claude Code installed (npm): ${installed}, path: ${this.findNpmClaudePath() || 'none'}`);
+        logConsole(
+          'ClaudeCredentialSync',
+          `Claude Code installed (npm): ${installed}, path: ${this.findNpmClaudePath() || 'none'}`
+        );
         if (!installed) {
           await this.installClaudeCLI(sendStatus);
           if (!this.isClaudeInstalled()) {
             sendStatus('');
-            return { success: false, message: 'Claude Code installation failed. Please install manually: npm install -g @anthropic-ai/claude-code' };
+            return {
+              success: false,
+              message:
+                'Claude Code installation failed. Please install manually: npm install -g @anthropic-ai/claude-code',
+            };
           }
           sendStatus('Claude Code installed');
         }
@@ -398,7 +422,11 @@ export class ClaudeCredentialSync {
 
         if (!credentialsJson) {
           sendStatus('');
-          return { success: false, message: 'Authentication completed but credentials not found in Keychain. Please try again.' };
+          return {
+            success: false,
+            message:
+              'Authentication completed but credentials not found in Keychain. Please try again.',
+          };
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -412,7 +440,11 @@ export class ClaudeCredentialSync {
     try {
       const parsed = JSON.parse(credentialsJson);
       if (!parsed.claudeAiOauth?.accessToken) {
-        return { success: false, message: 'Claude Code credentials missing OAuth access token. Please re-login to Claude Code.' };
+        return {
+          success: false,
+          message:
+            'Claude Code credentials missing OAuth access token. Please re-login to Claude Code.',
+        };
       }
     } catch {
       return { success: false, message: 'Claude Code credentials are not valid JSON' };

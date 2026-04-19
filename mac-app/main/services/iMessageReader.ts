@@ -3,18 +3,16 @@ import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import type { IMessageData } from '../../shared/types/ipc';
-import { ContactsReaderNative, ContactRecord } from './contactsReaderNative';
+import { ContactsReaderNative, type ContactRecord } from './contactsReaderNative';
 import type { NormalizedMessage } from './messaging/types';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const bplistParser = require('bplist-parser') as {
-  parseBuffer: (buffer: Buffer) => any[];
+import * as bplistParserModule from 'bplist-parser';
+
+const bplistParser = bplistParserModule as unknown as {
+  parseBuffer: (buffer: Buffer) => unknown[];
 };
 
-const IMESSAGE_DB_PATH = path.join(
-  app.getPath('home'),
-  'Library/Messages/chat.db'
-);
+const IMESSAGE_DB_PATH = path.join(app.getPath('home'), 'Library/Messages/chat.db');
 
 const INVALID_HANDLE_SENTINEL = 'unknown';
 const columnPresenceCache = new Map<string, boolean>();
@@ -37,16 +35,21 @@ const hasColumn = (db: Database.Database, table: string, column: string): boolea
     return columnPresenceCache.get(cacheKey)!;
   }
   const info = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  const exists = info.some(col => col.name === column);
+  const exists = info.some((col) => col.name === column);
   columnPresenceCache.set(cacheKey, exists);
   return exists;
 };
 
+// eslint-disable-next-line no-control-regex -- intentional control-char strip for iMessage binary payloads
+const CONTROL_CHAR_NULL_REGEX = /\u0000/g;
+// eslint-disable-next-line no-control-regex -- intentional control-char strip for iMessage binary payloads
+const CONTROL_CHAR_RANGE_REGEX = /[\x00-\x1F\x7F]/g;
+
 const stripControlCharacters = (value: string) =>
   value
-    .replace(/\u0000/g, '')
+    .replace(CONTROL_CHAR_NULL_REGEX, '')
     .replace(/\uFFFC/g, '')
-    .replace(/[\x00-\x1F\x7F]/g, '')
+    .replace(CONTROL_CHAR_RANGE_REGEX, '')
     .replace(/\uFFFD/g, '')
     .trim();
 
@@ -70,7 +73,7 @@ const applyAttributedSplitHeuristic = (value: string): string => {
   const startDelimiter = 'NSString��+';
   const endDelimiter = '��';
   if (!value.includes(startDelimiter)) return value;
-  result = value.split(startDelimiter)[1]
+  result = value.split(startDelimiter)[1];
   result = result.substring(1);
   // Remove all leading '�' characters until a non-'�' character is seen
   let firstNonReplacementChar = 0;
@@ -80,7 +83,7 @@ const applyAttributedSplitHeuristic = (value: string): string => {
   if (firstNonReplacementChar > 0) {
     result = result.substring(firstNonReplacementChar);
   }
-  result = result.split(endDelimiter)[0]
+  result = result.split(endDelimiter)[0];
 
   result = stripControlCharacters(result);
   result = stripLeadingMarkers(result);
@@ -92,7 +95,7 @@ const sanitizeMessageCandidate = (
   messageId: number,
   source: 'text' | 'associated' | 'attributed' = 'text'
 ): string | null => {
-  if (candidate == null) return null;
+  if (candidate === null || candidate === undefined) return null;
   let value = candidate;
 
   if (typeof value === 'object') {
@@ -113,7 +116,7 @@ const sanitizeMessageCandidate = (
     normalized = applyAttributedSplitHeuristic(String(value || ''));
   }
 
-  return normalized
+  return normalized;
 };
 
 const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null => {
@@ -131,7 +134,7 @@ const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null =>
   try {
     const parsed = bplistParser.parseBuffer(buffer);
     if (!parsed?.length) return tryPlainString();
-    const archive = parsed[0];
+    const archive = parsed[0] as { $objects?: unknown } | undefined;
     const objects = Array.isArray(archive?.$objects) ? archive.$objects : [];
     const candidates: string[] = [];
 
@@ -159,7 +162,7 @@ const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null =>
     }
 
     const cleanedCandidates = candidates
-      .map(candidate => stripLeadingMarkers(stripControlCharacters(candidate)))
+      .map((candidate) => stripLeadingMarkers(stripControlCharacters(candidate)))
       .filter(Boolean);
 
     if (cleanedCandidates.length) {
@@ -167,14 +170,17 @@ const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null =>
       return cleanedCandidates[0] || null;
     }
 
-    const searchValue = (value: any, depth = 0): string | null => {
+    const searchValue = (value: unknown, depth = 0): string | null => {
       if (!value || depth > 5) return null;
       if (typeof value === 'string' && value.trim()) {
         return stripLeadingMarkers(stripControlCharacters(value));
       }
 
-      if (value.NS && typeof value.NS.string === 'string') {
-        return stripLeadingMarkers(stripControlCharacters(value.NS.string));
+      if (typeof value === 'object' && value !== null) {
+        const rec = value as { NS?: { string?: unknown } };
+        if (rec.NS && typeof rec.NS.string === 'string') {
+          return stripLeadingMarkers(stripControlCharacters(rec.NS.string));
+        }
       }
 
       if (Array.isArray(value)) {
@@ -182,7 +188,7 @@ const extractTextFromAttributedBody = (buffer?: Buffer | null): string | null =>
           const result = searchValue(item, depth + 1);
           if (result) return result;
         }
-      } else if (typeof value === 'object') {
+      } else if (typeof value === 'object' && value !== null) {
         for (const val of Object.values(value)) {
           const result = searchValue(val, depth + 1);
           if (result) return result;
@@ -236,27 +242,32 @@ export class IMessageReader {
       return false;
     }
   }
-  
+
   static async readMessages(sinceTimestamp?: string, isSync = false): Promise<IMessageData[]> {
     if (!this.checkAccess()) {
-      throw new Error('No access to iMessage database. Grant Full Disk Access in System Preferences.');
+      throw new Error(
+        'No access to iMessage database. Grant Full Disk Access in System Preferences.'
+      );
     }
-    
+
     const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
-    
+
     try {
       const hasAssociatedTextColumn = hasColumn(db, 'message', 'associated_message_text');
       const hasAttributedBodyColumn = hasColumn(db, 'message', 'attributedBody');
-      const contentWhereClause = hasAssociatedTextColumn || hasAttributedBodyColumn
-        ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
-        : 'm.text IS NOT NULL';
-      
+      const contentWhereClause =
+        hasAssociatedTextColumn || hasAttributedBodyColumn
+          ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
+          : 'm.text IS NOT NULL';
+
       // Add timestamp filter if provided
-      const timestampClause = sinceTimestamp 
+      const timestampClause = sinceTimestamp
         ? `AND m.date > ${isoToImessageTimestamp(sinceTimestamp)}`
         : '';
-      
-      const rawMessages = db.prepare(`
+
+      const rawMessages = db
+        .prepare(
+          `
         SELECT 
           m.ROWID as id,
           m.text,
@@ -279,7 +290,9 @@ export class IMessageReader {
           )
           ${timestampClause}
         ORDER BY m.date DESC
-      `).all() as RawMessageRow[];
+      `
+        )
+        .all() as RawMessageRow[];
 
       console.log(`[IMessageReader] Read ${rawMessages.length} raw messages from database`);
 
@@ -291,7 +304,9 @@ export class IMessageReader {
       let contactMap = new Map<string, ContactRecord>();
       try {
         contactMap = await ContactsReaderNative.readContacts();
-        console.log(`[IMessageReader] Loaded ${contactMap.size} contact identifiers for enrichment`);
+        console.log(
+          `[IMessageReader] Loaded ${contactMap.size} contact identifiers for enrichment`
+        );
       } catch (error) {
         console.warn('[IMessageReader] Failed to load contacts for enrichment:', error);
       }
@@ -302,7 +317,7 @@ export class IMessageReader {
       let skippedEmptyText = 0;
 
       for (const msg of rawMessages) {
-        let contactId = normalizeHandle(msg.handle_id || msg.chat_identifier || '');
+        const contactId = normalizeHandle(msg.handle_id || msg.chat_identifier || '');
         if (!contactId || contactId === INVALID_HANDLE_SENTINEL) {
           skippedMissingHandle++;
           continue;
@@ -313,16 +328,21 @@ export class IMessageReader {
           continue;
         }
 
-        let source = 'text';
         let cleanedText = sanitizeMessageCandidate(msg.text, msg.id);
-        
-        if ((!cleanedText || !cleanedText.trim()) && hasAssociatedTextColumn && msg.associated_message_text) {
-          source = 'associated';
+
+        if (
+          (!cleanedText || !cleanedText.trim()) &&
+          hasAssociatedTextColumn &&
+          msg.associated_message_text
+        ) {
           cleanedText = sanitizeMessageCandidate(msg.associated_message_text, msg.id, 'associated');
         }
 
-        if ((!cleanedText || !cleanedText.trim()) && hasAttributedBodyColumn && msg.attributedBody) {
-          source = 'attributed';
+        if (
+          (!cleanedText || !cleanedText.trim()) &&
+          hasAttributedBodyColumn &&
+          msg.attributedBody
+        ) {
           const decoded = extractTextFromAttributedBody(msg.attributedBody);
           cleanedText = sanitizeMessageCandidate(decoded, msg.id, 'attributed');
         }
@@ -334,7 +354,10 @@ export class IMessageReader {
         let contactName = msg.contact_name || contactId;
         const contactInfo = ContactsReaderNative.lookupContact(contactId, contactMap);
         if (contactInfo) {
-          const fullName = [contactInfo.firstName, contactInfo.lastName].filter(Boolean).join(' ').trim();
+          const fullName = [contactInfo.firstName, contactInfo.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
           if (fullName) {
             contactName = fullName;
           }
@@ -356,13 +379,19 @@ export class IMessageReader {
         });
       }
 
-      const fromUserCount = cleanedMessages.filter(m => m.is_from_me).length;
+      const fromUserCount = cleanedMessages.filter((m) => m.is_from_me).length;
       const fromOthersCount = cleanedMessages.length - fromUserCount;
 
-      console.log(`[IMessageReader] ✅ Cleaned ${cleanedMessages.length}/${rawMessages.length} messages`);
-      console.log(`[IMessageReader] 📊 Direction: ${fromUserCount} from user, ${fromOthersCount} from others`);
+      console.log(
+        `[IMessageReader] ✅ Cleaned ${cleanedMessages.length}/${rawMessages.length} messages`
+      );
+      console.log(
+        `[IMessageReader] 📊 Direction: ${fromUserCount} from user, ${fromOthersCount} from others`
+      );
       if (skippedMissingHandle) {
-        console.log(`[IMessageReader] ⚠️ Skipped ${skippedMissingHandle} messages missing a handle`);
+        console.log(
+          `[IMessageReader] ⚠️ Skipped ${skippedMissingHandle} messages missing a handle`
+        );
       }
       if (skippedShortCode) {
         console.log(`[IMessageReader] ⚠️ Skipped ${skippedShortCode} short numeric handles`);
@@ -385,16 +414,20 @@ export class IMessageReader {
       // For sync operations, check if user has EVER replied to contacts in this batch
       // This prevents filtering out messages from contacts the user replied to historically
       if (isSync && cleanedMessages.length > 0) {
-        const uniqueContactIds = [...new Set(cleanedMessages.map(m => m.contact_id))];
+        const uniqueContactIds = [...new Set(cleanedMessages.map((m) => m.contact_id))];
         const placeholders = uniqueContactIds.map(() => '?').join(',');
-        
-        const historicalReplies = db.prepare(`
+
+        const historicalReplies = db
+          .prepare(
+            `
           SELECT DISTINCT h.id as handle_id
           FROM message m
           JOIN handle h ON m.handle_id = h.ROWID
           WHERE m.is_from_me = 1
             AND h.id IN (${placeholders})
-        `).all(...uniqueContactIds) as Array<{ handle_id: string }>;
+        `
+          )
+          .all(...uniqueContactIds) as Array<{ handle_id: string }>;
 
         for (const row of historicalReplies) {
           const normalized = normalizeHandle(row.handle_id);
@@ -402,12 +435,14 @@ export class IMessageReader {
             repliedHandles.add(normalized);
           }
         }
-        
-        console.log(`[IMessageReader] Found ${historicalReplies.length} contacts with historical replies`);
+
+        console.log(
+          `[IMessageReader] Found ${historicalReplies.length} contacts with historical replies`
+        );
       }
 
       const filteredMessages = cleanedMessages.filter(
-        msg => repliedHandles.has(msg.contact_id) || namedHandles.has(msg.contact_id)
+        (msg) => repliedHandles.has(msg.contact_id) || namedHandles.has(msg.contact_id)
       );
 
       if (filteredMessages.length !== cleanedMessages.length) {
@@ -451,7 +486,7 @@ export class IMessageReader {
    * Convert array of IMessageData to NormalizedMessage format.
    */
   static toNormalizedMessages(messages: IMessageData[]): NormalizedMessage[] {
-    return messages.map(msg => this.toNormalizedMessage(msg));
+    return messages.map((msg) => this.toNormalizedMessage(msg));
   }
 
   /**
@@ -460,7 +495,9 @@ export class IMessageReader {
    */
   static async readMessagesSinceRowId(sinceRowId: number): Promise<IMessageData[]> {
     if (!this.checkAccess()) {
-      throw new Error('No access to iMessage database. Grant Full Disk Access in System Preferences.');
+      throw new Error(
+        'No access to iMessage database. Grant Full Disk Access in System Preferences.'
+      );
     }
 
     const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
@@ -468,11 +505,14 @@ export class IMessageReader {
     try {
       const hasAssociatedTextColumn = hasColumn(db, 'message', 'associated_message_text');
       const hasAttributedBodyColumn = hasColumn(db, 'message', 'attributedBody');
-      const contentWhereClause = hasAssociatedTextColumn || hasAttributedBodyColumn
-        ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
-        : 'm.text IS NOT NULL';
+      const contentWhereClause =
+        hasAssociatedTextColumn || hasAttributedBodyColumn
+          ? `(m.text IS NOT NULL OR ${hasAssociatedTextColumn ? 'm.associated_message_text IS NOT NULL' : '0'} OR ${hasAttributedBodyColumn ? 'm.attributedBody IS NOT NULL' : '0'})`
+          : 'm.text IS NOT NULL';
 
-      const rawMessages = db.prepare(`
+      const rawMessages = db
+        .prepare(
+          `
         SELECT
           m.ROWID as id,
           m.text,
@@ -495,13 +535,17 @@ export class IMessageReader {
             OR c.chat_identifier NOT LIKE 'chat%'
           )
         ORDER BY m.date ASC
-      `).all(sinceRowId) as RawMessageRow[];
+      `
+        )
+        .all(sinceRowId) as RawMessageRow[];
 
       if (rawMessages.length === 0) {
         return [];
       }
 
-      console.log(`[IMessageReader] Real-time: Found ${rawMessages.length} new messages since ROWID ${sinceRowId}`);
+      console.log(
+        `[IMessageReader] Real-time: Found ${rawMessages.length} new messages since ROWID ${sinceRowId}`
+      );
 
       let contactMap = new Map<string, ContactRecord>();
       try {
@@ -524,11 +568,19 @@ export class IMessageReader {
 
         let cleanedText = sanitizeMessageCandidate(msg.text, msg.id);
 
-        if ((!cleanedText || !cleanedText.trim()) && hasAssociatedTextColumn && msg.associated_message_text) {
+        if (
+          (!cleanedText || !cleanedText.trim()) &&
+          hasAssociatedTextColumn &&
+          msg.associated_message_text
+        ) {
           cleanedText = sanitizeMessageCandidate(msg.associated_message_text, msg.id, 'associated');
         }
 
-        if ((!cleanedText || !cleanedText.trim()) && hasAttributedBodyColumn && msg.attributedBody) {
+        if (
+          (!cleanedText || !cleanedText.trim()) &&
+          hasAttributedBodyColumn &&
+          msg.attributedBody
+        ) {
           const decoded = extractTextFromAttributedBody(msg.attributedBody);
           cleanedText = sanitizeMessageCandidate(decoded, msg.id, 'attributed');
         }
@@ -540,7 +592,10 @@ export class IMessageReader {
         let contactName = msg.contact_name || contactId;
         const contactInfo = ContactsReaderNative.lookupContact(contactId, contactMap);
         if (contactInfo) {
-          const fullName = [contactInfo.firstName, contactInfo.lastName].filter(Boolean).join(' ').trim();
+          const fullName = [contactInfo.firstName, contactInfo.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
           if (fullName) {
             contactName = fullName;
           }
@@ -578,11 +633,12 @@ export class IMessageReader {
 
     const db = new Database(IMESSAGE_DB_PATH, { readonly: true });
     try {
-      const result = db.prepare('SELECT MAX(ROWID) as maxId FROM message').get() as { maxId: number } | undefined;
+      const result = db.prepare('SELECT MAX(ROWID) as maxId FROM message').get() as
+        | { maxId: number }
+        | undefined;
       return result?.maxId ?? 0;
     } finally {
       db.close();
     }
   }
 }
-

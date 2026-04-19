@@ -74,9 +74,12 @@ export function initAutoUpdater(window: BrowserWindow) {
     setTimeout(() => checkForUpdates(), 500);
   });
 
-  setInterval(() => {
-    checkForUpdates();
-  }, 4 * 60 * 60 * 1000);
+  setInterval(
+    () => {
+      checkForUpdates();
+    },
+    4 * 60 * 60 * 1000
+  );
 
   autoUpdater.on('checking-for-update', () => {
     console.log('[AutoUpdater] Checking for updates...');
@@ -206,4 +209,3 @@ export function registerUpdateIpc() {
     return { success: true };
   });
 }
-

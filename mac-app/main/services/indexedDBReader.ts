@@ -59,7 +59,9 @@ export class IndexedDBReader {
     return new Promise((resolve) => {
       const args = originFilter ? [this.scriptPath, originFilter] : [this.scriptPath];
 
-      console.log(`[IndexedDBReader] Reading IndexedDB${originFilter ? ` for '${originFilter}'` : ''}...`);
+      console.log(
+        `[IndexedDBReader] Reading IndexedDB${originFilter ? ` for '${originFilter}'` : ''}...`
+      );
 
       const python = spawn('python3', args, {
         cwd: app.getPath('home'),
@@ -80,7 +82,9 @@ export class IndexedDBReader {
         if (code !== 0) {
           // Code 1 with no stderr usually means no matching origins found - not an error
           if (code === 1 && !stderr.trim()) {
-            console.log(`[IndexedDBReader] No IndexedDB data found${originFilter ? ` for '${originFilter}'` : ''}`);
+            console.log(
+              `[IndexedDBReader] No IndexedDB data found${originFilter ? ` for '${originFilter}'` : ''}`
+            );
           } else {
             console.error(`[IndexedDBReader] Python script failed with code ${code}`);
             if (stderr.trim()) {
@@ -110,11 +114,20 @@ export class IndexedDBReader {
           }
 
           const totalDatabases = results.reduce((sum, o) => sum + (o.databases?.length || 0), 0);
-          const totalRecords = results.reduce((sum, o) =>
-            sum + (o.databases?.reduce((s, d) =>
-              s + (d.objectStores?.reduce((r, os) => r + (os.records?.length || 0), 0) || 0), 0) || 0), 0);
+          const totalRecords = results.reduce(
+            (sum, o) =>
+              sum +
+              (o.databases?.reduce(
+                (s, d) =>
+                  s + (d.objectStores?.reduce((r, os) => r + (os.records?.length || 0), 0) || 0),
+                0
+              ) || 0),
+            0
+          );
 
-          console.log(`[IndexedDBReader] Read ${results.length} origins, ${totalDatabases} databases, ${totalRecords} records`);
+          console.log(
+            `[IndexedDBReader] Read ${results.length} origins, ${totalDatabases} databases, ${totalRecords} records`
+          );
 
           resolve({ origins: results, hashes });
         } catch (error) {

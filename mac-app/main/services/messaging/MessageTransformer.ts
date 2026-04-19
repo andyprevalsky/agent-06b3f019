@@ -26,17 +26,20 @@ export class MessageTransformer {
    */
   static toContactWithMessages(messages: NormalizedMessage[]): ContactWithMessages[] {
     // Group messages by contactId
-    const contactMap = new Map<string, {
-      messages: NormalizedMessage[];
-      contactName?: string;
-      firstName?: string;
-      lastName?: string;
-      company?: string;
-      title?: string;
-      email?: string;
-      emailAddresses?: string[];
-      channel: MessageChannel;
-    }>();
+    const contactMap = new Map<
+      string,
+      {
+        messages: NormalizedMessage[];
+        contactName?: string;
+        firstName?: string;
+        lastName?: string;
+        company?: string;
+        title?: string;
+        email?: string;
+        emailAddresses?: string[];
+        channel: MessageChannel;
+      }
+    >();
 
     for (const msg of messages) {
       const existing = contactMap.get(msg.contactId);
@@ -99,7 +102,7 @@ export class MessageTransformer {
         title: data.title,
         email: data.email,
         emailAddresses: data.emailAddresses,
-        messages: sortedMessages.map(msg => ({
+        messages: sortedMessages.map((msg) => ({
           id: msg.id,
           text: msg.text,
           date: toStorageTimestamp(msg.timestamp, msg.channel),

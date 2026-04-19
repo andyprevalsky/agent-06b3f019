@@ -1,8 +1,17 @@
-import { app, BrowserWindow, nativeImage, globalShortcut, ipcMain, screen, Menu, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  nativeImage,
+  globalShortcut,
+  ipcMain,
+  screen,
+  Menu,
+  shell,
+} from 'electron';
 import path from 'path';
 import Store from 'electron-store';
 import { config } from './base/config';
-import './handlers/registry'; // Register IPC handlers
+// Importing from './handlers/registry' registers all IPC handlers as a module-load side effect
 import { getOnboardingComplete } from './handlers/registry';
 import { IMessageReader } from './services/iMessageReader';
 import {
@@ -29,7 +38,7 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient(PROTOCOL);
 }
 
-console.log(`[App] Registered protocol: ${PROTOCOL}://`)
+console.log(`[App] Registered protocol: ${PROTOCOL}://`);
 
 // Handle deep link URLs (roselabs://...)
 function handleDeepLink(url: string) {
@@ -127,9 +136,8 @@ function getIconPaths() {
   return {
     macIcnsPath,
     macPngPath,
-    iconPath: process.platform === 'darwin'
-      ? (config.isDev ? macPngPath : macIcnsPath)
-      : macPngPath,
+    iconPath:
+      process.platform === 'darwin' ? (config.isDev ? macPngPath : macIcnsPath) : macPngPath,
   };
 }
 
@@ -178,7 +186,9 @@ function createMainWindow() {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const appOrigin = config.isDev ? `http://localhost:${process.env.MAC_APP_PORT || '5174'}` : 'file://';
+    const appOrigin = config.isDev
+      ? `http://localhost:${process.env.MAC_APP_PORT || '5174'}`
+      : 'file://';
     if (!url.startsWith(appOrigin)) {
       event.preventDefault();
       shell.openExternal(url);
@@ -233,7 +243,9 @@ function createQuickQueryWindow() {
   }
 
   if (config.isDev) {
-    quickQueryWindow.loadURL(`http://localhost:${process.env.MAC_APP_PORT || '5174'}/launcher.html`);
+    quickQueryWindow.loadURL(
+      `http://localhost:${process.env.MAC_APP_PORT || '5174'}/launcher.html`
+    );
   } else {
     quickQueryWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
   }
@@ -282,7 +294,7 @@ function positionQuickQueryWindow() {
   const workArea = targetDisplay.workArea ?? targetDisplay.bounds;
 
   const x = Math.round(workArea.x + (workArea.width - width) / 2);
-  const y = Math.round(workArea.y + (workArea.height * 0.8)); // Lower on screen
+  const y = Math.round(workArea.y + workArea.height * 0.8); // Lower on screen
   quickQueryWindow.setPosition(x, y, false);
 }
 
@@ -314,7 +326,7 @@ function showQuickQueryWindow() {
   quickQueryWindow.focusOnWebView();
 
   // Clear any pending focus timeouts from previous show
-  quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
+  quickQueryFocusTimeouts.forEach((t) => clearTimeout(t));
   quickQueryFocusTimeouts = [];
 
   // Aggressively grab focus multiple times to beat other apps
@@ -346,13 +358,17 @@ function showQuickQueryWindow() {
         });
 
         // Also focus the input directly via JS
-        quickQueryWindow.webContents.executeJavaScript(`
+        quickQueryWindow.webContents
+          .executeJavaScript(
+            `
           const input = document.querySelector('input');
           if (input) {
             input.click();
             input.focus();
           }
-        `).catch(() => {});
+        `
+          )
+          .catch(() => {});
       }
     }, delay);
     quickQueryFocusTimeouts.push(timeout);
@@ -376,7 +392,7 @@ function hideQuickQueryWindow({ focusMain }: { focusMain?: boolean } = {}) {
   }
 
   // Cancel all pending focus timeouts to prevent them from re-showing the window
-  quickQueryFocusTimeouts.forEach(t => clearTimeout(t));
+  quickQueryFocusTimeouts.forEach((t) => clearTimeout(t));
   quickQueryFocusTimeouts = [];
 
   quickQueryBlurEnabled = false; // Disable blur when hiding
@@ -435,12 +451,13 @@ function unregisterGlobalShortcuts() {
 
 function registerQuickQueryIpc() {
   ipcMain.handle('quick-query:submit', (_event, payload) => {
-    const queryPayload = typeof payload === 'string'
-      ? { query: payload, submittedAt: Date.now() }
-      : {
-          query: payload?.query ?? '',
-          submittedAt: payload?.submittedAt ?? Date.now(),
-        };
+    const queryPayload =
+      typeof payload === 'string'
+        ? { query: payload, submittedAt: Date.now() }
+        : {
+            query: payload?.query ?? '',
+            submittedAt: payload?.submittedAt ?? Date.now(),
+          };
 
     hideQuickQueryWindow({ focusMain: true });
 
@@ -528,12 +545,7 @@ function createAppMenu() {
     },
     {
       label: 'Window',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
-        { type: 'separator' },
-        { role: 'front' },
-      ],
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }],
     },
   ];
 
@@ -558,7 +570,7 @@ app.whenReady().then(() => {
 
   // Handle deep link if app was launched via URL (app was closed)
   // On macOS, the URL is passed via process.argv when launched from closed state
-  const deepLinkArg = process.argv.find(arg => arg.startsWith(`${PROTOCOL}://`));
+  const deepLinkArg = process.argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
   if (deepLinkArg) {
     // Small delay to ensure renderer is ready
     setTimeout(() => handleDeepLink(deepLinkArg), 500);
@@ -603,4 +615,3 @@ app.on('will-quit', () => {
   }
   globalShortcut.unregisterAll();
 });
-

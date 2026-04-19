@@ -17,12 +17,13 @@ interface OnboardingProps {
 }
 
 // Rose gradient for dots
-const roseGradient = 'linear-gradient(to bottom left, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)';
+const roseGradient =
+  'linear-gradient(to bottom left, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)';
 
 // Dot indicator component
 const StepDots = ({
   steps,
-  currentStep
+  currentStep,
 }: {
   steps: OnboardingStep[];
   currentStep: OnboardingStep;
@@ -44,7 +45,11 @@ const StepDots = ({
   );
 };
 
-const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: OnboardingProps) => {
+const Onboarding = ({
+  onComplete,
+  isSignedIn: _isSignedIn = false,
+  skipAuth = false,
+}: OnboardingProps) => {
   // Navigation steps - exclude auth if skipAuth is true
   const navSteps: OnboardingStep[] = skipAuth
     ? ['customization', 'data', 'shortcut', 'welcome', 'payment']
@@ -100,7 +105,9 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
       {/* Back button - below drag region */}
       {canGoBack && (
         <button
-          onClick={goBack}
+          onClick={() => {
+            void goBack();
+          }}
           className="absolute top-14 left-4 p-1.5 text-muted-foreground/50 hover:text-foreground transition-colors z-10"
         >
           <ChevronLeft className="w-5 h-5" />
@@ -110,24 +117,12 @@ const Onboarding = ({ onComplete, isSignedIn = false, skipAuth = false }: Onboar
       {showDots && <StepDots steps={dotSteps} currentStep={currentStep} />}
 
       <div className="flex-1 flex flex-col">
-        {currentStep === 'auth' && (
-          <OnboardingAuth onComplete={goToNext} />
-        )}
-        {currentStep === 'customization' && (
-          <OnboardingCustomization onComplete={goToNext} />
-        )}
-        {currentStep === 'data' && (
-          <OnboardingData onComplete={goToNext} />
-        )}
-        {currentStep === 'shortcut' && (
-          <OnboardingShortcut onComplete={goToNext} />
-        )}
-        {currentStep === 'welcome' && (
-          <OnboardingWelcome onGetStarted={handleGetStarted} />
-        )}
-        {currentStep === 'payment' && (
-          <OnboardingPayment onComplete={onComplete} />
-        )}
+        {currentStep === 'auth' && <OnboardingAuth onComplete={goToNext} />}
+        {currentStep === 'customization' && <OnboardingCustomization onComplete={goToNext} />}
+        {currentStep === 'data' && <OnboardingData onComplete={goToNext} />}
+        {currentStep === 'shortcut' && <OnboardingShortcut onComplete={goToNext} />}
+        {currentStep === 'welcome' && <OnboardingWelcome onGetStarted={handleGetStarted} />}
+        {currentStep === 'payment' && <OnboardingPayment onComplete={onComplete} />}
       </div>
 
       {/* Footer links - fixed 20px from bottom */}

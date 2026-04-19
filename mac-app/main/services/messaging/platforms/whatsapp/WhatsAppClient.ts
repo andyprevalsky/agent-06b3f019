@@ -1,22 +1,35 @@
 import { EventEmitter } from 'events';
 import { WhatsAppAuth } from './WhatsAppAuth';
-import type { NormalizedMessage, SyncEvent, ConnectionState as AppConnectionState, WhatsAppAuthCallbacks } from '../../types';
+import type {
+  NormalizedMessage,
+  SyncEvent,
+  ConnectionState as AppConnectionState,
+  WhatsAppAuthCallbacks,
+} from '../../types';
 
-// Baileys types (import type is fine for ESM modules)
+// Baileys types — Baileys is loaded dynamically at runtime, so we can't statically
+// import its types in a CommonJS build. `any` here is the pragmatic choice; a later
+// pass can harden these once the dynamic-import wrapper is replaced.
+/* eslint-disable @typescript-eslint/no-explicit-any */
 type WAMessage = any;
 type ConnectionState = any;
 type BaileysEventMap = any;
 type WASocket = any;
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 // Lazy-loaded Baileys module
 let baileys: typeof import('@whiskeysockets/baileys') | null = null;
 
 // Use Function constructor to preserve dynamic import (TypeScript transforms import() to require() in commonjs mode)
-const dynamicImport = new Function('modulePath', 'return import(modulePath)') as (path: string) => Promise<any>;
+const dynamicImport = new Function('modulePath', 'return import(modulePath)') as (
+  path: string
+) => Promise<unknown>;
 
 async function loadBaileys(): Promise<typeof import('@whiskeysockets/baileys')> {
   if (!baileys) {
-    baileys = await dynamicImport('@whiskeysockets/baileys');
+    baileys = (await dynamicImport(
+      '@whiskeysockets/baileys'
+    )) as typeof import('@whiskeysockets/baileys');
   }
   return baileys!;
 }
@@ -106,10 +119,10 @@ export class WhatsAppClient extends EventEmitter {
       this.sock = makeWASocket({
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, silentLogger as any),
+          keys: makeCacheableSignalKeyStore(state.keys, silentLogger),
         },
         version,
-        logger: silentLogger as any,
+        logger: silentLogger,
         printQRInTerminal: false,
         // Use standard Chrome browser identifier to avoid WhatsApp blocking
         browser: ['Chrome (macOS)', 'Chrome', '126.0.6478.183'],
@@ -166,7 +179,9 @@ export class WhatsAppClient extends EventEmitter {
     }
 
     try {
-      console.log(`[WhatsAppClient] Attempting to fetch ${limit} historical messages for ${chatId}`);
+      console.log(
+        `[WhatsAppClient] Attempting to fetch ${limit} historical messages for ${chatId}`
+      );
 
       // Attempt 1: Try using store if available (Baileys internal message store)
       // This is the most reliable method but requires message store setup
@@ -175,7 +190,9 @@ export class WhatsAppClient extends EventEmitter {
       // Attempt 2: Try fetchMessageHistory if available (may not work in v7.0+)
       // This is a best-effort attempt
       try {
-        const sock = this.sock as any;
+        const sock = this.sock as unknown as {
+          fetchMessageHistory?: (chatId: string, limit: number) => Promise<unknown>;
+        };
         if (typeof sock.fetchMessageHistory === 'function') {
           const history = await sock.fetchMessageHistory(chatId, limit);
           if (Array.isArray(history)) {
@@ -241,15 +258,18 @@ export class WhatsAppClient extends EventEmitter {
     });
 
     // Handle historical message sync (fires during initial pairing)
-    this.sock.ev.on('messaging-history.set', (historySet: {
-      chats: any[];
-      contacts: any[];
-      messages: WAMessage[];
-      isLatest?: boolean;
-      progress?: number | null;
-    }) => {
-      this.handleHistorySync(historySet);
-    });
+    this.sock.ev.on(
+      'messaging-history.set',
+      (historySet: {
+        chats: unknown[];
+        contacts: unknown[];
+        messages: WAMessage[];
+        isLatest?: boolean;
+        progress?: number | null;
+      }) => {
+        this.handleHistorySync(historySet);
+      }
+    );
 
     // Handle WebSocket errors
     if (this.sock.ws) {
@@ -289,12 +309,15 @@ export class WhatsAppClient extends EventEmitter {
     }
 
     if (connection === 'close') {
-      const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+      const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output
+        ?.statusCode;
       // DisconnectReason.loggedOut = 401, DisconnectReason.restartRequired = 515
       const isLoggedOut = statusCode === 401;
       const isRestartRequired = statusCode === 515;
 
-      console.log(`[WhatsAppClient] Connection closed (status: ${statusCode}, loggedOut: ${isLoggedOut}, restart: ${isRestartRequired})`);
+      console.log(
+        `[WhatsAppClient] Connection closed (status: ${statusCode}, loggedOut: ${isLoggedOut}, restart: ${isRestartRequired})`
+      );
 
       if (isLoggedOut) {
         WhatsAppAuth.clearCredentials();
@@ -303,7 +326,9 @@ export class WhatsAppClient extends EventEmitter {
       // On status 515 (restart required), clear partial auth and reconnect
       if (isRestartRequired && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        console.log(`[WhatsAppClient] Restart required, clearing auth and reconnecting (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        console.log(
+          `[WhatsAppClient] Restart required, clearing auth and reconnecting (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
+        );
         WhatsAppAuth.clearCredentials();
         // Reconnect after a short delay
         setTimeout(() => {
@@ -356,7 +381,9 @@ export class WhatsAppClient extends EventEmitter {
     }
 
     if (normalizedMessages.length > 0) {
-      console.log(`[WhatsAppClient] Normalized ${normalizedMessages.length} messages (historical: ${isHistorical})`);
+      console.log(
+        `[WhatsAppClient] Normalized ${normalizedMessages.length} messages (historical: ${isHistorical})`
+      );
 
       this.emit('sync', {
         type: 'new_messages',
@@ -371,15 +398,17 @@ export class WhatsAppClient extends EventEmitter {
    * This fires during initial pairing when syncFullHistory is true.
    */
   private handleHistorySync(historySet: {
-    chats: any[];
-    contacts: any[];
+    chats: unknown[];
+    contacts: unknown[];
     messages: WAMessage[];
     isLatest?: boolean;
     progress?: number | null;
   }): void {
     const { chats, contacts, messages, isLatest, progress } = historySet;
 
-    console.log(`[WhatsAppClient] 📜 History sync received: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts`);
+    console.log(
+      `[WhatsAppClient] 📜 History sync received: ${messages.length} messages, ${chats.length} chats, ${contacts.length} contacts`
+    );
     if (progress !== undefined && progress !== null) {
       console.log(`[WhatsAppClient] History sync progress: ${Math.round(progress * 100)}%`);
     }
@@ -407,7 +436,9 @@ export class WhatsAppClient extends EventEmitter {
     }
 
     if (normalizedMessages.length > 0) {
-      console.log(`[WhatsAppClient] 📜 Normalized ${normalizedMessages.length} historical messages`);
+      console.log(
+        `[WhatsAppClient] 📜 Normalized ${normalizedMessages.length} historical messages`
+      );
 
       this.emit('sync', {
         type: 'new_messages',
@@ -529,7 +560,8 @@ export class WhatsAppClient extends EventEmitter {
           resolve();
         } else if (update.connection === 'close') {
           cleanup();
-          const statusCode = (update.lastDisconnect?.error as any)?.output?.statusCode;
+          const statusCode = (update.lastDisconnect?.error as { output?: { statusCode?: number } })
+            ?.output?.statusCode;
           // DisconnectReason.loggedOut = 401
           if (statusCode === 401) {
             reject(new Error('WhatsApp session logged out'));
