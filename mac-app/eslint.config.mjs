@@ -44,6 +44,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/messaging/platforms/telegram/**/*.ts',
   'main/domains/messaging-telegram/**/*.ts',
   'main/services/chromeProfileResolver.ts',
+  'main/domains/chrome-profile-resolver/**/*.ts',
   'main/services/cookieReader.ts',
   'main/domains/cookie-reader/**/*.ts',
   'main/services/messaging/platforms/whatsapp/**/*.ts',
