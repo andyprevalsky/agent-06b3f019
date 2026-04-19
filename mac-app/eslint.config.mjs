@@ -37,6 +37,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/chromeProfileResolver.ts',
   'main/services/cookieReader.ts',
   'main/services/messaging/platforms/whatsapp/**/*.ts',
+  'main/domains/messaging-whatsapp/**/*.ts',
   'main/services/messaging/platforms/imessage/**/*.ts',
   'main/services/uploader.ts',
   'main/services/atlasCredentialStore.ts',
