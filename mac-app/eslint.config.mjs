@@ -49,6 +49,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/messaging/platforms/whatsapp/**/*.ts',
   'main/domains/messaging-whatsapp/**/*.ts',
   'main/services/messaging/platforms/imessage/**/*.ts',
+  'main/domains/messaging-imessage/**/*.ts',
   'main/services/uploader.ts',
   'main/domains/uploader/**/*.ts',
   'main/services/atlasCredentialStore.ts',
