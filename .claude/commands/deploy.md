@@ -72,13 +72,14 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty). Commit any resulting changes once.
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 2. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
+   - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
 
@@ -161,6 +162,26 @@ cd agents && bash scripts/run-coverage.sh
 ```
 
 Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+
+## Step 1m: Mac-app format + lint auto-fix (skip if `$CHANGED_MAC_APP` is empty)
+
+Sequential mutator — runs before the parallel verifier batch, same pattern as Step 1 (prettier) and Step 2a (eslint --fix) for the back-end.
+
+```bash
+cd mac-app && npm run format && npm run lint:fix
+```
+
+Commit any resulting changes (can combine with Step 1's commit).
+
+## Step 4m-lint: Mac-app format:check + lint + type-check (skip if `$CHANGED_MAC_APP` is empty)
+
+Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
+
+```bash
+cd mac-app && npm run format:check && npm run lint && npm run type-check
+```
+
+If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
 
 ## Step 4m: Mac-app blackbox tests (skip if `$CHANGED_MAC_APP` is empty)
 
