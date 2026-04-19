@@ -36,6 +36,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/batchUploader.ts',
   'main/domains/batch-uploader/**/*.ts',
   'main/services/IMessageQueueService.ts',
+  'main/domains/i-message-queue-service/**/*.ts',
   'main/services/auth.ts',
   'main/services/claudeCredentialSync.ts',
   'main/domains/claude-credential-sync/**/*.ts',
