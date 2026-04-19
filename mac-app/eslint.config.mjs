@@ -24,6 +24,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/messaging/index.ts',
   'main/services/messaging/types.ts',
   'main/services/browserStateSync.ts',
+  'main/domains/browser-state-sync/**/*.ts',
   'ui/main.tsx',
   'main/services/batchUploader.ts',
   'main/services/IMessageQueueService.ts',
