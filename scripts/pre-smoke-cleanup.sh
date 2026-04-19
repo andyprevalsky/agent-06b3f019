@@ -48,7 +48,7 @@ if [[ -z "$WORKSPACE" ]]; then
 else
     DB_CONTAINER="victoria-db-$WORKSPACE"
     if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-        SQL='UPDATE "Agent" SET status = '"'"'FAILED'"'"', updated_at = NOW() WHERE status = '"'"'ACTIVE'"'"' AND created_at < NOW() - INTERVAL '"'"'30 minutes'"'"' RETURNING id;'
+        SQL='UPDATE "Agent" SET status = '"'"'FAILED'"'"', "updatedAt" = NOW() WHERE status = '"'"'ACTIVE'"'"' AND "createdAt" < NOW() - INTERVAL '"'"'30 minutes'"'"' RETURNING id;'
         if [[ $DRY -eq 1 ]]; then
             echo "   (dry-run) would execute: $SQL"
         else
