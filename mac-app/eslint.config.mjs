@@ -14,6 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const STRICT_DOMAIN_FILES = [
   'main/services/cookieSync.ts',
   'main/services/iMessageSync.ts',
+  'main/domains/i-message-sync/**/*.ts',
   'ui/onboarding/**/*.{ts,tsx}',
   'main/handlers/registry.ts',
   'main/services/sync/**/*.ts',
