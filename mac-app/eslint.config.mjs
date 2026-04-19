@@ -60,6 +60,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/cacheStorageReader.ts',
   'main/domains/cache-storage-reader/**/*.ts',
   'main/services/fingerprintReader.ts',
+  'main/domains/fingerprint-reader/**/*.ts',
   'main/services/localStorageReader.ts',
   'main/services/permissionReader.ts',
   'main/preload.ts',
