@@ -10,9 +10,11 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 ---
 
-# Step 0: Capture original Conductor workspace title
+# Step 0: Capture original Conductor workspace title + seed task list
 
-Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
+Before running tests or creating/updating a PR:
+
+**(a) Capture the current Conductor workspace title** so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
 
 ```bash
 WORKSPACE_DIR="$(basename "$PWD")"
@@ -22,6 +24,24 @@ echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
 If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 14a rename.
+
+**(b) Seed the task list with one task per deploy step** (MANDATORY — this is the checklist that prevents silent skips). Immediately create tasks for each of the following via `TaskCreate`, in order:
+
+1. Phase 1 prep: prettier / eslint fix + verify / tsc / structural (Steps 1–4)
+2. Coverage gates: back-end / front-end / agents / mac-app (Steps 4a–4m) as applicable
+3. Research lint + structural (Step 4r) if `$CHANGED_RESEARCH` non-empty
+4. Credential health (Step 4c)
+5. Early push + PR open + CodeRabbit scope trim (Step 4d)
+6. Stack spin-up (Step 5)
+7. Blackbox API tests (Step 5a) if `$CHANGED_BACKEND` non-empty
+8. **Smoke + semantic combined run (Step 6)** — single gate, both must pass
+9. CodeRabbit review cycle + fix loop (Steps 9–10)
+10. Archive plan / cleanup / revert scope trim (Steps 11–11b)
+11. Merge (Step 12)
+12. Wait for deploys (Step 13)
+13. New branch + restore workspace title (Steps 14–14a)
+
+Every subsequent step updates its task status via `TaskUpdate` (in_progress → completed). **Missing tasks are disqualifying.** If at the end of Phase 1 the task list does not show every test gate as `completed`, you are not allowed to proceed to merge.
 
 ---
 
@@ -271,7 +291,7 @@ bash scripts/pre-smoke-cleanup.sh           # kills this worktree's stale servic
 
 Temporal workflow termination is handled in-process by `run_benchmark.py`'s preflight (Step 6) — belt-and-braces.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
+Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts `back-end`, `agents`, `research`, **and `front-end`** (the frontend is required by Step 6's semantic tests, so it is booted alongside the other services — only `mac-app` is skipped). When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -331,13 +351,7 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
-**Also start the frontend dev server** (required by Step 6b semantic tests). `run.sh --benchmark` intentionally skips the front-end, so launch it as a sibling background process:
-
-```bash
-# Start front-end dev server in a separate background process (needed for semantic tests).
-# run_in_background=true for this command:
-(cd front-end && VITE_PORT=$((CONDUCTOR_PORT + 1)) npm run dev > frontend-logs.log 2>&1)
-```
+**Also wait for the frontend** (required by Step 6's semantic tests; `run.sh --benchmark` now boots it alongside backend/agents):
 
 ```bash
 export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
@@ -369,11 +383,13 @@ BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/
 
 **ESCALATE IMMEDIATELY on third-party credit/billing errors.** If any test fails with "insufficient credits", "402", "quota exceeded", or similar billing errors from external providers (OpenRouter, OpenAI, E2B, Twilio, etc.), STOP and tell the user immediately. Do NOT try to fix this in code (e.g., accepting 500s). The user needs to add credits to the provider account.
 
-## Step 6: Smoke benchmarks + fix
+## Step 6: Smoke benchmarks + semantic tests (combined gate)
 
-### When smoke can be skipped
+**Smoke and semantic are one gate now.** They run in parallel via `scripts/run-smoke-and-semantic.sh`: smoke benchmarks execute autonomously in Temporal while you drive semantic tests through Chrome CDP. The script only exits 0 when BOTH pass. Skipping one without the other is not possible at the script level — the old "smoke green → forgot semantic" failure mode is eliminated.
 
-Smoke benchmarks exercise the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions). Skip them **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
+### When this combined gate can be skipped
+
+It exercises the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions) plus real user flows through the frontend. Skip **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
 
 **SAFE TO SKIP** when the diff is limited to paths that don't ship or don't affect agent behavior:
 
@@ -410,23 +426,30 @@ Smoke benchmarks exercise the full agent runtime (backend API → Temporal → w
 
 When skipping, record it explicitly in the Test Report:
 ```
-| Smoke Benchmarks | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
+| Smoke + Semantic | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
 ```
 
-### Running smoke
+### Running the combined gate
 
-With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
+With the local stack from Step 5 still running (back-end + agents + front-end all healthy), launch the combined runner **in the background** — it needs to run while you drive Chrome CDP through the semantic tests.
 
 ```bash
-# Run smoke benchmarks against local backend.
-# TEMPORAL_TASK_QUEUE must match the queue run.sh's worker listens on.
-# ALLOW_TEMPORAL_CLEANUP=true lets the benchmark pre-flight terminate stale workflows
-# from previous runs on Temporal Cloud (otherwise cleanup is skipped for non-local Temporal).
-cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
+cd "$(git rev-parse --show-toplevel)"
+# Run this with run_in_background=true so you can drive semantic tests while smoke executes.
+bash scripts/run-smoke-and-semantic.sh
 ```
 
-This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
+Behavior:
+- Starts `python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel` in a child process (log: `.context/deploy-smoke.log`).
+- Prints every `.semantic.md` test body to stdout. While the smoke child runs, drive each test via `mcp__claude-in-chrome__*` tools and record pass/fail for each with:
+  ```bash
+  bash front-end/scripts/run-semantic-tests.sh --record <name> pass
+  # or
+  bash front-end/scripts/run-semantic-tests.sh --record <name> fail "<reason>"
+  ```
+- After smoke exits, the script validates every semantic test has a `pass` result tagged with the current HEAD SHA. Missing or stale results = non-zero exit.
+
+This runs 5 e2e smoke tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research, plus every `.semantic.md` test (currently `login`, `agent-realtime`) through the real frontend via Chrome CDP.
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
 
@@ -556,45 +579,24 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
-## Step 6b: Semantic tests + fix
+### Driving semantic tests in parallel with smoke
 
-Semantic tests exercise real user flows through Chrome CDP against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
+While `run-smoke-and-semantic.sh` is running in the background, drive each `.semantic.md` test through Chrome CDP. The script has already printed the test bodies to stdout (`.context/deploy-smoke.log` is the smoke child's log; the combined runner's stdout/stderr go wherever the Bash tool surfaces background output).
 
-**Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
+For each test:
+1. Call `mcp__claude-in-chrome__tabs_context_mcp` first (never reuse stale tab IDs from earlier runs).
+2. Navigate/interact per the test's `steps`.
+3. Verify each `invariants` line. Capture console via `mcp__claude-in-chrome__read_console_messages` and network via `mcp__claude-in-chrome__read_network_requests` as needed.
+4. Stop at the `termination` condition.
+5. Record the result:
+   ```bash
+   bash front-end/scripts/run-semantic-tests.sh --record <name> pass
+   # or on failure:
+   bash front-end/scripts/run-semantic-tests.sh --record <name> fail "<reason>"
+   ```
+6. On failure: read `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt`. Fix the root cause. Re-run the stack + combined runner.
 
-### Running semantic tests
-
-With the full stack from Step 5 still running (backend, worker, research, **and frontend on `$SMOKE_FRONTEND_URL`**):
-
-```bash
-cd "$(git rev-parse --show-toplevel)"
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
-  bash front-end/scripts/run-semantic-tests.sh --list
-```
-
-For each listed test (currently `login`, `agent-realtime`), run the test and execute its instructions using `mcp__claude-in-chrome__*` browser tools:
-
-```bash
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
-  bash front-end/scripts/run-semantic-tests.sh <test-name>
-```
-
-The script validates pre-conditions (backend health, frontend accessible) and emits the structured test body (`pre-conditions`, `steps`, `invariants`, `termination`). You (Claude) must then execute those steps via Chrome CDP:
-1. Call `mcp__claude-in-chrome__tabs_context_mcp` to get tab context (MUST be first — never reuse stale tab IDs from earlier runs).
-2. Navigate/interact per the test's steps.
-3. Verify each invariant holds. Capture console output via `mcp__claude-in-chrome__read_console_messages` and network activity via `mcp__claude-in-chrome__read_network_requests` as needed.
-4. Stop at the termination condition.
-
-### Pass criteria
-
-**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): if a semantic test fails, you diagnose and fix the root cause. "Chrome CDP not available", "realtime broadcast didn't arrive", "extension missing" — none of those are excuses. Fix the underlying issue.
-
-### On failure
-
-1. Read the failing invariant. Capture the browser console + network tab output.
-2. Check `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt` for backend-side errors that correlate with the UI failure.
-3. Fix the root cause in code.
-4. Restart services (Step 5) and re-run the failed semantic test.
+Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): any semantic-test failure is a real failure. "Chrome CDP not available", "realtime broadcast didn't arrive", "extension missing" — none of those are excuses.
 
 ---
 
@@ -612,12 +614,12 @@ The script validates pre-conditions (backend health, frontend accessible) and em
 # ║  4c. Credential health: all integrations authenticate             ║
 # ║  4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes)    ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
-# ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
-# ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
-# ║     limited to safe paths; if ANY must-run path is touched, smoke ║
-# ║     is required)                                                   ║
-# ║  6b. Semantic tests: 100% pass whenever smoke ran (skip together  ║
-# ║      with smoke — never skip one without the other)               ║
+# ║  6. Combined smoke + semantic gate: scripts/run-smoke-and-        ║
+# ║     semantic.sh exits 0 (5/5 smoke pass AND every .semantic.md    ║
+# ║     has a pass result tagged with current HEAD) — OR explicitly   ║
+# ║     skipped per the "When this combined gate can be skipped" table║
+# ║     in Step 6. Smoke and semantic are ONE gate; they cannot be    ║
+# ║     skipped independently.                                         ║
 # ║                                                                    ║
 # ║  If ANY test has ANY failure, you are BLOCKED.                     ║
 # ║  Fix it or escalate to the user. Do NOT proceed.                   ║
@@ -829,6 +831,36 @@ fi
 ```
 
 ## Step 12: Merge
+
+**Pre-merge artifact gate (MANDATORY).** Before calling `gh pr merge`, verify that the combined smoke+semantic gate artifacts exist for the current HEAD. If any `.semantic.md` test is missing a matching pass result tagged with the HEAD SHA, abort — do not merge.
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+HEAD_SHA="$(git rev-parse HEAD)"
+GATE_OK=1
+for f in "$REPO_ROOT"/front-end/src/tests/semantic/*.semantic.md; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f" .semantic.md)"
+  result="$REPO_ROOT/.context/semantic-results/${name}.json"
+  if [ ! -f "$result" ]; then
+    echo "MISSING: semantic result for $name" >&2
+    GATE_OK=0
+    continue
+  fi
+  status=$(python3 -c "import json; print(json.load(open('$result')).get('status',''))")
+  sha=$(python3 -c "import json; print(json.load(open('$result')).get('head_sha',''))")
+  if [ "$status" != "pass" ] || [ "$sha" != "$HEAD_SHA" ]; then
+    echo "FAIL: $name (status=$status, sha=$sha, expected=$HEAD_SHA)" >&2
+    GATE_OK=0
+  fi
+done
+if [ "$GATE_OK" -ne 1 ]; then
+  echo "❌ Pre-merge semantic gate FAILED — rerun scripts/run-smoke-and-semantic.sh" >&2
+  exit 1
+fi
+```
+
+If the combined gate was explicitly skipped in Step 6 (diff is test-infra-only per the skip table), the artifact check is skipped too. In that case record the skip in the Test Report and proceed.
 
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 

@@ -359,14 +359,15 @@ else
 fi
 PIDS+=($!); NAMES+=("back-end")
 
-if ! $BENCHMARK_MODE; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
-    PIDS+=($!); NAMES+=("front-end")
+# Front-end is always launched — benchmark mode needs it for semantic tests
+# (Chrome CDP drives a real browser against the dev server in parallel with smoke).
+run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+PIDS+=($!); NAMES+=("front-end")
 
-    if $IS_MAC; then
-        run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
-        PIDS+=($!); NAMES+=("mac-app")
-    fi
+# mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
+if ! $BENCHMARK_MODE && $IS_MAC; then
+    run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
+    PIDS+=($!); NAMES+=("mac-app")
 fi
 
 run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &

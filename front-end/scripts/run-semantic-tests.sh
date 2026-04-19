@@ -11,10 +11,13 @@ set -euo pipefail
 # and verify behavior through an actual browser.
 #
 # Usage:
-#   bash scripts/run-semantic-tests.sh                    # list available tests
-#   bash scripts/run-semantic-tests.sh agent-realtime     # run specific test
-#   bash scripts/run-semantic-tests.sh --list             # list available tests
-#   bash scripts/run-semantic-tests.sh --print <name>     # print test instructions
+#   bash scripts/run-semantic-tests.sh                         # list available tests
+#   bash scripts/run-semantic-tests.sh agent-realtime          # run specific test
+#   bash scripts/run-semantic-tests.sh --list                  # list available tests
+#   bash scripts/run-semantic-tests.sh --print <name>          # print test instructions
+#   bash scripts/run-semantic-tests.sh --record <name> <pass|fail> [reason]
+#       Writes .context/semantic-results/<name>.json tagged with HEAD SHA.
+#       Used by scripts/run-smoke-and-semantic.sh to enforce the gate.
 #
 # Requirements:
 #   - Backend running on $BACKEND_PORT (default: 3001)
@@ -24,7 +27,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$FRONTEND_DIR/.." && pwd)"
 SEMANTIC_DIR="$FRONTEND_DIR/src/tests/semantic"
+RESULTS_DIR="$REPO_ROOT/.context/semantic-results"
 cd "$FRONTEND_DIR"
 
 BACKEND_PORT="${BACKEND_PORT:-3001}"
@@ -52,6 +57,47 @@ if [[ "${1:-}" == "--print" ]]; then
     exit 1
   fi
   cat "$TEST_FILE"
+  exit 0
+fi
+
+# --record mode: write pass/fail result for one test (used by the combined
+# smoke+semantic runner to gate the deploy on actual completion). The result
+# is tagged with the current git HEAD SHA so the gate rejects results from
+# an older commit.
+if [[ "${1:-}" == "--record" ]]; then
+  TEST_NAME="${2:-}"
+  STATUS="${3:-}"
+  REASON="${4:-}"
+  if [[ -z "$TEST_NAME" || -z "$STATUS" ]]; then
+    echo "Usage: run-semantic-tests.sh --record <name> <pass|fail> [reason]" >&2
+    exit 2
+  fi
+  if [[ "$STATUS" != "pass" && "$STATUS" != "fail" ]]; then
+    echo "Error: status must be 'pass' or 'fail' (got: $STATUS)" >&2
+    exit 2
+  fi
+  TEST_FILE="$SEMANTIC_DIR/${TEST_NAME}.semantic.md"
+  if [[ ! -f "$TEST_FILE" ]]; then
+    echo "Error: No semantic test found: $TEST_NAME" >&2
+    exit 2
+  fi
+  mkdir -p "$RESULTS_DIR"
+  HEAD_SHA="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+  TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # JSON-escape reason via python for safety
+  python3 - "$RESULTS_DIR/${TEST_NAME}.json" "$TEST_NAME" "$STATUS" "$REASON" "$HEAD_SHA" "$TIMESTAMP" <<'PY'
+import json, sys
+path, name, status, reason, head_sha, ts = sys.argv[1:7]
+with open(path, "w") as f:
+    json.dump({
+        "name": name,
+        "status": status,
+        "reason": reason,
+        "head_sha": head_sha,
+        "recorded_at": ts,
+    }, f, indent=2)
+PY
+  echo "Recorded: $TEST_NAME=$STATUS (HEAD=$HEAD_SHA)"
   exit 0
 fi
 

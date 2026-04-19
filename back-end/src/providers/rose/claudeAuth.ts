@@ -53,6 +53,7 @@ interface BuildBodyOptions {
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
   maxTokens?: number;
+  temperature?: number;
 }
 
 export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unknown> {
@@ -74,7 +75,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     stream: true,
     system: systemBlocks,
     thinking: { type: 'adaptive' },
-    temperature: 1,
+    temperature: opts.temperature ?? 1,
   };
 
   applyAnthropicResponseFormat(body, opts.responseFormat);
@@ -86,6 +87,7 @@ interface ClaudeAuthOptions {
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
   maxTokens?: number;
+  temperature?: number;
   claudeToken: string;
   requestId: string;
   callSite?: string;
@@ -104,6 +106,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     messages: opts.messages,
     responseFormat: opts.responseFormat,
     maxTokens: opts.maxTokens,
+    temperature: opts.temperature,
   });
   const actualModel = `${opts.poolSpec.claudeAuthModel}-claude`;
 

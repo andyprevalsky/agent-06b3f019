@@ -172,6 +172,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             messages: opts.options.messages,
             responseFormat: opts.options.response_format,
             maxTokens: opts.options.max_tokens,
+            temperature: opts.options.temperature,
             claudeToken: opts.options.claude_token!,
             requestId: opts.requestId,
             callSite: opts.callSite,
@@ -197,21 +198,30 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     }
   }
 
-  // 2. Waterfall
-  yield* runWithFallThrough({
-    produce: () =>
-      waterfallComplete({
-        poolSpec,
-        messages: opts.options.messages,
-        responseFormat: opts.options.response_format,
-        temperature: opts.options.temperature,
-        maxTokens: opts.options.max_tokens,
-        openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
-        requestId: opts.requestId,
-        callSite: opts.callSite,
-      }),
-    emit: emitChunk,
-  });
+  // 2. Waterfall — this is the terminal pipeline; unwrap the internal
+  // fall-through sentinel so callers continue to see typed RoseError
+  // subclasses (their `instanceof RoseError` checks depend on it).
+  try {
+    yield* runWithFallThrough({
+      produce: () =>
+        waterfallComplete({
+          poolSpec,
+          messages: opts.options.messages,
+          responseFormat: opts.options.response_format,
+          temperature: opts.options.temperature,
+          maxTokens: opts.options.max_tokens,
+          openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
+          requestId: opts.requestId,
+          callSite: opts.callSite,
+        }),
+      emit: emitChunk,
+    });
+  } catch (err) {
+    if (err instanceof PreContentFallThroughError) {
+      throw err.cause;
+    }
+    throw err;
+  }
   log.info('waterfall.done', {
     request_id: opts.requestId,
     pool: opts.pool,
@@ -237,25 +247,40 @@ async function* runWithFallThrough(
   let yieldedAny = false;
   const iterator = opts.produce()[Symbol.asyncIterator]();
 
-  while (true) {
-    let result: IteratorResult<RoseStreamChunk>;
-    try {
-      result = await iterator.next();
-    } catch (err) {
-      if (!yieldedAny && err instanceof RoseError && isFallThroughError(err)) {
-        // Caller-visible "no content yet" failure — safe to swap pipelines.
-        throw new PreContentFallThroughError(err);
+  try {
+    while (true) {
+      let result: IteratorResult<RoseStreamChunk>;
+      try {
+        result = await iterator.next();
+      } catch (err) {
+        if (!yieldedAny && err instanceof RoseError && isFallThroughError(err)) {
+          // Caller-visible "no content yet" failure — safe to swap pipelines.
+          throw new PreContentFallThroughError(err);
+        }
+        // Post-content failures must propagate directly: partial output has
+        // already been streamed to the caller, so splicing in a second model's
+        // output would corrupt the response.
+        throw err;
       }
-      // Post-content failures must propagate directly: partial output has
-      // already been streamed to the caller, so splicing in a second model's
-      // output would corrupt the response.
-      throw err;
+      if (result.done) return;
+      const out = opts.emit(result.value);
+      if (out) {
+        yield out;
+        yieldedAny = true;
+      }
     }
-    if (result.done) return;
-    const out = opts.emit(result.value);
-    if (out) {
-      yield out;
-      yieldedAny = true;
+  } finally {
+    // Close the upstream iterator when the consumer stops early (throw/return)
+    // so `produce()`'s finally blocks — socket cleanup, AbortController signal
+    // tripping, stream cancellation — actually run. Without this, an early
+    // exit (e.g. a consumer break) would leak the underlying fetch response.
+    if (iterator.return) {
+      try {
+        await iterator.return();
+      } catch {
+        // Nothing useful we can do here; the finally's sole purpose was
+        // plumbing cleanup into the upstream generator.
+      }
     }
   }
 }

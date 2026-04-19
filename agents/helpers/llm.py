@@ -1219,7 +1219,16 @@ async def call_llm_structured_streaming(  # noqa: C901
             )
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
-        response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
+        # The claudeAuth path streams text_buffer directly (no reasoning prefix),
+        # so the final flush must match: otherwise delta-tracking consumers (e.g.
+        # call_llm_activity) see the final chunk jump to "reasoning + text" and
+        # compute the wrong slice offset.
+        if using_claude_auth:
+            response_text = text_buffer or None
+        else:
+            response_text = _extract_response_from_partial_json(
+                accumulated_reasoning, accumulated_json
+            )
         if response_text and response_text != last_emitted_for_chunk:
             await on_chunk(response_text, token_count)
 
