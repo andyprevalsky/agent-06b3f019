@@ -1037,24 +1037,30 @@ async def _terminate_stale_workflows():
 
         config = load_config()
 
-        # Safety check: only terminate workflows on local Temporal or when explicitly allowed
+        # Safety check: terminate workflows only when we can prove the queue is
+        # worktree-scoped. Local Temporal, a worktree-derived queue (via
+        # CONDUCTOR_WORKSPACE_NAME), or explicit ALLOW_TEMPORAL_CLEANUP=true all
+        # qualify. Cloud Temporal with a shared queue does not — that could
+        # nuke another worktree's live runs.
         temporal_addr = config.temporal.address
         is_local = any(h in temporal_addr for h in ("localhost", "127.0.0.1"))
         allow_cleanup = os.environ.get("ALLOW_TEMPORAL_CLEANUP", "").lower() == "true"
-        if not is_local and not allow_cleanup:
-            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local and ALLOW_TEMPORAL_CLEANUP is not set")
+        is_worktree_scoped = bool(os.environ.get("CONDUCTOR_WORKSPACE_NAME"))
+        if not is_local and not allow_cleanup and not is_worktree_scoped:
+            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local, queue is not worktree-scoped, and ALLOW_TEMPORAL_CLEANUP is not set")
             return
 
-        # run.sh exports TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-        # but config.py may load a different value from .env. Prefer the env var
-        # that the running worker actually uses, falling back to the Conductor
-        # workspace-derived name so the cleanup targets the same queue the worker
-        # polls even when the benchmark is invoked outside run.sh.
+        # Inside Conductor, run.sh overrides TEMPORAL_TASK_QUEUE to
+        # navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME for the worker. The default
+        # TEMPORAL_TASK_QUEUE from .env (e.g. navi-agent-tasks-test) is shared
+        # across worktrees and is NOT what the local worker polls. Prefer the
+        # workspace-derived queue so cleanup targets the same queue the worker
+        # is actually polling.
         workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
         derived = f"navi-agent-tasks-{workspace}" if workspace else None
         task_queue = (
-            os.environ.get("TEMPORAL_TASK_QUEUE")
-            or derived
+            derived
+            or os.environ.get("TEMPORAL_TASK_QUEUE")
             or config.temporal.task_queue
         )
 
@@ -1114,8 +1120,8 @@ async def _fail_stale_active_agents():
         return
 
     sql = (
-        'UPDATE "Agent" SET status = \'FAILED\', updated_at = NOW() '
-        "WHERE status = 'ACTIVE' AND created_at < NOW() - INTERVAL '30 minutes' "
+        'UPDATE "Agent" SET status = \'FAILED\', "updatedAt" = NOW() '
+        'WHERE status = \'ACTIVE\' AND "createdAt" < NOW() - INTERVAL \'30 minutes\' '
         "RETURNING id;"
     )
     try:

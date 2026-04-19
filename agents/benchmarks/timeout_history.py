@@ -24,11 +24,13 @@ HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
 
 MIN_SAMPLES = 5
-# Derive timeouts from the last N successful runs × a small safety buffer.
-# This keeps timeouts close to observed steady-state rather than absorbing
-# historical outliers (p95 from months-old slow runs).
-RECENT_PASS_WINDOW = 3
-SAFETY_MULTIPLIER = 1.25
+# Derive timeouts from the last N successful runs × a safety buffer.
+# Window=5 absorbs short-term variance (LLM latency spikes, preflight overhead)
+# without inheriting stale outliers (p95 from months-old slow runs). Multiplier
+# 1.5 leaves enough headroom for runs that land at the upper end of variance
+# observed across window=5 (empirically ~1.3–1.4× p50 on smoke tasks).
+RECENT_PASS_WINDOW = 5
+SAFETY_MULTIPLIER = 1.5
 FLOOR_SECONDS = 30
 CEIL_SECONDS = 900
 
