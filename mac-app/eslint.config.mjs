@@ -66,6 +66,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/permissionReader.ts',
   'main/domains/permission-reader/**/*.ts',
   'main/preload.ts',
+  'main/domains/electron-preload/**/*.ts',
   'main/services/browserPasswordReader.ts',
   'main/services/contactsReaderNative.ts',
   'main/services/indexedDBReader.ts',
