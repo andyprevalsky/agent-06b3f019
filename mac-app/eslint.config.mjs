@@ -83,6 +83,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/UpdateIndicator.tsx',
   'ui/features/update-indicator/**/*.{ts,tsx}',
   'ui/features/launcher/**/*.{ts,tsx}',
+  'ui/features/atlas-password-modal/**/*.{ts,tsx}',
 ];
 
 export default tseslint.config(
