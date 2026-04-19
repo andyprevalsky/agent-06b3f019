@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # List all runtime services currently running from this worktree: run.sh and
-# the subprocess tree it spawned (backend, agents worker, supabase, etc.).
+# the subprocess tree it spawned (backend, agents worker, front-end, mac-app).
 # Prints PID, PPID, state, listening ports, and the first 100 chars of command.
 #
 # Scope is $PWD — sibling worktrees are not listed. Pair with
@@ -32,7 +32,6 @@ for pattern in \
     "scripts/run\.sh" \
     "$WORKTREE_DIR/back-end" \
     "$WORKTREE_DIR/agents" \
-    "$WORKTREE_DIR/research" \
     "$WORKTREE_DIR/front-end" \
     "$WORKTREE_DIR/mac-app"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
