@@ -80,6 +80,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/features/electron-app/**/*.{ts,tsx}',
   'main/services/iMessageReader.ts',
   'main/domains/i-message-reader/**/*.ts',
+  'ui/features/launcher/**/*.{ts,tsx}',
 ];
 
 export default tseslint.config(
