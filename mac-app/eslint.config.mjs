@@ -54,6 +54,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/components/AtlasPasswordModal.tsx',
   'ui/components/TelegramAuthModal.tsx',
   'ui/components/WhatsAppQRModal.tsx',
+  'ui/features/electron-app/**/*.{ts,tsx}',
 ];
 
 export default tseslint.config(
