@@ -108,9 +108,16 @@ verify_jwt = false
 TOML
 
 # Check if Supabase local services are running (required for functions serve)
+# Set SKIP_SUPABASE_START=1 to skip the local stack (auth/realtime/studio/DB).
+# Edge functions hit prod Supabase for DB ops via PROD_SUPABASE_URL, so the
+# local stack is only needed when testing auth/realtime locally — skip it in
+# sandboxes where Docker is unavailable (Cord, Codespaces without DinD, etc.).
 echo "Checking if Supabase is running..."
 cd supabase
-if ! supabase status &> /dev/null; then
+if [ "${SKIP_SUPABASE_START:-0}" = "1" ] || ! docker ps &>/dev/null; then
+    echo -e "${YELLOW}⚠️  Skipping 'supabase start' (SKIP_SUPABASE_START=1 or Docker unavailable).${NC}"
+    echo -e "${YELLOW}   Edge functions will serve standalone against prod Supabase via PROD_SUPABASE_URL.${NC}\n"
+elif ! supabase status &> /dev/null; then
     echo -e "${YELLOW}⚠️  Local Supabase is not running. Starting it...${NC}\n"
     MAX_RETRIES=3
     for attempt in $(seq 1 $MAX_RETRIES); do

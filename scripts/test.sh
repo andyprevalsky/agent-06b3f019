@@ -18,6 +18,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# mac-app is Electron + macOS-only; skip its build on non-Darwin hosts.
+IS_MAC=false
+[ "$(uname)" = "Darwin" ] && IS_MAC=true
+
 # ── Parse flags ──
 REPO=""
 DOMAIN=""
@@ -177,7 +181,7 @@ if should_run "front-end"; then
   BUILD_LOGS+=("$FE_BUILD_LOG")
 fi
 
-if should_run "mac-app"; then
+if should_run "mac-app" && $IS_MAC; then
   MAC_BUILD_LOG="$TMPDIR_BASE/mac_build.log"
   bash -c "cd mac-app && npx vite build && npx tsc -p tsconfig.main.json" > "$MAC_BUILD_LOG" 2>&1 &
   BUILD_PIDS+=($!)

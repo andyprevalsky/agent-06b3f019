@@ -12,7 +12,11 @@ Fast-track merge to main. Runs local validation tests, pushes directly to main, 
 
 ---
 
-## Step 1: Run local tests
+## Step 1: Sync
+
+Run `/sync` first — pulls the latest `main` into the current branch so local `main` isn't stale (otherwise `main...HEAD` diffs are wrong and you might re-push commits that are already upstream).
+
+## Step 2: Run local tests
 
 All commands run from repo root. Compute changed files once:
 
@@ -22,44 +26,44 @@ CHANGED_FRONTEND=$(git diff --name-only main...HEAD -- 'front-end/**' || true)
 CHANGED_RESEARCH=$(git diff --name-only main...HEAD -- 'research/' || true)
 ```
 
-### 1a. Prettier (skip if no TS changes)
+### 2a. Prettier (skip if no TS changes)
 
 ```bash
 cd back-end && npx prettier --write $CHANGED_TS
 ```
 
-### 1b. ESLint (skip if no TS changes)
+### 2b. ESLint (skip if no TS changes)
 
 ```bash
 cd back-end && npx eslint --fix $CHANGED_TS
 cd back-end && npx eslint $CHANGED_TS
 ```
 
-### 1c. TypeScript type check (skip if no TS changes)
+### 2c. TypeScript type check (skip if no TS changes)
 
 ```bash
 cd back-end && npx tsc --noEmit
 ```
 
-### 1d. Structural tests (skip if no TS changes)
+### 2d. Structural tests (skip if no TS changes)
 
 ```bash
 cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 ```
 
-### 1e. Back-end code coverage (skip if no back-end/ changes)
+### 2e. Back-end code coverage (skip if no back-end/ changes)
 
 ```bash
 cd back-end && npm run test:coverage
 ```
 
-### 1f. Front-end code coverage (skip if no front-end/ changes)
+### 2f. Front-end code coverage (skip if no front-end/ changes)
 
 ```bash
 cd front-end && npm run test:coverage
 ```
 
-### 1g. Agents code coverage (skip if no agents/ changes)
+### 2g. Agents code coverage (skip if no agents/ changes)
 
 ```bash
 cd agents && bash scripts/run-coverage.sh
@@ -67,7 +71,7 @@ cd agents && bash scripts/run-coverage.sh
 
 Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward 80%.
 
-### 1h. Blackbox API tests (skip if no back-end/ changes)
+### 2h. Blackbox API tests (skip if no back-end/ changes)
 
 The blackbox runner auto-starts an isolated backend on a dedicated port:
 
@@ -75,7 +79,7 @@ The blackbox runner auto-starts an isolated backend on a dedicated port:
 cd back-end && bash scripts/run-blackbox-tests.sh
 ```
 
-### 1i. Research lint + structural (skip if no research/ changes)
+### 2i. Research lint + structural (skip if no research/ changes)
 
 Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
 
@@ -93,10 +97,6 @@ cd research && bash scripts/lint-check.sh
 If any step fails, fix the issue and re-run from the top.
 
 Stage and commit any auto-fix changes (prettier, eslint) before proceeding.
-
-## Step 2: Sync
-
-Run `/sync` before merging.
 
 ## Step 3: Merge to main
 
