@@ -76,7 +76,22 @@ export interface CompletionChunk {
  */
 export type ChunkKind = 'metadata' | 'content' | 'reasoning' | 'usage' | 'done';
 
-export interface RoseStreamChunk {
-  kind: ChunkKind;
-  data: Record<string, any>;
-}
+export type RoseStreamChunk =
+  | {
+      kind: 'metadata';
+      data: { actual_model: string; pool_name: string; request_id: string };
+    }
+  | { kind: 'content'; data: { text: string } }
+  | { kind: 'reasoning'; data: { text: string } }
+  | {
+      kind: 'usage';
+      data: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        finish_reason?: string;
+      };
+    }
+  | { kind: 'done'; data: Record<string, never> };

@@ -63,10 +63,10 @@ export async function* parseAnthropicSSE(
     const dataStr = line.slice(6);
     if (dataStr === '[DONE]') break;
 
-    let event: any;
+    let event;
     try {
       event = JSON.parse(dataStr);
-    } catch (err) {
+    } catch {
       log.warn('parse_error.anthropic', {
         request_id: options.requestId,
         snippet: dataStr.substring(0, 200),
@@ -158,7 +158,7 @@ export async function* parseOpenAISSE(
     },
   };
 
-  let usage: any = {};
+  let usage: Record<string, number> = {};
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
@@ -171,10 +171,10 @@ export async function* parseOpenAISSE(
       break;
     }
 
-    let event: any;
+    let event;
     try {
       event = JSON.parse(dataStr);
-    } catch (err) {
+    } catch {
       log.warn('parse_error.openai', {
         request_id: options.requestId,
         snippet: dataStr.substring(0, 200),

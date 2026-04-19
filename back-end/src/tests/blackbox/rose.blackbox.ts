@@ -64,7 +64,9 @@ function assert(cond: boolean, message: string): void {
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
   if (actual !== expected) {
-    throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    throw new Error(
+      `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
+    );
   }
 }
 
@@ -238,7 +240,7 @@ async function testClaudeAuth_happyPath() {
     assertEqual(text, 'Hello world', 'concatenated text');
     const usageChunk = chunks[chunks.length - 1];
     assertEqual(usageChunk.choices[0].finish_reason, 'stop', 'finish_reason=stop');
-    assert(usageChunk.usage != null, 'usage present');
+    assert(usageChunk.usage !== null && usageChunk.usage !== undefined, 'usage present');
     assertEqual(usageChunk.usage!.prompt_tokens, 10, 'prompt_tokens');
     assertEqual(usageChunk.usage!.completion_tokens, 5, 'completion_tokens');
   } finally {
@@ -466,12 +468,24 @@ async function main(): Promise<void> {
     { name: 'pool / POOL_REGISTRY shape', fn: testPool_getPoolRegistryShape },
     { name: 'pool / unknown model throws', fn: testPool_unknownModelThrows },
     { name: 'claudeAuth / happy path', fn: testClaudeAuth_happyPath },
-    { name: 'claudeAuth / 401 falls through to waterfall', fn: testClaudeAuth_401FallsThroughToWaterfall },
-    { name: 'claudeAuth / 400 falls through (no retry)', fn: testClaudeAuth_400FallsThroughNoRetry },
-    { name: 'claudeAuth / no token goes direct to waterfall', fn: testClaudeAuth_noTokenGoesDirectToWaterfall },
+    {
+      name: 'claudeAuth / 401 falls through to waterfall',
+      fn: testClaudeAuth_401FallsThroughToWaterfall,
+    },
+    {
+      name: 'claudeAuth / 400 falls through (no retry)',
+      fn: testClaudeAuth_400FallsThroughNoRetry,
+    },
+    {
+      name: 'claudeAuth / no token goes direct to waterfall',
+      fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
+    },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
-    { name: 'transforms / strip unsupported schema keywords', fn: testTransforms_stripUnsupportedSchemaKeywords },
+    {
+      name: 'transforms / strip unsupported schema keywords',
+      fn: testTransforms_stripUnsupportedSchemaKeywords,
+    },
     { name: 'transforms / anyOf/oneOf/allOf recursed', fn: testTransforms_anyOfOneOfAllOfRecursed },
   ];
 

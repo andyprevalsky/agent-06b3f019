@@ -7,11 +7,7 @@ import { z } from 'zod';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
-import {
-  createStreamingCompletion,
-  RoseAuthError,
-  RoseInvalidRequest,
-} from './rose';
+import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
 
 const log = createLogger('ResponseSchema');
 

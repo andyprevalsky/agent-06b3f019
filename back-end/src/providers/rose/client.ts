@@ -25,11 +25,7 @@ import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isFallThroughError, RoseError } from './errors';
 import { getPool, poolForModel } from './pools';
-import type {
-  CompletionChunk,
-  CompletionOptions,
-  RoseStreamChunk,
-} from './types';
+import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
 
 const log = createLogger('Rose');
@@ -133,9 +129,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     }
     if (chunk.kind === 'usage') {
       return {
-        choices: [
-          { index: 0, delta: {}, finish_reason: chunk.data.finish_reason ?? 'stop' },
-        ],
+        choices: [{ index: 0, delta: {}, finish_reason: chunk.data.finish_reason ?? 'stop' }],
         requested_model: opts.options.model,
         actual_model: metadata.actual_model,
         pool_name: metadata.pool_name,
@@ -227,7 +221,7 @@ async function* runWithFallThrough(
 ): AsyncIterable<CompletionChunk> {
   let yieldedAny = false;
   const iterator = opts.produce()[Symbol.asyncIterator]();
-  // eslint-disable-next-line no-restricted-syntax -- buffer-then-flush requires explicit iteration
+   
   while (true) {
     let result: IteratorResult<RoseStreamChunk>;
     try {

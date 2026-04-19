@@ -62,7 +62,7 @@ function openrouterHeaders(openrouterKey: string): Record<string, string> {
 }
 
 interface PostOptions {
-  body: Record<string, any>;
+  body: Record<string, unknown>;
   requestId: string;
   callSite?: string;
   connectTimeoutMs?: number;
@@ -77,7 +77,10 @@ async function withTimeout(
   const upstream = signal;
   const onAbort = () => controller.abort(upstream.reason);
   upstream.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error(`connect timeout ${timeoutMs}ms`)), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(new Error(`connect timeout ${timeoutMs}ms`)),
+    timeoutMs
+  );
   try {
     return await fn(controller.signal);
   } finally {

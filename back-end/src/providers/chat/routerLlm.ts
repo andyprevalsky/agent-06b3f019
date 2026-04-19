@@ -1,7 +1,7 @@
 /**
  * Router LLM - First step in chat mode.
  * Analyzes user intent and decides: direct_answer | web_search | agent_start_task
- * Uses Supabase completions endpoint for rose-labs models with streaming.
+ * Uses the in-process Rose completions client for streaming.
  */
 
 import { z } from 'zod';
@@ -13,6 +13,9 @@ import {
   generateStreamId,
 } from './supabaseBroadcast';
 import { v4 as uuidv4 } from 'uuid';
+import { createLogger } from '../logger';
+
+const log = createLogger('RouterLLM');
 
 // ============================================
 // Zod Schema for Router Decision
@@ -100,8 +103,8 @@ interface FilePointer {
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
-  filePointer?: any; // FilePointer from DB JSON - validated at runtime
-  metadata?: Record<string, any>;
+  filePointer?: Record<string, unknown>; // FilePointer from DB JSON - validated at runtime
+  metadata?: Record<string, unknown>;
 }
 
 // File size threshold for inline content (20MB)
@@ -128,11 +131,18 @@ const TEXT_MIME_TYPES = new Set([
 // Build multimodal content from a file pointer
 // Downloads from storage and converts to base64 for LLM
 // ============================================
+type MultimodalContentBlock = {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+  file?: { filename: string; file_data: string };
+};
+
 async function buildMultimodalContentFromFile(
   text: string,
   filePointer: FilePointer
-): Promise<Array<{ type: string; text?: string; image_url?: { url: string } }>> {
-  const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+): Promise<MultimodalContentBlock[]> {
+  const content: MultimodalContentBlock[] = [];
 
   // File too large for inline content
   if (filePointer.size_bytes >= LLM_INLINE_THRESHOLD) {
@@ -185,7 +195,7 @@ async function buildMultimodalContentFromFile(
           filename: filePointer.original_filename,
           file_data: `data:${filePointer.mime_type};base64,${base64}`,
         },
-      } as any);
+      });
     } else {
       // Other file types: just metadata
       content.push({
@@ -196,7 +206,9 @@ async function buildMultimodalContentFromFile(
       });
     }
   } catch (error) {
-    console.error('[RouterLLM] Failed to download file from storage:', error);
+    log.error('[RouterLLM] Failed to download file from storage', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     content.push({
       type: 'text',
       text: text
@@ -313,7 +325,7 @@ export async function callRouterLlm(params: {
   // Convert messages to OpenAI format (with multimodal support)
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
-    content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    content: string | MultimodalContentBlock[];
   }> = [{ role: 'system', content: ROUTER_SYSTEM_PROMPT }];
 
   for (const msg of params.messages) {
@@ -331,7 +343,11 @@ export async function callRouterLlm(params: {
       // Check for file attachment
       if (msg.filePointer) {
         // Build multimodal content from file (downloads from storage)
-        const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
+        // Runtime validation: DB JSON is cast to FilePointer shape
+        const content = await buildMultimodalContentFromFile(
+          msg.text,
+          msg.filePointer as unknown as FilePointer
+        );
         openaiMessages.push({
           role: 'user',
           content,
@@ -346,7 +362,7 @@ export async function callRouterLlm(params: {
   }
 
   const startTime = Date.now();
-  console.log('[RouterLLM] Starting streaming for routing decision', {
+  log.info('[RouterLLM] Starting streaming for routing decision', {
     agentId: params.agentId,
     model: params.model,
     streamId,
@@ -388,13 +404,14 @@ export async function callRouterLlm(params: {
     // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = racing ($)
     const actualModel = chunk.actual_model;
     if (chunkCount === 1) {
-      console.log(
-        `[RouterLLM] First chunk: actual_model="${actualModel}", requested_model="${chunk.requested_model}"`
-      );
+      log.info('[RouterLLM] First chunk', {
+        actualModel,
+        requestedModel: chunk.requested_model,
+      });
     }
     if (!isClaude && actualModel?.endsWith('-claude')) {
       isClaude = true;
-      console.log(`[RouterLLM] User Claude token detected: actual_model="${actualModel}"`);
+      log.info('[RouterLLM] User Claude token detected', { actualModel });
     }
 
     // Get delta from chunk
@@ -438,7 +455,7 @@ export async function callRouterLlm(params: {
       if (action === 'web_search') {
         webSearchDetected = true;
         webSearchToolCallId = uuidv4();
-        console.log('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
+        log.info('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
           toolCallId: webSearchToolCallId,
         });
         await broadcastToolEvent(
@@ -454,9 +471,12 @@ export async function callRouterLlm(params: {
 
     // Log progress every 50 chunks
     if (chunkCount % 50 === 0) {
-      console.log(
-        `[RouterLLM] Progress: chunk=${chunkCount}, reasoning=${accumulatedReasoning.length}, json=${accumulatedJson.length}, streamed=${sequence}`
-      );
+      log.info('[RouterLLM] Progress', {
+        chunk: chunkCount,
+        reasoning: accumulatedReasoning.length,
+        json: accumulatedJson.length,
+        streamed: sequence,
+      });
     }
   }
 
@@ -467,7 +487,7 @@ export async function callRouterLlm(params: {
   await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude);
 
   const streamDuration = Date.now() - startTime;
-  console.log('[RouterLLM] Streaming complete', {
+  log.info('[RouterLLM] Streaming complete', {
     agentId: params.agentId,
     streamId,
     durationMs: streamDuration,
@@ -479,7 +499,7 @@ export async function callRouterLlm(params: {
 
   // Parse the complete JSON
   if (!fullJson) {
-    console.error('[RouterLLM] No content received from LLM', {
+    log.error('[RouterLLM] No content received from LLM', {
       agentId: params.agentId,
       streamId,
     });
@@ -490,7 +510,7 @@ export async function callRouterLlm(params: {
   try {
     parsed = JSON.parse(fullJson);
   } catch (error) {
-    console.error('[RouterLLM] Failed to parse JSON response', {
+    log.error('[RouterLLM] Failed to parse JSON response', {
       agentId: params.agentId,
       streamId,
       error: error instanceof Error ? error.message : String(error),
@@ -537,7 +557,7 @@ export async function callRouterLlm(params: {
       throw new Error(`Unknown action: ${raw.action}`);
   }
 
-  console.log('[RouterLLM] Decision:', {
+  log.info('[RouterLLM] Decision', {
     action: decision.action,
     reasoning: decision.reasoning.substring(0, 100),
     streamedChunks: sequence,

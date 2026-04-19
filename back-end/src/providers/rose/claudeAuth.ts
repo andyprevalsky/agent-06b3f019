@@ -55,10 +55,10 @@ interface BuildBodyOptions {
   maxTokens?: number;
 }
 
-export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, any> {
+export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unknown> {
   const { systemText, messages: anthropicMessages } = transformMessagesForAnthropic(opts.messages);
 
-  const systemBlocks: any[] = [IDENTITY_BLOCK, DISCLAIMER_BLOCK];
+  const systemBlocks: Record<string, unknown>[] = [IDENTITY_BLOCK, DISCLAIMER_BLOCK];
   if (systemText) {
     systemBlocks.push({
       type: 'text',
@@ -67,7 +67,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, any> 
     });
   }
 
-  const body: Record<string, any> = {
+  const body: Record<string, unknown> = {
     model: opts.poolSpec.claudeAuthModel,
     messages: anthropicMessages,
     max_tokens: opts.maxTokens ?? 8192,
@@ -98,9 +98,7 @@ interface ClaudeAuthOptions {
  * Throws a typed RoseError on any fall-through failure; caller falls
  * through to the waterfall path.
  */
-export async function* claudeAuthComplete(
-  opts: ClaudeAuthOptions
-): AsyncIterable<RoseStreamChunk> {
+export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterable<RoseStreamChunk> {
   const body = buildAnthropicBody({
     poolSpec: opts.poolSpec,
     messages: opts.messages,
@@ -111,7 +109,7 @@ export async function* claudeAuthComplete(
 
   let lastError: Error | null = null;
 
-  // eslint-disable-next-line no-restricted-syntax -- per-attempt retry with branching on response status
+   
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let response;
     try {
@@ -161,10 +159,7 @@ export async function* claudeAuthComplete(
     }
 
     if (status === 400) {
-      throw new RoseInvalidRequest(
-        `Anthropic 400: ${errorBody.substring(0, 200)}`,
-        status
-      );
+      throw new RoseInvalidRequest(`Anthropic 400: ${errorBody.substring(0, 200)}`, status);
     }
 
     if (status >= 500) {
@@ -172,10 +167,7 @@ export async function* claudeAuthComplete(
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS));
         continue;
       }
-      throw new RoseServerError(
-        `Anthropic ${status}: ${errorBody.substring(0, 200)}`,
-        status
-      );
+      throw new RoseServerError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
     }
 
     throw new RoseError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);

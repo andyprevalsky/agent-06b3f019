@@ -11,7 +11,7 @@ import type { CompletionMessage, ContentBlock, ResponseFormat } from './types';
 
 const DATA_URI_RE = /^data:([^;]+);base64,([\s\S]+)$/;
 
-function transformContentBlockForAnthropic(block: ContentBlock): any {
+function transformContentBlockForAnthropic(block: ContentBlock): unknown {
   if (!block || typeof block !== 'object') return block;
 
   if (block.type === 'image_url' && block.image_url?.url) {
@@ -45,7 +45,7 @@ function transformContentBlockForAnthropic(block: ContentBlock): any {
 
 export interface AnthropicMessages {
   systemText: string | null;
-  messages: Array<{ role: string; content: any }>;
+  messages: Array<{ role: string; content: unknown }>;
 }
 
 /**
@@ -55,11 +55,9 @@ export interface AnthropicMessages {
  * messages, so we don't handle them. If a caller needs them, copy the
  * Python implementation.
  */
-export function transformMessagesForAnthropic(
-  messages: CompletionMessage[]
-): AnthropicMessages {
+export function transformMessagesForAnthropic(messages: CompletionMessage[]): AnthropicMessages {
   const systemParts: string[] = [];
-  const out: Array<{ role: string; content: any }> = [];
+  const out: Array<{ role: string; content: unknown }> = [];
 
   for (const msg of messages) {
     if (msg.role === 'system') {
@@ -102,21 +100,27 @@ const UNSUPPORTED_SCHEMA_KEYS = [
  * Strip JSON-schema constraints Anthropic's structured-output validator
  * rejects. Recurses into properties / items / $defs / anyOf / oneOf / allOf.
  */
-export function transformSchemaForAnthropic(schema: any): any {
+type JsonSchema = Record<string, unknown>;
+
+export function transformSchemaForAnthropic(schema: unknown): unknown {
   if (!schema || typeof schema !== 'object') return schema;
 
-  const out: Record<string, any> = { ...schema };
+  const out: JsonSchema = { ...(schema as JsonSchema) };
   for (const key of UNSUPPORTED_SCHEMA_KEYS) {
     delete out[key];
   }
 
-  if (out.type === 'object' && out.additionalProperties && typeof out.additionalProperties === 'object') {
+  if (
+    out.type === 'object' &&
+    out.additionalProperties &&
+    typeof out.additionalProperties === 'object'
+  ) {
     out.additionalProperties = false;
   }
 
   if (out.properties && typeof out.properties === 'object') {
-    const newProps: Record<string, any> = {};
-    for (const [k, v] of Object.entries(out.properties)) {
+    const newProps: JsonSchema = {};
+    for (const [k, v] of Object.entries(out.properties as JsonSchema)) {
       newProps[k] = transformSchemaForAnthropic(v);
     }
     out.properties = newProps;
@@ -127,8 +131,8 @@ export function transformSchemaForAnthropic(schema: any): any {
   }
 
   if (out.$defs && typeof out.$defs === 'object') {
-    const newDefs: Record<string, any> = {};
-    for (const [k, v] of Object.entries(out.$defs)) {
+    const newDefs: JsonSchema = {};
+    for (const [k, v] of Object.entries(out.$defs as JsonSchema)) {
       newDefs[k] = transformSchemaForAnthropic(v);
     }
     out.$defs = newDefs;
@@ -136,7 +140,7 @@ export function transformSchemaForAnthropic(schema: any): any {
 
   for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
     if (Array.isArray(out[keyword])) {
-      out[keyword] = out[keyword].map(transformSchemaForAnthropic);
+      out[keyword] = (out[keyword] as unknown[]).map(transformSchemaForAnthropic);
     }
   }
 
@@ -148,7 +152,7 @@ export function transformSchemaForAnthropic(schema: any): any {
  * `output_config` field (claudeAuth path).
  */
 export function applyAnthropicResponseFormat(
-  body: Record<string, any>,
+  body: Record<string, unknown>,
   responseFormat?: ResponseFormat
 ): void {
   if (!responseFormat?.json_schema?.schema) return;

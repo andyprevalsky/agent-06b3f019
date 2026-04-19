@@ -40,8 +40,8 @@ function buildOpenRouterBody(opts: {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
-}): Record<string, any> {
-  const body: Record<string, any> = {
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = {
     model: opts.model,
     messages: opts.messages,
     stream: true,
@@ -53,9 +53,7 @@ function buildOpenRouterBody(opts: {
   return body;
 }
 
-export async function* waterfallComplete(
-  opts: WaterfallOptions
-): AsyncIterable<RoseStreamChunk> {
+export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<RoseStreamChunk> {
   const stepErrors: RoseStepError[] = [];
   const perStepMs = opts.perStepTimeoutMs ?? PER_STEP_TIMEOUT_MS;
 
@@ -117,7 +115,7 @@ export async function* waterfallComplete(
 }
 
 async function* streamOneStep(opts: {
-  body: Record<string, any>;
+  body: Record<string, unknown>;
   model: string;
   poolName: string;
   openrouterKey: string;

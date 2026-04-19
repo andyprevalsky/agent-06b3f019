@@ -59,9 +59,7 @@ export function poolForModel(model: string): PoolName | null {
 export function getPool(name: PoolName): PoolSpec {
   const spec = POOL_REGISTRY[name];
   if (!spec) {
-    throw new Error(
-      `Unknown Rose pool ${name} (valid: ${Object.keys(POOL_REGISTRY).join(', ')})`
-    );
+    throw new Error(`Unknown Rose pool ${name} (valid: ${Object.keys(POOL_REGISTRY).join(', ')})`);
   }
   return spec;
 }
