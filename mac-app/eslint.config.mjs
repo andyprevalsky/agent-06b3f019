@@ -34,6 +34,7 @@ const STRICT_DOMAIN_FILES = [
   'main/domains/browser-state-sync/**/*.ts',
   'ui/main.tsx',
   'main/services/batchUploader.ts',
+  'main/domains/batch-uploader/**/*.ts',
   'main/services/IMessageQueueService.ts',
   'main/services/auth.ts',
   'main/services/claudeCredentialSync.ts',
