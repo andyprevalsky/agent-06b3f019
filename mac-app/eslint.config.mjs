@@ -53,6 +53,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/uploader.ts',
   'main/domains/uploader/**/*.ts',
   'main/services/atlasCredentialStore.ts',
+  'main/domains/atlas-credential-store/**/*.ts',
   'main/services/autoUpdater.ts',
   'main/domains/auto-updater/**/*.ts',
   'main/services/browserCookieReader.ts',
