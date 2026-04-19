@@ -67,6 +67,8 @@ const STRICT_DOMAIN_FILES = [
   'ui/components/TelegramAuthModal.tsx',
   'ui/components/WhatsAppQRModal.tsx',
   'ui/features/electron-app/**/*.{ts,tsx}',
+  'main/services/iMessageReader.ts',
+  'main/domains/i-message-reader/**/*.ts',
 ];
 
 export default tseslint.config(
