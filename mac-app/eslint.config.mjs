@@ -20,6 +20,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/features/onboarding/**/*.{ts,tsx}',
   'main/handlers/registry.ts',
   'main/services/sync/**/*.ts',
+  'main/domains/sync-manager/**/*.ts',
   'ui/ElectronApp.tsx',
   'main/services/messaging/MessageTransformer.ts',
   'main/services/messaging/index.ts',
