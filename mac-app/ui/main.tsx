@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import ElectronApp from './features/electron-app';
-import UpdateIndicator from './UpdateIndicator';
+import UpdateIndicator from './features/update-indicator';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
