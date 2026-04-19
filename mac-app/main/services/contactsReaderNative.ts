@@ -1,7 +1,9 @@
+import fs from 'fs';
+import path from 'path';
 import type { MacContact, OptionalProperty } from 'node-mac-contacts';
+import * as macContactsModule from 'node-mac-contacts';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const macContacts = require('node-mac-contacts') as {
+const macContacts = macContactsModule as unknown as {
   getAllContacts: (props?: OptionalProperty[]) => MacContact[];
   getAuthStatus?: () => string;
 };
@@ -44,18 +46,22 @@ export class ContactsReaderNative {
       ];
 
       const contacts = macContacts.getAllContacts(props) || [];
-      // Dump every contact object as full JSON per row to a local text file for debugging
-      try {
-        const fs = require('fs');
-        const path = require('path');
-        const dumpPath = path.join(process.cwd(), 'contacts_dump.txt');
-        const lines = contacts.map(contact => JSON.stringify(contact));
-        fs.writeFileSync(dumpPath, lines.join('\n'), 'utf-8');
-        console.log(`[ContactsReaderNative] Dumped all contact objects (one per row) to ${dumpPath}`);
-      } catch (err) {
-        console.warn('[ContactsReaderNative] Failed to dump contacts to text file:', err);
+      // Opt-in debug dump; never enabled by default (file contains PII).
+      if (process.env.ROSE_DEBUG_CONTACT_DUMP === '1') {
+        try {
+          const dumpPath = path.join(process.cwd(), 'contacts_dump.txt');
+          const lines = contacts.map((contact) => JSON.stringify(contact));
+          fs.writeFileSync(dumpPath, lines.join('\n'), { encoding: 'utf-8', mode: 0o600 });
+          console.log(
+            `[ContactsReaderNative] Dumped all contact objects (one per row) to ${dumpPath}`
+          );
+        } catch (err) {
+          console.warn('[ContactsReaderNative] Failed to dump contacts to text file:', err);
+        }
       }
-      console.log(`[ContactsReaderNative] Retrieved ${contacts.length} contacts from CNContactStore`);
+      console.log(
+        `[ContactsReaderNative] Retrieved ${contacts.length} contacts from CNContactStore`
+      );
 
       const map = new Map<string, ContactRecord>();
       let contactsWithPhones = 0;
@@ -93,7 +99,9 @@ export class ContactsReaderNative {
       const sampleRecords: ContactRecord[] = [];
       const seenIdentifiers = new Set<string>();
       for (const record of map.values()) {
-        const key = record.identifier || `${record.firstName}-${record.lastName}-${record.phoneNumbers[0] || ''}`;
+        const key =
+          record.identifier ||
+          `${record.firstName}-${record.lastName}-${record.phoneNumbers[0] || ''}`;
         if (seenIdentifiers.has(key)) continue;
         seenIdentifiers.add(key);
         sampleRecords.push(record);
@@ -104,7 +112,8 @@ export class ContactsReaderNative {
         console.log('[ContactsReaderNative] 📋 Sample contacts:');
         sampleRecords.forEach((record, index) => {
           console.log(
-            `  #${index + 1}: id=${record.identifier || 'n/a'} name="${record.firstName} ${record.lastName}". phones=${record.phoneNumbers.length
+            `  #${index + 1}: id=${record.identifier || 'n/a'} name="${record.firstName} ${record.lastName}". phones=${
+              record.phoneNumbers.length
             } emails=${record.emails.length} company=${record.company || 'n/a'}`
           );
         });
@@ -129,9 +138,7 @@ export class ContactsReaderNative {
     const normalized = this.normalizeIdentifier(trimmed);
 
     return (
-      contactMap.get(normalized) ||
-      contactMap.get(trimmed.toLowerCase()) ||
-      contactMap.get(trimmed)
+      contactMap.get(normalized) || contactMap.get(trimmed.toLowerCase()) || contactMap.get(trimmed)
     );
   }
 
@@ -182,4 +189,3 @@ export class ContactsReaderNative {
     return normalized;
   }
 }
-

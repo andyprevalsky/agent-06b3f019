@@ -12,6 +12,8 @@ set -euo pipefail
 #   bash scripts/test.sh back-end                      # backend tests only
 #   bash scripts/test.sh back-end auth                 # backend blackbox: auth domain
 #   bash scripts/test.sh front-end                     # frontend tests only
+#   bash scripts/test.sh mac-app                       # mac-app tests only
+#   bash scripts/test.sh mac-app onboarding            # mac-app blackbox: onboarding domain
 #   bash scripts/test.sh --list                        # list available repos/domains
 #   bash scripts/test.sh -v                            # verbose — show all output
 
@@ -61,6 +63,9 @@ if $LIST; then
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo "    (semantic — requires --smoke):"
   (cd front-end && bash scripts/run-semantic-tests.sh --list 2>/dev/null) | sed 's/^/    /'
+  echo ""
+  echo "  mac-app"
+  (cd mac-app && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo ""
   echo "  research"
   (cd research && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
@@ -214,6 +219,14 @@ if should_run "front-end"; then
     bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else
     bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
+  fi
+fi
+
+if should_run "mac-app"; then
+  if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
+    bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  else
+    bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
   fi
 fi
 

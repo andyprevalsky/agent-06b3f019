@@ -28,13 +28,20 @@ function getTimestamp(): string {
 }
 
 function formatArgs(args: unknown[]): string {
-  return args.map(arg => {
-    if (typeof arg === 'string') return arg;
-    return util.inspect(arg, { depth: 2, colors: false });
-  }).join(' ');
+  return args
+    .map((arg) => {
+      if (typeof arg === 'string') return arg;
+      return util.inspect(arg, { depth: 2, colors: false });
+    })
+    .join(' ');
 }
 
-function formatLogMessage(level: string, component: string, message: string, data?: unknown): string {
+function formatLogMessage(
+  level: string,
+  component: string,
+  message: string,
+  data?: unknown
+): string {
   const timestamp = getTimestamp();
   const dataStr = data !== undefined ? ` ${JSON.stringify(data).slice(0, 200)}` : '';
   return `[${timestamp}] [${level}] [${component}]${dataStr ? ' ' : ''}${message}${dataStr}\n`;
@@ -106,4 +113,20 @@ export function closeLogger(): void {
   ipcStream?.end();
   consoleStream = null;
   ipcStream = null;
+}
+
+/**
+ * Extract a human-readable message from any caught error value.
+ * Catch variables are typed as `unknown` under strict TypeScript; use this
+ * helper instead of annotating catches with `any` to keep lint + types happy.
+ */
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    const serialized = JSON.stringify(error);
+    return serialized ?? String(error);
+  } catch {
+    return String(error);
+  }
 }

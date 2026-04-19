@@ -60,8 +60,10 @@ const ShaderTile = ({ size }: { size: number }) => {
         bottom: 0,
         width: '100%',
         height: size,
-        maskImage: 'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
-        WebkitMaskImage: 'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
+        maskImage:
+          'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
+        WebkitMaskImage:
+          'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
         pointerEvents: 'none',
       }}
     />
@@ -142,7 +144,7 @@ const Launcher = () => {
         query: query.trim(),
         submittedAt: Date.now(),
       });
-    } catch (err) {
+    } catch {
       setSubmitting(false);
     }
   };
@@ -170,12 +172,14 @@ const Launcher = () => {
         }}
       >
         {/* Shader background */}
-        <div style={{
-          position: 'absolute',
-          inset: 0,
-          borderRadius: 9999,
-          overflow: 'hidden'
-        }}>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: 9999,
+            overflow: 'hidden',
+          }}
+        >
           <ShaderTile size={52} />
         </div>
 
@@ -214,22 +218,20 @@ const Launcher = () => {
               disabled={submitting}
               placeholder="Enter any desire"
               className="placeholder-input"
-              style={{
-                flex: 1,
-                minWidth: 0,
-                background: 'transparent',
-                fontSize: 13,
-                color: '#272725',
-                border: 'none',
-                outline: 'none',
-              } as React.CSSProperties}
+              style={
+                {
+                  flex: 1,
+                  minWidth: 0,
+                  background: 'transparent',
+                  fontSize: 13,
+                  color: '#272725',
+                  border: 'none',
+                  outline: 'none',
+                } as React.CSSProperties
+              }
             />
 
-            <LiquidWhiteButton
-              onClick={() => handleSubmit()}
-              disabled={submitting}
-              size="sm"
-            >
+            <LiquidWhiteButton onClick={() => handleSubmit()} disabled={submitting} size="sm">
               <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
             </LiquidWhiteButton>
           </form>

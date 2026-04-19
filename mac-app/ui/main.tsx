@@ -8,7 +8,7 @@ import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
 import './fonts.css';
 import '@/index.css';
 import React, { useEffect } from 'react';
-import type { QuickQueryPayload } from '../shared/types/ipc';
+import type { BrowserType, QuickQueryPayload } from '../shared/types/ipc';
 
 // Electron-specific integration handlers
 const electronHandlers = {
@@ -17,11 +17,13 @@ const electronHandlers = {
     onClick: async () => {
       const hasAccess = await window.api.checkIMessageAccess();
       if (!hasAccess) {
-        throw new Error('Grant Full Disk Access in System Preferences → Privacy & Security → Full Disk Access');
+        throw new Error(
+          'Grant Full Disk Access in System Preferences → Privacy & Security → Full Disk Access'
+        );
       }
       const result = await window.api.startIMessageUpload();
       if (!result.success) {
-        throw new Error(result.message || 'Upload failed');
+        throw new Error(result.message ?? 'Upload failed');
       }
     },
   },
@@ -31,14 +33,16 @@ const electronHandlers = {
       const cookies = await window.api.readChromeCookies();
       const result = await window.api.uploadCookies(cookies);
       if (!result.success) {
-        throw new Error(result.message || 'Upload failed');
+        throw new Error(result.message ?? 'Upload failed');
       }
     },
   },
   claudeCode: {
     isAvailable: true,
     hasCredentials: () => window.api.claudeCode?.hasCredentials() ?? Promise.resolve(false),
-    syncCredentials: () => window.api.claudeCode?.syncCredentials() ?? Promise.resolve({ success: false, message: 'Not available' }),
+    syncCredentials: () =>
+      window.api.claudeCode?.syncCredentials() ??
+      Promise.resolve({ success: false, message: 'Not available' }),
   },
   browserCookies: {
     isAvailable: true,
@@ -47,24 +51,18 @@ const electronHandlers = {
     },
     syncBrowser: async (browserType: string, keychainPassword?: string) => {
       const cookies = await window.api.readBrowserCookies(
-        browserType as import('../shared/types/ipc').BrowserType,
-        keychainPassword ? { keychainPassword } : undefined
+        browserType as BrowserType,
+        keychainPassword !== undefined && keychainPassword !== '' ? { keychainPassword } : undefined
       );
       if (cookies.length > 0) {
-        const result = await window.api.uploadBrowserCookies(
-          browserType as import('../shared/types/ipc').BrowserType,
-          cookies
-        );
+        const result = await window.api.uploadBrowserCookies(browserType as BrowserType, cookies);
         if (!result.success) {
-          throw new Error(result.message || 'Upload failed');
+          throw new Error(result.message ?? 'Upload failed');
         }
       }
     },
     syncBrowserPasswords: async (browserType: string, config?: { keychainPassword?: string }) => {
-      return window.api.syncBrowserPasswords(
-        browserType as import('../shared/types/ipc').BrowserType,
-        config
-      );
+      return window.api.syncBrowserPasswords(browserType as BrowserType, config);
     },
     storeAtlasPassword: async (password: string) => {
       if (window.api.atlas?.storePassword) {

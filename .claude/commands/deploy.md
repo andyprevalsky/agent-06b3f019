@@ -65,7 +65,8 @@ CHANGED_TS=$(echo "$CHANGED" | grep -E '^back-end/src/.*\.ts$' | sed 's|^back-en
 CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
 CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
-CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/|^mac-app/' || true)
+CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
+CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
 ```
 
@@ -78,6 +79,7 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
+   - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
@@ -159,6 +161,18 @@ cd agents && bash scripts/run-coverage.sh
 ```
 
 Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+
+## Step 4m: Mac-app blackbox tests (skip if `$CHANGED_MAC_APP` is empty)
+
+The mac-app has its own vitest + MSW + jsdom blackbox suite covering every renderer and main-process domain (see `mac-app/tests/blackbox/`). Run the full suite:
+
+```bash
+cd mac-app && bash scripts/run-blackbox-tests.sh
+```
+
+**ALL domains must pass — 0 failures.** Same rule as backend blackbox (Step 5a): "pre-existing" is not an excuse, fix every failure. The runner writes artifacts to `mac-app/.context/test-runs/<run-id>/` with a `manifest.json` + `runner.log` for diagnosis.
+
+If the failure is renderer-only (jsdom + React), check `mac-app/tests/blackbox/test-wrapper.tsx` and the relevant MSW handlers in `mac-app/tests/blackbox/msw/handlers.ts`. If it's main-process (Node + Electron stubs), check `mac-app/tests/blackbox/electron-stubs.ts` and `mac-app/tests/blackbox/fetch-capture.ts`.
 
 ## Step 4r: Research lint + structural (skip if `$CHANGED_RESEARCH` is empty)
 
@@ -503,6 +517,7 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 # ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
 # ║  4g. Agents code coverage: meets pyproject.toml threshold         ║
 # ║  4c. Credential health: all integrations authenticate             ║
+# ║  4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes)    ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
 # ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
 # ║     "When smoke can be skipped" table in Step 6 (diff must be     ║

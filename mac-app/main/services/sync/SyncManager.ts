@@ -24,34 +24,45 @@ interface SyncConfig {
 
 const CONFIG: Record<Platform, SyncConfig> = {
   imessage: {
-    interval: 5 * 60 * 1000,  // 5 minutes
-    enableRealTime: true,      // fs.watch on chat.db
+    interval: 5 * 60 * 1000, // 5 minutes
+    enableRealTime: true, // fs.watch on chat.db
     syncOnStartup: true,
     integrationNames: ['imessage'],
   },
   telegram: {
     interval: 5 * 60 * 1000,
-    enableRealTime: true,      // MTProto events
-    syncOnStartup: true,       // Sync historical after connect
+    enableRealTime: true, // MTProto events
+    syncOnStartup: true, // Sync historical after connect
     integrationNames: ['telegram'],
   },
   whatsapp: {
     interval: 5 * 60 * 1000,
-    enableRealTime: true,      // Baileys events
-    syncOnStartup: false,      // Limited historical due to Baileys v7
+    enableRealTime: true, // Baileys events
+    syncOnStartup: false, // Limited historical due to Baileys v7
     integrationNames: ['whatsapp'],
   },
   cookies: {
     interval: 5 * 60 * 1000,
     enableRealTime: false,
     syncOnStartup: true,
-    integrationNames: ['chrome'],  // Legacy cookie integration
+    integrationNames: ['chrome'], // Legacy cookie integration
   },
   browserState: {
     interval: 5 * 60 * 1000,
     enableRealTime: false,
     syncOnStartup: true,
-    integrationNames: ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'],
+    integrationNames: [
+      'chrome',
+      'edge',
+      'brave',
+      'arc',
+      'opera',
+      'vivaldi',
+      'chromium',
+      'atlas',
+      'safari',
+      'firefox',
+    ],
   },
   // claudeCode sync disabled — token is managed manually via update-claude-token.ts
   // claudeCode: {
@@ -122,10 +133,10 @@ export class SyncManager {
 
     // Stop real-time watchers
     IMessageSync.stopRealTimeSync();
-    await TelegramSync.disconnect().catch(err =>
+    await TelegramSync.disconnect().catch((err) =>
       logConsoleError('SyncManager', 'Error disconnecting Telegram', err)
     );
-    await WhatsAppSync.disconnect().catch(err =>
+    await WhatsAppSync.disconnect().catch((err) =>
       logConsoleError('SyncManager', 'Error disconnecting WhatsApp', err)
     );
 
@@ -159,7 +170,10 @@ export class SyncManager {
 
     // Get connected integrations once
     const connected = await IntegrationCache.getConnected();
-    logConsole('SyncManager', `Connected integrations: ${Array.from(connected).join(', ') || 'none'}`);
+    logConsole(
+      'SyncManager',
+      `Connected integrations: ${Array.from(connected).join(', ') || 'none'}`
+    );
 
     const tasks: Promise<void>[] = [];
 
@@ -167,12 +181,12 @@ export class SyncManager {
       if (!cfg.syncOnStartup) continue;
 
       // Check if any of the integration names are connected
-      const isConnected = cfg.integrationNames.some(name => connected.has(name));
+      const isConnected = cfg.integrationNames.some((name) => connected.has(name));
       if (!isConnected) continue;
 
       logConsole('SyncManager', `Running startup sync for ${platform}`);
       tasks.push(
-        this.syncPlatformCore(platform).catch(err =>
+        this.syncPlatformCore(platform).catch((err) =>
           logConsoleError('SyncManager', `Startup sync error for ${platform}`, err)
         )
       );
@@ -188,10 +202,13 @@ export class SyncManager {
   private static startPeriodicDispatcher(): void {
     if (this.intervalId) return;
 
-    logConsole('SyncManager', `Starting periodic sync (every ${this.SYNC_INTERVAL_MS / 1000 / 60} min)`);
+    logConsole(
+      'SyncManager',
+      `Starting periodic sync (every ${this.SYNC_INTERVAL_MS / 1000 / 60} min)`
+    );
 
     this.intervalId = setInterval(() => {
-      this.syncAllPlatforms().catch(err =>
+      this.syncAllPlatforms().catch((err) =>
         logConsoleError('SyncManager', 'Periodic sync error', err)
       );
     }, this.SYNC_INTERVAL_MS);
@@ -217,7 +234,7 @@ export class SyncManager {
           if (success) {
             logConsole('SyncManager', 'Telegram connected, syncing historical...');
             // Sync historical after connecting
-            await TelegramSync.syncHistorical().catch(err =>
+            await TelegramSync.syncHistorical().catch((err) =>
               logConsoleError('SyncManager', 'Telegram historical sync error', err)
             );
           }
@@ -261,11 +278,11 @@ export class SyncManager {
       if (cfg.interval === 0) continue;
 
       // Check if any of the integration names are connected
-      const isConnected = cfg.integrationNames.some(name => connected.has(name));
+      const isConnected = cfg.integrationNames.some((name) => connected.has(name));
       if (!isConnected) continue;
 
       tasks.push(
-        this.syncPlatformCore(platform).catch(err =>
+        this.syncPlatformCore(platform).catch((err) =>
           logConsoleError('SyncManager', `Sync error for ${platform}`, err)
         )
       );
@@ -287,7 +304,7 @@ export class SyncManager {
   private static async syncPlatform(platform: Platform): Promise<void> {
     const cfg = CONFIG[platform];
     const connected = await IntegrationCache.getConnected();
-    const isConnected = cfg.integrationNames.some(name => connected.has(name));
+    const isConnected = cfg.integrationNames.some((name) => connected.has(name));
 
     if (!isConnected) {
       logConsole('SyncManager', `Skipping ${platform} sync - not connected`);

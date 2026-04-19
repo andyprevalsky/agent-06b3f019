@@ -88,7 +88,9 @@ export class FingerprintReader {
         let webglRenderer = '';
         try {
           const canvas = document.createElement('canvas');
-          const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl') as WebGLRenderingContext | null;
+          const gl =
+            canvas.getContext('webgl') ||
+            (canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
           if (gl) {
             const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
             if (debugInfo) {
@@ -125,7 +127,10 @@ export class FingerprintReader {
         // Audio fingerprint
         let audioHash = '';
         try {
-          const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const audioContext = new (
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+          )();
           const oscillator = audioContext.createOscillator();
           const analyser = audioContext.createAnalyser();
           const gainNode = audioContext.createGain();
@@ -146,7 +151,7 @@ export class FingerprintReader {
 
           oscillator.stop();
           audioContext.close();
-        } catch (e) {
+        } catch {
           // Audio context may not be available
         }
 
@@ -155,9 +160,20 @@ export class FingerprintReader {
 
         // Installed fonts detection (basic check)
         const testFonts = [
-          'Arial', 'Arial Black', 'Comic Sans MS', 'Courier New', 'Georgia',
-          'Impact', 'Times New Roman', 'Trebuchet MS', 'Verdana', 'Helvetica',
-          'Monaco', 'Menlo', 'SF Pro', 'San Francisco'
+          'Arial',
+          'Arial Black',
+          'Comic Sans MS',
+          'Courier New',
+          'Georgia',
+          'Impact',
+          'Times New Roman',
+          'Trebuchet MS',
+          'Verdana',
+          'Helvetica',
+          'Monaco',
+          'Menlo',
+          'SF Pro',
+          'San Francisco',
         ];
 
         const installedFonts: string[] = [];
@@ -203,7 +219,23 @@ export class FingerprintReader {
         // Client Hints (navigator.userAgentData)
         let userAgentData = null;
         try {
-          const navUserAgentData = (nav as any).userAgentData;
+          interface UAData {
+            brands?: { brand: string; version: string }[];
+            mobile?: boolean;
+            platform?: string;
+            platformVersion?: string;
+            architecture?: string;
+            bitness?: string;
+            model?: string;
+            fullVersionList?: { brand: string; version: string }[];
+          }
+          const navUserAgentData = (
+            nav as unknown as {
+              userAgentData?: {
+                getHighEntropyValues: (hints: string[]) => Promise<UAData>;
+              };
+            }
+          ).userAgentData;
           console.log('[Fingerprint] userAgentData available:', !!navUserAgentData);
           if (navUserAgentData) {
             const uaData = await navUserAgentData.getHighEntropyValues([
@@ -216,7 +248,10 @@ export class FingerprintReader {
               'platformVersion',
               'fullVersionList',
             ]);
-            console.log('[Fingerprint] getHighEntropyValues result:', JSON.stringify(uaData).substring(0, 200));
+            console.log(
+              '[Fingerprint] getHighEntropyValues result:',
+              JSON.stringify(uaData).substring(0, 200)
+            );
             userAgentData = {
               brands: uaData.brands || [],
               mobile: uaData.mobile || false,
@@ -235,7 +270,16 @@ export class FingerprintReader {
         // Network Information API (navigator.connection)
         let connection = null;
         try {
-          const conn = (nav as any).connection;
+          const conn = (
+            nav as unknown as {
+              connection?: {
+                effectiveType?: string;
+                downlink?: number;
+                rtt?: number;
+                saveData?: boolean;
+              };
+            }
+          ).connection;
           if (conn) {
             connection = {
               effectiveType: conn.effectiveType || '4g',
@@ -244,7 +288,7 @@ export class FingerprintReader {
               saveData: conn.saveData || false,
             };
           }
-        } catch (e) {
+        } catch {
           // Network Information API may not be available
         }
 
@@ -266,7 +310,7 @@ export class FingerprintReader {
             language: nav.language,
             languages: Array.from(nav.languages),
             hardwareConcurrency: nav.hardwareConcurrency,
-            deviceMemory: (nav as any).deviceMemory || null,
+            deviceMemory: (nav as unknown as { deviceMemory?: number }).deviceMemory || null,
             maxTouchPoints: nav.maxTouchPoints,
             vendor: nav.vendor,
             doNotTrack: nav.doNotTrack,
@@ -313,7 +357,7 @@ export class FingerprintReader {
       // Clean up temp directory
       try {
         fs.rmSync(tempUserDataDir, { recursive: true, force: true });
-      } catch (cleanupErr) {
+      } catch {
         // Ignore cleanup errors
       }
     }

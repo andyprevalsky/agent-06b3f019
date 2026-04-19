@@ -50,7 +50,7 @@ async function afterAllArtifactBuild(buildResult) {
   }
 
   // Find DMG files
-  const dmgFiles = buildResult.artifactPaths.filter(p => p.endsWith('.dmg'));
+  const dmgFiles = buildResult.artifactPaths.filter((p) => p.endsWith('.dmg'));
 
   if (dmgFiles.length === 0) {
     console.log('[staple-dmg] No DMG files found, skipping');
@@ -95,7 +95,9 @@ async function afterAllArtifactBuild(buildResult) {
       // Fetch log for debugging
       console.error(`[staple-dmg] DMG notarization failed with status: ${result.status}`);
       try {
-        const log = exec(`xcrun notarytool log ${result.id} --keychain-profile "${NOTARYTOOL_PROFILE}"`);
+        const log = exec(
+          `xcrun notarytool log ${result.id} --keychain-profile "${NOTARYTOOL_PROFILE}"`
+        );
         console.error('[staple-dmg] ===== NOTARIZATION LOG =====');
         console.error(log);
         console.error('[staple-dmg] ===== END LOG =====');

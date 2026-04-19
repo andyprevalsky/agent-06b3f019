@@ -79,3 +79,4 @@ agents/benchmarks/runs/*.json
 back-end/jobs/
 moltbot/
 .test-logs/
+.context/

@@ -27,7 +27,8 @@ export interface LocalStorageData {
 function parseKey(keyBuffer: Buffer): { origin: string; key: string } | null {
   try {
     // Key must start with "_"
-    if (keyBuffer[0] !== 0x5f) { // "_"
+    if (keyBuffer[0] !== 0x5f) {
+      // "_"
       return null;
     }
 
@@ -206,7 +207,9 @@ export class LocalStorageReader {
       hashes[origin] = computeOriginHash(originEntries);
     }
 
-    console.log(`[LocalStorageReader] Read ${entries.length} entries from ${Object.keys(byOrigin).length} origins`);
+    console.log(
+      `[LocalStorageReader] Read ${entries.length} entries from ${Object.keys(byOrigin).length} origins`
+    );
 
     return {
       entries,

@@ -90,11 +90,7 @@ export class IMessageQueueService {
 
         if (!response.ok) {
           if (response.status !== 401) {
-            logConsoleError(
-              'IMessageQueueService',
-              'Pop request failed',
-              response.statusText
-            );
+            logConsoleError('IMessageQueueService', 'Pop request failed', response.statusText);
           }
           return;
         }
@@ -128,11 +124,7 @@ export class IMessageQueueService {
 
       logConsole('IMessageQueueService', `Sent iMessage to ${maskedPhone}`);
     } catch (err) {
-      logConsoleError(
-        'IMessageQueueService',
-        `Failed to send to ${maskedPhone}`,
-        err
-      );
+      logConsoleError('IMessageQueueService', `Failed to send to ${maskedPhone}`, err);
       // Message is already popped from queue, so error is logged but not retried
       // Consider adding error reporting to backend in the future
     }

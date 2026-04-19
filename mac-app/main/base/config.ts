@@ -31,4 +31,3 @@ export const config = {
 if (!config.supabase.url || !config.supabase.anonKey) {
   throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
 }
-

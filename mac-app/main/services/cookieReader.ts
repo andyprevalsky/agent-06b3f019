@@ -13,18 +13,16 @@ const execAsync = promisify(exec);
 export class CookieReader {
   private static async getEncryptionKey(): Promise<Buffer> {
     // Get Chrome Safe Storage key from macOS Keychain
-    const { stdout } = await execAsync(
-      'security find-generic-password -wa "Chrome"'
-    );
+    const { stdout } = await execAsync('security find-generic-password -wa "Chrome"');
     const password = stdout.trim();
-    
+
     // Derive AES key using PBKDF2-SHA1
     // Chrome uses: salt="saltysalt", iterations=1003, key_length=16
     const salt = 'saltysalt';
     const iterations = 1003;
     return crypto.pbkdf2Sync(password, salt, iterations, 16, 'sha1');
   }
-  
+
   /**
    * Remove PKCS7 padding from decrypted data.
    */
@@ -42,25 +40,25 @@ export class CookieReader {
     }
     return data.slice(0, data.length - paddingLength);
   }
-  
+
   /**
    * Chrome on macOS prepends 32 bytes of random data before the actual cookie value
    * during encryption. After decryption, we need to skip these 32 bytes.
    * Format: [32 bytes random] + [actual value] + [PKCS7 padding]
    */
   private static readonly CHROME_PREFIX_LENGTH = 32;
-  
+
   /**
    * Decrypt a Chrome cookie value.
    * Chrome on macOS uses AES-128-CBC with a fixed IV of 16 spaces.
    * Returns null if decryption fails (cookie will be skipped).
    */
   private static decryptValue(encryptedValue: Buffer, key: Buffer): string | null {
-    // Handle empty or null values
-    if (!encryptedValue || encryptedValue.length === 0) {
+    // Handle empty values
+    if (encryptedValue.length === 0) {
       return null;
     }
-    
+
     // Check for v10 encryption prefix (Chrome on macOS)
     const prefix = encryptedValue.slice(0, 3).toString();
     if (prefix !== 'v10') {
@@ -72,60 +70,44 @@ export class CookieReader {
       }
       return null; // Unknown format, skip
     }
-    
+
     // v10 format: 3 bytes prefix + ciphertext
     // Need at least the prefix + 1 block of ciphertext
     if (encryptedValue.length < 4) {
       return null;
     }
-    
+
     try {
       // Chrome on macOS uses AES-128-CBC with a fixed IV of 16 space characters
       const iv = Buffer.alloc(16, ' '); // 16 space characters
       const ciphertext = encryptedValue.slice(3); // Skip 'v10' prefix
-      
+
       const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
       decipher.setAutoPadding(false); // We'll handle padding manually
-      
-      const decrypted = Buffer.concat([
-        decipher.update(ciphertext),
-        decipher.final()
-      ]);
-      
+
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+
       // Remove PKCS7 padding
       const unpadded = this.removePKCS7Padding(decrypted);
-      
+
       // Chrome prepends 32 bytes of random data - skip it
       if (unpadded.length > this.CHROME_PREFIX_LENGTH) {
         return unpadded.slice(this.CHROME_PREFIX_LENGTH).toString('utf8');
       }
-      
+
       // If unpadded length is exactly 32 or less, the cookie value is empty
       // (Chrome only stored the random prefix, no actual value)
       return '';
-    } catch (error) {
+    } catch {
       // Decryption failed - corrupted cookie or wrong key
       return null;
     }
   }
-  
-  static async readCookies(): Promise<CookieData[]> {
-    // Resolve Chrome cookies file across profile directories
-    const chromeCookiesPath = resolveChromeProfilePath('Cookies');
-    if (!chromeCookiesPath) {
-      console.log('[CookieReader] Chrome cookies file not found');
-      return [];
-    }
 
-    // Copy database (Chrome locks it)
-    const tempPath = path.join(app.getPath('temp'), 'Cookies-copy');
-    fs.copyFileSync(chromeCookiesPath, tempPath);
-    
-    const db = new Database(tempPath, { readonly: true });
-    const key = await this.getEncryptionKey();
-    
-    try {
-      const rows = db.prepare(`
+  private static queryCookieRows(db: Database.Database): CookieRow[] {
+    return db
+      .prepare(
+        `
         SELECT
           host_key,
           name,
@@ -145,47 +127,102 @@ export class CookieReader {
           source_port,
           last_update_utc
         FROM cookies
-      `).all() as any[];
-      
+      `
+      )
+      .all() as CookieRow[];
+  }
+
+  private static rowToCookie(row: CookieRow, value: string): CookieData {
+    return {
+      host_key: row.host_key,
+      name: row.name,
+      value,
+      path: row.path,
+      expires_utc: row.expires_utc,
+      is_secure: row.is_secure === 1,
+      is_httponly: row.is_httponly === 1,
+      creation_utc: row.creation_utc,
+      top_frame_site_key: row.top_frame_site_key ?? '',
+      last_access_utc: row.last_access_utc,
+      has_expires: row.has_expires === 1,
+      is_persistent: row.is_persistent === 1,
+      priority: row.priority,
+      samesite: row.samesite,
+      source_scheme: row.source_scheme,
+      source_port: row.source_port,
+      last_update_utc: row.last_update_utc,
+    };
+  }
+
+  static async readCookies(): Promise<CookieData[]> {
+    // Resolve Chrome cookies file across profile directories
+    const chromeCookiesPath = resolveChromeProfilePath('Cookies');
+    if (chromeCookiesPath === null) {
+      console.log('[CookieReader] Chrome cookies file not found');
+      return [];
+    }
+
+    // Copy database (Chrome locks it). Use a per-invocation temp dir so
+    // concurrent callers can't clobber each other's DB copy.
+    const tempDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'cookie-reader-'));
+    const tempPath = path.join(tempDir, 'Cookies-copy.sqlite');
+    fs.copyFileSync(chromeCookiesPath, tempPath);
+
+    let db: Database.Database | null = null;
+    try {
+      db = new Database(tempPath, { readonly: true });
+      const key = await this.getEncryptionKey();
+      const rows = this.queryCookieRows(db);
       const cookies: CookieData[] = [];
       let skipped = 0;
-      
+
       for (const row of rows) {
         const value = this.decryptValue(row.encrypted_value, key);
-        
+
         // Skip cookies that couldn't be decrypted or have empty values
         if (value === null || value === '') {
           skipped++;
           continue;
         }
-        
-        cookies.push({
-          host_key: row.host_key,
-          name: row.name,
-          value,
-          path: row.path,
-          expires_utc: row.expires_utc,
-          is_secure: row.is_secure === 1,
-          is_httponly: row.is_httponly === 1,
-          creation_utc: row.creation_utc,
-          top_frame_site_key: row.top_frame_site_key,
-          last_access_utc: row.last_access_utc,
-          has_expires: row.has_expires === 1,
-          is_persistent: row.is_persistent === 1,
-          priority: row.priority,
-          samesite: row.samesite,
-          source_scheme: row.source_scheme,
-          source_port: row.source_port,
-          last_update_utc: row.last_update_utc,
-        });
+
+        cookies.push(this.rowToCookie(row, value));
       }
-      
+
       console.log(`[CookieReader] Read ${cookies.length} cookies (skipped ${skipped} unreadable)`);
       return cookies;
     } finally {
-      db.close();
-      fs.unlinkSync(tempPath);
+      db?.close();
+      // Best-effort cleanup of the per-invocation temp dir.
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {
+        // File may have been removed by another process.
+      }
+      try {
+        fs.rmdirSync(tempDir);
+      } catch {
+        // Directory may have been removed or contain other files.
+      }
     }
   }
 }
 
+interface CookieRow {
+  host_key: string;
+  name: string;
+  encrypted_value: Buffer;
+  path: string;
+  expires_utc: number;
+  is_secure: number;
+  is_httponly: number;
+  creation_utc: number;
+  top_frame_site_key: string | null;
+  last_access_utc: number;
+  has_expires: number;
+  is_persistent: number;
+  priority: number;
+  samesite: number;
+  source_scheme: number;
+  source_port: number;
+  last_update_utc: number;
+}

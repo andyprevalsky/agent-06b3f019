@@ -30,4 +30,3 @@
   "include": ["ui/**/*", "shared/**/*"],
   "exclude": ["node_modules", "dist"]
 }
-

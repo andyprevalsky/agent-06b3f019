@@ -23,27 +23,27 @@ const PERMISSION_TYPES = [
 
 // Map Chrome's internal names to Web API names
 const PERMISSION_NAME_MAP: Record<string, string> = {
-  'media_stream_camera': 'camera',
-  'media_stream_mic': 'microphone',
-  'midi_sysex': 'midi',
-  'usb_guard': 'usb',
-  'serial_guard': 'serial',
-  'bluetooth_guard': 'bluetooth',
-  'hid_guard': 'hid',
-  'window_placement': 'window-management',
-  'local_fonts': 'local-fonts',
-  'idle_detection': 'idle-detection',
+  media_stream_camera: 'camera',
+  media_stream_mic: 'microphone',
+  midi_sysex: 'midi',
+  usb_guard: 'usb',
+  serial_guard: 'serial',
+  bluetooth_guard: 'bluetooth',
+  hid_guard: 'hid',
+  window_placement: 'window-management',
+  local_fonts: 'local-fonts',
+  idle_detection: 'idle-detection',
 };
 
 export interface PermissionGrant {
-  origin: string;      // "https://www.amazon.com" or pattern like "[*.]amazon.com"
-  permission: string;  // Web API name: "geolocation", "camera", etc.
-  setting: number;     // 1=allow, 2=block
+  origin: string; // "https://www.amazon.com" or pattern like "[*.]amazon.com"
+  permission: string; // Web API name: "geolocation", "camera", etc.
+  setting: number; // 1=allow, 2=block
 }
 
 export interface PermissionData {
   grants: PermissionGrant[];
-  hash: string;  // For cache invalidation
+  hash: string; // For cache invalidation
   grantCount: number;
 }
 
@@ -53,7 +53,7 @@ export interface PermissionData {
  */
 function parseOriginPattern(pattern: string): string {
   // Remove the ",*" suffix Chrome uses for secondary patterns
-  let origin = pattern.replace(/,\*$/, '');
+  const origin = pattern.replace(/,\*$/, '');
 
   // Handle wildcard patterns like "[*.]" - keep as-is for pattern matching
   // These match subdomains: "[*.]amazon.com" matches *.amazon.com
@@ -123,7 +123,7 @@ export class PermissionReader {
         for (const [originPattern, value] of Object.entries(permSettings)) {
           if (!value || typeof value !== 'object') continue;
 
-          const setting = (value as any).setting;
+          const setting = (value as { setting?: number }).setting;
           // Only include explicit allow (1) or block (2), skip default (0) or ask
           if (setting !== 1 && setting !== 2) continue;
 
@@ -137,7 +137,9 @@ export class PermissionReader {
         }
       }
 
-      console.log(`[PermissionReader] Read ${grants.length} permission grants from Chrome Preferences`);
+      console.log(
+        `[PermissionReader] Read ${grants.length} permission grants from Chrome Preferences`
+      );
 
       const hash = computePermissionsHash(grants);
 

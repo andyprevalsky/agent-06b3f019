@@ -1,6 +1,6 @@
 import { config } from '../base/config';
 import { AuthService } from './auth';
-import { BrowserCookieReader } from './browserCookieReader';
+import { BrowserCookieReader, type BrowserType } from './browserCookieReader';
 import { BrowserPasswordReader } from './browserPasswordReader';
 import { LocalStorageReader, LocalStorageData } from './localStorageReader';
 import { IndexedDBReader, IndexedDBData, IndexedDBOriginData } from './indexedDBReader';
@@ -45,7 +45,6 @@ interface IndexedDBBatch {
  * localStorage is batched by origins and compressed with gzip.
  */
 export class BrowserStateSync {
-
   /**
    * Split localStorage data into batches by origins.
    */
@@ -109,7 +108,7 @@ export class BrowserStateSync {
         const response = await fetch(`${config.apiUrl}/api/integrations/localStorage/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
@@ -119,16 +118,20 @@ export class BrowserStateSync {
           throw new Error(`Upload failed: ${response.status} ${errorText}`);
         }
 
-        console.log(`[BrowserStateSync] ✅ Batch ${batch.batchIndex + 1}/${batch.totalBatches} uploaded (${batch.originCount} origins, ${batch.entryCount} entries)`);
+        console.log(
+          `[BrowserStateSync] ✅ Batch ${batch.batchIndex + 1}/${batch.totalBatches} uploaded (${batch.originCount} origins, ${batch.entryCount} entries)`
+        );
         return { success: true };
-
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        console.warn(`[BrowserStateSync] Batch ${batch.batchIndex + 1} upload attempt ${attempt + 1} failed:`, lastError.message);
+        console.warn(
+          `[BrowserStateSync] Batch ${batch.batchIndex + 1} upload attempt ${attempt + 1} failed:`,
+          lastError.message
+        );
 
         if (attempt < MAX_RETRIES - 1) {
           const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
@@ -146,22 +149,26 @@ export class BrowserStateSync {
   ): Promise<{ success: boolean; message?: string }> {
     const batches = this.splitIntoBatches(data);
 
-    console.log(`[BrowserStateSync] Uploading localStorage in ${batches.length} batches (${data.originCount} origins, ${data.entryCount} entries)`);
+    console.log(
+      `[BrowserStateSync] Uploading localStorage in ${batches.length} batches (${data.originCount} origins, ${data.entryCount} entries)`
+    );
 
     // Upload all batches in PARALLEL - each batch directly upserts to DB
     const uploadResults = await Promise.all(
-      batches.map(batch => this.uploadBatchWithRetry(batch, accessToken))
+      batches.map((batch) => this.uploadBatchWithRetry(batch, accessToken))
     );
 
     const failedBatches = uploadResults
-      .map((result, index) => result.success ? null : index)
+      .map((result, index) => (result.success ? null : index))
       .filter((index): index is number => index !== null);
 
     if (failedBatches.length > 0) {
-      console.error(`[BrowserStateSync] ❌ Failed batches: ${failedBatches.map(i => i + 1).join(', ')} of ${batches.length}`);
+      console.error(
+        `[BrowserStateSync] ❌ Failed batches: ${failedBatches.map((i) => i + 1).join(', ')} of ${batches.length}`
+      );
       return {
         success: false,
-        message: `Failed batches: ${failedBatches.map(i => i + 1).join(', ')} of ${batches.length}`,
+        message: `Failed batches: ${failedBatches.map((i) => i + 1).join(', ')} of ${batches.length}`,
       };
     }
 
@@ -228,7 +235,7 @@ export class BrowserStateSync {
         const response = await fetch(`${config.apiUrl}/api/integrations/indexedDB/upload`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
           },
           body: formData,
         });
@@ -238,16 +245,20 @@ export class BrowserStateSync {
           throw new Error(`Upload failed: ${response.status} ${errorText}`);
         }
 
-        console.log(`[BrowserStateSync] ✅ IndexedDB batch ${batch.batchIndex + 1}/${batch.totalBatches} uploaded (${batch.origins.length} origins)`);
+        console.log(
+          `[BrowserStateSync] ✅ IndexedDB batch ${batch.batchIndex + 1}/${batch.totalBatches} uploaded (${batch.origins.length} origins)`
+        );
         return { success: true };
-
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        console.warn(`[BrowserStateSync] IndexedDB batch ${batch.batchIndex + 1} upload attempt ${attempt + 1} failed:`, lastError.message);
+        console.warn(
+          `[BrowserStateSync] IndexedDB batch ${batch.batchIndex + 1} upload attempt ${attempt + 1} failed:`,
+          lastError.message
+        );
 
         if (attempt < MAX_RETRIES - 1) {
           const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
@@ -268,22 +279,26 @@ export class BrowserStateSync {
 
     const batches = this.splitIndexedDBIntoBatches(data);
 
-    console.log(`[BrowserStateSync] Uploading IndexedDB in ${batches.length} batches (${data.origins.length} origins)`);
+    console.log(
+      `[BrowserStateSync] Uploading IndexedDB in ${batches.length} batches (${data.origins.length} origins)`
+    );
 
     // Upload all batches in PARALLEL
     const uploadResults = await Promise.all(
-      batches.map(batch => this.uploadIndexedDBBatchWithRetry(batch, accessToken))
+      batches.map((batch) => this.uploadIndexedDBBatchWithRetry(batch, accessToken))
     );
 
     const failedBatches = uploadResults
-      .map((result, index) => result.success ? null : index)
+      .map((result, index) => (result.success ? null : index))
       .filter((index): index is number => index !== null);
 
     if (failedBatches.length > 0) {
-      console.error(`[BrowserStateSync] ❌ Failed IndexedDB batches: ${failedBatches.map(i => i + 1).join(', ')} of ${batches.length}`);
+      console.error(
+        `[BrowserStateSync] ❌ Failed IndexedDB batches: ${failedBatches.map((i) => i + 1).join(', ')} of ${batches.length}`
+      );
       return {
         success: false,
-        message: `Failed batches: ${failedBatches.map(i => i + 1).join(', ')} of ${batches.length}`,
+        message: `Failed batches: ${failedBatches.map((i) => i + 1).join(', ')} of ${batches.length}`,
       };
     }
 
@@ -318,7 +333,7 @@ export class BrowserStateSync {
       const response = await fetch(`${config.apiUrl}/api/integrations/permissions/upload`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
         },
         body: formData,
       });
@@ -368,7 +383,7 @@ export class BrowserStateSync {
       const response = await fetch(`${config.apiUrl}/api/integrations/cacheStorage/upload`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
         },
         body: formData,
       });
@@ -422,7 +437,7 @@ export class BrowserStateSync {
       const response = await fetch(`${config.apiUrl}/api/integrations/passwords/upload`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
         },
         body: formData,
       });
@@ -459,8 +474,19 @@ export class BrowserStateSync {
       const connected = await IntegrationCache.getConnected();
 
       // Find all connected browser integrations
-      const validBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas', 'safari', 'firefox'];
-      const connectedBrowserTypes = validBrowsers.filter(browser => connected.has(browser));
+      const validBrowsers = [
+        'chrome',
+        'edge',
+        'brave',
+        'arc',
+        'opera',
+        'vivaldi',
+        'chromium',
+        'atlas',
+        'safari',
+        'firefox',
+      ];
+      const connectedBrowserTypes = validBrowsers.filter((browser) => connected.has(browser));
 
       if (connectedBrowserTypes.length === 0) {
         console.log('[BrowserStateSync] Skipping sync - no browser integrations connected');
@@ -469,15 +495,15 @@ export class BrowserStateSync {
 
       // Get installed browsers that are connected
       const installedBrowsers = BrowserCookieReader.getInstalledBrowsers();
-      const browsersToSync = installedBrowsers.filter(
-        b => connectedBrowserTypes.includes(b.type)
+      const browsersToSync = installedBrowsers.filter((b) =>
+        connectedBrowserTypes.includes(b.type)
       );
 
       // Check if Atlas has a stored password
       const atlasPassword = AtlasCredentialStore.getPassword();
 
       // Filter to browsers we can actually sync
-      const syncableBrowsers = browsersToSync.filter(b => {
+      const syncableBrowsers = browsersToSync.filter((b) => {
         if (b.type === 'atlas') {
           // Atlas requires stored password
           return atlasPassword !== null;
@@ -491,7 +517,9 @@ export class BrowserStateSync {
         return;
       }
 
-      console.log(`[BrowserStateSync] Starting browser state sync for: ${syncableBrowsers.map(b => b.name).join(', ')}`);
+      console.log(
+        `[BrowserStateSync] Starting browser state sync for: ${syncableBrowsers.map((b) => b.name).join(', ')}`
+      );
 
       // Upload promises for all data types
       const uploadPromises: Promise<{ success: boolean; message?: string }>[] = [];
@@ -500,9 +528,10 @@ export class BrowserStateSync {
       for (const browser of syncableBrowsers) {
         try {
           // For Atlas, use the stored password
-          const config = browser.type === 'atlas' && atlasPassword
-            ? { keychainPassword: atlasPassword }
-            : undefined;
+          const config =
+            browser.type === 'atlas' && atlasPassword
+              ? { keychainPassword: atlasPassword }
+              : undefined;
 
           const cookies = await BrowserCookieReader.readCookies(browser.type, config);
           console.log(`[BrowserStateSync] Read ${cookies.length} ${browser.name} cookies`);
@@ -523,7 +552,9 @@ export class BrowserStateSync {
         // Read and upload localStorage
         try {
           const localStorageData = await LocalStorageReader.readLocalStorage();
-          console.log(`[BrowserStateSync] Read ${localStorageData.entryCount} localStorage entries`);
+          console.log(
+            `[BrowserStateSync] Read ${localStorageData.entryCount} localStorage entries`
+          );
 
           if (localStorageData.entryCount > 0) {
             uploadPromises.push(
@@ -536,7 +567,15 @@ export class BrowserStateSync {
 
         // Read and upload IndexedDB (requires Python with ccl_chromium_reader)
         // Only sync important domains to avoid slow full scans
-        const indexedDBFilters = ['amazon', 'google', 'doordash', 'instacart', 'uber', 'netflix', 'spotify'];
+        const indexedDBFilters = [
+          'amazon',
+          'google',
+          'doordash',
+          'instacart',
+          'uber',
+          'netflix',
+          'spotify',
+        ];
         try {
           // Read IndexedDB for each important domain
           const allOrigins: IndexedDBOriginData[] = [];
@@ -549,12 +588,12 @@ export class BrowserStateSync {
           }
 
           const indexedDBData = { origins: allOrigins, hashes: allHashes };
-          console.log(`[BrowserStateSync] Read ${indexedDBData.origins.length} IndexedDB origins (filtered to important domains)`);
+          console.log(
+            `[BrowserStateSync] Read ${indexedDBData.origins.length} IndexedDB origins (filtered to important domains)`
+          );
 
           if (indexedDBData.origins.length > 0) {
-            uploadPromises.push(
-              this.uploadIndexedDBInBatches(indexedDBData, session.access_token)
-            );
+            uploadPromises.push(this.uploadIndexedDBInBatches(indexedDBData, session.access_token));
           }
         } catch (error) {
           console.error('[BrowserStateSync] Failed to read IndexedDB:', error);
@@ -566,9 +605,7 @@ export class BrowserStateSync {
           console.log(`[BrowserStateSync] Read ${permissionData.grantCount} permission grants`);
 
           if (permissionData.grantCount > 0) {
-            uploadPromises.push(
-              this.uploadPermissions(permissionData, session.access_token)
-            );
+            uploadPromises.push(this.uploadPermissions(permissionData, session.access_token));
           }
         } catch (error) {
           console.error('[BrowserStateSync] Failed to read permissions:', error);
@@ -577,12 +614,12 @@ export class BrowserStateSync {
         // Read and upload Cache Storage metadata
         try {
           const cacheStorageData = await CacheStorageReader.readCacheStorage();
-          console.log(`[BrowserStateSync] Read ${cacheStorageData.originCount} Cache Storage origins`);
+          console.log(
+            `[BrowserStateSync] Read ${cacheStorageData.originCount} Cache Storage origins`
+          );
 
           if (cacheStorageData.originCount > 0) {
-            uploadPromises.push(
-              this.uploadCacheStorage(cacheStorageData, session.access_token)
-            );
+            uploadPromises.push(this.uploadCacheStorage(cacheStorageData, session.access_token));
           }
         } catch (error) {
           console.error('[BrowserStateSync] Failed to read Cache Storage:', error);
@@ -594,9 +631,7 @@ export class BrowserStateSync {
           console.log(`[BrowserStateSync] Read ${passwords.length} passwords`);
 
           if (passwords.length > 0) {
-            uploadPromises.push(
-              this.uploadPasswords(passwords, session.access_token)
-            );
+            uploadPromises.push(this.uploadPasswords(passwords, session.access_token));
           }
         } catch (error) {
           console.error('[BrowserStateSync] Failed to read passwords:', error);
@@ -610,14 +645,13 @@ export class BrowserStateSync {
 
       const results = await Promise.all(uploadPromises);
 
-      const allSuccess = results.every(r => r.success);
+      const allSuccess = results.every((r) => r.success);
       if (allSuccess) {
         console.log('[BrowserStateSync] ✅ Sync complete');
       } else {
-        const failures = results.filter(r => !r.success);
+        const failures = results.filter((r) => !r.success);
         console.error('[BrowserStateSync] ❌ Some uploads failed:', failures);
       }
-
     } catch (error) {
       console.error('[BrowserStateSync] Error during sync:', error);
     }
@@ -629,7 +663,9 @@ export class BrowserStateSync {
    */
   static startBackgroundSync(): void {
     // SyncManager handles periodic syncs now - no-op
-    console.log('[BrowserStateSync] startBackgroundSync() is deprecated. Use SyncManager.startAll()');
+    console.log(
+      '[BrowserStateSync] startBackgroundSync() is deprecated. Use SyncManager.startAll()'
+    );
   }
 
   /**
@@ -663,7 +699,7 @@ export class BrowserStateSync {
         ? { keychainPassword: options.keychainPassword }
         : undefined;
 
-      const cookies = await BrowserCookieReader.readCookies(browserType as any, config);
+      const cookies = await BrowserCookieReader.readCookies(browserType as BrowserType, config);
       console.log(`[BrowserStateSync] Read ${cookies.length} ${browserType} cookies`);
 
       if (cookies.length > 0) {
@@ -692,7 +728,15 @@ export class BrowserStateSync {
       }
 
       // IndexedDB (filtered to important domains)
-      const indexedDBFilters = ['amazon', 'google', 'doordash', 'instacart', 'uber', 'netflix', 'spotify'];
+      const indexedDBFilters = [
+        'amazon',
+        'google',
+        'doordash',
+        'instacart',
+        'uber',
+        'netflix',
+        'spotify',
+      ];
       try {
         const allOrigins: IndexedDBOriginData[] = [];
         const allHashes: Record<string, string> = {};
@@ -707,9 +751,7 @@ export class BrowserStateSync {
         console.log(`[BrowserStateSync] Read ${indexedDBData.origins.length} IndexedDB origins`);
 
         if (indexedDBData.origins.length > 0) {
-          uploadPromises.push(
-            this.uploadIndexedDBInBatches(indexedDBData, session.access_token)
-          );
+          uploadPromises.push(this.uploadIndexedDBInBatches(indexedDBData, session.access_token));
         }
       } catch (error) {
         console.error('[BrowserStateSync] Failed to read IndexedDB:', error);
@@ -721,9 +763,7 @@ export class BrowserStateSync {
         console.log(`[BrowserStateSync] Read ${permissionData.grantCount} permission grants`);
 
         if (permissionData.grantCount > 0) {
-          uploadPromises.push(
-            this.uploadPermissions(permissionData, session.access_token)
-          );
+          uploadPromises.push(this.uploadPermissions(permissionData, session.access_token));
         }
       } catch (error) {
         console.error('[BrowserStateSync] Failed to read permissions:', error);
@@ -732,12 +772,12 @@ export class BrowserStateSync {
       // Cache Storage
       try {
         const cacheStorageData = await CacheStorageReader.readCacheStorage();
-        console.log(`[BrowserStateSync] Read ${cacheStorageData.originCount} Cache Storage origins`);
+        console.log(
+          `[BrowserStateSync] Read ${cacheStorageData.originCount} Cache Storage origins`
+        );
 
         if (cacheStorageData.originCount > 0) {
-          uploadPromises.push(
-            this.uploadCacheStorage(cacheStorageData, session.access_token)
-          );
+          uploadPromises.push(this.uploadCacheStorage(cacheStorageData, session.access_token));
         }
       } catch (error) {
         console.error('[BrowserStateSync] Failed to read Cache Storage:', error);
@@ -753,7 +793,12 @@ export class BrowserStateSync {
       if (fingerprint) {
         console.log(`[BrowserStateSync] Collected fingerprint: success`);
         uploadPromises.push(
-          BatchUploader.uploadInBatches('browser_fingerprint', fingerprint, session.access_token, null)
+          BatchUploader.uploadInBatches(
+            'browser_fingerprint',
+            fingerprint,
+            session.access_token,
+            null
+          )
         );
       }
     } catch (error) {
@@ -767,15 +812,18 @@ export class BrowserStateSync {
 
     // Run all uploads in parallel
     const results = await Promise.all(uploadPromises);
-    const allSuccess = results.every(r => r.success);
+    const allSuccess = results.every((r) => r.success);
 
     if (allSuccess) {
       console.log(`[BrowserStateSync] ✅ Full sync complete for ${browserType}`);
       return { success: true };
     } else {
-      const failures = results.filter(r => !r.success);
+      const failures = results.filter((r) => !r.success);
       console.error(`[BrowserStateSync] ❌ Some uploads failed for ${browserType}:`, failures);
-      return { success: false, message: `Some uploads failed: ${failures.map(f => f.message).join(', ')}` };
+      return {
+        success: false,
+        message: `Some uploads failed: ${failures.map((f) => f.message).join(', ')}`,
+      };
     }
   }
 
@@ -795,7 +843,16 @@ export class BrowserStateSync {
     }
 
     // Supported browsers for password reading
-    const supportedBrowsers = ['chrome', 'edge', 'brave', 'arc', 'opera', 'vivaldi', 'chromium', 'atlas'];
+    const supportedBrowsers = [
+      'chrome',
+      'edge',
+      'brave',
+      'arc',
+      'opera',
+      'vivaldi',
+      'chromium',
+      'atlas',
+    ];
     if (!supportedBrowsers.includes(browserType)) {
       return { success: false, message: `Password sync not supported for ${browserType}` };
     }
@@ -805,13 +862,22 @@ export class BrowserStateSync {
       return { success: false, message: 'Atlas requires a keychain password' };
     }
 
-    console.log(`[BrowserStateSync] Starting password-only sync for ${browserType}, keychainPassword provided: ${!!options?.keychainPassword}`);
+    console.log(
+      `[BrowserStateSync] Starting password-only sync for ${browserType}, keychainPassword provided: ${!!options?.keychainPassword}`
+    );
 
     try {
       // Read and encrypt passwords
-      const config = options?.keychainPassword ? { keychainPassword: options.keychainPassword } : undefined;
-      console.log(`[BrowserStateSync] Passing config to readAndEncryptPasswords:`, { hasKeychainPassword: !!config?.keychainPassword });
-      const passwords = await BrowserPasswordReader.readAndEncryptPasswords(browserType as any, config);
+      const config = options?.keychainPassword
+        ? { keychainPassword: options.keychainPassword }
+        : undefined;
+      console.log(`[BrowserStateSync] Passing config to readAndEncryptPasswords:`, {
+        hasKeychainPassword: !!config?.keychainPassword,
+      });
+      const passwords = await BrowserPasswordReader.readAndEncryptPasswords(
+        browserType as BrowserType,
+        config
+      );
       console.log(`[BrowserStateSync] Read ${passwords.length} passwords from ${browserType}`);
 
       if (passwords.length === 0) {
@@ -825,7 +891,10 @@ export class BrowserStateSync {
       if (result.success) {
         console.log(`[BrowserStateSync] ✅ Password-only sync complete for ${browserType}`);
       } else {
-        console.error(`[BrowserStateSync] ❌ Password sync failed for ${browserType}:`, result.message);
+        console.error(
+          `[BrowserStateSync] ❌ Password sync failed for ${browserType}:`,
+          result.message
+        );
       }
 
       return result;

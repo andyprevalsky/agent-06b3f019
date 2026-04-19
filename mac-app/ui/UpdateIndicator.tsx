@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import type { UpdateStatusPayload } from "../shared/types/ipc";
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import type { UpdateStatusPayload } from '../shared/types/ipc';
 
 const NONE_DISMISS_DELAY = 3000;
-const portalId = "rose-update-indicator";
+const portalId = 'rose-update-indicator';
 
 // Rose gradient colors for progress bar
-const ROSE_GRADIENT = "linear-gradient(to right, #094EFF, #537FFF, #84E4FF, #65CBDF)";
+const ROSE_GRADIENT = 'linear-gradient(to right, #094EFF, #537FFF, #84E4FF, #65CBDF)';
 
 // Gift icon SVG path
 const GiftIcon = () => (
@@ -56,10 +56,11 @@ const WarningIcon = () => (
 );
 
 // Base chip styling
-const chipBase = "flex items-center rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm";
+const chipBase =
+  'flex items-center rounded-full bg-neutral-100 border border-neutral-200 px-3 py-1.5 shadow-sm';
 
 export default function UpdateIndicator() {
-  const [status, setStatus] = useState<UpdateStatusPayload>({ state: "idle" });
+  const [status, setStatus] = useState<UpdateStatusPayload>({ state: 'idle' });
   const [progress, setProgress] = useState(0);
   const [showNoneChip, setShowNoneChip] = useState(false);
   const dismissedVersionRef = useRef<string | null>(null);
@@ -69,7 +70,7 @@ export default function UpdateIndicator() {
   const container = useMemo(() => {
     const existing = document.getElementById(portalId);
     if (existing) return existing;
-    const node = document.createElement("div");
+    const node = document.createElement('div');
     node.id = portalId;
     document.body.appendChild(node);
     return node;
@@ -93,14 +94,13 @@ export default function UpdateIndicator() {
       }
 
       // Map "building" state to "none" (treat as up to date)
-      const effectivePayload = payload.state === "building" 
-        ? { ...payload, state: "none" as const }
-        : payload;
+      const effectivePayload =
+        payload.state === 'building' ? { ...payload, state: 'none' as const } : payload;
 
       setStatus(effectivePayload);
 
       // Handle "none" state - show chip then auto-dismiss
-      if (effectivePayload.state === "none") {
+      if (effectivePayload.state === 'none') {
         setShowNoneChip(true);
         noneTimerRef.current = setTimeout(() => {
           setShowNoneChip(false);
@@ -123,10 +123,10 @@ export default function UpdateIndicator() {
   }, []);
 
   const dismiss = () => {
-    if ((status.state === "available" || status.state === "downloaded") && status.version) {
+    if ((status.state === 'available' || status.state === 'downloaded') && status.version) {
       dismissedVersionRef.current = status.version;
     }
-    setStatus({ state: "idle" });
+    setStatus({ state: 'idle' });
     setShowNoneChip(false);
     if (noneTimerRef.current) {
       clearTimeout(noneTimerRef.current);
@@ -135,16 +135,16 @@ export default function UpdateIndicator() {
   };
 
   const isDismissedVersion =
-    (status.state === "available" || status.state === "downloaded") &&
+    (status.state === 'available' || status.state === 'downloaded') &&
     dismissedVersionRef.current === status.version;
 
   // Don't show anything for idle or dismissed versions
-  if (status.state === "idle" || isDismissedVersion) {
+  if (status.state === 'idle' || isDismissedVersion) {
     return null;
   }
 
   // CHECKING - Spinner only
-  if (status.state === "checking") {
+  if (status.state === 'checking') {
     return createPortal(
       <div className="pointer-events-none fixed bottom-6 left-6 z-[9999]">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-400 border-t-transparent" />
@@ -154,7 +154,7 @@ export default function UpdateIndicator() {
   }
 
   // NONE (Up to date) - Auto-dismissing chip
-  if (status.state === "none") {
+  if (status.state === 'none') {
     if (!showNoneChip) return null;
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
@@ -171,7 +171,7 @@ export default function UpdateIndicator() {
   }
 
   // AVAILABLE - New update available with Install Now
-  if (status.state === "available") {
+  if (status.state === 'available') {
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
         <div className={`${chipBase} justify-between gap-4`}>
@@ -200,7 +200,7 @@ export default function UpdateIndicator() {
   }
 
   // DOWNLOADING - Progress bar with rose gradient
-  if (status.state === "downloading") {
+  if (status.state === 'downloading') {
     const percent = Math.round(status.percent ?? progress ?? 0);
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
@@ -222,7 +222,7 @@ export default function UpdateIndicator() {
   }
 
   // DOWNLOADED - Ready to restart
-  if (status.state === "downloaded") {
+  if (status.state === 'downloaded') {
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
         <div className={`${chipBase} justify-between gap-4`}>
@@ -251,7 +251,7 @@ export default function UpdateIndicator() {
   }
 
   // ERROR - Chip with retry
-  if (status.state === "error") {
+  if (status.state === 'error') {
     return createPortal(
       <div className="pointer-events-auto fixed bottom-6 left-6 z-[9999]">
         <div className={`${chipBase} justify-between gap-4`}>

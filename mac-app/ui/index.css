@@ -6,18 +6,25 @@
   .animate-dots {
     text-align: left;
   }
-  
+
   .animate-dots::before {
     content: '.';
     animation: dots 1.5s infinite;
     display: inline-block;
     text-align: left;
   }
-  
+
   @keyframes dots {
-    0%, 100% { content: '.'; }
-    33% { content: '..'; }
-    66% { content: '...'; }
+    0%,
+    100% {
+      content: '.';
+    }
+    33% {
+      content: '..';
+    }
+    66% {
+      content: '...';
+    }
   }
 }
 
@@ -29,36 +36,36 @@
 @layer base {
   :root {
     /* Luxury color palette */
-    --background: 240 15% 98%;        /* Pearl white */
-    --foreground: 240 15% 8%;         /* Midnight black */
-    --surface: 240 10% 96%;           /* Lighter pearl */
-    --surface-elevated: 0 0% 100%;    /* Pure white for cards */
+    --background: 240 15% 98%; /* Pearl white */
+    --foreground: 240 15% 8%; /* Midnight black */
+    --surface: 240 10% 96%; /* Lighter pearl */
+    --surface-elevated: 0 0% 100%; /* Pure white for cards */
 
     /* Premium material colors */
-    --primary: 240 15% 8%;            /* Midnight black */
+    --primary: 240 15% 8%; /* Midnight black */
     --primary-foreground: 240 15% 98%;
-    --space-gray: 240 8% 60%;         /* Space gray */
+    --space-gray: 240 8% 60%; /* Space gray */
     --space-gray-foreground: 240 15% 98%;
-    
-    --card: 0 0% 100%;                /* Pure white for elevated surfaces */
+
+    --card: 0 0% 100%; /* Pure white for elevated surfaces */
     --card-foreground: 240 15% 8%;
-    
-    --secondary: 240 10% 96%;         /* Light pearl */
+
+    --secondary: 240 10% 96%; /* Light pearl */
     --secondary-foreground: 240 15% 8%;
-    
-    --muted: 240 8% 92%;              /* Subtle gray */
+
+    --muted: 240 8% 92%; /* Subtle gray */
     --muted-foreground: 240 8% 45%;
-    
-    --accent: 240 15% 8%;             /* Midnight black accent */
+
+    --accent: 240 15% 8%; /* Midnight black accent */
     --accent-foreground: 240 15% 98%;
-    
+
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 0 0% 98%;
-    
-    --border: 240 8% 88%;             /* Soft borders */
+
+    --border: 240 8% 88%; /* Soft borders */
     --input: 240 8% 94%;
     --ring: 240 15% 8%;
-    
+
     --radius: 0.75rem;
 
     --sidebar-background: 0 0% 98%;
@@ -117,11 +124,24 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
   }
 
   header,
   header * {
-    font-family: 'Geist', Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    font-family:
+      'Geist',
+      Inter,
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      'Helvetica Neue',
+      Arial,
+      'Noto Sans',
+      sans-serif;
   }
 }

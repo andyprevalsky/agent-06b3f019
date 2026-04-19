@@ -19,11 +19,13 @@ A Mac-only Electron application for securely uploading iMessage and Chrome Cooki
 ## Setup
 
 1. **Install dependencies:**
+
    ```bash
    npm install
    ```
 
 2. **Create `.env` file:**
+
    ```bash
    cp .env.example .env
    ```
@@ -43,6 +45,7 @@ npm run dev
 ```
 
 This will:
+
 - Start Vite dev server on `http://localhost:5173`
 - Launch Electron app with hot-reload
 
@@ -53,6 +56,7 @@ npm run build
 ```
 
 Creates production builds:
+
 - `.dmg` installer
 - `.zip` distribution
 
@@ -69,6 +73,7 @@ Creates production builds:
 Following [electron-template](https://github.com/fameoflight/electron-template) best practices:
 
 ### Main Process (Node.js)
+
 - `main/index.ts` - Window creation and app lifecycle
 - `main/preload.ts` - IPC bridge (security boundary)
 - `main/services/` - Business logic (iMessage, Cookies, Upload)
@@ -76,12 +81,14 @@ Following [electron-template](https://github.com/fameoflight/electron-template) 
 - `main/base/` - Shared utilities (Config, Crypto)
 
 ### Renderer Process (React)
+
 - `ui/App.tsx` - Main app component
 - `ui/components/` - React components
 - `ui/hooks/` - Custom React hooks
 - `ui/lib/` - Supabase client
 
 ### Shared
+
 - `shared/types/ipc.ts` - TypeScript IPC contracts
 
 ## Security
@@ -105,4 +112,3 @@ Following [electron-template](https://github.com/fameoflight/electron-template) 
 ## License
 
 MIT
-
