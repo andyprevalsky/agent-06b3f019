@@ -15,92 +15,14 @@
 
 import { useState, useEffect } from 'react';
 import { Loader2, ArrowRight, Sparkles } from 'lucide-react';
-import { getSession } from '@/lib/supabase';
 import { SystemCustomization, type CustomizationData } from '@/features/customization';
-
-const backendUrl: string =
-  typeof import.meta.env.VITE_BACKEND_API_URL === 'string' &&
-  import.meta.env.VITE_BACKEND_API_URL.length > 0
-    ? import.meta.env.VITE_BACKEND_API_URL
-    : 'http://localhost:3001';
+import { fetchCustomization, saveCustomization } from '../api';
 
 interface OnboardingCustomizationProps {
   onComplete: () => void;
 }
 
-interface UserSettingsResponse {
-  systemName?: string | null;
-  profilePicture?: string | null;
-  customSystemPrompt?: string | null;
-}
-
-const fetchCustomization = async (): Promise<CustomizationData | null> => {
-  const session = getSession();
-  if (session === null || session === undefined) {
-    return null;
-  }
-  try {
-    const response = await fetch(`${backendUrl}/api/user-settings`, {
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-      },
-    });
-    if (!response.ok) return null;
-    const data = (await response.json()) as UserSettingsResponse;
-    return {
-      systemName:
-        data.systemName !== null && data.systemName !== undefined ? data.systemName : 'Rose',
-      profilePicture:
-        data.profilePicture !== null && data.profilePicture !== undefined
-          ? data.profilePicture
-          : null,
-      customSystemPrompt:
-        data.customSystemPrompt !== null && data.customSystemPrompt !== undefined
-          ? data.customSystemPrompt
-          : '',
-    };
-  } catch (err) {
-    console.error('Failed to load customization:', err);
-    return null;
-  }
-};
-
-const saveCustomization = async (customization: CustomizationData): Promise<void> => {
-  const session = getSession();
-  if (session === null || session === undefined) {
-    throw new Error('Not authenticated');
-  }
-  const response = await fetch(`${backendUrl}/api/user-settings`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      systemName:
-        customization.systemName !== null &&
-        customization.systemName !== undefined &&
-        customization.systemName.length > 0
-          ? customization.systemName
-          : null,
-      profilePicture:
-        customization.profilePicture !== null && customization.profilePicture !== undefined
-          ? customization.profilePicture
-          : null,
-      customSystemPrompt:
-        customization.customSystemPrompt !== null &&
-        customization.customSystemPrompt !== undefined &&
-        customization.customSystemPrompt.length > 0
-          ? customization.customSystemPrompt
-          : null,
-    }),
-  });
-  if (!response.ok) {
-    throw new Error('Failed to save customization');
-  }
-};
-
-export default function OnboardingCustomization({ onComplete }: OnboardingCustomizationProps) {
+const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): JSX.Element => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,7 +39,7 @@ export default function OnboardingCustomization({ onComplete }: OnboardingCustom
     });
   }, []);
 
-  const handleContinue = async () => {
+  const handleContinue = async (): Promise<void> => {
     setSaving(true);
     setError(null);
     try {
@@ -185,4 +107,6 @@ export default function OnboardingCustomization({ onComplete }: OnboardingCustom
       </div>
     </div>
   );
-}
+};
+
+export default OnboardingCustomization;

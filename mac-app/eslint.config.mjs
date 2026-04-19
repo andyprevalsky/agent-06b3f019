@@ -17,6 +17,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/iMessageSync.ts',
   'main/domains/i-message-sync/**/*.ts',
   'ui/onboarding/**/*.{ts,tsx}',
+  'ui/features/onboarding/**/*.{ts,tsx}',
   'main/handlers/registry.ts',
   'main/services/sync/**/*.ts',
   'ui/ElectronApp.tsx',

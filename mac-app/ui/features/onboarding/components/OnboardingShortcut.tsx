@@ -1,55 +1,36 @@
+/**
+ * STATE MACHINE: OnboardingShortcut
+ *
+ *   [IDLE] ──(load saved)──> [READY]
+ *       │
+ *       └──(click change)──> [RECORDING] ──(keydown)──> persist → [READY]
+ */
+
 import { useState, useEffect, useRef } from 'react';
 import { ArrowRight, ArrowUp } from 'lucide-react';
 import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
 import LiquidWhiteButton from '@/components/ui/liquid-white-button';
-
-interface ShortcutConfig {
-  modifiers: string[];
-  key: string;
-}
+import { DEFAULT_SHORTCUT, MODIFIER_DISPLAY, KEY_DISPLAY, MODIFIER_KEY_CODES } from '../config';
+import type { ShortcutConfig } from '../types';
 
 interface OnboardingShortcutProps {
   onComplete: () => void;
 }
 
-const DEFAULT_SHORTCUT: ShortcutConfig = {
-  modifiers: ['Alt'],
-  key: 'Space',
-};
-
-const MODIFIER_DISPLAY: Record<string, string> = {
-  Meta: '\u2318', // Command
-  Alt: '\u2325', // Option
-  Control: '\u2303', // Control
-  Shift: '\u21E7', // Shift
-};
-
-const KEY_DISPLAY: Record<string, string> = {
-  Space: 'Space',
-  ArrowUp: '\u2191',
-  ArrowDown: '\u2193',
-  ArrowLeft: '\u2190',
-  ArrowRight: '\u2192',
-  Enter: '\u23CE',
-  Escape: 'Esc',
-  Tab: '\u21E5',
-  Backspace: '\u232B',
-};
-
 const formatShortcut = (config: ShortcutConfig): string => {
-  const mods = config.modifiers.map((m) => MODIFIER_DISPLAY[m] || m).join(' ');
-  const key = KEY_DISPLAY[config.key] || config.key.toUpperCase();
+  const mods = config.modifiers.map((m) => MODIFIER_DISPLAY[m] ?? m).join(' ');
+  const key = KEY_DISPLAY[config.key] ?? config.key.toUpperCase();
   return `${mods} ${key}`.trim();
 };
 
 // Quick Launcher preview shader
-const LauncherShaderTile = ({ size }: { size: number }) => {
+const LauncherShaderTile = ({ size }: { size: number }): JSX.Element => {
   const containerRef = useRef<HTMLDivElement>(null);
   const shaderRef = useRef<ShaderMount | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (container === null) return;
 
     if (shaderRef.current !== null) {
       shaderRef.current.dispose();
@@ -105,70 +86,64 @@ const LauncherShaderTile = ({ size }: { size: number }) => {
   );
 };
 
-// Quick Launcher preview component
-const QuickLauncherPreview = () => {
-  return (
-    <div style={{ position: 'relative', width: '100%', height: 52 }}>
+const QuickLauncherPreview = (): JSX.Element => (
+  <div style={{ position: 'relative', width: '100%', height: 52 }}>
+    <div
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        borderRadius: 9999,
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
+      }}
+    >
       <div
         style={{
           position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
+          inset: 0,
           borderRadius: 9999,
-          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
+          overflow: 'hidden',
         }}
       >
-        {/* Shader background */}
-        <div
+        <LauncherShaderTile size={52} />
+      </div>
+
+      <div
+        style={{
+          position: 'absolute',
+          top: 2,
+          left: 2,
+          right: 2,
+          bottom: 2,
+          borderRadius: 9999,
+          backgroundColor: '#f5f5f5',
+          display: 'flex',
+          alignItems: 'center',
+          paddingLeft: 16,
+          paddingRight: 4,
+          gap: 12,
+        }}
+      >
+        <span
           style={{
-            position: 'absolute',
-            inset: 0,
-            borderRadius: 9999,
-            overflow: 'hidden',
+            flex: 1,
+            fontSize: 13,
+            color: 'rgba(39, 39, 37, 0.5)',
           }}
         >
-          <LauncherShaderTile size={52} />
-        </div>
+          Enter any desire
+        </span>
 
-        {/* Inner content */}
-        <div
-          style={{
-            position: 'absolute',
-            top: 2,
-            left: 2,
-            right: 2,
-            bottom: 2,
-            borderRadius: 9999,
-            backgroundColor: '#f5f5f5',
-            display: 'flex',
-            alignItems: 'center',
-            paddingLeft: 16,
-            paddingRight: 4,
-            gap: 12,
-          }}
-        >
-          <span
-            style={{
-              flex: 1,
-              fontSize: 13,
-              color: 'rgba(39, 39, 37, 0.5)',
-            }}
-          >
-            Enter any desire
-          </span>
-
-          <LiquidWhiteButton disabled size="sm">
-            <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-          </LiquidWhiteButton>
-        </div>
+        <LiquidWhiteButton disabled size="sm">
+          <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+        </LiquidWhiteButton>
       </div>
     </div>
-  );
-};
+  </div>
+);
 
-// Convert e.code to a readable key name
 const codeToKey = (code: string): string => {
   if (code.startsWith('Key')) {
     return code.slice(3);
@@ -198,19 +173,8 @@ const codeToKey = (code: string): string => {
     Slash: '/',
     Backquote: '`',
   };
-  return codeMap[code] || code;
+  return codeMap[code] ?? code;
 };
-
-const MODIFIER_KEY_CODES = new Set([
-  'MetaLeft',
-  'MetaRight',
-  'AltLeft',
-  'AltRight',
-  'ControlLeft',
-  'ControlRight',
-  'ShiftLeft',
-  'ShiftRight',
-]);
 
 const extractShortcutFromEvent = (e: KeyboardEvent): ShortcutConfig | null => {
   if (MODIFIER_KEY_CODES.has(e.code)) return null;
@@ -224,11 +188,12 @@ const extractShortcutFromEvent = (e: KeyboardEvent): ShortcutConfig | null => {
 };
 
 const loadSavedShortcut = async (): Promise<ShortcutConfig | null> => {
-  if (!window.api?.shortcut?.get) return null;
+  const shortcutApi = window.api?.shortcut;
+  if (shortcutApi?.get === undefined || shortcutApi.set === undefined) return null;
   try {
-    const saved = await window.api.shortcut.get();
-    if (saved) return saved;
-    await window.api.shortcut.set(DEFAULT_SHORTCUT);
+    const saved = await shortcutApi.get();
+    if (saved !== null && saved !== undefined) return saved;
+    await shortcutApi.set(DEFAULT_SHORTCUT);
     return null;
   } catch (err) {
     console.error('Failed to load shortcut config:', err);
@@ -237,15 +202,16 @@ const loadSavedShortcut = async (): Promise<ShortcutConfig | null> => {
 };
 
 const persistShortcut = async (config: ShortcutConfig): Promise<void> => {
-  if (!window.api?.shortcut?.set) return;
+  const shortcutApi = window.api?.shortcut;
+  if (shortcutApi?.set === undefined) return;
   try {
-    await window.api.shortcut.set(config);
+    await shortcutApi.set(config);
   } catch (err) {
     console.error('Failed to save shortcut:', err);
   }
 };
 
-const OnboardingShortcut = ({ onComplete }: OnboardingShortcutProps) => {
+const OnboardingShortcut = ({ onComplete }: OnboardingShortcutProps): JSX.Element => {
   const [shortcut, setShortcut] = useState<ShortcutConfig>(DEFAULT_SHORTCUT);
   const [isRecording, setIsRecording] = useState(false);
   const isRecordingRef = useRef(isRecording);
@@ -256,15 +222,15 @@ const OnboardingShortcut = ({ onComplete }: OnboardingShortcutProps) => {
 
   useEffect(() => {
     void loadSavedShortcut().then((saved) => {
-      if (saved) setShortcut(saved);
+      if (saved !== null) setShortcut(saved);
     });
   }, []);
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
       if (!isRecordingRef.current) return;
       const newShortcut = extractShortcutFromEvent(e);
-      if (!newShortcut) return;
+      if (newShortcut === null) return;
       e.preventDefault();
       e.stopPropagation();
       setShortcut(newShortcut);
@@ -304,9 +270,9 @@ const OnboardingShortcut = ({ onComplete }: OnboardingShortcutProps) => {
                 {formatShortcut(shortcut)}
               </span>
             )}
-            {!isRecording && (
+            {!isRecording ? (
               <span className="text-xs text-muted-foreground mt-2 block">click to change</span>
-            )}
+            ) : null}
           </button>
         </div>
 

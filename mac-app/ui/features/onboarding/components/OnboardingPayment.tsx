@@ -1,13 +1,20 @@
+/**
+ * STATE MACHINE: OnboardingPayment
+ *
+ *   [CHOICE] ──(click Subscribe)──> open Stripe URL → [WAITING]
+ *       │
+ *       └──(enter bypass code)──> validate → [SUCCESS] onComplete()
+ *                                          │
+ *                                          └── (invalid) → show error → [CHOICE]
+ *
+ *   [WAITING] ──(IPC: payment success)──> onComplete()
+ *       │
+ *       └──(IPC: payment failure)──> [CHOICE]
+ */
+
 import { useEffect, useState } from 'react';
 import { Loader2, ExternalLink } from 'lucide-react';
-
-const STRIPE_PAYMENT_URL_PROD = 'https://buy.stripe.com/6oU00k2kK1vi8bLdL8bQY00';
-const STRIPE_PAYMENT_URL_DEV = 'https://buy.stripe.com/test_5kQcN64tX2PccvS6dM9ws00';
-
-const isDev = Boolean(import.meta.env.DEV);
-const STRIPE_PAYMENT_URL = isDev ? STRIPE_PAYMENT_URL_DEV : STRIPE_PAYMENT_URL_PROD;
-
-const BYPASS_CODE = '181818';
+import { BYPASS_CODE, getStripePaymentUrl } from '../config';
 
 interface OnboardingPaymentProps {
   onComplete: () => void;
@@ -27,7 +34,7 @@ const PaymentChoice = ({
   bypassError,
   onBypassSubmit,
   onBypassCodeChange,
-}: PaymentChoiceProps) => (
+}: PaymentChoiceProps): JSX.Element => (
   <div className="space-y-6">
     <button
       onClick={onOpenPayment}
@@ -68,56 +75,42 @@ const PaymentChoice = ({
   </div>
 );
 
-const OnboardingPayment = ({ onComplete }: OnboardingPaymentProps) => {
+const OnboardingPayment = ({ onComplete }: OnboardingPaymentProps): JSX.Element => {
   const [waitingForPayment, setWaitingForPayment] = useState(false);
   const [bypassCode, setBypassCode] = useState('');
   const [bypassError, setBypassError] = useState(false);
 
-  console.log('[OnboardingPayment] Rendered', { waitingForPayment, bypassCode, bypassError });
-
   useEffect(() => {
-    const handlePaymentComplete = (data: { success: boolean }) => {
-      console.log('[OnboardingPayment] Payment complete callback received', data);
+    const handlePaymentComplete = (data: { success: boolean }): void => {
       if (data.success) {
-        console.log('[OnboardingPayment] Payment succeeded, calling onComplete');
         onComplete();
       } else {
-        console.log('[OnboardingPayment] Payment failed, resetting waitingForPayment');
         setWaitingForPayment(false);
       }
     };
 
     window.api.onPaymentComplete(handlePaymentComplete);
-    console.log('[OnboardingPayment] Registered payment complete listener');
 
     return () => {
       window.api.removePaymentCompleteListener();
-      console.log('[OnboardingPayment] Removed payment complete listener');
     };
   }, [onComplete]);
 
-  const handleOpenPayment = () => {
-    console.log('[OnboardingPayment] Opening Stripe payment URL', { url: STRIPE_PAYMENT_URL });
+  const handleOpenPayment = (): void => {
     setWaitingForPayment(true);
-    void window.api.openExternal(STRIPE_PAYMENT_URL);
+    void window.api.openExternal(getStripePaymentUrl());
   };
 
-  const handleBypassSubmit = (e: React.FormEvent) => {
+  const handleBypassSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
-    console.log('[OnboardingPayment] Bypass code submitted', {
-      codeLength: bypassCode.length,
-      matches: bypassCode === BYPASS_CODE,
-    });
     if (bypassCode === BYPASS_CODE) {
-      console.log('[OnboardingPayment] Bypass code accepted, calling onComplete');
       onComplete();
     } else {
-      console.log('[OnboardingPayment] Bypass code rejected');
       setBypassError(true);
     }
   };
 
-  const handleBypassCodeChange = (value: string) => {
+  const handleBypassCodeChange = (value: string): void => {
     setBypassCode(value);
     setBypassError(false);
   };

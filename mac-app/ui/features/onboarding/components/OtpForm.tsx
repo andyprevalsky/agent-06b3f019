@@ -21,7 +21,7 @@ const SmsAuthLabel = ({
 }: {
   smsAuthorized: boolean;
   onChange: (value: boolean) => void;
-}) => (
+}): JSX.Element => (
   <label className="flex items-start gap-3 p-3 bg-muted/30 border border-border rounded-xl cursor-pointer">
     <input
       type="checkbox"
@@ -69,7 +69,7 @@ const OtpActions = ({
   resendCountdown: number;
   onResend: () => void;
   onBackToSignup: () => void;
-}) => (
+}): JSX.Element => (
   <div className="flex items-center justify-center gap-4 mt-4">
     <button
       type="button"
@@ -102,7 +102,7 @@ export const OtpForm = ({
   onSubmit,
   onResend,
   onBackToSignup,
-}: OtpFormProps) => (
+}: OtpFormProps): JSX.Element => (
   <div className="flex-1 flex items-center justify-center px-8">
     <div className="w-full max-w-sm" style={{ fontFamily }}>
       <RoseLogo />
@@ -132,7 +132,7 @@ export const OtpForm = ({
           className="w-full py-3 px-4 rounded-xl bg-foreground text-background font-medium text-sm hover:bg-foreground/90 transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {loading ? 'Verifying...' : 'Continue'}
-          {!loading && <ArrowRight className="w-3.5 h-3.5" />}
+          {loading ? null : <ArrowRight className="w-3.5 h-3.5" />}
         </button>
       </form>
       <OtpActions

@@ -1,30 +1,51 @@
 import { useState, useEffect } from 'react';
 import { sendOTP, verifyOTP } from '@/features/auth/api';
-import { stripPhoneNumber } from './OnboardingAuthShared';
+import { RESEND_COOLDOWN_SECONDS } from './config';
+import type { AuthStep, UseOnboardingAuthResult } from './types';
 
-export type AuthStep = 'signup' | 'otp';
+// Format phone number as user types: +1 (XXX)-XXX-XXXX
+export const formatPhoneNumber = (value: string): string => {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 0) return '';
 
-export interface UseOnboardingAuthResult {
-  step: AuthStep;
-  loading: boolean;
-  error: string | null;
-  firstName: string;
-  lastName: string;
-  phone: string;
-  otp: string;
-  smsAuthorized: boolean;
-  resendCountdown: number;
-  isFormValid: boolean;
-  setFirstName: (v: string) => void;
-  setLastName: (v: string) => void;
-  setPhone: (v: string) => void;
-  setOtp: (v: string) => void;
-  setSmsAuthorized: (v: boolean) => void;
-  handleSignupSubmit: (e: React.FormEvent) => void;
-  handleOtpSubmit: (e: React.FormEvent) => void;
-  handleResendOTP: () => void;
-  handleBackToSignup: () => void;
-}
+  if (digits[0] === '1') {
+    let formatted = '+1';
+    const remaining = digits.slice(1);
+    if (remaining.length > 0) {
+      formatted += ' (' + remaining.slice(0, 3);
+      if (remaining.length >= 3) {
+        formatted += ')';
+        if (remaining.length > 3) {
+          formatted += '-' + remaining.slice(3, 6);
+          if (remaining.length > 6) {
+            formatted += '-' + remaining.slice(6, 10);
+          }
+        }
+      }
+    }
+    return formatted;
+  }
+
+  if (digits.length <= 10) {
+    let formatted = '+1 (' + digits.slice(0, 3);
+    if (digits.length >= 3) {
+      formatted += ')';
+      if (digits.length > 3) {
+        formatted += '-' + digits.slice(3, 6);
+        if (digits.length > 6) {
+          formatted += '-' + digits.slice(6, 10);
+        }
+      }
+    }
+    return formatted;
+  }
+
+  return '+' + digits;
+};
+
+const stripPhoneNumber = (formatted: string): string => {
+  return '+' + formatted.replace(/\D/g, '');
+};
 
 export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResult => {
   const [step, setStep] = useState<AuthStep>('signup');
@@ -49,7 +70,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
   const submitPhone = async (phoneValue: string): Promise<boolean> => {
     try {
       await sendOTP(stripPhoneNumber(phoneValue));
-      setResendCountdown(30);
+      setResendCountdown(RESEND_COOLDOWN_SECONDS);
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send verification code');
@@ -57,7 +78,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
     }
   };
 
-  const handleSignupSubmit = (e: React.FormEvent) => {
+  const handleSignupSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
     if (!isFormValid) return;
     setLoading(true);
@@ -68,14 +89,14 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
     });
   };
 
-  const handleResendOTP = () => {
+  const handleResendOTP = (): void => {
     if (resendCountdown > 0) return;
     setLoading(true);
     setError(null);
     void submitPhone(phone).then(() => setLoading(false));
   };
 
-  const handleOtpSubmit = (e: React.FormEvent) => {
+  const handleOtpSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
     if (!smsAuthorized) return;
     setLoading(true);
@@ -88,7 +109,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
       .finally(() => setLoading(false));
   };
 
-  const handleBackToSignup = () => {
+  const handleBackToSignup = (): void => {
     setStep('signup');
     setOtp('');
     setError(null);

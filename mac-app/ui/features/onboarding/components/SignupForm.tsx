@@ -1,5 +1,6 @@
 import { ArrowRight } from 'lucide-react';
-import { RoseLogo, ErrorBanner, fontFamily, formatPhoneNumber } from './OnboardingAuthShared';
+import { RoseLogo, ErrorBanner, fontFamily } from './OnboardingAuthShared';
+import { formatPhoneNumber } from '../hooks';
 
 interface SignupFormProps {
   firstName: string;
@@ -25,7 +26,7 @@ export const SignupForm = ({
   onLastNameChange,
   onPhoneChange,
   onSubmit,
-}: SignupFormProps) => (
+}: SignupFormProps): JSX.Element => (
   <div className="flex-1 flex items-center justify-center px-8">
     <div className="w-full max-w-sm" style={{ fontFamily }}>
       <RoseLogo />
@@ -69,7 +70,7 @@ export const SignupForm = ({
           className="w-full py-3 px-4 rounded-xl bg-foreground text-background font-medium text-sm hover:bg-foreground/90 transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {loading ? 'Sending code...' : 'Continue'}
-          {!loading && <ArrowRight className="w-3.5 h-3.5" />}
+          {loading ? null : <ArrowRight className="w-3.5 h-3.5" />}
         </button>
       </form>
     </div>

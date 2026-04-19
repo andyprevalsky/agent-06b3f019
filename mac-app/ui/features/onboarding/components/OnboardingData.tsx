@@ -1,5 +1,5 @@
 /* eslint-disable max-lines, max-lines-per-function, @typescript-eslint/strict-boolean-expressions, @typescript-eslint/no-floating-promises, @typescript-eslint/no-misused-promises --
- * OnboardingData.tsx orchestrates 5 distinct integration flows (browser auth, passwords,
+ * OnboardingData orchestrates 5 distinct integration flows (browser auth, passwords,
  * Gmail OAuth, messaging, Claude Code) with tightly coupled state. Splitting it into
  * per-integration components requires a dedicated refactor that's out of scope for the
  * format-and-lint pass. TODO: track refactor in a follow-up issue; remove this block
@@ -7,34 +7,29 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import { Check, Loader2, ArrowRight, RefreshCw } from 'lucide-react';
-import { getSession } from '@/lib/supabase';
-import AtlasPasswordModal from '../components/AtlasPasswordModal';
-import ApplePasswordsModal from '../components/ApplePasswordsModal';
-import WhatsAppQRModal from '../components/WhatsAppQRModal';
-import TelegramAuthModal from '../components/TelegramAuthModal';
-import AgentPayModal from '../components/AgentPayModal';
-import type { BrowserInfo, BrowserType } from '../../shared/types/ipc';
+import AtlasPasswordModal from '../../../components/AtlasPasswordModal';
+import ApplePasswordsModal from '../../../components/ApplePasswordsModal';
+import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
+import TelegramAuthModal from '../../../components/TelegramAuthModal';
+import AgentPayModal from '../../../components/AgentPayModal';
+import type { BrowserInfo, BrowserType, Integration } from '../types';
+import {
+  fetchIntegrations,
+  fetchUserSettings,
+  startGmailOAuth,
+  uploadApplePasswords,
+  sendPasswordIntegrationRequest,
+  spawnLinkedInSyncAgent,
+} from '../api';
 
 // Browser icons
-import chromeIcon from '../assets/chrome-icon.png';
-import chatgptIcon from '../assets/chatgpt-icon.webp';
-import braveIcon from '../assets/brave-icon.webp';
-import applePasswordsIcon from '../assets/apple-passwords-icon.png';
+import chromeIcon from '../../../assets/chrome-icon.png';
+import chatgptIcon from '../../../assets/chatgpt-icon.webp';
+import braveIcon from '../../../assets/brave-icon.webp';
+import applePasswordsIcon from '../../../assets/apple-passwords-icon.png';
 
 interface OnboardingDataProps {
   onComplete: () => void;
-}
-
-interface Integration {
-  id: string;
-  name: string;
-  status: string;
-  config?: {
-    connectedEmail?: string;
-    connectedEmails?: string[];
-    cookieCount?: number;
-    fingerprint?: unknown;
-  };
 }
 
 // Browser icon component
@@ -241,110 +236,82 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           console.log('[OnboardingData] getInstalledBrowsers API not available');
         }
 
-        // Fetch existing integrations
-        const session = getSession();
-        if (!session?.access_token) {
-          setInitialLoading(false);
-          return;
+        // Fetch existing integrations via api layer
+        const integrations: Integration[] = await fetchIntegrations();
+
+        // Check for browser integrations (chrome, edge, atlas, etc.)
+        const validBrowserTypes = [
+          'chrome',
+          'edge',
+          'brave',
+          'arc',
+          'opera',
+          'vivaldi',
+          'chromium',
+          'atlas',
+          'safari',
+          'firefox',
+        ];
+        const newConnectedBrowsers = new Set<BrowserType>();
+        for (const integration of integrations) {
+          if (validBrowserTypes.includes(integration.name) && integration.status === 'CONNECTED') {
+            newConnectedBrowsers.add(integration.name as BrowserType);
+          }
+        }
+        setConnectedBrowsers(newConnectedBrowsers);
+
+        // Check for password integrations
+        const chromeIntegration = integrations.find(
+          (i: Integration) => i.name === 'chrome' && i.status === 'CONNECTED'
+        );
+        setChromePasswordsSynced(!!chromeIntegration);
+
+        const applePasswordsIntegration = integrations.find(
+          (i: Integration) => i.name === 'apple_passwords' && i.status === 'CONNECTED'
+        );
+        setApplePasswordsSynced(!!applePasswordsIntegration);
+
+        const atlasPasswordsIntegration = integrations.find(
+          (i: Integration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED'
+        );
+        setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
+
+        // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
+        // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
+        const gmailIntegration = integrations.find((i) => i.name === 'gmail');
+        const isGmailConnected =
+          gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';
+        if (isGmailConnected) {
+          if (
+            gmailIntegration.config?.connectedEmails &&
+            gmailIntegration.config.connectedEmails.length > 0
+          ) {
+            setConnectedEmails(gmailIntegration.config.connectedEmails);
+          } else if (gmailIntegration.config?.connectedEmail) {
+            setConnectedEmails([gmailIntegration.config.connectedEmail]);
+          }
         }
 
-        const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-        const response = await fetch(`${backendUrl}/api/integrations`, {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        });
+        // Check for messaging integrations
+        const imessageIntegration = integrations.find(
+          (i: Integration) => i.name === 'imessage' && i.status === 'CONNECTED'
+        );
+        setIMessageSynced(!!imessageIntegration);
 
-        if (response.ok) {
-          const data = await response.json();
-          const integrations: Integration[] = data.integrations || [];
+        const whatsappIntegration = integrations.find(
+          (i: Integration) => i.name === 'whatsapp' && i.status === 'CONNECTED'
+        );
+        setWhatsAppConnected(!!whatsappIntegration);
 
-          // Check for browser integrations (chrome, edge, atlas, etc.)
-          const validBrowserTypes = [
-            'chrome',
-            'edge',
-            'brave',
-            'arc',
-            'opera',
-            'vivaldi',
-            'chromium',
-            'atlas',
-            'safari',
-            'firefox',
-          ];
-          const newConnectedBrowsers = new Set<BrowserType>();
-          for (const integration of integrations) {
-            if (
-              validBrowserTypes.includes(integration.name) &&
-              integration.status === 'CONNECTED'
-            ) {
-              newConnectedBrowsers.add(integration.name as BrowserType);
-            }
-          }
-          setConnectedBrowsers(newConnectedBrowsers);
-
-          // Check for password integrations
-          const chromeIntegration = integrations.find(
-            (i: Integration) => i.name === 'chrome' && i.status === 'CONNECTED'
-          );
-          setChromePasswordsSynced(!!chromeIntegration);
-
-          const applePasswordsIntegration = integrations.find(
-            (i: Integration) => i.name === 'apple_passwords' && i.status === 'CONNECTED'
-          );
-          setApplePasswordsSynced(!!applePasswordsIntegration);
-
-          const atlasPasswordsIntegration = integrations.find(
-            (i: Integration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED'
-          );
-          setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
-
-          // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
-          // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
-          const gmailIntegration = integrations.find((i) => i.name === 'gmail');
-          const isGmailConnected =
-            gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';
-          if (isGmailConnected) {
-            if (
-              gmailIntegration.config?.connectedEmails &&
-              gmailIntegration.config.connectedEmails.length > 0
-            ) {
-              setConnectedEmails(gmailIntegration.config.connectedEmails);
-            } else if (gmailIntegration.config?.connectedEmail) {
-              setConnectedEmails([gmailIntegration.config.connectedEmail]);
-            }
-          }
-
-          // Check for messaging integrations
-          const imessageIntegration = integrations.find(
-            (i: Integration) => i.name === 'imessage' && i.status === 'CONNECTED'
-          );
-          setIMessageSynced(!!imessageIntegration);
-
-          const whatsappIntegration = integrations.find(
-            (i: Integration) => i.name === 'whatsapp' && i.status === 'CONNECTED'
-          );
-          setWhatsAppConnected(!!whatsappIntegration);
-
-          const telegramIntegration = integrations.find(
-            (i: Integration) => i.name === 'telegram' && i.status === 'CONNECTED'
-          );
-          setTelegramConnected(!!telegramIntegration);
-
-          // Check for Claude Code credentials
-        }
+        const telegramIntegration = integrations.find(
+          (i: Integration) => i.name === 'telegram' && i.status === 'CONNECTED'
+        );
+        setTelegramConnected(!!telegramIntegration);
 
         // Check if agent pay is already configured
-        const settingsResponse = await fetch(`${backendUrl}/api/user-settings`, {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        });
-        if (settingsResponse.ok) {
-          const settingsData = await settingsResponse.json();
-          if (settingsData.encryptedPaymentInformation) {
-            setAgentPayConfigured(true);
-          }
+        const settings = await fetchUserSettings();
+        if (settings !== null && settings.encryptedPaymentInformation) {
+          setAgentPayConfigured(true);
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -438,31 +405,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleApplePasswordsSync = async (file: File) => {
     setPasswordSyncLoading('apple');
     try {
-      const session = getSession();
-      if (!session?.access_token) {
-        throw new Error('Not authenticated');
-      }
-
-      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const response = await fetch(`${backendUrl}/api/integrations/passwords/apple/upload`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: formData,
-      });
-
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to import passwords');
-      }
-
+      const result = await uploadApplePasswords(file);
       setApplePasswordsSynced(true);
       setApplePasswordsModalOpen(false);
-      console.log(`[OnboardingData] Imported ${payload.passwordCount} Apple passwords`);
+      console.log(`[OnboardingData] Imported ${result.passwordCount} Apple passwords`);
     } catch (err) {
       console.error('Failed to import Apple passwords:', err);
       throw err; // Let the modal handle the error display
@@ -498,28 +444,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     setPasswordRequestSending(true);
 
     try {
-      const session = getSession();
-      if (!session?.access_token) {
-        console.error('No auth session');
-        setPasswordRequestSending(false);
-        return;
-      }
-
-      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-      const response = await fetch(`${backendUrl}/api/integrations/passwords/request`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ request: passwordRequestInput.trim() }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(data?.error || 'Failed to send request');
-      }
-
+      await sendPasswordIntegrationRequest(passwordRequestInput.trim());
       setPasswordRequestSent(true);
       setPasswordRequestInput('');
       console.log('[OnboardingData] Password integration request sent');
@@ -646,42 +571,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleLinkedInSync = async () => {
     setLinkedinSyncLoading(true);
     try {
-      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-      const session = await getSession();
-      const goal = `Download my LinkedIn data export and upload it to the platform.
-
-Steps:
-1. Use a browser agent to navigate to https://www.linkedin.com/mypreferences/d/download-my-data and request a full data export. Click "Request archive" to initiate.
-
-2. LinkedIn takes time to prepare the export (can be minutes to hours). Wait 10 minutes between checks. Use a browser agent to check my email inbox for an email from LinkedIn with subject containing "Your LinkedIn data archive is ready". Repeat checking every 10 minutes for up to 8 hours.
-
-3. When the email arrives, use a browser agent to:
-   - Open the email
-   - Click the download link
-   - Download the ZIP file from the LinkedIn download page
-
-4. After downloading the ZIP file, use a claude code agent to upload it to the backend (replace the file path with the actual downloaded ZIP path):
-   curl -X POST ${backendUrl}/api/integrations/linkedin/upload -H "Authorization: Bearer ${session?.access_token}" -F "file=@<path-to-downloaded-zip>"`;
-
-      const response = await fetch(`${backendUrl}/api/agents`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: JSON.stringify({
-          goal,
-          depth: 1,
-          source: 'MAC_APP',
-          price_limit_cents: 500,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to create agent');
-      }
-
+      await spawnLinkedInSyncAgent();
       console.log('[LinkedIn] Sync agent started successfully');
     } catch (err) {
       console.error('[LinkedIn] Failed to start sync agent:', err);
@@ -690,33 +580,11 @@ Steps:
     }
   };
 
-  // Handle Claude Code credentials sync
+  // Handle Gmail OAuth connect
   const handleGmailConnect = async () => {
     setGmailLoading(true);
     try {
-      const session = getSession();
-      if (!session?.access_token) {
-        console.error('No auth session');
-        setGmailLoading(false);
-        return;
-      }
-
-      const backendUrl = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001';
-
-      // Start OAuth flow
-      const startResponse = await fetch(`${backendUrl}/api/integrations/email/gmail/start`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!startResponse.ok) {
-        throw new Error('Failed to start Gmail OAuth');
-      }
-
-      const { authUrl } = await startResponse.json();
+      const authUrl = await startGmailOAuth();
 
       const width = 500;
       const height = 600;
@@ -739,13 +607,7 @@ Steps:
       // Poll backend for integration status (works regardless of popup or external browser)
       const pollForConnection = setInterval(async () => {
         try {
-          const response = await fetch(`${backendUrl}/api/integrations`, {
-            headers: { Authorization: `Bearer ${session.access_token}` },
-          });
-          if (!response.ok) return;
-
-          const data = await response.json();
-          const integrations: Integration[] = data.integrations || [];
+          const integrations: Integration[] = await fetchIntegrations();
           const gmailIntegration = integrations.find((i) => i.name === 'gmail');
           const isGmailConnected =
             gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';
@@ -759,9 +621,7 @@ Steps:
               setConnectedEmails(gmailIntegration.config.connectedEmails);
             } else if (gmailIntegration.config?.connectedEmail) {
               const email = gmailIntegration.config.connectedEmail;
-              if (!connectedEmails.includes(email)) {
-                setConnectedEmails((prev) => [...prev, email]);
-              }
+              setConnectedEmails((prev) => (prev.includes(email) ? prev : [...prev, email]));
             }
             setGmailLoading(false);
           }
@@ -780,12 +640,6 @@ Steps:
       setGmailLoading(false);
     }
   };
-
-  // Note: Currently backend only supports one Gmail per user due to unique constraint
-  // So we don't show remove button for now
-  // const handleRemoveEmail = (emailToRemove: string) => {
-  //   setConnectedEmails(prev => prev.filter(email => email !== emailToRemove));
-  // };
 
   if (initialLoading) {
     return (
