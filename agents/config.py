@@ -108,16 +108,6 @@ class ParallelConfig:
 
 
 @dataclass
-class RoseConfig:
-    """Rose API configuration for routing Rose models to Supabase edge function."""
-
-    # URL is set dynamically based on environment in load_config()
-    api_url: str = ""
-    api_key: str = ""  # Rose API key (x-api-key header)
-    supabase_anon_key: str = ""  # Supabase anon key (Authorization header)
-
-
-@dataclass
 class SupabaseConfig:
     """Supabase configuration for direct Realtime broadcasts."""
 
@@ -192,7 +182,6 @@ class AppConfig:
     gemini: GeminiConfig
     steel: SteelConfig
     parallel: ParallelConfig
-    rose: RoseConfig
     supabase: SupabaseConfig
     payment: PaymentConfig
     x402: X402Config
@@ -273,19 +262,7 @@ def load_config() -> AppConfig:
         api_key=os.environ["PARRALLEL_API_KEY"],
     )
 
-    # Use local Supabase functions in development, production URL otherwise
     environment = os.getenv("ENVIRONMENT", "production")
-    rose_functions_url = (
-        f"http://localhost:{os.getenv('RESEARCH_PORT', '54321')}/functions/v1"
-        if environment != "production"
-        else "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1"
-    )
-
-    rose = RoseConfig(
-        api_url=os.getenv("ROSE_API_URL", f"{rose_functions_url}/completions"),
-        api_key=os.getenv("ROSE_API_KEY", ""),
-        supabase_anon_key=os.getenv("SUPABASE_ANON_KEY", ""),
-    )
 
     supabase = SupabaseConfig(
         url=os.getenv("SUPABASE_URL", "https://kzlurqihzaolhzsbkctf.supabase.co"),
@@ -335,7 +312,6 @@ def load_config() -> AppConfig:
         gemini=gemini,
         steel=steel,
         parallel=parallel,
-        rose=rose,
         supabase=supabase,
         payment=payment,
         x402=x402,

@@ -16,9 +16,7 @@ TIMEOUT_SECONDS=120
 1. Backend API is healthy: `GET {BACKEND_URL}/health` returns 200
 2. Frontend is accessible: `GET {FRONTEND_URL}` returns 200
 3. Worker is running: `agents/navi-worker-log.txt` contains recent "Polling" entries (within last 60s)
-4. Research service is running: `GET http://localhost:54321/functions/v1/completions` returns 401 (alive, needs auth)
-   - Start with: `cd research && RESEARCH_PORT=54321 bash run-local.sh`
-5. Chrome browser with Claude extension connected (for CDP browser steps)
+4. Chrome browser with Claude extension connected (for CDP browser steps)
 
 ## Setup
 1. Navigate to `{FRONTEND_URL}` in Chrome
