@@ -227,6 +227,33 @@ export async function* parseOpenAISSE(
 }
 
 /**
+ * Read one chunk with an idle-timeout race. The timeout timer is cleared
+ * as soon as the read wins so it can't later reject in the background as
+ * an unhandled promise rejection.
+ */
+async function readWithIdleTimeout<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  idleTimeoutMs: number,
+  requestId: string
+) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () =>
+        reject(
+          new RoseStallError(`SSE stream idle for >${idleTimeoutMs}ms (request_id=${requestId})`)
+        ),
+      idleTimeoutMs
+    );
+  });
+  try {
+    return await Promise.race([reader.read(), timeoutPromise]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Read SSE lines from a ReadableStream, raising RoseStallError if more
  * than `idleTimeoutMs` elapses between consecutive lines.
  */
@@ -240,23 +267,8 @@ async function* iterLinesWithIdleTimeout(
   let buffer = '';
 
   try {
-    // eslint-disable-next-line no-restricted-syntax -- explicit per-read idle timeout requires interleaved await
-    while (true) {
-      const readPromise = reader.read();
-      const timeoutPromise = new Promise<{ done: true; value: undefined; stalled: true }>(
-        (_, reject) => {
-          setTimeout(
-            () =>
-              reject(
-                new RoseStallError(
-                  `SSE stream idle for >${idleTimeoutMs}ms (request_id=${requestId})`
-                )
-              ),
-            idleTimeoutMs
-          );
-        }
-      );
-      const result = await Promise.race([readPromise, timeoutPromise]);
+    for (;;) {
+      const result = await readWithIdleTimeout(reader, idleTimeoutMs, requestId);
       if (result.done) break;
       buffer += decoder.decode(result.value, { stream: true });
 

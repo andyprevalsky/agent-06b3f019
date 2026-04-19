@@ -195,6 +195,12 @@ async def parse_anthropic_sse(
                 elif delta_type == "thinking_delta":
                     text = delta.get("thinking") or ""
                     if text:
+                        # Reasoning counts as emitted: thinking models
+                        # legitimately place their JSON payload in
+                        # reasoning tokens, and the structured-streaming
+                        # caller extracts it. The "no real content" case
+                        # is gated at the caller via the "No JSON content
+                        # received" raise, not here.
                         emitted_content_or_tool = True
                         yield StreamChunk(kind="reasoning", data={"text": text})
                 elif delta_type == "input_json_delta":
@@ -364,6 +370,9 @@ async def parse_openai_sse(
             #   - `reasoning_content` (Gemini 3 Pro thinking, raw upstream)
             reasoning_text = delta.get("reasoning") or delta.get("reasoning_content")
             if reasoning_text:
+                # See parse_anthropic_sse thinking_delta — reasoning counts
+                # as emitted so thinking-model JSON-in-reasoning reaches the
+                # caller's extractor instead of stalling prematurely.
                 emitted_content_or_tool = True
                 yield StreamChunk(kind="reasoning", data={"text": reasoning_text})
 

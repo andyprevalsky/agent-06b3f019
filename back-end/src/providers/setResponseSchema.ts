@@ -289,7 +289,9 @@ export async function setResponseSchema(agentId: string): Promise<void> {
       {
         maxRetries: 4,
         initialBackoffMs: 100,
-        isRetryable: () => true,
+        // Auth / invalid-request errors are configuration problems — retrying
+        // them delays schema setup and burns duplicate provider calls.
+        isRetryable: isRetryableSchemaError,
         component: 'ResponseSchema',
       }
     );

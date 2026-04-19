@@ -97,6 +97,23 @@ interface FilePointer {
   created_at: string;
 }
 
+// Runtime validation — DB JSON must match the FilePointer shape before we
+// trust it enough to call downloadFromStorage() or build a multimodal block.
+function isValidFilePointer(value: unknown): value is FilePointer {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.storage_path === 'string' &&
+    v.storage_path.length > 0 &&
+    typeof v.mime_type === 'string' &&
+    v.mime_type.length > 0 &&
+    typeof v.size_bytes === 'number' &&
+    Number.isFinite(v.size_bytes) &&
+    v.size_bytes >= 0 &&
+    typeof v.original_filename === 'string'
+  );
+}
+
 // ============================================
 // Message format for LLM calls
 // ============================================
@@ -342,16 +359,25 @@ export async function callRouterLlm(params: {
     } else if (msg.role === 'USER') {
       // Check for file attachment
       if (msg.filePointer) {
-        // Build multimodal content from file (downloads from storage)
-        // Runtime validation: DB JSON is cast to FilePointer shape
-        const content = await buildMultimodalContentFromFile(
-          msg.text,
-          msg.filePointer as unknown as FilePointer
-        );
-        openaiMessages.push({
-          role: 'user',
-          content,
-        });
+        if (isValidFilePointer(msg.filePointer)) {
+          // Build multimodal content from file (downloads from storage)
+          const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
+          openaiMessages.push({
+            role: 'user',
+            content,
+          });
+        } else {
+          // Malformed persisted JSON — degrade to a plain-text attachment
+          // marker so routing doesn't crash on bad DB data.
+          log.warn('[RouterLLM] Invalid filePointer shape, degrading to text', {
+            agentId: params.agentId,
+          });
+          const marker = '[attachment metadata invalid, file unavailable]';
+          openaiMessages.push({
+            role: 'user',
+            content: msg.text ? `${msg.text}\n\n${marker}` : marker,
+          });
+        }
       } else if (msg.text) {
         openaiMessages.push({ role: 'user', content: msg.text });
       }

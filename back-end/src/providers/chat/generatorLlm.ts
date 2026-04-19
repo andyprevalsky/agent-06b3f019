@@ -23,6 +23,23 @@ interface FilePointer {
   created_at: string;
 }
 
+// Runtime validation — DB JSON must match the FilePointer shape before we
+// trust it enough to call downloadFromStorage() or build a multimodal block.
+function isValidFilePointer(value: unknown): value is FilePointer {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.storage_path === 'string' &&
+    v.storage_path.length > 0 &&
+    typeof v.mime_type === 'string' &&
+    v.mime_type.length > 0 &&
+    typeof v.size_bytes === 'number' &&
+    Number.isFinite(v.size_bytes) &&
+    v.size_bytes >= 0 &&
+    typeof v.original_filename === 'string'
+  );
+}
+
 // ============================================
 // Message format for LLM calls
 // ============================================
@@ -305,16 +322,25 @@ export async function callGeneratorLlm(params: {
     } else if (msg.role === 'USER') {
       // Check for file attachment
       if (msg.filePointer) {
-        // Build multimodal content from file (downloads from storage)
-        // Runtime validation: DB JSON is cast to FilePointer shape
-        const content = await buildMultimodalContentFromFile(
-          msg.text,
-          msg.filePointer as unknown as FilePointer
-        );
-        openaiMessages.push({
-          role: 'user',
-          content,
-        });
+        if (isValidFilePointer(msg.filePointer)) {
+          // Build multimodal content from file (downloads from storage)
+          const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
+          openaiMessages.push({
+            role: 'user',
+            content,
+          });
+        } else {
+          // Malformed persisted JSON — degrade to a plain-text attachment
+          // marker so routing doesn't crash on bad DB data.
+          log.warn('[GeneratorLLM] Invalid filePointer shape, degrading to text', {
+            agentId: params.agentId,
+          });
+          const marker = '[attachment metadata invalid, file unavailable]';
+          openaiMessages.push({
+            role: 'user',
+            content: msg.text ? `${msg.text}\n\n${marker}` : marker,
+          });
+        }
       } else if (msg.text) {
         openaiMessages.push({ role: 'user', content: msg.text });
       }
@@ -333,14 +359,18 @@ export async function callGeneratorLlm(params: {
     messageCount: openaiMessages.length,
   });
 
-  // Log full context being sent to generator (no truncation)
+  // Log metadata only — never full message bodies. Multimodal messages
+  // carry base64 file data; normal messages carry raw user text. Logging
+  // the bodies leaks sensitive data and blows up log volume on attachments.
   log.info('[GeneratorLLM] Context being sent to LLM');
   openaiMessages.forEach((msg, i) => {
+    const contentType = typeof msg.content === 'string' ? 'string' : 'array';
+    const length = typeof msg.content === 'string' ? msg.content.length : msg.content.length;
     log.info('[GeneratorLLM] Message', {
       index: i,
       role: msg.role,
-      content:
-        typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+      contentType,
+      length,
     });
   });
 

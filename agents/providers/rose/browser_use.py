@@ -370,6 +370,10 @@ _VALID_ACTIONS = frozenset({
     "dropdown_options", "select_dropdown", "screenshot", "find_text",
     "upload_file", "search", "goto", "navback", "input_text", "press_key",
     "switch_tab", "close_tab", "open_new_tab", "attempt_completion",
+    # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
+    # the user for help mid-task. Keep the allowlist in sync with the tool
+    # schema or normalize_browser_use_response() will reject it.
+    "send_message_to_user",
 })
 
 

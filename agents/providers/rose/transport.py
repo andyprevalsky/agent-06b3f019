@@ -107,7 +107,11 @@ async def post_anthropic_stream(
                     agent_id=agent_id,
                     call_site=call_site,
                     status=response.status_code,
-                    body=error_body[:500],
+                    # Validation failures echo request fragments, which can
+                    # expose user content / internal schema. Log only the
+                    # body length; the full body is still attached below for
+                    # the caller's error classifier.
+                    error_body_len=len(error_body),
                 )
                 # Attach body to response for the caller's error classifier.
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
@@ -149,7 +153,9 @@ async def post_openrouter_stream(
                     agent_id=agent_id,
                     call_site=call_site,
                     status=response.status_code,
-                    body=error_body[:500],
+                    # See post_anthropic_stream for rationale — log length
+                    # only; raw body stays on the response for the classifier.
+                    error_body_len=len(error_body),
                 )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
             yield response

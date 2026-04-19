@@ -115,7 +115,11 @@ export function transformSchemaForAnthropic(schema: unknown): unknown {
     out.additionalProperties &&
     typeof out.additionalProperties === 'object'
   ) {
-    out.additionalProperties = false;
+    // `additionalProperties: { ... }` means "dictionary with typed values".
+    // Keep the map shape but recurse so unsupported nested keywords are
+    // still stripped. Don't flatten to `false`, which would break every
+    // map-typed field on the claudeAuth path.
+    out.additionalProperties = transformSchemaForAnthropic(out.additionalProperties);
   }
 
   if (out.properties && typeof out.properties === 'object') {

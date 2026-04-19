@@ -109,7 +109,6 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
 
   let lastError: Error | null = null;
 
-   
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let response;
     try {
@@ -123,7 +122,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS));
+        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
       throw new RoseServerError(`Anthropic connect/read error: ${lastError.message}`);
@@ -148,7 +147,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
 
     if (status === 429) {
       if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(backoffFor429(response.headers, attempt));
+        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
       throw new RoseRateLimitError(`Anthropic 429: ${errorBody.substring(0, 200)}`, status);
@@ -164,7 +163,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
 
     if (status >= 500) {
       if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS));
+        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
       throw new RoseServerError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
@@ -189,8 +188,22 @@ function backoffFor429(headers: Headers, attempt: number): number {
   return Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error('Request aborted'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(signal?.reason ?? new Error('Request aborted'));
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // Re-export for callers that need to discriminate stalls separately.

@@ -34,7 +34,7 @@ _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
 # Smoke test timeout caps — keep these as low as practical.
 # If smoke tests hit these limits, diagnose and fix the bottleneck first;
 # only raise limits when the underlying latency is genuinely irreducible.
-_SMOKE_TIMEOUT_CAPS: dict[str, int] = {
+SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "chat-mode": 120,
     "spawn-sub-agents": 300,
     "parallel-tool-calls": 300,
@@ -43,13 +43,18 @@ _SMOKE_TIMEOUT_CAPS: dict[str, int] = {
 }
 
 
+def get_smoke_cap(name: str) -> int | None:
+    """Return the hard timeout cap for a smoke task, or None if not a smoke task."""
+    return SMOKE_TIMEOUT_CAPS.get(name)
+
+
 def _load_tasks() -> List[BenchmarkTask]:
     with open(_TASKS_FILE) as f:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
-        if t.name in _SMOKE_TIMEOUT_CAPS:
-            cap = _SMOKE_TIMEOUT_CAPS[t.name]
+        if t.name in SMOKE_TIMEOUT_CAPS:
+            cap = SMOKE_TIMEOUT_CAPS[t.name]
             if t.timeout_seconds > cap:
                 raise ValueError(
                     f"Smoke test '{t.name}' timeout_seconds={t.timeout_seconds} exceeds "

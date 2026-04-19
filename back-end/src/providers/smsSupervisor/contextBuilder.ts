@@ -170,17 +170,34 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     customSystemPrompt: user?.customSystemPrompt || null,
   });
 
-  // Load full session history (no limit — all messages are persisted)
-  const parsedSessionMessages: unknown = session?.messages
-    ? JSON.parse(
-        typeof session.messages === 'string' ? session.messages : JSON.stringify(session.messages)
-      )
-    : [];
+  // Load full session history (no limit — all messages are persisted).
+  // Defensive parse: a malformed row must not break the supervisor path for
+  // every inbound SMS. We drop anything that isn't a well-formed message.
+  let parsedSessionMessages: unknown = [];
+  const rawMessages = session?.messages;
+  if (rawMessages !== undefined && rawMessages !== null) {
+    try {
+      parsedSessionMessages =
+        typeof rawMessages === 'string' ? JSON.parse(rawMessages) : rawMessages;
+    } catch (err) {
+      log.warn('[SmsContext] Failed to parse session.messages, dropping history', {
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      parsedSessionMessages = [];
+    }
+  }
   const sessionMessages: CompletionMessage[] = Array.isArray(parsedSessionMessages)
-    ? parsedSessionMessages.map((m) => {
-        const entry = m as { role: 'user' | 'assistant'; content: string };
-        return { role: entry.role, content: entry.content };
-      })
+    ? parsedSessionMessages
+        .filter(
+          (m): m is { role: 'user' | 'assistant'; content: string } =>
+            typeof m === 'object' &&
+            m !== null &&
+            ((m as Record<string, unknown>).role === 'user' ||
+              (m as Record<string, unknown>).role === 'assistant') &&
+            typeof (m as Record<string, unknown>).content === 'string'
+        )
+        .map((entry) => ({ role: entry.role, content: entry.content }))
     : [];
 
   const totalDurationMs = Date.now() - startTime;
@@ -324,9 +341,7 @@ async function fetchVisibleMessages(agentIds: string[]): Promise<VisibleMessage[
     if (countByAgent[msg.agentId] > MAX_MESSAGES_PER_AGENT) continue;
 
     const title = (metadata.title as string) || toolName || 'Message';
-    const completionSummary = metadata.completionSummary as
-      | { summary?: string }
-      | undefined;
+    const completionSummary = metadata.completionSummary as { summary?: string } | undefined;
     const text =
       (metadata.attentionMessage as string | undefined) ||
       completionSummary?.summary ||

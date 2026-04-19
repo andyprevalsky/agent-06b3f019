@@ -21,11 +21,13 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
+from browser_tools.schemas import AVAILABLE_ACTIONS
 from config import load_config
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.model_pricing import get_model_pricing_with_fallback
 from loop.activity_helper import call_temporal_activity_from_activity
+from providers.rose import ClaudeAuthContext, RoseClient
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.prompts import build_verifier_prompt
@@ -45,9 +47,6 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
-from browser_tools.schemas import AVAILABLE_ACTIONS
-from providers.rose import ClaudeAuthContext, RoseClient
-
 from .repo import (
     close_browser_session,
     fetch_claude_token,
@@ -77,6 +76,7 @@ from .service_crypto import (
     build_autopay_prompt_section,
     build_passwords_prompt_section,
     decrypt_payment_info,
+    extract_rate_limited_until,
     fetch_recent_otps,
 )
 from .types import ClaudeTokenState
@@ -141,12 +141,18 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         current_source = token_state.source
         current_pool_id = token_state.pool_token_id
 
+        # Preserve the provider cooldown window (Retry-After header, anthropic
+        # ratelimit reset, or ISO hint) so the pooled token stays out of
+        # circulation for the correct duration instead of being requeued
+        # immediately on the next activity.
+        rate_limited_until = extract_rate_limited_until(llm_result)
+
         await report_claude_token_rate_limited(
             config,
             user_id=user_id,
             source=current_source,
             pool_token_id=current_pool_id,
-            rate_limited_until=None,
+            rate_limited_until=rate_limited_until,
         )
 
         token_state.access_token = None

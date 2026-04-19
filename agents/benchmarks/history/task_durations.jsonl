@@ -59,3 +59,12 @@
 {"task": "claude-code-agent", "duration_seconds": 71.4, "cost_cents": 0.0, "timestamp": "2026-04-18T21:56:40.539415+00:00", "agent_id": "23a600b3-30fe-4e4f-914f-516d6cbfeedd"}
 {"task": "browser-smoke", "duration_seconds": 161.9, "cost_cents": 3.0, "timestamp": "2026-04-18T21:56:40.539415+00:00", "agent_id": "df7ec249-069a-4cb0-9d81-240fd7e9da31"}
 {"task": "parallel-tool-calls", "duration_seconds": 116.8, "cost_cents": 16.0, "timestamp": "2026-04-18T22:49:01.391506+00:00", "agent_id": "b9261d37-0c48-438f-8e36-507daf918efc"}
+{"task": "chat-mode", "duration_seconds": 5.1, "cost_cents": 0.0, "timestamp": "2026-04-19T17:32:25.266339+00:00", "agent_id": "c3297925-6dd6-454a-ba91-d097f02a4a2d"}
+{"task": "spawn-sub-agents", "duration_seconds": 131.5, "cost_cents": 1.0, "timestamp": "2026-04-19T17:32:25.266339+00:00", "agent_id": "d3362bf9-a01d-4a6a-8d52-b21ff021480f"}
+{"task": "parallel-tool-calls", "duration_seconds": 297.2, "cost_cents": 0.0, "timestamp": "2026-04-19T17:32:25.266339+00:00", "agent_id": "3f8e3506-a23d-4102-80a2-9167aa821da1"}
+{"task": "claude-code-agent", "duration_seconds": 151.6, "cost_cents": 0.0, "timestamp": "2026-04-19T17:32:25.266339+00:00", "agent_id": "28ed622c-3246-4426-8f25-197f1bf9b558"}
+{"task": "browser-smoke", "duration_seconds": 51.0, "cost_cents": 0.0, "timestamp": "2026-04-19T17:32:25.266339+00:00", "agent_id": "2b9a8f09-bcd6-4527-830e-9929ee3c1f47"}
+{"task": "chat-mode", "duration_seconds": 5.1, "cost_cents": 0.0, "timestamp": "2026-04-19T19:26:14.657903+00:00", "agent_id": "7c1497aa-0f90-4cc7-9621-1d88681c7bf3"}
+{"task": "chat-mode", "duration_seconds": 5.1, "cost_cents": 0.0, "timestamp": "2026-04-19T19:35:12.727878+00:00", "agent_id": "db5f262e-52db-46bf-bac3-01d146fb31f6"}
+{"task": "chat-mode", "duration_seconds": 5.1, "cost_cents": 0.0, "timestamp": "2026-04-19T20:03:11.520296+00:00", "agent_id": "e269b33f-a9e9-4875-9d97-1419fc460336"}
+{"task": "browser-smoke", "duration_seconds": 146.3, "cost_cents": 1.0, "timestamp": "2026-04-19T20:03:11.520296+00:00", "agent_id": "4c6e965c-1f17-48f0-8536-b01d8230b5d0"}

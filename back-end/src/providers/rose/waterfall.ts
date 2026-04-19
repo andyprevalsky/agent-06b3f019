@@ -76,8 +76,12 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       maxTokens: opts.maxTokens,
     });
 
+    // Only pre-content failures are eligible for waterfall fallback — once a
+    // model has streamed any content, a mid-stream failure must propagate
+    // directly so the next provider's output doesn't get spliced onto it.
+    let emitted = false;
     try {
-      yield* streamOneStep({
+      const stepIter = streamOneStep({
         body,
         model,
         poolName: opts.poolSpec.name,
@@ -88,9 +92,24 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
         idleTimeoutMs: opts.idleTimeoutMs ?? perStepMs,
         abortSignal: opts.abortSignal,
       });
+      for await (const chunk of stepIter) {
+        emitted = true;
+        yield chunk;
+      }
       return;
     } catch (err) {
       const re = err instanceof RoseError ? err : new RoseError(String(err));
+      if (emitted) {
+        log.warn('step_failed_mid_stream', {
+          request_id: opts.requestId,
+          call_site: opts.callSite,
+          pool: opts.poolSpec.name,
+          step: idx + 1,
+          model,
+          error: re.message,
+        });
+        throw re;
+      }
       log.warn('step_failed', {
         request_id: opts.requestId,
         call_site: opts.callSite,

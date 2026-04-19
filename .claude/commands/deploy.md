@@ -194,12 +194,47 @@ This same file is also part of the full blackbox suite (Step 5a), so it will run
 Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
 
 1. Commit any uncommitted changes from Phase 1a (prettier/eslint fixes, coverage-driven test additions), using the test-report commit format from Step 7.
-2. If on `main`, create a new branch; push with `-u`:
+2. **Trim CodeRabbit scope for large PRs.** CodeRabbit skips review when a PR has "too many files" — which defeats the whole review gate. If the diff exceeds **150 files**, temporarily add negative `path_filters` to `.coderabbit.yaml` so CodeRabbit sees only the 150 highest-importance files. Ranking: runtime code (back-end/src, agents/{activities,helpers,loop,workflows,tools,domains,browser_tools}, research/supabase/functions, prisma schema, worker.py/config.py/health_server.py) beats UI (front-end/src, mac-app/main) beats tests/benchmarks/docs/configs; within each bucket, larger diffs rank higher. The exclusions are wrapped in `DEPLOY-AUTO-EXCLUDE-BEGIN`/`END` markers and reverted in Step 11b so they never reach `main`.
+
+   ```bash
+   CHANGED_COUNT=$(git diff --name-only main...HEAD | wc -l | tr -d ' ')
+   if [ "$CHANGED_COUNT" -gt 150 ]; then
+     git diff --numstat main...HEAD | awk '
+       { a=$1; d=$2; p=$3;
+         if (a=="-") a=0; if (d=="-") d=0;
+         s = a + d;
+         if      (p ~ /^back-end\/src\// && p !~ /\/tests\//)                                       s += 10000;
+         else if (p ~ /^agents\/(activities|helpers|loop|workflows|tools|domains|browser_tools)\//) s += 10000;
+         else if (p ~ /^research\/supabase\/functions\//)                                           s += 10000;
+         else if (p ~ /^back-end\/prisma\//)                                                        s += 9000;
+         else if (p ~ /^agents\/(worker|config|health_server)\.py$/)                                s += 9000;
+         else if (p ~ /^(front-end\/src|mac-app\/main)\//)                                          s += 5000;
+         else if (p ~ /\/(tests|benchmarks)\//)                                                     s += 500;
+         else if (p ~ /\.(md|yaml|yml|json|lock)$/)                                                 s += 100;
+         else                                                                                       s += 1000;
+         print s"\t"p
+       }' | sort -rn | awk 'NR>150 {print "    - \"!"$2"\""}' > /tmp/coderabbit-excludes.yml
+     python3 - <<'PY'
+   import pathlib
+   excludes = pathlib.Path('/tmp/coderabbit-excludes.yml').read_text().rstrip()
+   cfg = pathlib.Path('.coderabbit.yaml')
+   text = cfg.read_text()
+   marker = '  path_instructions:'
+   assert marker in text, 'path_instructions anchor missing from .coderabbit.yaml'
+   block = '    # DEPLOY-AUTO-EXCLUDE-BEGIN\n' + excludes + '\n    # DEPLOY-AUTO-EXCLUDE-END\n\n'
+   cfg.write_text(text.replace(marker, block + marker, 1))
+   PY
+     rm /tmp/coderabbit-excludes.yml
+     git add .coderabbit.yaml
+     git commit -m "chore: trim CodeRabbit path filters for large PR ($CHANGED_COUNT files -> 150)"
+   fi
+   ```
+3. If on `main`, create a new branch; push with `-u`:
    ```bash
    git push -u origin $(git branch --show-current)
    ```
-3. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
-4. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
+4. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
+5. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
 
 **If runtime tests (5/5a/6) fail** after the PR is already open: fix the issue, push the fix commit, and restart the Test Loop from Step 0. The new push re-arms CodeRabbit automatically — Step 9's poll-until-re-armed logic handles that correctly.
 
@@ -207,15 +242,20 @@ Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish be
 
 ## Step 5: Spin up local services
 
-**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. Orphans subscribe to the same Temporal task queue the new run will use and will silently steal work from smoke tasks.
+**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, run the pre-smoke cleanup. It enforces "at most 1 of each service per worktree" and reaps long-idle zombies from other worktrees — the invariant that keeps smoke runs from poisoning each other across `/deploy` invocations.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/list-services.sh           # inspect what's running (optional, informational)
-bash scripts/kill-services.sh           # kill the whole tree; preserves DB container + volume
+bash scripts/list-services.sh               # inspect what's running (optional, informational)
+bash scripts/pre-smoke-cleanup.sh           # kills this worktree's stale services + reaps idle zombies
 ```
 
-`scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
+`scripts/pre-smoke-cleanup.sh` does three things, all idempotent:
+1. **Process dedup** — calls `kill-services.sh` to kill every run.sh tree / worker / backend / frontend process in this worktree (so we start from a clean "0 of each service" baseline). Worktree-scoped via `$PWD`, so sibling worktrees are untouched.
+2. **Stale ACTIVE agents** — marks agents in this worktree's DB that have been `ACTIVE` for >30 min as `FAILED`. Stops the new run from inheriting orphans from a previous aborted run.
+3. **Idle-zombie reap** — stops `victoria-db-*` / `supabase_*` containers from OTHER worktrees whose last log line is older than 30 min. Active parallel worktrees are preserved; dead ones freed. Tune via `PRE_SMOKE_IDLE_MIN=60 bash scripts/pre-smoke-cleanup.sh`.
+
+Temporal workflow termination is handled in-process by `run_benchmark.py`'s preflight (Step 6) — belt-and-braces.
 
 Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
 
@@ -281,11 +321,11 @@ for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" 
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/kill-services.sh                    # kills run.sh tree, preserves DB
+bash scripts/pre-smoke-cleanup.sh                # kills this worktree's services; DB container preserved
 (cd research/supabase && supabase stop 2>/dev/null) || true   # stop supabase compose stack
 ```
 
-`kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
+`pre-smoke-cleanup.sh` is a superset of `kill-services.sh` and also marks stuck ACTIVE agents as FAILED + reaps long-idle zombie containers. Safe to re-run any time — idempotent. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
 
 ## Step 5a: Blackbox API tests + fix
 
@@ -647,7 +687,7 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → **STOP and escalate to the user.** Do NOT proceed to merge. Tell the user CodeRabbit skipped the review, explain why (file count, etc.), and ask how they want to proceed (e.g., filter paths, split PR, or merge without review).
+- **REVIEW SKIPPED** (e.g., "Too many files!") → Step 4d's path-filter trim should have prevented this by capping scope at 150 files. If CodeRabbit still skipped, the trim either didn't run or didn't apply to enough files — investigate: confirm the `DEPLOY-AUTO-EXCLUDE-BEGIN` block is present in `.coderabbit.yaml` on the pushed commit, and that file count after filters is ≤ 150. If the trim is broken, fix it and re-push. Only escalate to the user if you cannot get CodeRabbit to review after verifying the trim is in place.
 - **No issues found** → proceed to Phase 3.
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
@@ -698,6 +738,25 @@ cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-
 ```
 
 This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
+
+## Step 11b: Revert CodeRabbit path filter trim (if applied)
+
+If Step 4d added `DEPLOY-AUTO-EXCLUDE-BEGIN`/`END` exclusions to `.coderabbit.yaml` for a large PR, strip them now — the exclusions were PR-scoped; they must not land on `main`. CodeRabbit will re-arm on the new push, but we do NOT wait for it: the prior review (with trimmed scope) already counts as the review gate. Proceed directly to merge.
+
+```bash
+if grep -q "DEPLOY-AUTO-EXCLUDE-BEGIN" .coderabbit.yaml; then
+  python3 - <<'PY'
+import pathlib, re
+cfg = pathlib.Path('.coderabbit.yaml')
+text = cfg.read_text()
+pattern = re.compile(r'\n?\s*# DEPLOY-AUTO-EXCLUDE-BEGIN.*?# DEPLOY-AUTO-EXCLUDE-END\n', re.DOTALL)
+cfg.write_text(pattern.sub('\n', text))
+PY
+  git add .coderabbit.yaml
+  git commit -m "chore: restore CodeRabbit path filters after PR review"
+  git push
+fi
+```
 
 ## Step 12: Merge
 

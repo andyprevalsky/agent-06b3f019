@@ -47,12 +47,10 @@ const ALIAS_TO_POOL: Record<string, PoolName> = {
 export function poolForModel(model: string): PoolName | null {
   if (!model) return null;
   const lowered = model.toLowerCase();
+  // Only the aliases explicitly listed above resolve. A typo or future
+  // identifier like `rose-labs/rose-2` must fall through to "unknown" so the
+  // caller can reject it, instead of being silently routed to rose-1-lite.
   if (lowered in ALIAS_TO_POOL) return ALIAS_TO_POOL[lowered];
-  if (lowered.startsWith('rose-labs/')) {
-    if (lowered.includes('ultra')) return 'rose-1-ultra';
-    if (lowered.includes('browser-use')) return 'rose-1-browser-use';
-    return 'rose-1-lite';
-  }
   return null;
 }
 

@@ -13,6 +13,8 @@ from temporalio import activity
 from providers.rose.pricing import (
     ANTHROPIC_MODEL_PRICING,
     get_anthropic_pricing,
+)
+from providers.rose.pricing import (
     get_model_pricing as _lookup_model_pricing,
 )
 
@@ -53,14 +55,19 @@ def get_default_pricing(model: str) -> Dict[str, float]:
 
 
 async def get_model_pricing_with_fallback(model: str) -> Dict[str, float]:
-    """Resolve pricing or raise — keeps callers from silently using bad numbers."""
+    """Resolve pricing, falling back to coarse estimates for unknown models.
+
+    Newly introduced or aliased model ids shouldn't crash the pipeline — fall
+    back to `get_default_pricing` so callers still get a plausible number.
+    """
     pricing = await get_model_pricing(model)
-    if pricing is None:
-        raise RuntimeError(
-            f"Failed to resolve pricing for model '{model}'. "
-            f"Add it to providers/rose/pricing.py."
-        )
-    return pricing
+    if pricing is not None:
+        return pricing
+    logger.warning(
+        "💰 Using default pricing fallback — model not in pricing table",
+        model=model,
+    )
+    return get_default_pricing(model)
 
 
 @activity.defn

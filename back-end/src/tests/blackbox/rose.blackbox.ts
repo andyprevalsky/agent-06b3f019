@@ -163,9 +163,11 @@ async function testPool_forModelFuzzy() {
   assertEqual(poolForModel('rose-labs/rose-1-browser-use'), 'rose-1-browser-use', 'browser-use');
   assertEqual(poolForModel('rose'), 'rose-1-lite', 'rose alias');
   assertEqual(poolForModel('rose-ultra'), 'rose-1-ultra', 'rose-ultra alias');
-  // Fuzzy fallback for unknown rose-labs/* strings
-  assertEqual(poolForModel('rose-labs/something-ultra-new'), 'rose-1-ultra', 'fuzzy ultra');
-  assertEqual(poolForModel('rose-labs/something-mini'), 'rose-1-lite', 'fuzzy lite default');
+  // Strict resolution: unknown rose-labs/* identifiers fall through to null so
+  // the caller rejects them explicitly (e.g. a typo or unreleased rose-labs/rose-2
+  // must not silently route to rose-1-lite).
+  assertEqual(poolForModel('rose-labs/something-ultra-new'), null, 'unknown rose-labs/*');
+  assertEqual(poolForModel('rose-labs/rose-2'), null, 'future rose-labs model');
   assertEqual(poolForModel('openai/gpt-4'), null, 'non-rose');
   assertEqual(poolForModel(''), null, 'empty');
 }

@@ -27,15 +27,14 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     RoseClient,
     RoseError,
-    StreamChunk,
     claude_auth_from_token,
     pool_for_model,
 )
 from providers.rose.transforms import reconstruct_agent_response
-from helpers.tracing import backend_api_headers, current_request_id, rose_api_headers, traced
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
     create_agent_action_model,
@@ -1797,7 +1796,10 @@ async def call_llm(
             result = {
                 "content": content,
                 "model": rose_response.actual_model or model,
-                "finish_reason": "stop",
+                # Preserve Rose's real finish signal so callers can detect
+                # max_tokens truncation; prior code hardcoded "stop" and lost
+                # that distinction.
+                "finish_reason": usage.get("finish_reason", "stop"),
                 "usage": {
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
@@ -1966,9 +1968,18 @@ async def _call_llm_verifier(  # noqa: C901
 
     # Native tool_use blocks from claudeAuth → rebuild the verifier JSON envelope
     # so the existing parser (which expects a single {reasoning, score, ...} blob)
-    # finds it via accumulated_json.
+    # finds it via accumulated_json. Note the verifier schema is
+    # {reasoning, score, ...}, NOT the agent-envelope shape
+    # {reasoning, response, tool_calls} that `reconstruct_agent_response`
+    # produces — serialize the first tool's `input` dict directly.
     if tool_use_blocks:
-        accumulated_json = reconstruct_agent_response(accumulated_json, tool_use_blocks)
+        first_input = tool_use_blocks[0].get("input")
+        if not isinstance(first_input, dict):
+            raise ValueError(
+                "Verifier native tool payload must be an object "
+                f"(got {type(first_input).__name__})"
+            )
+        accumulated_json = json.dumps(first_input)
 
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0

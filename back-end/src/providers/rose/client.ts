@@ -30,6 +30,21 @@ import { waterfallComplete } from './waterfall';
 
 const log = createLogger('Rose');
 
+/**
+ * Internal sentinel — a fall-through RoseError captured *before* any chunk
+ * was emitted to the caller. Only these can be swallowed and replaced with
+ * waterfall output. A mid-stream fall-through MUST propagate directly so we
+ * don't splice partial content from two different models.
+ */
+class PreContentFallThroughError extends Error {
+  readonly cause: RoseError;
+  constructor(cause: RoseError) {
+    super(cause.message);
+    this.name = 'PreContentFallThroughError';
+    this.cause = cause;
+  }
+}
+
 const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
 
 function requiredEnv(name: string): string {
@@ -170,11 +185,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       });
       return;
     } catch (err) {
-      if (err instanceof RoseError && isFallThroughError(err)) {
-        claudeAuthFailed = err;
+      if (err instanceof PreContentFallThroughError) {
+        claudeAuthFailed = err.cause;
         log.info('fall_through_to_waterfall', {
           request_id: opts.requestId,
-          reason: err.name,
+          reason: err.cause.name,
         });
       } else {
         throw err;
@@ -221,15 +236,19 @@ async function* runWithFallThrough(
 ): AsyncIterable<CompletionChunk> {
   let yieldedAny = false;
   const iterator = opts.produce()[Symbol.asyncIterator]();
-   
+
   while (true) {
     let result: IteratorResult<RoseStreamChunk>;
     try {
       result = await iterator.next();
     } catch (err) {
       if (!yieldedAny && err instanceof RoseError && isFallThroughError(err)) {
-        throw err; // caller wraps — see wrapStream
+        // Caller-visible "no content yet" failure — safe to swap pipelines.
+        throw new PreContentFallThroughError(err);
       }
+      // Post-content failures must propagate directly: partial output has
+      // already been streamed to the caller, so splicing in a second model's
+      // output would corrupt the response.
       throw err;
     }
     if (result.done) return;

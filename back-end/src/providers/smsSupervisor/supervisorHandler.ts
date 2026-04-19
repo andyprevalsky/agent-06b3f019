@@ -471,7 +471,17 @@ function parseSessionMessages(raw: unknown): SessionMessage[] {
   try {
     const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!Array.isArray(arr)) return [];
-    return arr as SessionMessage[];
+    // Filter: a bad row (missing role / non-string content / missing timestamp)
+    // would flow straight into the next Rose request and fail the LLM call.
+    return arr.filter(
+      (item): item is SessionMessage =>
+        typeof item === 'object' &&
+        item !== null &&
+        ((item as Record<string, unknown>).role === 'user' ||
+          (item as Record<string, unknown>).role === 'assistant') &&
+        typeof (item as Record<string, unknown>).content === 'string' &&
+        typeof (item as Record<string, unknown>).timestamp === 'string'
+    );
   } catch {
     return [];
   }

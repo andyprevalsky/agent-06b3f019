@@ -75,8 +75,14 @@ async function withTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const upstream = signal;
-  const onAbort = () => controller.abort(upstream.reason);
-  upstream.addEventListener('abort', onAbort, { once: true });
+  const onAbort = (): void => controller.abort(upstream.reason);
+  // Honor already-aborted signals before starting fetch — otherwise the
+  // listener never fires and the provider request runs despite cancellation.
+  if (upstream.aborted) {
+    controller.abort(upstream.reason);
+  } else {
+    upstream.addEventListener('abort', onAbort, { once: true });
+  }
   const timer = setTimeout(
     () => controller.abort(new Error(`connect timeout ${timeoutMs}ms`)),
     timeoutMs
