@@ -6,6 +6,8 @@
  * [MOUNTED] --> renders ticker with CSS animations
  */
 
+import type { CSSProperties } from 'react';
+
 import openaiLogo from '@/assets/openai-logo.png';
 import anthropicLogo from '@/assets/anthropic-logo.png';
 import cerebrasLogo from '@/assets/cerebras-logo.png';
@@ -16,6 +18,41 @@ import deepgramLogo from '@/assets/deepgram-logo.png';
 import hedraLogo from '@/assets/hedra-logo.png';
 import ycombinatorLogo from '@/assets/ycombinator-logo.png';
 
+interface ProviderLogo {
+  src: string;
+  alt: string;
+  style: CSSProperties;
+  extraClass?: string;
+}
+
+const PROVIDER_LOGOS: ProviderLogo[] = [
+  { src: openaiLogo, alt: 'OpenAI', style: { maxHeight: '40px', minHeight: '40px' } },
+  { src: anthropicLogo, alt: 'Anthropic', style: { maxHeight: '24px', minHeight: '24px' } },
+  { src: cerebrasLogo, alt: 'Cerebras', style: { maxHeight: '52px', minHeight: '52px' } },
+  {
+    src: elevenlabsLogo,
+    alt: 'ElevenLabs',
+    style: { maxHeight: '24px', minHeight: '24px' },
+    extraClass: 'elevenlabs-logo',
+  },
+  {
+    src: googleAiLogo,
+    alt: 'Google AI',
+    style: { maxHeight: '40px', minHeight: '40px', marginBottom: '8px' },
+  },
+  { src: metaLogo, alt: 'Meta', style: { maxHeight: '24px', minHeight: '24px' } },
+  {
+    src: deepgramLogo,
+    alt: 'Deepgram',
+    style: { maxHeight: '32px', minHeight: '32px', marginTop: '8px' },
+  },
+  { src: hedraLogo, alt: 'Hedra', style: { maxHeight: '40px', minHeight: '40px' } },
+  { src: ycombinatorLogo, alt: 'Y Combinator', style: { maxHeight: '40px', minHeight: '40px' } },
+];
+
+// Duplicate logos so the CSS-animated ticker can loop seamlessly.
+const TICKER_LOGOS: ProviderLogo[] = [...PROVIDER_LOGOS, ...PROVIDER_LOGOS];
+
 const PoweredByTicker = () => {
   return (
     <section className="py-8 bg-background border-b border-border/50 relative z-20">
@@ -24,114 +61,15 @@ const PoweredByTicker = () => {
         <div className="w-full overflow-hidden">
           <div className="logo-ticker animate">
             <div className="ticker-track">
-              <img
-                src={openaiLogo}
-                alt="OpenAI"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
-              <img
-                src={anthropicLogo}
-                alt="Anthropic"
-                className="provider-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={cerebrasLogo}
-                alt="Cerebras"
-                className="provider-logo"
-                style={{ maxHeight: '52px', minHeight: '52px' }}
-              />
-              <img
-                src={elevenlabsLogo}
-                alt="ElevenLabs"
-                className="provider-logo elevenlabs-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={googleAiLogo}
-                alt="Google AI"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px', marginBottom: '8px' }}
-              />
-              <img
-                src={metaLogo}
-                alt="Meta"
-                className="provider-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={deepgramLogo}
-                alt="Deepgram"
-                className="provider-logo"
-                style={{ maxHeight: '32px', minHeight: '32px', marginTop: '8px' }}
-              />
-              <img
-                src={hedraLogo}
-                alt="Hedra"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
-              <img
-                src={ycombinatorLogo}
-                alt="Y Combinator"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
-              <img
-                src={openaiLogo}
-                alt="OpenAI"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
-              <img
-                src={anthropicLogo}
-                alt="Anthropic"
-                className="provider-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={cerebrasLogo}
-                alt="Cerebras"
-                className="provider-logo"
-                style={{ maxHeight: '52px', minHeight: '52px' }}
-              />
-              <img
-                src={elevenlabsLogo}
-                alt="ElevenLabs"
-                className="provider-logo elevenlabs-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={googleAiLogo}
-                alt="Google AI"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px', marginBottom: '8px' }}
-              />
-              <img
-                src={metaLogo}
-                alt="Meta"
-                className="provider-logo"
-                style={{ maxHeight: '24px', minHeight: '24px' }}
-              />
-              <img
-                src={deepgramLogo}
-                alt="Deepgram"
-                className="provider-logo"
-                style={{ maxHeight: '32px', minHeight: '32px', marginTop: '8px' }}
-              />
-              <img
-                src={hedraLogo}
-                alt="Hedra"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
-              <img
-                src={ycombinatorLogo}
-                alt="Y Combinator"
-                className="provider-logo"
-                style={{ maxHeight: '40px', minHeight: '40px' }}
-              />
+              {TICKER_LOGOS.map((logo, index) => (
+                <img
+                  key={`${logo.alt}-${index}`}
+                  src={logo.src}
+                  alt={logo.alt}
+                  className={`provider-logo${logo.extraClass ? ` ${logo.extraClass}` : ''}`}
+                  style={logo.style}
+                />
+              ))}
             </div>
           </div>
         </div>

@@ -291,6 +291,19 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
+**Also start the frontend dev server** (required by Step 6b semantic tests). `run.sh --benchmark` intentionally skips the front-end, so launch it as a sibling background process:
+
+```bash
+# Start front-end dev server in a separate background process (needed for semantic tests).
+# run_in_background=true for this command:
+(cd front-end && VITE_PORT=$((CONDUCTOR_PORT + 1)) npm run dev > frontend-logs.log 2>&1)
+```
+
+```bash
+export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
+for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
+```
+
 **Teardown (MANDATORY):** after Step 6 finishes (pass OR fail), and any time you abort Step 5/6 mid-way, you MUST tear the stack down before moving on. Skipping this leaves zombie run.sh + grandchildren that (a) subscribe to the Temporal queue and poison the next smoke run, and (b) leak ports, RAM, and worker slots across `/deploy` invocations.
 
 ```bash
@@ -503,6 +516,46 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
+## Step 6b: Semantic tests + fix
+
+Semantic tests exercise real user flows through Chrome CDP against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
+
+**Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
+
+### Running semantic tests
+
+With the full stack from Step 5 still running (backend, worker, research, **and frontend on `$SMOKE_FRONTEND_URL`**):
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash front-end/scripts/run-semantic-tests.sh --list
+```
+
+For each listed test (currently `login`, `agent-realtime`), run the test and execute its instructions using `mcp__claude-in-chrome__*` browser tools:
+
+```bash
+BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash front-end/scripts/run-semantic-tests.sh <test-name>
+```
+
+The script validates pre-conditions (backend health, frontend accessible) and emits the structured test body (`pre-conditions`, `steps`, `invariants`, `termination`). You (Claude) must then execute those steps via Chrome CDP:
+1. Call `mcp__claude-in-chrome__tabs_context_mcp` to get tab context (MUST be first — never reuse stale tab IDs from earlier runs).
+2. Navigate/interact per the test's steps.
+3. Verify each invariant holds. Capture console output via `mcp__claude-in-chrome__read_console_messages` and network activity via `mcp__claude-in-chrome__read_network_requests` as needed.
+4. Stop at the termination condition.
+
+### Pass criteria
+
+**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): if a semantic test fails, you diagnose and fix the root cause. "Chrome CDP not available", "realtime broadcast didn't arrive", "extension missing" — none of those are excuses. Fix the underlying issue.
+
+### On failure
+
+1. Read the failing invariant. Capture the browser console + network tab output.
+2. Check `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt` for backend-side errors that correlate with the UI failure.
+3. Fix the root cause in code.
+4. Restart services (Step 5) and re-run the failed semantic test.
+
 ---
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -523,6 +576,8 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 # ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
 # ║     limited to safe paths; if ANY must-run path is touched, smoke ║
 # ║     is required)                                                   ║
+# ║  6b. Semantic tests: 100% pass whenever smoke ran (skip together  ║
+# ║      with smoke — never skip one without the other)               ║
 # ║                                                                    ║
 # ║  If ANY test has ANY failure, you are BLOCKED.                     ║
 # ║  Fix it or escalate to the user. Do NOT proceed.                   ║

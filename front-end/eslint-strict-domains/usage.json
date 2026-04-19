@@ -8,5 +8,6 @@
   "src/features/usage/components/TopModelsCard.tsx",
   "src/features/usage/components/Usage.tsx",
   "src/features/usage/components/index.ts",
-  "src/features/usage/index.ts"
+  "src/features/usage/index.ts",
+  "src/pages/Usage.tsx"
 ]
