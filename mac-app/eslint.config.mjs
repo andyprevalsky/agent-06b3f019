@@ -57,6 +57,7 @@ const STRICT_DOMAIN_FILES = [
   'main/domains/auto-updater/**/*.ts',
   'main/services/browserCookieReader.ts',
   'main/services/cacheStorageReader.ts',
+  'main/domains/cache-storage-reader/**/*.ts',
   'main/services/fingerprintReader.ts',
   'main/services/localStorageReader.ts',
   'main/services/permissionReader.ts',
