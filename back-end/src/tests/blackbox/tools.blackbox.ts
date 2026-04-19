@@ -310,6 +310,7 @@ async function testBoundary_noOutboundCalls() {
     'stripe.com',
     'e2b.app',
     'verify.twilio.com',
+    'vapi.ai',
   ];
   const toolsCaptures = captures.filter((c) => !INFRA.some((p) => c.url.includes(p)));
 
