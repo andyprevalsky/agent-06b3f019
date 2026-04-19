@@ -31,6 +31,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/auth.ts',
   'main/services/claudeCredentialSync.ts',
   'main/services/messaging/platforms/telegram/**/*.ts',
+  'main/domains/messaging-telegram/**/*.ts',
   'main/services/chromeProfileResolver.ts',
   'main/services/cookieReader.ts',
   'main/services/messaging/platforms/whatsapp/**/*.ts',
