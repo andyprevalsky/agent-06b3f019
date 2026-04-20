@@ -79,6 +79,7 @@ const STRICT_DOMAIN_FILES = [
   'main/domains/i-message-sender/**/*.ts',
   'ui/launcher/**/*.{ts,tsx}',
   'ui/components/AgentPayModal.tsx',
+  'ui/features/agent-pay-modal/**/*.{ts,tsx}',
   'ui/components/ApplePasswordsModal.tsx',
   'ui/features/apple-passwords-modal/**/*.{ts,tsx}',
   'ui/components/AtlasPasswordModal.tsx',
