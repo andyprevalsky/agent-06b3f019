@@ -884,6 +884,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 response_format=response_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                seed=model_seed,
                 skip_cache=skip_cache,
                 claude_auth=claude_auth_from_token(claude_token),
                 agent_id=agent_id,
@@ -1139,12 +1140,28 @@ async def call_llm_structured_streaming(  # noqa: C901
             )
             raise ValueError(f"Rose streaming failed: {exc}") from exc
 
-        # On the claudeAuth path, rebuild the agent JSON envelope from native
-        # text + tool_use blocks once the stream is fully drained. This makes
-        # the existing accumulated_json parser work unchanged.
+        # On the claudeAuth path, rebuild the response-model JSON once the
+        # stream is fully drained. The shape depends on the caller's schema:
+        #   - Agent envelope `{reasoning, response, tool_calls}`: merge native
+        #     text + tool_use blocks via reconstruct_agent_response.
+        #   - Any other schema (PlannerResponse, ReasoningResponse, etc.): serialize
+        #     the first tool's `input` dict directly. The verifier path at
+        #     `_call_llm_verifier` does the same.
         if not was_cancelled and using_claude_auth:
+            model_fields = set(response_model.model_fields.keys())
+            is_agent_envelope = {"response", "tool_calls"}.issubset(model_fields)
             if tool_use_blocks:
-                accumulated_json = reconstruct_agent_response(text_buffer, tool_use_blocks)
+                if is_agent_envelope:
+                    accumulated_json = reconstruct_agent_response(text_buffer, tool_use_blocks)
+                else:
+                    first_input = tool_use_blocks[0].get("input")
+                    if not isinstance(first_input, dict):
+                        raise ValueError(
+                            "Native tool payload must be an object "
+                            f"(got {type(first_input).__name__}) for non-envelope schema "
+                            f"{response_model.__name__}"
+                        )
+                    accumulated_json = json.dumps(first_input)
             elif text_buffer:
                 # Native text only (no tool_use) — treat as the JSON envelope
                 # body; existing markdown/balanced-brace extraction handles it.

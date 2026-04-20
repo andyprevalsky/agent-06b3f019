@@ -278,6 +278,11 @@ async function* iterLinesWithIdleTimeout(
         yield line;
       }
     }
+    // Truncated streams may close mid-line; yield the remainder so callers
+    // don't silently drop diagnostic data on an early provider disconnect.
+    if (buffer.length > 0) {
+      yield buffer;
+    }
   } finally {
     try {
       reader.releaseLock();
