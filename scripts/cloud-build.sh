@@ -89,6 +89,35 @@ if ! $IS_MAC; then
         $SUDO systemctl start docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
         echo "   Installed: $($SUDO docker --version 2>/dev/null || echo docker)"
     fi
+
+    # ── 2b. Fallback: system Postgres when Docker daemon can't run ──────
+    # Some sandboxed environments (containers, CI without --privileged) can
+    # install Docker but can't start the daemon. Install system Postgres as
+    # a fallback so run.sh / blackbox tests still have a database.
+    if ! docker info >/dev/null 2>&1; then
+        echo "⚠️  Docker daemon unavailable — installing system Postgres as fallback..."
+        if ! command -v pg_isready >/dev/null 2>&1; then
+            $SUDO apt-get update -qq && $SUDO apt-get install -y -qq postgresql postgresql-client
+        fi
+        # Start the cluster
+        PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
+        $SUDO pg_ctlcluster "$PG_VER" main start 2>/dev/null || $SUDO service postgresql start 2>/dev/null || true
+        # Set password + create DB to match the Docker container convention
+        $SUDO su - postgres -c "psql -c \"ALTER USER postgres PASSWORD 'postgres';\"" 2>/dev/null || true
+        $SUDO su - postgres -c "createdb victoria" 2>/dev/null || true
+        # Enable md5 auth so localhost TCP connections work with password
+        PG_HBA=$(find /etc/postgresql -name pg_hba.conf 2>/dev/null | head -1)
+        if [ -n "$PG_HBA" ]; then
+            sed -i 's/^local\s\+all\s\+all\s\+peer/local   all             all                                     md5/' "$PG_HBA"
+            sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
+            $SUDO pg_ctlcluster "$PG_VER" main reload 2>/dev/null || true
+        fi
+        if pg_isready -U postgres -q 2>/dev/null; then
+            echo "✅ System Postgres running (fallback — no Docker)"
+        else
+            echo "❌ Failed to start system Postgres"
+        fi
+    fi
 fi
 
 # ── 3 & 4: JS (npm + prisma generate) || Python (venv + pip) in parallel ─
