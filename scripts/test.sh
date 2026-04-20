@@ -206,7 +206,7 @@ cleanup_bg() {
 }
 trap cleanup_bg EXIT
 
-if should_run "front-end"; then
+if should_run "front-end" && ! $SMOKE; then
   FE_BUILD_LOG="$TMPDIR_BASE/fe_build.log"
   bash -c "cd front-end && npx vite build" > "$FE_BUILD_LOG" 2>&1 &
   BUILD_PIDS+=($!)

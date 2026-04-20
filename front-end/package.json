@@ -19,7 +19,8 @@
     "generate_webm_final": "bash ./video-to-process/outputs/final/generate_webm_final.sh",
     "social:gen": "node scripts/generate-social-images.mjs",
     "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "build-storybook": "storybook build",
+    "postinstall": "playwright install chromium --with-deps 2>/dev/null || true"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.31.3",

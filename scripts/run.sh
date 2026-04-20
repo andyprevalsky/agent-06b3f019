@@ -115,96 +115,142 @@ fi
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE"
 
-# ── Pre-flight: ensure Docker is running (Postgres container) ──
-if ! docker ps &>/dev/null 2>&1; then
-    if [ -d "/Applications/Docker.app" ]; then
-        echo "🐳 Docker not running — starting Docker Desktop..."
-        open -a Docker
-        for i in $(seq 1 60); do
-            if docker ps &>/dev/null 2>&1; then
-                echo "🐳 Docker is ready"
+# ── Pre-flight: ensure Postgres is available ──
+# Prefer Docker (per-workspace container), fall back to system Postgres when
+# the Docker daemon isn't available (sandboxed containers, CI without --privileged).
+DOCKER_OK=false
+if docker info >/dev/null 2>&1; then
+    DOCKER_OK=true
+fi
+
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
+DB_OWNED_BY_US=false  # Track whether we started/created the DB (cleanup only stops what we own)
+USE_SYSTEM_PG=false
+
+if $DOCKER_OK; then
+    # ── Docker path (macOS / Linux with working Docker) ──
+    if ! docker ps &>/dev/null 2>&1; then
+        if [ -d "/Applications/Docker.app" ]; then
+            echo "🐳 Docker not running — starting Docker Desktop..."
+            open -a Docker
+            for i in $(seq 1 60); do
+                if docker ps &>/dev/null 2>&1; then
+                    echo "🐳 Docker is ready"
+                    break
+                fi
+                if [ "$i" -eq 60 ]; then
+                    echo "⚠️  Docker did not start in 60s — local Postgres may fail"
+                fi
+                sleep 1
+            done
+        fi
+    fi
+
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+
+    # Helper: create (or recreate) the Postgres container with the correct port
+    create_db_container() {
+        docker rm -f "$DB_CONTAINER" 2>/dev/null || true
+        docker run -d \
+            --name "$DB_CONTAINER" \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=victoria \
+            -p "$LOCAL_DB_PORT:5432" \
+            -v "$DB_VOLUME:/var/lib/postgresql/data" \
+            postgres:16-alpine >/dev/null
+    }
+
+    if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+        ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)
+        if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
+            echo "🐘 Local Postgres already running ($DB_CONTAINER on port $LOCAL_DB_PORT)"
+        else
+            echo "🐘 Postgres container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
+            create_db_container
+            DB_OWNED_BY_US=true
+        fi
+    elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
+        ACTUAL_PORT=$(docker inspect "$DB_CONTAINER" --format='{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}' 2>/dev/null || true)
+        if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
+            echo "🐘 Starting stopped Postgres container..."
+            docker start "$DB_CONTAINER" >/dev/null
+            DB_OWNED_BY_US=true
+        else
+            echo "🐘 Stopped container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
+            create_db_container
+            DB_OWNED_BY_US=true
+        fi
+    else
+        echo "🐘 Creating local Postgres container..."
+        create_db_container
+        DB_OWNED_BY_US=true
+    fi
+
+    # Wait for Postgres to accept connections
+    echo -n "   Waiting for Postgres..."
+    for i in $(seq 1 30); do
+        if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+            echo " ready (${i}s)"
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            echo " ❌ timed out"
+            exit 1
+        fi
+        sleep 1
+    done
+else
+    # ── System Postgres fallback (no Docker) ──
+    USE_SYSTEM_PG=true
+    SYSTEM_PG_PORT=5432
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/victoria"
+
+    if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+        echo "🐘 System Postgres already running on port $SYSTEM_PG_PORT"
+    else
+        echo "🐘 Starting system Postgres..."
+        PG_VER=$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')
+        if [ -n "$PG_VER" ]; then
+            pg_ctlcluster "$PG_VER" main start 2>/dev/null || service postgresql start 2>/dev/null || true
+        else
+            service postgresql start 2>/dev/null || true
+        fi
+        # Wait for it
+        echo -n "   Waiting for Postgres..."
+        for i in $(seq 1 30); do
+            if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+                echo " ready (${i}s)"
                 break
             fi
-            if [ "$i" -eq 60 ]; then
-                echo "⚠️  Docker did not start in 60s — local Postgres may fail"
+            if [ "$i" -eq 30 ]; then
+                echo " ❌ No Docker and system Postgres failed to start."
+                echo "   Run scripts/cloud-build.sh to install Postgres."
+                exit 1
             fi
             sleep 1
         done
-    else
-        echo "⚠️  Docker Desktop not installed — local Postgres may fail"
     fi
+    # Ensure victoria DB exists (idempotent)
+    PGPASSWORD=postgres psql -h localhost -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='victoria'" 2>/dev/null \
+        | grep -q 1 || PGPASSWORD=postgres createdb -h localhost -U postgres victoria 2>/dev/null || true
 fi
 
-# ── Pre-flight: start local Postgres for backend ──
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
-DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
-LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
 export DATABASE_URL="$LOCAL_DB_URL"
 export DIRECT_URL="$LOCAL_DB_URL"
-
-# Helper: create (or recreate) the Postgres container with the correct port
-create_db_container() {
-    docker rm -f "$DB_CONTAINER" 2>/dev/null || true
-    docker run -d \
-        --name "$DB_CONTAINER" \
-        -e POSTGRES_PASSWORD=postgres \
-        -e POSTGRES_DB=victoria \
-        -p "$LOCAL_DB_PORT:5432" \
-        -v "$DB_VOLUME:/var/lib/postgresql/data" \
-        postgres:16-alpine >/dev/null
-}
-
-DB_OWNED_BY_US=false  # Track whether we started/created the DB (cleanup only stops what we own)
-
-if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    # Running — check if port mapping matches
-    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)
-    if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
-        echo "🐘 Local Postgres already running ($DB_CONTAINER on port $LOCAL_DB_PORT)"
-    else
-        echo "🐘 Postgres container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
-        create_db_container
-        DB_OWNED_BY_US=true
-    fi
-elif docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    # Stopped — check if port mapping matches before starting
-    ACTUAL_PORT=$(docker inspect "$DB_CONTAINER" --format='{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}' 2>/dev/null || true)
-    if [ "$ACTUAL_PORT" = "$LOCAL_DB_PORT" ]; then
-        echo "🐘 Starting stopped Postgres container..."
-        docker start "$DB_CONTAINER" >/dev/null
-        DB_OWNED_BY_US=true
-    else
-        echo "🐘 Stopped container on wrong port ($ACTUAL_PORT vs $LOCAL_DB_PORT) — recreating..."
-        create_db_container
-        DB_OWNED_BY_US=true
-    fi
-else
-    echo "🐘 Creating local Postgres container..."
-    create_db_container
-    DB_OWNED_BY_US=true
-fi
-
-# Wait for Postgres to accept connections
-echo -n "   Waiting for Postgres..."
-for i in $(seq 1 30); do
-    if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
-        echo " ready (${i}s)"
-        break
-    fi
-    if [ "$i" -eq 30 ]; then
-        echo " ❌ timed out"
-        exit 1
-    fi
-    sleep 1
-done
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
 
 # Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
-USER_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -d victoria -tAc \
-  "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
+if $DOCKER_OK && ! $USE_SYSTEM_PG; then
+    USER_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -d victoria -tAc \
+      "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
+else
+    USER_EXISTS=$(PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc \
+      "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
+fi
 if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
@@ -328,7 +374,7 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree_hard "$pid"
     done
-    if $DB_OWNED_BY_US; then
+    if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"

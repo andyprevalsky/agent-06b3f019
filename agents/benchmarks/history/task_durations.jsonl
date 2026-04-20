@@ -96,3 +96,12 @@
 {"task": "parallel-tool-calls", "duration_seconds": 181.5, "cost_cents": 21.0, "timestamp": "2026-04-20T20:29:19.184733+00:00", "agent_id": "a28385e7-d1c3-4752-bfb6-07fae38492d3"}
 {"task": "claude-code-agent", "duration_seconds": 111.1, "cost_cents": 0.0, "timestamp": "2026-04-20T20:29:19.184733+00:00", "agent_id": "f5aa712e-6292-4282-ab26-1d8d06ab1f29"}
 {"task": "browser-smoke", "duration_seconds": 141.1, "cost_cents": 3.0, "timestamp": "2026-04-20T20:29:19.184733+00:00", "agent_id": "4e9b142a-2519-43dd-b990-cae9dfa3d326"}
+{"task": "chat-mode", "duration_seconds": 5.3, "cost_cents": 0.0, "timestamp": "2026-04-20T21:23:42.384955+00:00", "agent_id": "1bb1ec9c-6538-4683-a0ab-1ab91ce18659"}
+{"task": "spawn-sub-agents", "duration_seconds": 87.4, "cost_cents": 8.0, "timestamp": "2026-04-20T21:23:42.384955+00:00", "agent_id": "6c6ce895-4ebc-41c3-a5f6-8ab901cb0570"}
+{"task": "parallel-tool-calls", "duration_seconds": 158.5, "cost_cents": 24.0, "timestamp": "2026-04-20T21:23:42.384955+00:00", "agent_id": "cfaee15c-ae6c-47be-acc2-ae85fb82701e"}
+{"task": "claude-code-agent", "duration_seconds": 137.9, "cost_cents": 0.0, "timestamp": "2026-04-20T21:23:42.384955+00:00", "agent_id": "e547ffc3-5246-4cf9-b97c-e3fb590e1e3d"}
+{"task": "browser-smoke", "duration_seconds": 61.9, "cost_cents": 1.0, "timestamp": "2026-04-20T21:23:42.384955+00:00", "agent_id": "36dc4d5e-a23f-4c37-a37c-e911c4bfbec6"}
+{"task": "chat-mode", "duration_seconds": 6.2, "cost_cents": 0.0, "timestamp": "2026-04-20T22:17:19.803689+00:00", "agent_id": "ece17050-abc1-4b78-9625-696774812cf3"}
+{"task": "spawn-sub-agents", "duration_seconds": 174.6, "cost_cents": 6.0, "timestamp": "2026-04-20T22:17:19.803689+00:00", "agent_id": "ef1f5fe3-29e8-4e8e-b394-ccae6e385c01"}
+{"task": "claude-code-agent", "duration_seconds": 72.8, "cost_cents": 0.0, "timestamp": "2026-04-20T22:17:19.803689+00:00", "agent_id": "592a7c69-09da-4d80-bb02-0f547aeffb80"}
+{"task": "browser-smoke", "duration_seconds": 57.4, "cost_cents": 1.0, "timestamp": "2026-04-20T22:17:19.803689+00:00", "agent_id": "d49fa779-aec1-4513-99ea-225af7340b5a"}
