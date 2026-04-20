@@ -85,6 +85,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/components/AtlasPasswordModal.tsx',
   'ui/components/TelegramAuthModal.tsx',
   'ui/components/WhatsAppQRModal.tsx',
+  'ui/features/whats-app-qr-modal/**/*.{ts,tsx}',
   'ui/features/electron-app/**/*.{ts,tsx}',
   'main/services/iMessageReader.ts',
   'main/domains/i-message-reader/**/*.ts',
