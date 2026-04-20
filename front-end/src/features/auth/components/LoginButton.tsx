@@ -54,7 +54,11 @@ const LoginButton = () => {
       <PhoneAuthModal
         open={modalOpen}
         onOpenChange={setModalOpen}
-        onAuthComplete={() => void refreshAuthState('post-otp-verify')}
+        onAuthComplete={() => {
+          void refreshAuthState('post-otp-verify').catch((error: unknown) => {
+            console.error('Failed to refresh auth state after OTP verify', error);
+          });
+        }}
       />
     </>
   );

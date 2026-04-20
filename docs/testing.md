@@ -7,9 +7,9 @@ Single source of truth for running tests. All commands run from the repo root.
 ```bash
 bash scripts/test.sh --port=3001                   # everything: offline + smoke + semantic (requires running services)
 bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + Playwright semantic)
-bash scripts/test.sh agents                        # single repo (offline)
-bash scripts/test.sh agents web-search             # single domain (offline)
-bash scripts/test.sh back-end auth                 # backend blackbox: auth domain
+bash scripts/test.sh --no-smoke agents             # single repo (offline)
+bash scripts/test.sh --no-smoke agents web-search  # single domain (offline)
+bash scripts/test.sh --no-smoke back-end auth      # backend blackbox: auth domain
 bash scripts/test.sh --list                        # list available repos/domains
 ```
 

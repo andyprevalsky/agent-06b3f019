@@ -105,21 +105,6 @@ export async function deleteAgent(agentId: string): Promise<void> {
   }).catch(() => {});
 }
 
-export async function waitForConsoleMatch(
-  rec: Recorder,
-  predicate: (text: string) => boolean,
-  timeoutMs: number,
-  page: Page,
-): Promise<string | null> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const hit = rec.console.find((m) => predicate(m.text));
-    if (hit) return hit.text;
-    await page.waitForTimeout(250);
-  }
-  return null;
-}
-
 export function hasUncaughtErrors(rec: Recorder): string[] {
   const textErrors = rec.console
     .filter(

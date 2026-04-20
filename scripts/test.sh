@@ -271,11 +271,11 @@ if $SMOKE; then
   # Frontend semantic tests (Playwright/Chromium, requires running frontend)
   SEMANTIC_BACKEND_PORT="$PORT"
   SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
-  if curl -s "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
-    bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
-  else
-    echo "  ℹ Skipping semantic tests — frontend not running on port $SEMANTIC_FRONTEND_PORT"
+  if ! curl -sf "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
+    echo "ERROR: semantic tests require frontend on port $SEMANTIC_FRONTEND_PORT (start it or pass --no-smoke to skip)."
+    exit 1
   fi
+  bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
 
   collect_bg_suites
 fi
