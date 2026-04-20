@@ -74,6 +74,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/contactsReaderNative.ts',
   'main/domains/contacts-reader-native/**/*.ts',
   'main/services/indexedDBReader.ts',
+  'main/domains/indexed-db-reader/**/*.ts',
   'main/services/iMessageSender.ts',
   'main/domains/i-message-sender/**/*.ts',
   'ui/launcher/**/*.{ts,tsx}',
