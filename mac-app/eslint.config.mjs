@@ -93,6 +93,7 @@ const STRICT_DOMAIN_FILES = [
   'ui/features/update-indicator/**/*.{ts,tsx}',
   'ui/features/launcher/**/*.{ts,tsx}',
   'ui/features/atlas-password-modal/**/*.{ts,tsx}',
+  'ui/features/telegram-auth-modal/**/*.{ts,tsx}',
 ];
 
 export default tseslint.config(
