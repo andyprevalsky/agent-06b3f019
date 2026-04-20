@@ -5,10 +5,10 @@ Single source of truth for running tests. All commands run from the repo root.
 ## Quick Start
 
 ```bash
-bash scripts/test.sh                              # all offline tests
-bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks (requires running services)
-bash scripts/test.sh agents                        # single repo
-bash scripts/test.sh agents web-search             # single domain
+bash scripts/test.sh --port=3001                   # everything: offline + smoke + semantic (requires running services)
+bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + Playwright semantic)
+bash scripts/test.sh agents                        # single repo (offline)
+bash scripts/test.sh agents web-search             # single domain (offline)
 bash scripts/test.sh back-end auth                 # backend blackbox: auth domain
 bash scripts/test.sh --list                        # list available repos/domains
 ```
@@ -17,8 +17,8 @@ bash scripts/test.sh --list                        # list available repos/domain
 
 | Suite | Command | Server Required | Filtering |
 |-------|---------|-----------------|-----------|
-| All offline | `bash scripts/test.sh` | No | repo, domain |
-| + Smoke | `bash scripts/test.sh --smoke --port=N` | Yes | — |
+| Offline-only | `bash scripts/test.sh --no-smoke` | No | repo, domain |
+| All (offline + smoke + semantic) | `bash scripts/test.sh --port=N` | Yes | — |
 | Agents blackbox | `cd agents && python scripts/run_blackbox_tests.py [domain]` | No | domain |
 | Backend structural | `cd back-end && npx tsx src/tests/structural/layer-deps.test.ts` | No | — |
 | Backend blackbox | `cd back-end && bash scripts/run-blackbox-tests.sh [domain]` | No (self-manages) | domain |

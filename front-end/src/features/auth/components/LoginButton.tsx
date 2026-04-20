@@ -27,7 +27,7 @@ import PhoneAuthModal from './PhoneAuthModal';
 
 const LoginButton = () => {
   const [modalOpen, setModalOpen] = useState(false);
-  const { user, loading } = useAuth();
+  const { user, loading, refreshAuthState } = useAuth();
   const navigate = useNavigate();
 
   const handleClick = () => {
@@ -51,7 +51,11 @@ const LoginButton = () => {
         Login
       </button>
 
-      <PhoneAuthModal open={modalOpen} onOpenChange={setModalOpen} />
+      <PhoneAuthModal
+        open={modalOpen}
+        onOpenChange={setModalOpen}
+        onAuthComplete={() => void refreshAuthState('post-otp-verify')}
+      />
     </>
   );
 };

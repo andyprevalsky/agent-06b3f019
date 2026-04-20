@@ -3,10 +3,13 @@ set -euo pipefail
 
 # ── Root-level test runner ──────────────────────────────────────
 #
+# Runs EVERYTHING by default: offline suites + smoke (which bundles the
+# Playwright semantic tests). Flags disable suites — they never enable them.
+#
 # Usage:
-#   bash scripts/test.sh                              # all offline tests
-#   bash scripts/test.sh --smoke                       # + smoke benchmarks (auto-derives port from CONDUCTOR_PORT)
-#   bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks (explicit port)
+#   bash scripts/test.sh                              # offline + smoke + semantic (auto-port from CONDUCTOR_PORT)
+#   bash scripts/test.sh --port=3001                   # explicit port
+#   bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + semantic)
 #   bash scripts/test.sh agents                        # single repo
 #   bash scripts/test.sh agents web-search             # single domain
 #   bash scripts/test.sh back-end                      # backend tests only
@@ -27,20 +30,20 @@ IS_MAC=false
 # ── Parse flags ──
 REPO=""
 DOMAIN=""
-SMOKE=false
+SMOKE=true
 PORT=""
 LIST=false
 VERBOSE=false
 
 for arg in "$@"; do
   case "$arg" in
-    --smoke) SMOKE=true ;;
+    --no-smoke) SMOKE=false ;;
     --port=*) PORT="${arg#--port=}" ;;
     --list) LIST=true ;;
     -v|--verbose) VERBOSE=true ;;
     -*)
       echo "Unknown flag: $arg"
-      echo "Usage: bash scripts/test.sh [repo] [domain] [--smoke --port=N] [--list] [-v]"
+      echo "Usage: bash scripts/test.sh [repo] [domain] [--no-smoke] [--port=N] [--list] [-v]"
       exit 1
       ;;
     *)
@@ -65,7 +68,7 @@ if $LIST; then
   echo ""
   echo "  front-end"
   (cd front-end && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
-  echo "    (semantic — requires --smoke):"
+  echo "    (semantic — runs under smoke):"
   (cd front-end && bash scripts/run-semantic-tests.sh --list 2>/dev/null) | sed 's/^/    /'
   echo ""
   echo "  mac-app"
@@ -82,8 +85,8 @@ if $SMOKE && [ -z "$PORT" ] && [ -n "${CONDUCTOR_PORT:-}" ]; then
   PORT="$CONDUCTOR_PORT"
 fi
 if $SMOKE && [ -z "$PORT" ]; then
-  echo "ERROR: --port=N is required when using --smoke (or set CONDUCTOR_PORT)."
-  echo "Example: bash scripts/test.sh --smoke --port=3001"
+  echo "ERROR: smoke requires a port (set CONDUCTOR_PORT or pass --port=N; pass --no-smoke to skip)."
+  echo "Example: bash scripts/test.sh --port=3001"
   exit 1
 fi
 
@@ -265,15 +268,11 @@ if $SMOKE; then
   SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME:-local}"
   bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
 
-  # Frontend semantic tests (Chrome CDP, requires running frontend)
+  # Frontend semantic tests (Playwright/Chromium, requires running frontend)
   SEMANTIC_BACKEND_PORT="$PORT"
   SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
   if curl -s "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
-    for f in front-end/src/tests/semantic/*.semantic.md; do
-      [ -f "$f" ] || continue
-      name=$(basename "$f" .semantic.md)
-      bg_suite "Frontend Semantic ($name)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh $name"
-    done
+    bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
   else
     echo "  ℹ Skipping semantic tests — frontend not running on port $SEMANTIC_FRONTEND_PORT"
   fi
