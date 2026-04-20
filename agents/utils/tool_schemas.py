@@ -245,28 +245,33 @@ class WebFetchTool(BaseModel):
 
 
 class GrepTool(BaseModel):
-    """Search user's local data (message threads) by keyword.
+    """Search user's local data (message threads, contact network) by keyword.
 
-    Searches iMessage and email conversation threads for matching messages.
-    Returns matching messages with surrounding context (like grep -C).
-    Pattern is plain text (not regex). Use empty string '' to return all messages (no filter).
+    Searches iMessage/email conversation threads or the user's contact network.
+    Returns matching records. Pattern is plain text (not regex).
+    Use empty string '' to return all records (no filter).
     """
 
     tool: Literal["grep"]
     pattern: str = Field(
-        description="Text to search for in messages (plain text, not regex). Use '' to return all messages. E.g. 'dinner', 'project update'"
+        description="Text to search for (plain text, not regex). Use '' to return all records. E.g. 'dinner', 'acme', 'cto'."
     )
     source: str = Field(
         default="messages",
-        description="Data source to search. 'messages' = iMessage/email threads. 'agent_network_user_messages' = user messages across the agent network (all agents in this workflow tree). 'agent_network_tool_results' = tool call results across the agent network (search results, research findings, etc.).",
+        description=(
+            "Data source to search. 'messages' = iMessage/email threads. "
+            "'network' = user's contact network (name, phone, email, company, title, relation). "
+            "'agent_network_user_messages' = user messages across the agent network (all agents in this workflow tree). "
+            "'agent_network_tool_results' = tool call results across the agent network (search results, research findings, etc.)."
+        ),
     )
     person_id: Optional[str] = Field(
         default=None,
-        description="Optional person identifier to scope search to one thread. Can be an email address, phone number, or full name.",
+        description="Optional person identifier to scope search to one thread (messages source only). Can be an email address, phone number, or full name.",
     )
     since: Optional[str] = Field(
         default=None,
-        description="ISO 8601 timestamp cutoff — only return messages after this time. E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.",
+        description="ISO 8601 timestamp cutoff — only return messages after this time (messages source only). E.g. '2025-06-01T00:00:00Z'. Defaults to 365 days ago.",
     )
 
 

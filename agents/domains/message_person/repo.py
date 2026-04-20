@@ -11,10 +11,13 @@ import httpx
 import structlog
 from temporalio import activity
 
+from helpers.tracing import traced
+
 logger = structlog.get_logger()
 
 
 @activity.defn
+@traced("fetch_recent_messages_activity")
 async def fetch_recent_messages_activity(
     user_id: str,
     limit: int = 100,
@@ -51,6 +54,7 @@ async def fetch_recent_messages_activity(
 
 
 @activity.defn
+@traced("generate_message_activity")
 async def generate_message_activity(
     model: str,
     system_name: str,

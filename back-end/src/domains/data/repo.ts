@@ -220,6 +220,63 @@ export async function getNewestMessage(userId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Network (contacts) queries
+// ---------------------------------------------------------------------------
+
+/**
+ * Search user's contact network by ILIKE across name, phone, email, company,
+ * title, relation, and communicationFrequency. Ranked by messagesExchanged DESC.
+ */
+export async function searchContacts(params: {
+  userId: string;
+  pattern: string;
+  limit: number;
+}) {
+  const { userId, pattern, limit } = params;
+
+  const where: Prisma.PersonWhereInput = {
+    userId,
+    ...(pattern.length > 0
+      ? {
+          OR: [
+            { firstName: { contains: pattern, mode: 'insensitive' as const } },
+            { lastName: { contains: pattern, mode: 'insensitive' as const } },
+            { email: { contains: pattern, mode: 'insensitive' as const } },
+            { phoneNumber: { contains: pattern, mode: 'insensitive' as const } },
+            { company: { contains: pattern, mode: 'insensitive' as const } },
+            { title: { contains: pattern, mode: 'insensitive' as const } },
+            { relation: { contains: pattern, mode: 'insensitive' as const } },
+            { communicationFrequency: { contains: pattern, mode: 'insensitive' as const } },
+          ],
+        }
+      : {}),
+  };
+
+  const [total, matches] = await Promise.all([
+    prisma.person.count({ where }),
+    prisma.person.findMany({
+      where,
+      orderBy: [{ messagesExchanged: 'desc' }, { lastName: 'asc' }],
+      take: limit,
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        phoneNumber: true,
+        email: true,
+        company: true,
+        title: true,
+        relation: true,
+        communicationFrequency: true,
+        messagesExchanged: true,
+      },
+    }),
+  ]);
+
+  return { total, matches };
+}
+
+// ---------------------------------------------------------------------------
 // Agent network queries
 // ---------------------------------------------------------------------------
 

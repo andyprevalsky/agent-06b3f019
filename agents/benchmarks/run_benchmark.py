@@ -405,7 +405,10 @@ async def poll_agent(
     while True:
         elapsed = time.time() - start
         if elapsed > resolved_timeout:
-            reason = f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+            reason = (
+                f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+                f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
+            )
             print(f"    ⏰ {reason}")
             data = await get_agent(base_url, agent_id)
             return data, approvals_triggered, approvals_resolved, reason
@@ -571,6 +574,7 @@ async def poll_agent(
                     f"{role} {aid[:12]} stalled: no new messages for {idle:.0f}s "
                     f"(threshold={AGENT_STALL_SECONDS}s, status={st['status']}, "
                     f"messages={st['count']})"
+                    f" | Investigate: python agents/benchmarks/agent_latency.py {aid}"
                 )
                 print(f"    🛑 AGENT STALL — {reason}")
                 return data, approvals_triggered, approvals_resolved, reason
@@ -943,7 +947,10 @@ async def run_single_task(
             duration_seconds=round(duration, 1),
             cost_cents=0,
             message_count=0,
-            failure_reason=str(e),
+            failure_reason=(
+                f"{e}"
+                + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
+            ),
             logs=logs,
         )
     finally:

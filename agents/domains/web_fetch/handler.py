@@ -12,6 +12,7 @@ from domains.web_fetch.config import PARALLEL_AI_COST_CENTS
 from domains.web_fetch.service import fetch_and_extract
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
+from helpers.tracing import traced
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 
 
@@ -184,6 +185,7 @@ async def web_fetch(
 
 
 @activity.defn
+@traced("web_fetch_activity")
 async def web_fetch_activity(
     url: str,
     objective: str,

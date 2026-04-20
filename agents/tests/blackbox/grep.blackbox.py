@@ -141,6 +141,55 @@ async def test_grep_empty_pattern():
     assert body["pattern"] == ""
 
 
+async def test_grep_network_source_forwarded():
+    """grep_activity forwards source=network to backend."""
+    setup_mock({
+        "/api/data/grep": {
+            "status": 200,
+            "json": {
+                "matches": [
+                    {
+                        "person_id": "p-1",
+                        "first_name": "Alice",
+                        "last_name": "Smith",
+                        "phone_number": "+15551234567",
+                        "email": "alice@example.com",
+                        "company": "Acme",
+                        "title": "CTO",
+                        "relation": "colleague",
+                        "communication_frequency": "weekly",
+                        "messages_exchanged": 42,
+                    }
+                ],
+                "total_matches": 1,
+                "truncated": False,
+            },
+        },
+    })
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import grep_activity
+
+        result = await grep_activity(
+            pattern="acme",
+            source="network",
+            user_id="user-42",
+        )
+
+    assert result["total_matches"] == 1
+    assert result["matches"][0]["first_name"] == "Alice"
+
+    call = assert_captured_call(
+        url_contains="/api/data/grep",
+        method="POST",
+    )
+    body = json.loads(call["requestBody"])
+    assert body["source"] == "network"
+    assert body["pattern"] == "acme"
+    # person_id / since must NOT be injected for network source
+    assert "person_id" not in body
+    assert "since" not in body
+
+
 # -------------------- service.py tests --------------------
 
 
@@ -250,6 +299,7 @@ async def run_all_tests():
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
+    await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)
     r.record("truncate_pattern_short", test_truncate_pattern_short)
     r.record("truncate_pattern_long", test_truncate_pattern_long)
     await r.record_async("execute_grep_happy", test_execute_grep_happy)

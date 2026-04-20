@@ -26,6 +26,7 @@ from config import load_config
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
 from helpers.model_pricing import get_model_pricing_with_fallback
+from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.rose import ClaudeAuthContext, RoseClient
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -112,6 +113,25 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         available_actions=AVAILABLE_ACTIONS,
         agent_id=agent_id,
         call_site=f"browser_use_step_{iteration}",
+    )
+
+    from helpers.observability import dump_llm_context
+
+    dump_llm_context(
+        call_site=f"browser_use_step_{iteration}",
+        # Browser-use builds its own messages inside the Rose client; surface
+        # the inputs that would have formed the user turn so the dump is
+        # actionable without reconstructing from the Rose side.
+        messages=[{"role": "user", "content": task}],
+        agent_id=agent_id,
+        model="rose-1-browser-use",
+        extra={
+            "browser_state": browser_state,
+            "action_history": action_entries,
+            "available_actions": AVAILABLE_ACTIONS,
+            "iteration": iteration,
+            "browser_use_mode": browser_use_mode,
+        },
     )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -203,6 +223,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
 
 
 @activity.defn
+@traced("spawn_browser_agent_activity_v3")
 async def spawn_browser_agent_activity_v3(  # noqa: C901
     user_id: str,
     agent_id: str,
@@ -1530,46 +1551,53 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             result = None
 
             while True:
-                activity_handle = workflow.start_activity(
-                    spawn_browser_agent_activity_v3,
-                    args=[
-                        user_id,
-                        agent_id,
-                        goal,
-                        tool_call_id,
-                        write_lock_resume_state.get("task_id") if write_lock_resume_state else None,
-                        write_lock_resume_state.get("session_id") if write_lock_resume_state else None,
-                        write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None,
-                        write_lock_resume_state is not None,
-                        output_schema,
-                        attachments if attachments else None,
-                        write_lock_enabled,
-                        start_url,
-                        write_lock_resume_state,
-                        system_name,
-                    ],
-                    start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
-                    heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                    retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_RETRIES),
-                )
+                async with span(
+                    "browser_activity_wait",
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="spawn_browser_agent",
+                    is_resume=write_lock_resume_state is not None,
+                ):
+                    activity_handle = workflow.start_activity(
+                        spawn_browser_agent_activity_v3,
+                        args=[
+                            user_id,
+                            agent_id,
+                            goal,
+                            tool_call_id,
+                            write_lock_resume_state.get("task_id") if write_lock_resume_state else None,
+                            write_lock_resume_state.get("session_id") if write_lock_resume_state else None,
+                            write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None,
+                            write_lock_resume_state is not None,
+                            output_schema,
+                            attachments if attachments else None,
+                            write_lock_enabled,
+                            start_url,
+                            write_lock_resume_state,
+                            system_name,
+                        ],
+                        start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
+                        heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
+                        cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                        retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_RETRIES),
+                    )
 
-                was_cancelled = False
-                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
-                if workflow_instance.is_paused and not activity_handle.done():
-                    logger.info("\U0001f534 Cancelling browser agent due to pause")
-                    activity_handle.cancel()
-                    was_cancelled = True
+                    was_cancelled = False
+                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
+                    if workflow_instance.is_paused and not activity_handle.done():
+                        logger.info("\U0001f534 Cancelling browser agent due to pause")
+                        activity_handle.cancel()
+                        was_cancelled = True
 
-                try:
-                    result = await activity_handle
-                except (asyncio.CancelledError, ActivityError) as e:
-                    if isinstance(e, ActivityError) and not isinstance(
-                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                    ):
-                        raise
-                    was_cancelled = True
-                    result = {"status": "cancelled", "message": "Browser agent cancelled by user"}
+                    try:
+                        result = await activity_handle
+                    except (asyncio.CancelledError, ActivityError) as e:
+                        if isinstance(e, ActivityError) and not isinstance(
+                            e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                        ):
+                            raise
+                        was_cancelled = True
+                        result = {"status": "cancelled", "message": "Browser agent cancelled by user"}
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")

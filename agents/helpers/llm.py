@@ -27,6 +27,7 @@ from helpers.attachments import (
 )
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     RoseClient,
@@ -796,6 +797,21 @@ async def call_llm_structured_streaming(  # noqa: C901
         detected_tools_ordered: List of (tool_name, tool_call_id, timestamp) tuples in detection order
     """
     config = load_config()
+
+    dump_llm_context(
+        call_site=call_site,
+        messages=messages,
+        agent_id=agent_id,
+        model=model,
+        extra={
+            "response_model": response_model.__name__ if response_model else None,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reasoning_max_tokens": reasoning_max_tokens,
+            "skip_cache": skip_cache,
+            "has_claude_token": claude_token is not None,
+        },
+    )
 
     # Check if this is a Rose model — route in-process via RoseClient (replaces
     # the Supabase edge function).
@@ -1767,6 +1783,20 @@ async def call_llm(
         config = load_config()
         model = model or config.openrouter.model
 
+        dump_llm_context(
+            call_site=call_site,
+            messages=messages,
+            agent_id=agent_id,
+            model=model,
+            response_format=response_format,
+            extra={
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "skip_cache": skip_cache,
+                "has_claude_token": claude_token is not None,
+            },
+        )
+
         # Check if this is a Rose model — route directly to Anthropic / OpenRouter
         # via the in-process RoseClient (replaces the Supabase edge function).
         pool = pool_for_model(model) if model else None
@@ -1910,6 +1940,15 @@ async def _call_llm_verifier(  # noqa: C901
         )
 
     response_format = _build_verifier_json_schema(response_schema)
+
+    dump_llm_context(
+        call_site=call_site,
+        messages=messages,
+        agent_id=agent_id,
+        model=model,
+        response_format=response_format,
+        extra={"pool": pool, "has_claude_token": claude_token is not None},
+    )
 
     accumulated_reasoning = ""
     accumulated_json = ""

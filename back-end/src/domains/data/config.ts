@@ -13,3 +13,6 @@ export const DEFAULT_SINCE_DAYS = 365;
 
 // Context window expansion (ms) — 1 hour on each side of match
 export const CONTEXT_WINDOW_MS = 3600000;
+
+// Network (contacts) grep — max results returned
+export const NETWORK_GREP_LIMIT = 20;

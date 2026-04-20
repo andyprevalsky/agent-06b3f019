@@ -67,12 +67,12 @@ if ! curl -sf "$FRONTEND_URL" > /dev/null; then
 fi
 
 # List the semantic tests the gate will require.
-mapfile -t SEMANTIC_TESTS < <(
-  for f in "$SEMANTIC_DIR"/*.semantic.md; do
-    [ -f "$f" ] || continue
-    basename "$f" .semantic.md
-  done
-)
+# (avoid `mapfile` — bash 3.2 on stock macOS doesn't ship it)
+SEMANTIC_TESTS=()
+for f in "$SEMANTIC_DIR"/*.semantic.md; do
+  [ -f "$f" ] || continue
+  SEMANTIC_TESTS+=("$(basename "$f" .semantic.md)")
+done
 echo ""
 echo "Semantic tests to be driven in parallel (${#SEMANTIC_TESTS[@]}):"
 for name in "${SEMANTIC_TESTS[@]}"; do

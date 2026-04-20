@@ -54,6 +54,26 @@ const GrepResponse = z.object({
   truncation_message: z.string().optional(),
 });
 
+const NetworkGrepResponse = z.object({
+  matches: z.array(
+    z.object({
+      person_id: z.string(),
+      first_name: z.string().nullable(),
+      last_name: z.string().nullable(),
+      phone_number: z.string().nullable(),
+      email: z.string().nullable(),
+      company: z.string().nullable(),
+      title: z.string().nullable(),
+      relation: z.string().nullable(),
+      communication_frequency: z.string().nullable(),
+      messages_exchanged: z.number().nullable(),
+    })
+  ),
+  total_matches: z.number(),
+  truncated: z.boolean(),
+  message: z.string().optional(),
+});
+
 const SummaryResponse = z.object({
   sources: z.object({
     messages: z.object({
@@ -500,6 +520,80 @@ async function testGrep_apiKeyBodyUserId() {
   assertSchema(GrepResponse, res.data, 'POST /grep (API key body user_id)');
 }
 
+// --- grep: network source -- empty pattern returns top contacts ---
+
+async function testGrepNetwork_emptyPatternFreshUser() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: '', source: 'network' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network empty)');
+  // Fresh user: zero contacts → no-match diagnostic message
+  if (body.total_matches !== 0) {
+    throw new Error(`Expected 0 matches for fresh user, got ${body.total_matches}`);
+  }
+  if (!body.message) {
+    throw new Error('Expected diagnostic message on zero matches');
+  }
+}
+
+// --- grep: network source -- keyword pattern on fresh user ---
+
+async function testGrepNetwork_keywordFreshUser() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: 'acme', source: 'network' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network keyword)');
+  if (body.total_matches !== 0) {
+    throw new Error(`Expected 0 matches for fresh user keyword, got ${body.total_matches}`);
+  }
+  if (body.truncated !== false) {
+    throw new Error('Expected truncated=false on zero matches');
+  }
+  if (!body.message?.toLowerCase().includes('acme')) {
+    throw new Error(`Expected diagnostic to include pattern 'acme', got: ${body.message}`);
+  }
+}
+
+// --- grep: network source -- invalid pattern type returns 400 ---
+
+async function testGrepNetwork_invalidPattern() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: 42, source: 'network' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'INVALID_PATTERN') {
+    throw new Error(`Expected INVALID_PATTERN, got: ${body.error}`);
+  }
+}
+
+// --- grep: network source -- ignores person_id/since ---
+
+async function testGrepNetwork_ignoresPersonIdAndSince() {
+  // Network source should not error on person_id or since — they are meaningless
+  // and must be ignored rather than rejected.
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({
+      pattern: '',
+      source: 'network',
+      person_id: 'not-a-real-person-id',
+      since: '2024-01-01T00:00:00Z',
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network ignores person_id/since)');
+}
+
 // ==================== RUN ====================
 
 async function runAll() {
@@ -579,6 +673,23 @@ async function runAll() {
     {
       name: 'POST /data/grep -- API key with user_id in body -> 200',
       fn: testGrep_apiKeyBodyUserId,
+    },
+    // deep coverage — network source
+    {
+      name: "POST /data/grep -- source='network' empty pattern on fresh user",
+      fn: testGrepNetwork_emptyPatternFreshUser,
+    },
+    {
+      name: "POST /data/grep -- source='network' keyword pattern (no matches)",
+      fn: testGrepNetwork_keywordFreshUser,
+    },
+    {
+      name: "POST /data/grep -- source='network' invalid pattern type -> 400",
+      fn: testGrepNetwork_invalidPattern,
+    },
+    {
+      name: "POST /data/grep -- source='network' ignores person_id and since",
+      fn: testGrepNetwork_ignoresPersonIdAndSince,
     },
   ];
 

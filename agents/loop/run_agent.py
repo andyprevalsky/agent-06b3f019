@@ -36,7 +36,7 @@ from helpers.llm import (
     check_progress,
 )
 from helpers.summarize import compress_context
-from helpers.tracing import traced
+from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
@@ -657,7 +657,13 @@ async def run_agent(  # noqa: C901
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
                 """Execute a single tool and return result with metadata."""
                 try:
-                    result = await execute_tool(tool_name, tool_args, tool_call_id)
+                    async with span(
+                        "tool_dispatch",
+                        agent_id=agent_id,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                    ):
+                        result = await execute_tool(tool_name, tool_args, tool_call_id)
                     return {"tool_name": tool_name, "tool_call_id": tool_call_id, "result": result, "error": None}
                 except Exception as e:
                     logger.error(f"Tool {tool_name} failed: {e}")
@@ -811,7 +817,13 @@ async def run_agent(  # noqa: C901
                 # Execute the tool first (it posts its own IN_PROGRESS/FINISHED)
                 if execute_tool:
                     try:
-                        await execute_tool(tool_name, tool_args, tool_call_id)
+                        async with span(
+                            "tool_dispatch",
+                            agent_id=agent_id,
+                            tool_name=tool_name,
+                            tool_call_id=tool_call_id,
+                        ):
+                            await execute_tool(tool_name, tool_args, tool_call_id)
                     except Exception as e:
                         logger.warning(f"attempt_completion tool error (non-fatal): {e}")
 

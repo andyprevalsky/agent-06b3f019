@@ -26,6 +26,7 @@ from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
+from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 
@@ -152,6 +153,7 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
 
 
 @activity.defn
+@traced("spawn_explore_agent_activity")
 async def spawn_explore_agent_activity(  # noqa: C901
     agent_id: str,
     user_id: str,

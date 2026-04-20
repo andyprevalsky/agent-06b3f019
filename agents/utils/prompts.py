@@ -857,12 +857,18 @@ APPROACH:
 - When you have enough information, call attempt_completion
 
 GREP USAGE:
-- grep searches the user's message threads (iMessage, email conversations)
-- Pattern is plain text (not regex) — use '' (empty string) to return all messages without filtering
-- Optional filters: source (e.g., "messages"), person_id (email, phone, or full name to search one person's thread), since (ISO timestamp cutoff)
+- grep searches the user's message threads (iMessage, email conversations) by default
+- Pattern is plain text (not regex) — use '' (empty string) to return all records without filtering
+- Optional filters (messages source only): person_id (email, phone, or full name to scope to one thread), since (ISO timestamp cutoff)
 - The 'since' parameter accepts ISO 8601 timestamps (e.g., "2025-06-01T00:00:00Z"). Use the current timestamp above to calculate relative time ranges.
 - Results return matching messages with surrounding context (like grep -C)
 - If grep returns no results, try different keywords or broaden the time range
+
+NETWORK SEARCH (contacts):
+The system prompt shows only the top 100 contacts by message volume. To reach the long tail:
+- source="network" — search the full contact database by name, phone, email, company, title, relation, or communication frequency
+- Pattern matches any of those fields (case-insensitive substring). Use '' to list top 20 contacts.
+- Examples: pattern="acme" finds everyone at Acme; pattern="+1212" finds 212 area code; pattern="cto" finds people with CTO title.
 
 AGENT NETWORK SEARCH:
 You are part of a network of agents working on interconnected tasks via recursive task decomposition.

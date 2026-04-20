@@ -36,6 +36,7 @@ from domains.spawn_agent.service import (
     validate_spawn_params,
 )
 from helpers.attachments import extract_attachments_from_context
+from helpers.tracing import span
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
@@ -194,44 +195,51 @@ class SpawnAgentManager(ToolManager):
             # Run explore agent activity with pause polling
             model = getattr(workflow_instance, "model", EXPLORE_DEFAULT_MODEL)
             claude_token = None  # Explore uses cheap lite waterfall, no claudeAuth
-            activity_handle = workflow.start_activity(
-                spawn_explore_agent_activity,
-                args=[
-                    workflow_instance.agent_id,
-                    workflow_instance.user_id,
-                    goal,
-                    model,
-                    network_metadata,
-                    local_data_summary,
-                    task_id,
-                    tool_call_id,
-                    claude_token,
-                    attachment_texts,
-                ],
-                start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,
-                heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
-                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                retry_policy=RetryPolicy(maximum_attempts=1),
-            )
+            async with span(
+                "explore_activity_wait",
+                agent_id=workflow_instance.agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="spawn_agent",
+                task_id=task_id,
+            ):
+                activity_handle = workflow.start_activity(
+                    spawn_explore_agent_activity,
+                    args=[
+                        workflow_instance.agent_id,
+                        workflow_instance.user_id,
+                        goal,
+                        model,
+                        network_metadata,
+                        local_data_summary,
+                        task_id,
+                        tool_call_id,
+                        claude_token,
+                        attachment_texts,
+                    ],
+                    start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,
+                    heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
+                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
 
-            # Wait for activity completion or pause signal
-            was_cancelled = False
-            await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
-            if workflow_instance.is_paused and not activity_handle.done():
-                logger.info("Cancelling explore agent due to pause", goal=goal[:100])
-                activity_handle.cancel()
-                was_cancelled = True
+                # Wait for activity completion or pause signal
+                was_cancelled = False
+                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
+                if workflow_instance.is_paused and not activity_handle.done():
+                    logger.info("Cancelling explore agent due to pause", goal=goal[:100])
+                    activity_handle.cancel()
+                    was_cancelled = True
 
-            # Get result
-            try:
-                result = await activity_handle
-            except (asyncio.CancelledError, ActivityError) as e:
-                if isinstance(e, ActivityError) and not isinstance(
-                    e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                ):
-                    raise  # Re-raise non-cancellation errors
-                was_cancelled = True
-                result = {}
+                # Get result
+                try:
+                    result = await activity_handle
+                except (asyncio.CancelledError, ActivityError) as e:
+                    if isinstance(e, ActivityError) and not isinstance(
+                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                    ):
+                        raise  # Re-raise non-cancellation errors
+                    was_cancelled = True
+                    result = {}
 
             if was_cancelled:
                 logger.info("Explore agent cancelled", goal=goal[:100])
