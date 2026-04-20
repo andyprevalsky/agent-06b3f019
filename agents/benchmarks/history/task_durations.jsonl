@@ -90,3 +90,4 @@
 {"task": "spawn-sub-agents", "duration_seconds": 131.0, "cost_cents": 9.0, "timestamp": "2026-04-20T20:01:00.909693+00:00", "agent_id": "0f38dac5-8222-4558-b30d-10e06c9551d6"}
 {"task": "claude-code-agent", "duration_seconds": 125.9, "cost_cents": 0.0, "timestamp": "2026-04-20T20:01:00.909693+00:00", "agent_id": "4c861106-d3fe-41db-8e35-06d72482e071"}
 {"task": "browser-smoke", "duration_seconds": 105.8, "cost_cents": 2.0, "timestamp": "2026-04-20T20:01:00.909693+00:00", "agent_id": "b5e3041b-af52-4c2c-93aa-870c031edf99"}
+{"task": "parallel-tool-calls", "duration_seconds": 131.5, "cost_cents": 18.0, "timestamp": "2026-04-20T20:16:14.680727+00:00", "agent_id": "d47afe38-e621-4364-a18e-5ec0d93bfcd3"}
