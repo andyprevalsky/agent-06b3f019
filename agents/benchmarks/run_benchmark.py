@@ -79,10 +79,11 @@ POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
 # Per-agent early-fail threshold: if a single agent emits no new messages for
 # this many seconds, fail fast instead of burning the full task timeout on a
-# silent worker. Kept at ~1 min so stalled/errored agents surface quickly; real
-# activities (LLM calls, tool executions) are expected to emit at least one
-# message per minute. See poll_agent.
-AGENT_STALL_SECONDS = 60
+# silent worker. Matches STALL_THRESHOLD because DAG reasoning activities can
+# stream for 60–90s via Supabase Realtime without posting intermediate rows to
+# the messages table — 60s here produces false-positive stalls on the synthesis
+# step of research-heavy smoke tasks.
+AGENT_STALL_SECONDS = 120
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
