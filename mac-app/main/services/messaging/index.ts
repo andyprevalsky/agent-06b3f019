@@ -1,10 +1,9 @@
-// Types
-export * from './types';
+/**
+ * Compatibility barrel — re-exports the messaging-core runtime layer.
+ *
+ * The real public surface lives in main/domains/messaging-core/runtime.ts.
+ * Callers should import from here (`main/services/messaging`) only while we
+ * keep the pre-refactor path stable for the blackbox tests that bind to it.
+ */
 
-// Transformer
-export { MessageTransformer } from './MessageTransformer';
-
-// Platform exports
-export * from './platforms/imessage';
-export * from './platforms/whatsapp';
-export * from './platforms/telegram';
+export * from '../../domains/messaging-core/runtime';

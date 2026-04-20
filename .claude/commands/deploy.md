@@ -10,11 +10,9 @@ Push the current branch, create a PR, wait for CodeRabbit review, merge, and wai
 
 ---
 
-# Step 0: Capture original Conductor workspace title + seed task list
+# Step 0: Capture original Conductor workspace title
 
-Before running tests or creating/updating a PR:
-
-**(a) Capture the current Conductor workspace title** so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
+Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
 
 ```bash
 WORKSPACE_DIR="$(basename "$PWD")"
@@ -24,24 +22,6 @@ echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
 If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 14a rename.
-
-**(b) Seed the task list with one task per deploy step** (MANDATORY — this is the checklist that prevents silent skips). Immediately create tasks for each of the following via `TaskCreate`, in order:
-
-1. Phase 1 prep: prettier / eslint fix + verify / tsc / structural (Steps 1–4)
-2. Coverage gates: back-end / front-end / agents / mac-app (Steps 4a–4m) as applicable
-3. Research lint + structural (Step 4r) if `$CHANGED_RESEARCH` non-empty
-4. Credential health (Step 4c)
-5. Early push + PR open + CodeRabbit scope trim (Step 4d)
-6. Stack spin-up (Step 5)
-7. Blackbox API tests (Step 5a) if `$CHANGED_BACKEND` non-empty
-8. **Smoke + semantic combined run (Step 6)** — single gate, both must pass
-9. CodeRabbit review cycle + fix loop (Steps 9–10)
-10. Archive plan / cleanup / revert scope trim (Steps 11–11b)
-11. Merge (Step 12)
-12. Wait for deploys (Step 13)
-13. New branch + restore workspace title (Steps 14–14a)
-
-Every subsequent step updates its task status via `TaskUpdate` (in_progress → completed). **Missing tasks are disqualifying.** If at the end of Phase 1 the task list does not show every test gate as `completed`, you are not allowed to proceed to merge.
 
 ---
 
@@ -92,13 +72,14 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty). Commit any resulting changes once.
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 2. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
+   - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
 
@@ -182,6 +163,26 @@ cd agents && bash scripts/run-coverage.sh
 
 Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
 
+## Step 1m: Mac-app format + lint auto-fix (skip if `$CHANGED_MAC_APP` is empty)
+
+Sequential mutator — runs before the parallel verifier batch, same pattern as Step 1 (prettier) and Step 2a (eslint --fix) for the back-end.
+
+```bash
+cd mac-app && npm run format && npm run lint:fix
+```
+
+Commit any resulting changes (can combine with Step 1's commit).
+
+## Step 4m-lint: Mac-app format:check + lint + type-check (skip if `$CHANGED_MAC_APP` is empty)
+
+Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
+
+```bash
+cd mac-app && npm run format:check && npm run lint && npm run type-check
+```
+
+If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
+
 ## Step 4m: Mac-app blackbox tests (skip if `$CHANGED_MAC_APP` is empty)
 
 The mac-app has its own vitest + MSW + jsdom blackbox suite covering every renderer and main-process domain (see `mac-app/tests/blackbox/`). Run the full suite:
@@ -228,47 +229,12 @@ This same file is also part of the full blackbox suite (Step 5a), so it will run
 Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
 
 1. Commit any uncommitted changes from Phase 1a (prettier/eslint fixes, coverage-driven test additions), using the test-report commit format from Step 7.
-2. **Trim CodeRabbit scope for large PRs.** CodeRabbit skips review when a PR has "too many files" — which defeats the whole review gate. If the diff exceeds **150 files**, temporarily add negative `path_filters` to `.coderabbit.yaml` so CodeRabbit sees only the 150 highest-importance files. Ranking: runtime code (back-end/src, agents/{activities,helpers,loop,workflows,tools,domains,browser_tools}, research/supabase/functions, prisma schema, worker.py/config.py/health_server.py) beats UI (front-end/src, mac-app/main) beats tests/benchmarks/docs/configs; within each bucket, larger diffs rank higher. The exclusions are wrapped in `DEPLOY-AUTO-EXCLUDE-BEGIN`/`END` markers and reverted in Step 11b so they never reach `main`.
-
-   ```bash
-   CHANGED_COUNT=$(git diff --name-only main...HEAD | wc -l | tr -d ' ')
-   if [ "$CHANGED_COUNT" -gt 150 ]; then
-     git diff --numstat main...HEAD | awk '
-       { a=$1; d=$2; p=$3;
-         if (a=="-") a=0; if (d=="-") d=0;
-         s = a + d;
-         if      (p ~ /^back-end\/src\// && p !~ /\/tests\//)                                       s += 10000;
-         else if (p ~ /^agents\/(activities|helpers|loop|workflows|tools|domains|browser_tools)\//) s += 10000;
-         else if (p ~ /^research\/supabase\/functions\//)                                           s += 10000;
-         else if (p ~ /^back-end\/prisma\//)                                                        s += 9000;
-         else if (p ~ /^agents\/(worker|config|health_server)\.py$/)                                s += 9000;
-         else if (p ~ /^(front-end\/src|mac-app\/main)\//)                                          s += 5000;
-         else if (p ~ /\/(tests|benchmarks)\//)                                                     s += 500;
-         else if (p ~ /\.(md|yaml|yml|json|lock)$/)                                                 s += 100;
-         else                                                                                       s += 1000;
-         print s"\t"p
-       }' | sort -rn | awk 'NR>150 {print "    - \"!"$2"\""}' > /tmp/coderabbit-excludes.yml
-     python3 - <<'PY'
-   import pathlib
-   excludes = pathlib.Path('/tmp/coderabbit-excludes.yml').read_text().rstrip()
-   cfg = pathlib.Path('.coderabbit.yaml')
-   text = cfg.read_text()
-   marker = '  path_instructions:'
-   assert marker in text, 'path_instructions anchor missing from .coderabbit.yaml'
-   block = '    # DEPLOY-AUTO-EXCLUDE-BEGIN\n' + excludes + '\n    # DEPLOY-AUTO-EXCLUDE-END\n\n'
-   cfg.write_text(text.replace(marker, block + marker, 1))
-   PY
-     rm /tmp/coderabbit-excludes.yml
-     git add .coderabbit.yaml
-     git commit -m "chore: trim CodeRabbit path filters for large PR ($CHANGED_COUNT files -> 150)"
-   fi
-   ```
-3. If on `main`, create a new branch; push with `-u`:
+2. If on `main`, create a new branch; push with `-u`:
    ```bash
    git push -u origin $(git branch --show-current)
    ```
-4. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
-5. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
+3. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
+4. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
 
 **If runtime tests (5/5a/6) fail** after the PR is already open: fix the issue, push the fix commit, and restart the Test Loop from Step 0. The new push re-arms CodeRabbit automatically — Step 9's poll-until-re-armed logic handles that correctly.
 
@@ -276,22 +242,17 @@ Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish be
 
 ## Step 5: Spin up local services
 
-**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, run the pre-smoke cleanup. It enforces "at most 1 of each service per worktree" and reaps long-idle zombies from other worktrees — the invariant that keeps smoke runs from poisoning each other across `/deploy` invocations.
+**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. Orphans subscribe to the same Temporal task queue the new run will use and will silently steal work from smoke tasks.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/list-services.sh               # inspect what's running (optional, informational)
-bash scripts/pre-smoke-cleanup.sh           # kills this worktree's stale services + reaps idle zombies
+bash scripts/list-services.sh           # inspect what's running (optional, informational)
+bash scripts/kill-services.sh           # kill the whole tree; preserves DB container + volume
 ```
 
-`scripts/pre-smoke-cleanup.sh` does three things, all idempotent:
-1. **Process dedup** — calls `kill-services.sh` to kill every run.sh tree / worker / backend / frontend process in this worktree (so we start from a clean "0 of each service" baseline). Worktree-scoped via `$PWD`, so sibling worktrees are untouched.
-2. **Stale ACTIVE agents** — marks agents in this worktree's DB that have been `ACTIVE` for >30 min as `FAILED`. Stops the new run from inheriting orphans from a previous aborted run.
-3. **Idle-zombie reap** — stops `victoria-db-*` / `supabase_*` containers from OTHER worktrees whose last log line is older than 30 min. Active parallel worktrees are preserved; dead ones freed. Tune via `PRE_SMOKE_IDLE_MIN=60 bash scripts/pre-smoke-cleanup.sh`.
+`scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Temporal workflow termination is handled in-process by `run_benchmark.py`'s preflight (Step 6) — belt-and-braces.
-
-Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts `back-end`, `agents`, `research`, **and `front-end`** (the frontend is required by Step 6's semantic tests, so it is booted alongside the other services — only `mac-app` is skipped). When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
+Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -351,7 +312,13 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
-**Also wait for the frontend** (required by Step 6's semantic tests; `run.sh --benchmark` now boots it alongside backend/agents):
+**Also start the frontend dev server** (required by Step 6b semantic tests). `run.sh --benchmark` intentionally skips the front-end, so launch it as a sibling background process:
+
+```bash
+# Start front-end dev server in a separate background process (needed for semantic tests).
+# run_in_background=true for this command:
+(cd front-end && VITE_PORT=$((CONDUCTOR_PORT + 1)) npm run dev > frontend-logs.log 2>&1)
+```
 
 ```bash
 export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
@@ -362,11 +329,11 @@ for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && brea
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/pre-smoke-cleanup.sh                # kills this worktree's services; DB container preserved
+bash scripts/kill-services.sh                    # kills run.sh tree, preserves DB
 (cd research/supabase && supabase stop 2>/dev/null) || true   # stop supabase compose stack
 ```
 
-`pre-smoke-cleanup.sh` is a superset of `kill-services.sh` and also marks stuck ACTIVE agents as FAILED + reaps long-idle zombie containers. Safe to re-run any time — idempotent. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
+`kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
 
 ## Step 5a: Blackbox API tests + fix
 
@@ -383,13 +350,11 @@ BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/
 
 **ESCALATE IMMEDIATELY on third-party credit/billing errors.** If any test fails with "insufficient credits", "402", "quota exceeded", or similar billing errors from external providers (OpenRouter, OpenAI, E2B, Twilio, etc.), STOP and tell the user immediately. Do NOT try to fix this in code (e.g., accepting 500s). The user needs to add credits to the provider account.
 
-## Step 6: Smoke benchmarks + semantic tests (combined gate)
+## Step 6: Smoke benchmarks + fix
 
-**Smoke and semantic are one gate now.** They run in parallel via `scripts/run-smoke-and-semantic.sh`: smoke benchmarks execute autonomously in Temporal while you drive semantic tests through Chrome CDP. The script only exits 0 when BOTH pass. Skipping one without the other is not possible at the script level — the old "smoke green → forgot semantic" failure mode is eliminated.
+### When smoke can be skipped
 
-### When this combined gate can be skipped
-
-It exercises the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions) plus real user flows through the frontend. Skip **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
+Smoke benchmarks exercise the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions). Skip them **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
 
 **SAFE TO SKIP** when the diff is limited to paths that don't ship or don't affect agent behavior:
 
@@ -426,30 +391,23 @@ It exercises the full agent runtime (backend API → Temporal → worker activit
 
 When skipping, record it explicitly in the Test Report:
 ```
-| Smoke + Semantic | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
+| Smoke Benchmarks | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
 ```
 
-### Running the combined gate
+### Running smoke
 
-With the local stack from Step 5 still running (back-end + agents + front-end all healthy), launch the combined runner **in the background** — it needs to run while you drive Chrome CDP through the semantic tests.
+With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
 
 ```bash
-cd "$(git rev-parse --show-toplevel)"
-# Run this with run_in_background=true so you can drive semantic tests while smoke executes.
-bash scripts/run-smoke-and-semantic.sh
+# Run smoke benchmarks against local backend.
+# TEMPORAL_TASK_QUEUE must match the queue run.sh's worker listens on.
+# ALLOW_TEMPORAL_CLEANUP=true lets the benchmark pre-flight terminate stale workflows
+# from previous runs on Temporal Cloud (otherwise cleanup is skipped for non-local Temporal).
+cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
+TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
 ```
 
-Behavior:
-- Starts `python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel` in a child process (log: `.context/deploy-smoke.log`).
-- Prints every `.semantic.md` test body to stdout. While the smoke child runs, drive each test via `mcp__claude-in-chrome__*` tools and record pass/fail for each with:
-  ```bash
-  bash front-end/scripts/run-semantic-tests.sh --record <name> pass
-  # or
-  bash front-end/scripts/run-semantic-tests.sh --record <name> fail "<reason>"
-  ```
-- After smoke exits, the script validates every semantic test has a `pass` result tagged with the current HEAD SHA. Missing or stale results = non-zero exit.
-
-This runs 5 e2e smoke tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research, plus every `.semantic.md` test (currently `login`, `agent-realtime`) through the real frontend via Chrome CDP.
+This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
 
 Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
 
@@ -579,24 +537,41 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 ```
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
-### Driving semantic tests in parallel with smoke
+## Step 6b: Semantic tests + fix
 
-While `run-smoke-and-semantic.sh` is running in the background, drive each `.semantic.md` test through Chrome CDP. The script has already printed the test bodies to stdout (`.context/deploy-smoke.log` is the smoke child's log; the combined runner's stdout/stderr go wherever the Bash tool surfaces background output).
+Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-For each test:
-1. Call `mcp__claude-in-chrome__tabs_context_mcp` first (never reuse stale tab IDs from earlier runs).
-2. Navigate/interact per the test's `steps`.
-3. Verify each `invariants` line. Capture console via `mcp__claude-in-chrome__read_console_messages` and network via `mcp__claude-in-chrome__read_network_requests` as needed.
-4. Stop at the `termination` condition.
-5. Record the result:
-   ```bash
-   bash front-end/scripts/run-semantic-tests.sh --record <name> pass
-   # or on failure:
-   bash front-end/scripts/run-semantic-tests.sh --record <name> fail "<reason>"
-   ```
-6. On failure: read `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt`. Fix the root cause. Re-run the stack + combined runner.
+**Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
 
-Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): any semantic-test failure is a real failure. "Chrome CDP not available", "realtime broadcast didn't arrive", "extension missing" — none of those are excuses.
+### Running semantic tests
+
+With the full stack from Step 5 still running (backend, worker, research, **and frontend on `$SMOKE_FRONTEND_URL`**):
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash front-end/scripts/run-semantic-tests.sh
+```
+
+This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
+
+```bash
+BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash front-end/scripts/run-semantic-tests.sh login
+```
+
+If Chromium is missing, install once: `cd front-end && npx playwright install chromium`.
+
+### Pass criteria
+
+**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15: if a semantic test fails, you diagnose and fix the root cause. "Flaky selector", "realtime broadcast didn't arrive", "timeout" — none of those are excuses. Fix the underlying issue.
+
+### On failure
+
+1. Read the failing invariant from the Playwright output. Trace artifacts land in `front-end/test-results/` and `front-end/playwright-report/` (video/trace are retained on failure).
+2. Check `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt` for backend-side errors that correlate with the UI failure.
+3. Fix the root cause in code.
+4. Restart services (Step 5) and re-run the failed semantic test.
 
 ---
 
@@ -614,12 +589,12 @@ Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): any sem
 # ║  4c. Credential health: all integrations authenticate             ║
 # ║  4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes)    ║
 # ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
-# ║  6. Combined smoke + semantic gate: scripts/run-smoke-and-        ║
-# ║     semantic.sh exits 0 (5/5 smoke pass AND every .semantic.md    ║
-# ║     has a pass result tagged with current HEAD) — OR explicitly   ║
-# ║     skipped per the "When this combined gate can be skipped" table║
-# ║     in Step 6. Smoke and semantic are ONE gate; they cannot be    ║
-# ║     skipped independently.                                         ║
+# ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
+# ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
+# ║     limited to safe paths; if ANY must-run path is touched, smoke ║
+# ║     is required)                                                   ║
+# ║  6b. Semantic tests: 100% pass whenever smoke ran (skip together  ║
+# ║      with smoke — never skip one without the other)               ║
 # ║                                                                    ║
 # ║  If ANY test has ANY failure, you are BLOCKED.                     ║
 # ║  Fix it or escalate to the user. Do NOT proceed.                   ║
@@ -759,7 +734,7 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → Step 4d's path-filter trim should have prevented this by capping scope at 150 files. If CodeRabbit still skipped, the trim either didn't run or didn't apply to enough files — investigate: confirm the `DEPLOY-AUTO-EXCLUDE-BEGIN` block is present in `.coderabbit.yaml` on the pushed commit, and that file count after filters is ≤ 150. If the trim is broken, fix it and re-push. Only escalate to the user if you cannot get CodeRabbit to review after verifying the trim is in place.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → **STOP and escalate to the user.** Do NOT proceed to merge. Tell the user CodeRabbit skipped the review, explain why (file count, etc.), and ask how they want to proceed (e.g., filter paths, split PR, or merge without review).
 - **No issues found** → proceed to Phase 3.
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
@@ -811,56 +786,7 @@ cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-
 
 This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
 
-## Step 11b: Revert CodeRabbit path filter trim (if applied)
-
-If Step 4d added `DEPLOY-AUTO-EXCLUDE-BEGIN`/`END` exclusions to `.coderabbit.yaml` for a large PR, strip them now — the exclusions were PR-scoped; they must not land on `main`. CodeRabbit will re-arm on the new push, but we do NOT wait for it: the prior review (with trimmed scope) already counts as the review gate. Proceed directly to merge.
-
-```bash
-if grep -q "DEPLOY-AUTO-EXCLUDE-BEGIN" .coderabbit.yaml; then
-  python3 - <<'PY'
-import pathlib, re
-cfg = pathlib.Path('.coderabbit.yaml')
-text = cfg.read_text()
-pattern = re.compile(r'\n?\s*# DEPLOY-AUTO-EXCLUDE-BEGIN.*?# DEPLOY-AUTO-EXCLUDE-END\n', re.DOTALL)
-cfg.write_text(pattern.sub('\n', text))
-PY
-  git add .coderabbit.yaml
-  git commit -m "chore: restore CodeRabbit path filters after PR review"
-  git push
-fi
-```
-
 ## Step 12: Merge
-
-**Pre-merge artifact gate (MANDATORY).** Before calling `gh pr merge`, verify that the combined smoke+semantic gate artifacts exist for the current HEAD. If any `.semantic.md` test is missing a matching pass result tagged with the HEAD SHA, abort — do not merge.
-
-```bash
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-HEAD_SHA="$(git rev-parse HEAD)"
-GATE_OK=1
-for f in "$REPO_ROOT"/front-end/src/tests/semantic/*.semantic.md; do
-  [ -f "$f" ] || continue
-  name="$(basename "$f" .semantic.md)"
-  result="$REPO_ROOT/.context/semantic-results/${name}.json"
-  if [ ! -f "$result" ]; then
-    echo "MISSING: semantic result for $name" >&2
-    GATE_OK=0
-    continue
-  fi
-  status=$(python3 -c "import json; print(json.load(open('$result')).get('status',''))")
-  sha=$(python3 -c "import json; print(json.load(open('$result')).get('head_sha',''))")
-  if [ "$status" != "pass" ] || [ "$sha" != "$HEAD_SHA" ]; then
-    echo "FAIL: $name (status=$status, sha=$sha, expected=$HEAD_SHA)" >&2
-    GATE_OK=0
-  fi
-done
-if [ "$GATE_OK" -ne 1 ]; then
-  echo "❌ Pre-merge semantic gate FAILED — rerun scripts/run-smoke-and-semantic.sh" >&2
-  exit 1
-fi
-```
-
-If the combined gate was explicitly skipped in Step 6 (diff is test-infra-only per the skip table), the artifact check is skipped too. In that case record the skip in the Test Report and proceed.
 
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 

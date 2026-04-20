@@ -14,6 +14,7 @@ import { config } from './base/config';
 // Importing from './handlers/registry' registers all IPC handlers as a module-load side effect
 import { getOnboardingComplete } from './handlers/registry';
 import { IMessageReader } from './services/iMessageReader';
+import './domains/i-message-sync/runtime';
 import {
   initAutoUpdater,
   setAutoUpdaterWindow,
