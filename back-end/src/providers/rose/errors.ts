@@ -1,0 +1,87 @@
+/**
+ * Typed error taxonomy for the Rose client.
+ *
+ * Mirrors agents/providers/rose/errors.py. Errors are classified by *cause*
+ * (auth/rate-limit/invalid-request/server/stall), not provider response
+ * code, so callers can branch on a single vocabulary across Anthropic and
+ * OpenRouter.
+ */
+
+export class RoseError extends Error {
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'RoseError';
+    this.status = status;
+  }
+}
+
+export class RoseAuthError extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RoseAuthError';
+  }
+}
+
+export class RoseRateLimitError extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RoseRateLimitError';
+  }
+}
+
+export class RoseInvalidRequest extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RoseInvalidRequest';
+  }
+}
+
+export class RoseServerError extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RoseServerError';
+  }
+}
+
+export class RoseStallError extends RoseError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RoseStallError';
+  }
+}
+
+export class RoseDeadlineError extends RoseError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RoseDeadlineError';
+  }
+}
+
+export interface RoseStepError {
+  model: string;
+  error: RoseError;
+}
+
+export class RoseAllFailed extends RoseError {
+  stepErrors: RoseStepError[];
+  constructor(message: string, stepErrors: RoseStepError[]) {
+    super(message);
+    this.name = 'RoseAllFailed';
+    this.stepErrors = stepErrors;
+  }
+}
+
+/**
+ * Errors that mean "claudeAuth failed before first content; try waterfall."
+ * Matches _FALL_THROUGH_ERRORS in agents/providers/rose/client.py.
+ */
+export function isFallThroughError(err: unknown): boolean {
+  return (
+    err instanceof RoseInvalidRequest ||
+    err instanceof RoseStallError ||
+    err instanceof RoseServerError ||
+    err instanceof RoseAuthError ||
+    err instanceof RoseRateLimitError
+  );
+}

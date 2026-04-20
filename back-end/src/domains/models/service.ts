@@ -1,6 +1,6 @@
 // eslint-disable-next-line no-restricted-imports -- domain-specific model cache, single consumer
 import NodeCache from 'node-cache';
-import { ROSE_MODEL_POOLS } from '../../providers/roseModels';
+import { POOL_REGISTRY, type PoolName } from '../../providers/rose/pools';
 import type { OpenRouterModel, SortedModel } from './types';
 import {
   OPENROUTER_API_KEY,
@@ -75,10 +75,11 @@ function calculatePoolPricing(pool: readonly string[], allModels: OpenRouterMode
  */
 async function calculateRoseMetadata(modelName: string, allModels: OpenRouterModel[]) {
   try {
-    const pool = ROSE_MODEL_POOLS[modelName as keyof typeof ROSE_MODEL_POOLS];
-    if (pool === undefined) {
+    const spec = POOL_REGISTRY[modelName as PoolName];
+    if (spec === undefined) {
       throw new Error(`Unknown Rose model: ${modelName}`);
     }
+    const pool = spec.waterfall;
 
     const { totalPrompt, totalCompletion, validModels, minContextLength } = calculatePoolPricing(
       pool,

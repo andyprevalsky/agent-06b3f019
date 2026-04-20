@@ -17,15 +17,14 @@
  */
 
 import { prisma } from '../database';
-import {
-  createStreamingCompletion,
-  CompletionMessage,
-  CompletionChunk,
-} from '../chat/supabaseCompletions';
+import { createStreamingCompletion, CompletionMessage } from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
-import { TOOL_SCHEMAS, executeToolCall, ToolCall, ToolResult } from './supervisorTools';
+import { executeToolCall, ToolCall, ToolResult } from './supervisorTools';
 import { fetchClaudeCodeAccessToken, fetchPoolToken } from '../claudeCredentials';
+import { createLogger } from '../logger';
+
+const log = createLogger('SmsSupervisor');
 
 const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
 const MAX_TOOL_ROUNDS = 10; // Safety cap
@@ -91,7 +90,7 @@ export async function handleSmsSupervisorMessage(config: {
   const { userId, phoneNumber, inboundMessage, abortSignal } = config;
   const overallStart = Date.now();
 
-  console.log('[SMS Supervisor] === START ===', {
+  log.info('[SmsSupervisor] === START ===', {
     userId,
     phone: phoneNumber.substring(0, 7) + '****',
     messageLength: inboundMessage.length,
@@ -101,7 +100,7 @@ export async function handleSmsSupervisorMessage(config: {
   // 1. Load or create SMS session
   const session = await loadOrCreateSession(userId);
 
-  console.log('[SMS Supervisor] Session loaded', {
+  log.info('[SmsSupervisor] Session loaded', {
     userId,
     sessionId: session.id,
     existingMessageCount: session.messages.length,
@@ -112,7 +111,7 @@ export async function handleSmsSupervisorMessage(config: {
   const contextStart = Date.now();
   const { systemPrompt, sessionHistory } = await buildSmsContext(userId);
 
-  console.log('[SMS Supervisor] Context built', {
+  log.info('[SmsSupervisor] Context built', {
     userId,
     systemPromptLength: systemPrompt.length,
     sessionHistoryLength: sessionHistory.length,
@@ -134,7 +133,7 @@ export async function handleSmsSupervisorMessage(config: {
   const allToolsExecuted: string[] = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    console.log('[SMS Supervisor] LLM call round', {
+    log.info('[SmsSupervisor] LLM call round', {
       round,
       messageCount: messages.length,
       totalTokenEstimate: messages.reduce(
@@ -147,7 +146,7 @@ export async function handleSmsSupervisorMessage(config: {
     const llmStart = Date.now();
     const llmResponse = await callSupervisorLlm(messages, claudeToken);
 
-    console.log('[SMS Supervisor] LLM response received', {
+    log.info('[SmsSupervisor] LLM response received', {
       round,
       reasoningLength: llmResponse.reasoning.length,
       toolCallCount: llmResponse.tool_calls.length,
@@ -170,7 +169,7 @@ export async function handleSmsSupervisorMessage(config: {
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
 
-      console.log('[SMS Supervisor] Tool executed', {
+      log.info('[SmsSupervisor] Tool executed', {
         round,
         tool: toolCall.tool,
         success: result.success,
@@ -183,7 +182,7 @@ export async function handleSmsSupervisorMessage(config: {
     // If attempt_completion was called, extract the message and exit
     if (completionCall) {
       finalResponse = completionCall.arguments?.message || '';
-      console.log('[SMS Supervisor] attempt_completion received', {
+      log.info('[SmsSupervisor] attempt_completion received', {
         round,
         responseLength: finalResponse.length,
         responsePreview: finalResponse.substring(0, 200),
@@ -193,7 +192,7 @@ export async function handleSmsSupervisorMessage(config: {
 
     // No attempt_completion and no tool calls — nudge the LLM
     if (llmResponse.tool_calls.length === 0) {
-      console.warn('[SMS Supervisor] No tool calls and no attempt_completion', { round });
+      log.warn('[SmsSupervisor] No tool calls and no attempt_completion', { round });
       messages.push({
         role: 'assistant',
         content: JSON.stringify({
@@ -229,13 +228,13 @@ export async function handleSmsSupervisorMessage(config: {
     // On last round safety cap, force a response
     if (round === MAX_TOOL_ROUNDS - 1 && !finalResponse) {
       finalResponse = 'Sorry, I had trouble processing that. Please try again.';
-      console.warn('[SMS Supervisor] Hit safety cap without attempt_completion');
+      log.warn('[SmsSupervisor] Hit safety cap without attempt_completion');
     }
   }
 
   // 6. Check if session was cleared while we were processing
   if (abortSignal?.aborted) {
-    console.log('[SMS Supervisor] Aborted before sending SMS (session cleared)', {
+    log.info('[SmsSupervisor] Aborted before sending SMS (session cleared)', {
       userId,
       responseLength: finalResponse.length,
     });
@@ -247,7 +246,7 @@ export async function handleSmsSupervisorMessage(config: {
     const smsStart = Date.now();
     const smsResult = await sendSms(phoneNumber, finalResponse);
 
-    console.log('[SMS Supervisor] SMS sent', {
+    log.info('[SmsSupervisor] SMS sent', {
       userId,
       phone: phoneNumber.substring(0, 7) + '****',
       responseLength: finalResponse.length,
@@ -258,7 +257,7 @@ export async function handleSmsSupervisorMessage(config: {
       durationMs: Date.now() - smsStart,
     });
   } else {
-    console.warn('[SMS Supervisor] No response to send', { userId });
+    log.warn('[SmsSupervisor] No response to send', { userId });
     finalResponse = "Sorry, I couldn't process that. Try again or text a task to get started.";
     await sendSms(phoneNumber, finalResponse);
   }
@@ -277,7 +276,7 @@ export async function handleSmsSupervisorMessage(config: {
 
   await saveSession(userId, session.messages);
 
-  console.log('[SMS Supervisor] === END ===', {
+  log.info('[SmsSupervisor] === END ===', {
     userId,
     toolsExecuted: allToolsExecuted,
     responseLength: finalResponse.length,
@@ -300,24 +299,24 @@ async function getClaudeToken(userId: string): Promise<string | null> {
     // Try user's own token first
     const userToken = await fetchClaudeCodeAccessToken(userId);
     if (userToken) {
-      console.log('[SMS Supervisor] Using user Claude token', { userId });
+      log.info('[SmsSupervisor] Using user Claude token', { userId });
       return userToken;
     }
 
     // Fall back to pool
     const poolResult = await fetchPoolToken();
     if (poolResult) {
-      console.log('[SMS Supervisor] Using pool Claude token', {
+      log.info('[SmsSupervisor] Using pool Claude token', {
         userId,
         poolTokenId: poolResult.poolTokenId,
       });
       return poolResult.accessToken;
     }
 
-    console.log('[SMS Supervisor] No Claude token available, will use racing', { userId });
+    log.info('[SmsSupervisor] No Claude token available, will use racing', { userId });
     return null;
   } catch (error) {
-    console.warn('[SMS Supervisor] Failed to fetch Claude token, falling back to racing', {
+    log.warn('[SmsSupervisor] Failed to fetch Claude token, falling back to racing', {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -336,7 +335,7 @@ async function callSupervisorLlm(
   const startTime = Date.now();
 
   // Log the full request
-  console.log('[SMS Supervisor LLM] Request', {
+  log.info('[SmsSupervisorLLM] Request', {
     model: SMS_SUPERVISOR_MODEL,
     messageCount: messages.length,
     hasClaudeToken: !!claudeToken,
@@ -387,7 +386,7 @@ async function callSupervisorLlm(
     }
   }
 
-  console.log('[SMS Supervisor LLM] Response stream consumed', {
+  log.info('[SmsSupervisorLLM] Response stream consumed', {
     contentLength: accumulatedContent.length,
     reasoningLength: accumulatedReasoning.length,
     actualModel,
@@ -401,7 +400,7 @@ async function callSupervisorLlm(
   try {
     parsed = JSON.parse(accumulatedContent);
   } catch (error) {
-    console.error('[SMS Supervisor LLM] Failed to parse response JSON', {
+    log.error('[SmsSupervisorLLM] Failed to parse response JSON', {
       error: error instanceof Error ? error.message : String(error),
       rawContent: accumulatedContent.substring(0, 500),
       contentLength: accumulatedContent.length,
@@ -420,7 +419,7 @@ async function callSupervisorLlm(
   }
 
   // Log the full parsed response
-  console.log('[SMS Supervisor LLM] Parsed response', {
+  log.info('[SmsSupervisorLLM] Parsed response', {
     reasoning: parsed.reasoning.substring(0, 300),
     toolCallCount: parsed.tool_calls?.length || 0,
     toolCalls: parsed.tool_calls?.map((tc) => ({
@@ -460,7 +459,7 @@ async function loadOrCreateSession(userId: string): Promise<SessionData> {
     data: { userId, messages: JSON.stringify([]) },
   });
 
-  console.log('[SMS Session] Created new session', {
+  log.info('[SmsSession] Created new session', {
     userId,
     sessionId: session.id,
   });
@@ -468,11 +467,21 @@ async function loadOrCreateSession(userId: string): Promise<SessionData> {
   return { id: session.id, messages: [], isNew: true };
 }
 
-function parseSessionMessages(raw: any): SessionMessage[] {
+function parseSessionMessages(raw: unknown): SessionMessage[] {
   try {
     const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!Array.isArray(arr)) return [];
-    return arr;
+    // Filter: a bad row (missing role / non-string content / missing timestamp)
+    // would flow straight into the next Rose request and fail the LLM call.
+    return arr.filter(
+      (item): item is SessionMessage =>
+        typeof item === 'object' &&
+        item !== null &&
+        ((item as Record<string, unknown>).role === 'user' ||
+          (item as Record<string, unknown>).role === 'assistant') &&
+        typeof (item as Record<string, unknown>).content === 'string' &&
+        typeof (item as Record<string, unknown>).timestamp === 'string'
+    );
   } catch {
     return [];
   }
@@ -485,7 +494,7 @@ async function saveSession(userId: string, messages: SessionMessage[]): Promise<
     create: { userId, messages: JSON.stringify(messages) },
   });
 
-  console.log('[SMS Session] Saved', {
+  log.info('[SmsSession] Saved', {
     userId,
     messageCount: messages.length,
   });

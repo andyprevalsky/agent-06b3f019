@@ -11,6 +11,7 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 
 from helpers.handle_tool_event import handle_tool_event
+from helpers.tracing import traced
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 from tools.web_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
@@ -210,6 +211,7 @@ async def web_search(
 
 
 @activity.defn
+@traced("web_search_activity")
 async def web_search_activity(query: str, max_tokens: int = 1500) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 

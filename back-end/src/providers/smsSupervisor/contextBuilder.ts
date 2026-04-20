@@ -8,9 +8,12 @@
  * Called on every inbound SMS to build a fresh snapshot of the user's state.
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../database';
-import { CompletionMessage } from '../chat/supabaseCompletions';
-import { getAgentUrl } from '../smsTemplates';
+import { CompletionMessage } from '../rose';
+import { createLogger } from '../logger';
+
+const log = createLogger('SmsContext');
 
 // Tool names whose messages are visible to users in the frontend
 const VISIBLE_TOOL_NAMES = [
@@ -33,15 +36,27 @@ const MAX_ATTENTION_REQUESTS = 10;
 // Max root agents to include in hierarchy
 const MAX_ROOT_AGENTS = 50;
 
-interface AgentNode {
+interface ChildAgentNode {
+  id: string;
+  goal: string;
+  status: string;
+  progress: number;
+  depth: number;
+  parentAgentId: string | null;
+  treeCostCents: number;
+  priceLimitCents: number;
+  updatedAt: Date;
+}
+
+interface RootAgentNode {
   id: string;
   goal: string;
   status: string;
   progress: number;
   treeCostCents: number;
   priceLimitCents: number;
-  depth: number;
-  parentAgentId: string | null;
+  updatedAt: Date;
+  children: ChildAgentNode[];
 }
 
 interface AttentionRequestContext {
@@ -50,7 +65,7 @@ interface AttentionRequestContext {
   workflowId: string;
   question: string;
   imageUrl: string | null;
-  metadata: any;
+  metadata: Prisma.JsonValue;
   createdAt: Date;
   shortcode?: string;
 }
@@ -61,6 +76,20 @@ interface VisibleMessage {
   toolName: string;
   title: string;
   timestamp: Date;
+}
+
+interface UserProfileContext {
+  userId: string;
+  name: string | null;
+  phone: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
+  country: string | null;
+  customSystemPrompt: string | null;
+  systemName: string | null;
 }
 
 export interface SmsContext {
@@ -74,7 +103,7 @@ export interface SmsContext {
 export async function buildSmsContext(userId: string): Promise<SmsContext> {
   const startTime = Date.now();
 
-  console.log('[SMS Context] Building context', { userId });
+  log.info('[SmsContext] Building context', { userId });
 
   // Fetch all data in parallel
   const [rootAgents, attentionRequests, user, session] = await Promise.all([
@@ -84,7 +113,7 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     fetchSmsSession(userId),
   ]);
 
-  console.log('[SMS Context] Fetched data', {
+  log.info('[SmsContext] Fetched data', {
     userId,
     rootAgentCount: rootAgents.length,
     attentionRequestCount: attentionRequests.length,
@@ -106,13 +135,13 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   const allAgentIds = [...recentAgentIds];
   for (const root of rootAgents) {
     if (recentAgentIds.includes(root.id) && root.children) {
-      allAgentIds.push(...root.children.map((c: any) => c.id));
+      allAgentIds.push(...root.children.map((c) => c.id));
     }
   }
 
   const visibleMessages = await fetchVisibleMessages(allAgentIds);
 
-  console.log('[SMS Context] Fetched visible messages', {
+  log.info('[SmsContext] Fetched visible messages', {
     userId,
     recentAgentCount: recentAgentIds.length,
     visibleMessageCount: visibleMessages.length,
@@ -141,20 +170,38 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     customSystemPrompt: user?.customSystemPrompt || null,
   });
 
-  // Load full session history (no limit — all messages are persisted)
-  const sessionMessages: CompletionMessage[] = session?.messages
-    ? (
-        JSON.parse(
-          typeof session.messages === 'string' ? session.messages : JSON.stringify(session.messages)
-        ) as any[]
-      ).map((m: any) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }))
+  // Load full session history (no limit — all messages are persisted).
+  // Defensive parse: a malformed row must not break the supervisor path for
+  // every inbound SMS. We drop anything that isn't a well-formed message.
+  let parsedSessionMessages: unknown = [];
+  const rawMessages = session?.messages;
+  if (rawMessages !== undefined && rawMessages !== null) {
+    try {
+      parsedSessionMessages =
+        typeof rawMessages === 'string' ? JSON.parse(rawMessages) : rawMessages;
+    } catch (err) {
+      log.warn('[SmsContext] Failed to parse session.messages, dropping history', {
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      parsedSessionMessages = [];
+    }
+  }
+  const sessionMessages: CompletionMessage[] = Array.isArray(parsedSessionMessages)
+    ? parsedSessionMessages
+        .filter(
+          (m): m is { role: 'user' | 'assistant'; content: string } =>
+            typeof m === 'object' &&
+            m !== null &&
+            ((m as Record<string, unknown>).role === 'user' ||
+              (m as Record<string, unknown>).role === 'assistant') &&
+            typeof (m as Record<string, unknown>).content === 'string'
+        )
+        .map((entry) => ({ role: entry.role, content: entry.content }))
     : [];
 
   const totalDurationMs = Date.now() - startTime;
-  console.log('[SMS Context] Built context', {
+  log.info('[SmsContext] Built context', {
     userId,
     systemPromptLength: systemPrompt.length,
     sessionHistoryLength: sessionMessages.length,
@@ -280,7 +327,7 @@ async function fetchVisibleMessages(agentIds: string[]): Promise<VisibleMessage[
   for (const msg of messages) {
     if (visible.length >= MAX_TOTAL_MESSAGES) break;
 
-    const metadata = msg.metadata as Record<string, any> | null;
+    const metadata = msg.metadata as Record<string, unknown> | null;
     if (!metadata) continue;
 
     const toolName = metadata.toolName as string | undefined;
@@ -294,7 +341,12 @@ async function fetchVisibleMessages(agentIds: string[]): Promise<VisibleMessage[
     if (countByAgent[msg.agentId] > MAX_MESSAGES_PER_AGENT) continue;
 
     const title = (metadata.title as string) || toolName || 'Message';
-    const text = metadata.attentionMessage || metadata.completionSummary?.summary || msg.text || '';
+    const completionSummary = metadata.completionSummary as { summary?: string } | undefined;
+    const text =
+      (metadata.attentionMessage as string | undefined) ||
+      completionSummary?.summary ||
+      msg.text ||
+      '';
 
     if (!text) continue;
 
@@ -335,7 +387,7 @@ async function fetchShortcodesForRequests(
 // Formatters
 // ============================================
 
-function formatAgentHierarchy(rootAgents: any[]): string {
+function formatAgentHierarchy(rootAgents: RootAgentNode[]): string {
   if (rootAgents.length === 0) {
     return '## Your Active Agents\n\nNo active agents.';
   }
@@ -401,7 +453,7 @@ function formatAttentionRequests(
       r.question.length > 200 ? r.question.substring(0, 197) + '...' : r.question;
 
     // Determine type from metadata
-    const metadata = r.metadata as Record<string, any> | null;
+    const metadata = r.metadata as Record<string, unknown> | null;
     const isApproval = metadata?.requestUserApproval || metadata?.writePermission;
     const type = isApproval ? 'APPROVAL' : 'QUESTION';
 
@@ -416,7 +468,7 @@ function formatAttentionRequests(
   return lines.join('\n');
 }
 
-function formatVisibleMessages(messages: VisibleMessage[], rootAgents: any[]): string {
+function formatVisibleMessages(messages: VisibleMessage[], rootAgents: RootAgentNode[]): string {
   if (messages.length === 0) {
     return '## Recent Agent Activity\n\nNo recent activity.';
   }
@@ -445,7 +497,7 @@ function formatVisibleMessages(messages: VisibleMessage[], rootAgents: any[]): s
   return lines.join('\n');
 }
 
-function formatUserContext(user: any): string {
+function formatUserContext(user: UserProfileContext | null): string {
   if (!user) return '';
 
   const parts = ['## User Context\n'];

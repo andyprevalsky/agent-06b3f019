@@ -8,7 +8,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { ROSE_MODEL_POOLS, normalizeRoseAlias } from './roseModels';
+import { POOL_REGISTRY, poolForModel } from './rose/pools';
 
 const log = createLogger('ModelPricing');
 
@@ -64,11 +64,11 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
     const data = (await response.json()) as { data: OpenRouterModel[] };
     const models: OpenRouterModel[] = data.data || [];
 
-    const normalizedAlias = normalizeRoseAlias(modelId);
+    const poolName = poolForModel(modelId);
     const model = models.find((m) => m.id === modelId);
 
-    if (normalizedAlias) {
-      const pool = ROSE_MODEL_POOLS[normalizedAlias];
+    if (poolName) {
+      const pool = POOL_REGISTRY[poolName].waterfall;
       const pricingEntries = pool
         .map((id) => models.find((m) => m.id === id))
         .filter(

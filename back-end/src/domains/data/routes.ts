@@ -17,6 +17,7 @@ import {
   InvalidSinceError,
 } from './service';
 import { grepAgentNetwork, MissingAgentIdError, AgentNotFoundError } from './agentNetworkService';
+import { grepNetwork, InvalidNetworkPatternError } from './networkService';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Data');
@@ -49,14 +50,17 @@ router.post(
         return;
       }
 
-      // Dispatch agent_network sources to dedicated handler
+      // Dispatch sources to dedicated handlers
       const source = req.body.source as string | undefined;
       const isAgentNetwork =
         source === 'agent_network_user_messages' || source === 'agent_network_tool_results';
+      const isNetwork = source === 'network';
 
       const result = isAgentNetwork
         ? await grepAgentNetwork(userId, req.body)
-        : await grep(userId, req.body);
+        : isNetwork
+          ? await grepNetwork(userId, req.body)
+          : await grep(userId, req.body);
 
       const elapsed = Date.now() - startTime;
       log.info(`grep [${elapsed}ms]`);
@@ -65,7 +69,7 @@ router.post(
     } catch (error) {
       const elapsed = Date.now() - startTime;
 
-      if (error instanceof InvalidPatternError) {
+      if (error instanceof InvalidPatternError || error instanceof InvalidNetworkPatternError) {
         res.status(400).json({ error: 'INVALID_PATTERN', message: error.message });
         return;
       }

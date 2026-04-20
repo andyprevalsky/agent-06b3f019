@@ -18,6 +18,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from helpers.attachments import extract_attachments_from_context
+from helpers.tracing import span
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 
@@ -67,43 +68,49 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
             claude_token = getattr(workflow_instance, "claude_max_token", None)
 
-            activity_handle = workflow.start_activity(
-                spawn_claude_code_activity,
-                args=[
-                    user_id,
-                    agent_id,
-                    goal,
-                    tool_call_id,
-                    output_schema,
-                    attachments if attachments else None,
-                    model,
-                    github_repo_url,
-                    claude_token,
-                ],
-                start_to_close_timeout=timedelta(minutes=50),
-                heartbeat_timeout=timedelta(minutes=5),
-                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            async with span(
+                "claude_code_activity_wait",
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="spawn_claude_code_agent",
+            ):
+                activity_handle = workflow.start_activity(
+                    spawn_claude_code_activity,
+                    args=[
+                        user_id,
+                        agent_id,
+                        goal,
+                        tool_call_id,
+                        output_schema,
+                        attachments if attachments else None,
+                        model,
+                        github_repo_url,
+                        claude_token,
+                    ],
+                    start_to_close_timeout=timedelta(minutes=50),
+                    heartbeat_timeout=timedelta(minutes=5),
+                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
-            # Wait for activity completion or pause signal
-            was_cancelled = False
-            await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
-            if workflow_instance.is_paused and not activity_handle.done():
-                logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
-                activity_handle.cancel()
-                was_cancelled = True
+                # Wait for activity completion or pause signal
+                was_cancelled = False
+                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
+                if workflow_instance.is_paused and not activity_handle.done():
+                    logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)
+                    activity_handle.cancel()
+                    was_cancelled = True
 
-            result = None
-            try:
-                result = await activity_handle
-            except (asyncio.CancelledError, ActivityError) as e:
-                if isinstance(e, ActivityError) and not isinstance(
-                    e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                ):
-                    raise
-                was_cancelled = True
-                result = {"status": "cancelled", "message": "Claude Code agent cancelled by user"}
+                result = None
+                try:
+                    result = await activity_handle
+                except (asyncio.CancelledError, ActivityError) as e:
+                    if isinstance(e, ActivityError) and not isinstance(
+                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                    ):
+                        raise
+                    was_cancelled = True
+                    result = {"status": "cancelled", "message": "Claude Code agent cancelled by user"}
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)

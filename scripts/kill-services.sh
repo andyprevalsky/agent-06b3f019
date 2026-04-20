@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Kill all runtime services started from this worktree (run.sh + descendants:
-# backend, agents worker, research/supabase, front-end, mac-app). Preserves the
-# Postgres container and its volume so subsequent runs can reuse them.
+# backend, agents worker, front-end, mac-app). Preserves the Postgres container
+# and its volume so subsequent runs can reuse them.
 #
 # Scope: only kills PIDs whose command line OR current working directory sits
 # inside $PWD, so sibling worktrees are untouched. Walks each root's descendant
@@ -48,17 +48,15 @@ ROOTS_FILE=$(mktemp)
 trap 'rm -f "$ROOTS_FILE" "$ALL_FILE"' EXIT
 ALL_FILE=$(mktemp)
 
-# Patterns that identify service roots. run.sh and run-local.sh are matched by
-# path fragment + PWD scope. The worktree-prefixed patterns catch grandchildren
-# (node, python, vite) that carry the absolute path in their argv.
+# Patterns that identify service roots. run.sh is matched by path fragment +
+# PWD scope. The worktree-prefixed patterns catch grandchildren (node, python,
+# vite) that carry the absolute path in their argv.
 for pattern in \
     "scripts/run\.sh" \
     "$WORKTREE_DIR/back-end/src/server\.ts" \
     "$WORKTREE_DIR/back-end.*tsx.*server\.ts" \
     "$WORKTREE_DIR/agents/scripts/run_local_worker" \
     "$WORKTREE_DIR/agents.*worker\.py" \
-    "$WORKTREE_DIR/research/run-local\.sh" \
-    "$WORKTREE_DIR/research.*supabase functions serve" \
     "$WORKTREE_DIR/front-end.*vite" \
     "$WORKTREE_DIR/mac-app/node_modules"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do

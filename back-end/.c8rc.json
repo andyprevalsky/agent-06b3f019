@@ -28,6 +28,7 @@
     "src/domains/integrations/repo.email.ts",
     "src/providers/retry.ts",
     "src/domains/models/types.ts",
+    "src/providers/rose/types.ts",
     "src/domains/sms-webhook/types.ts",
     "src/domains/invite-codes/types.ts",
     "src/domains/vapi/types.ts",

@@ -1,5 +1,0 @@
-curl -X POST "https://kzlurqihzaolhzsbkctf.supabase.co/functions/v1/completions" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6bHVycWloemFvbGh6c2JrY3RmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4ODkzMzYsImV4cCI6MjA3NTQ2NTMzNn0.oWv0CqdAbVpDsR-pBMn3A9sScgLtWKh0DYc8sXZz3XU" \
-  -H "x-api-key: af1ea4b12ea8dbe07c555a45a8ad4dc8" \
-  -d '{"model":"rose-labs/rose-1-lite","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":100,"stream":true,"stream_options":{"include_usage":true}}'

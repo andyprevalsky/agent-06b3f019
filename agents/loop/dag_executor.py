@@ -403,7 +403,7 @@ async def _execute_single_task(
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
             stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
 
-            reasoning_args = [task.goal, context, model, agent_id, stream_id]
+            reasoning_args = [task.goal, context, model, agent_id, stream_id, claude_token]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
             check_activity_payload("execute_reasoning_activity", reasoning_args)

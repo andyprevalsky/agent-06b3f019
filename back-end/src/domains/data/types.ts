@@ -74,6 +74,26 @@ export interface AgentNetworkGrepResult {
   message?: string;
 }
 
+export interface NetworkContactMatch {
+  person_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  phone_number: string | null;
+  email: string | null;
+  company: string | null;
+  title: string | null;
+  relation: string | null;
+  communication_frequency: string | null;
+  messages_exchanged: number | null;
+}
+
+export interface NetworkGrepResult {
+  matches: NetworkContactMatch[];
+  total_matches: number;
+  truncated: boolean;
+  message?: string;
+}
+
 export interface GrepNoMatchResult {
   matches: FormattedResult[];
   total_matches: 0;

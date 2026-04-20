@@ -18,11 +18,13 @@ from domains.deep_research.config import (
     RESEARCH_SYSTEM_PROMPT,
 )
 from domains.deep_research.types import DeepResearchResult
+from helpers.tracing import traced
 
 logger = structlog.get_logger()
 
 
 @activity.defn
+@traced("deep_research_activity")
 async def deep_research_activity(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> DeepResearchResult:
     """Activity: Perform deep research using Perplexity API.
 

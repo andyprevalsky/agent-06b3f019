@@ -1051,53 +1051,6 @@ async def test_upload_file_to_session_network_error():
 
 
 # ========================================
-# repo: call_rose_browser_use
-# ========================================
-
-
-async def test_call_rose_browser_use_success():
-    from domains.spawn_browser_agent_v3.repo import call_rose_browser_use
-
-    setup_mock(
-        {
-            "rose.example.com/completions": {
-                "status": 200,
-                "json": {"action": {"action": "click"}, "usage": {"prompt_tokens": 10}},
-            }
-        }
-    )
-    cfg = _fake_config()
-    out = await call_rose_browser_use(
-        task="goal",
-        browser_state={"screenshot": "b64", "dom_tree": "<html/>"},
-        action_history=[],
-        config=cfg,
-        mode="claude",
-        user_id="u1",
-        oauth_token="tok",
-    )
-    assert out["action"]["action"] == "click"
-    assert "request_id" in out
-
-
-async def test_call_rose_browser_use_error_raises():
-    from domains.spawn_browser_agent_v3.repo import call_rose_browser_use
-
-    setup_mock({"rose.example.com": {"status": 500, "text": "bad"}})
-    cfg = _fake_config()
-    try:
-        await call_rose_browser_use(
-            task="g",
-            browser_state={},
-            action_history=[],
-            config=cfg,
-        )
-        raise AssertionError("should raise")
-    except RuntimeError as e:
-        assert "Rose API error" in str(e)
-
-
-# ========================================
 # repo: call_extract_llm
 # ========================================
 
@@ -3143,9 +3096,6 @@ async def run_all_tests():
     await r.record_async("upload_file_session_success", test_upload_file_to_session_success)
     await r.record_async("upload_file_session_non_200", test_upload_file_to_session_non_200_returns_none)
     await r.record_async("upload_file_session_network", test_upload_file_to_session_network_error)
-
-    await r.record_async("call_rose_browser_use_success", test_call_rose_browser_use_success)
-    await r.record_async("call_rose_browser_use_error", test_call_rose_browser_use_error_raises)
 
     await r.record_async("call_extract_llm_success", test_call_extract_llm_success)
     await r.record_async("call_extract_llm_non_200", test_call_extract_llm_non_200)

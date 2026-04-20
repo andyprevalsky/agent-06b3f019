@@ -24,9 +24,13 @@ HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
 
 MIN_SAMPLES = 5
-# p95 × 1.7: with n=MIN_SAMPLES, p95 ≈ observed max, so 1.5× caps cut local
-# parallel-contention runs 2–5s over the ceiling. 1.7× absorbs that variance.
-P95_MULTIPLIER = 1.7
+# Derive timeouts from the last N successful runs × a safety buffer.
+# Window=5 absorbs short-term variance (LLM latency spikes, preflight overhead)
+# without inheriting stale outliers (p95 from months-old slow runs). Multiplier
+# 1.5 leaves enough headroom for runs that land at the upper end of variance
+# observed across window=5 (empirically ~1.3–1.4× p50 on smoke tasks).
+RECENT_PASS_WINDOW = 5
+SAFETY_MULTIPLIER = 1.5
 FLOOR_SECONDS = 30
 CEIL_SECONDS = 900
 
@@ -108,27 +112,43 @@ def _percentile(values: List[float], pct: float) -> float:
 def get_timeout(
     task_name: str,
     min_samples: int = MIN_SAMPLES,
-    multiplier: float = P95_MULTIPLIER,
+    multiplier: float = SAFETY_MULTIPLIER,
+    window: int = RECENT_PASS_WINDOW,
+    max_seconds: Optional[int] = None,
 ) -> int:
     """Return the dynamic timeout for this task in seconds.
+
+    Uses the max of the last `window` passed durations × `multiplier` to
+    absorb short-term variance without inheriting stale outliers. `max_seconds`
+    enforces a hard per-task cap (e.g. smoke tests); unset falls back to
+    CEIL_SECONDS.
 
     Raises InsufficientHistoryError if fewer than min_samples passed runs exist.
     """
     durations = _load_durations(task_name)
     if len(durations) < min_samples:
         raise InsufficientHistoryError(task_name, len(durations), min_samples)
-    p95 = _percentile(durations, 95.0)
-    derived = int(math.ceil(p95 * multiplier))
-    return max(FLOOR_SECONDS, min(CEIL_SECONDS, derived))
+    recent = durations[-window:]
+    derived = int(math.ceil(max(recent) * multiplier))
+    ceil = max_seconds if max_seconds is not None else CEIL_SECONDS
+    return max(FLOOR_SECONDS, min(ceil, derived))
 
 
-def summary(task_name: str) -> dict:
-    """Return {count, p50, p95, derived_timeout} for introspection/CLI."""
+def summary(task_name: str, max_seconds: Optional[int] = None) -> dict:
+    """Return {count, p50, p95, recent_max, derived_timeout} for introspection."""
     durations = _load_durations(task_name)
     if not durations:
-        return {"task": task_name, "count": 0, "p50": 0, "p95": 0, "derived_timeout": None}
+        return {
+            "task": task_name,
+            "count": 0,
+            "p50": 0,
+            "p95": 0,
+            "recent_max": 0,
+            "derived_timeout": None,
+        }
+    recent = durations[-RECENT_PASS_WINDOW:]
     try:
-        derived = get_timeout(task_name)
+        derived = get_timeout(task_name, max_seconds=max_seconds)
     except InsufficientHistoryError:
         derived = None
     return {
@@ -136,5 +156,6 @@ def summary(task_name: str) -> dict:
         "count": len(durations),
         "p50": round(_percentile(durations, 50.0), 1),
         "p95": round(_percentile(durations, 95.0), 1),
+        "recent_max": round(max(recent), 1),
         "derived_timeout": derived,
     }

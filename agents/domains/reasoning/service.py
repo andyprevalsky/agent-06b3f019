@@ -56,6 +56,7 @@ async def execute_reasoning(
     agent_id: str | None = None,
     stream_id: str | None = None,
     heartbeat_fn: Callable[[str], None] | None = None,
+    claude_token: str | None = None,
 ) -> dict[str, Any]:
     """Execute a reasoning task using LLM with streaming.
 
@@ -108,6 +109,7 @@ async def execute_reasoning(
         on_chunk=on_chunk,
         agent_id=agent_id,
         call_site="dag_reasoning",
+        claude_token=claude_token,
     )
 
     content = result.response if result and result.response else ""

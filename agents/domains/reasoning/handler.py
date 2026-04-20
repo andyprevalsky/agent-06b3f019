@@ -29,6 +29,7 @@ async def execute_reasoning_activity(
     model: str,
     agent_id: str | None = None,
     stream_id: str | None = None,
+    claude_token: str | None = None,
 ) -> dict:
     """Execute a reasoning task using LLM with streaming.
 
@@ -42,6 +43,7 @@ async def execute_reasoning_activity(
             agent_id=agent_id,
             stream_id=stream_id,
             heartbeat_fn=_safe_heartbeat,
+            claude_token=claude_token,
         )
     except Exception as e:
         logger.error(f"[Reasoning] Error calling LLM: {e}")

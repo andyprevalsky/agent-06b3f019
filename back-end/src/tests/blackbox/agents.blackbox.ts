@@ -3408,8 +3408,11 @@ async function testBoundary_createAgentModelPricing(): Promise<void> {
   await sleep(1500);
   const calls = await readCaptures();
 
-  // Filter for the OpenRouter model pricing call
-  const pricingCalls = calls.filter((c) => c.url.includes('openrouter.ai'));
+  // Filter for the OpenRouter model pricing call specifically (models list).
+  // Post-rose-migration, openrouter.ai is also used for chat completions via
+  // the in-process Rose provider (/api/v1/chat/completions), so we must
+  // narrow to the /v1/models endpoint to test the pricing path only.
+  const pricingCalls = calls.filter((c) => c.url.includes('openrouter.ai/api/v1/models'));
   // May be 0 if result was cached in-memory by modelPricing.ts (24h TTL)
   // or 1 if cache expired. Assert on shape when present.
   if (pricingCalls.length > 0) {
@@ -3514,23 +3517,45 @@ async function testBoundary_createAgentCallOrdering(): Promise<void> {
   const session = await createAnonymousSession('boundary-ordering');
   await clearCaptures();
 
-  await createTestAgent(session.user.id, 'Boundary ordering test');
+  // Tag this test's outbound fetches so we can filter out cross-test contamination
+  // (prior tests' fire-and-forget handlers may still be making calls in our window).
+  // The backend's captureTokenMiddleware + AsyncLocalStorage propagates the tag
+  // through the full async chain — synchronous awaits AND fire-and-forget.
+  const captureToken = `ordering-${randomUUID()}`;
+  const createRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(session.user.id), 'X-Capture-Token': captureToken },
+    body: JSON.stringify({ goal: 'Boundary ordering test' }),
+  });
+  if (createRes.status === 201) {
+    const body = createRes.data as { agent_id: string };
+    trackedAgentIds.add(body.agent_id);
+  }
 
   await sleep(2000);
-  const calls = await readCaptures();
 
-  // Synchronous calls (model pricing, geoip) should come before fire-and-forget calls (github, chat)
-  const syncCallIdx = calls.findIndex(
-    (c) => c.url.includes('openrouter.ai') || c.url.includes('ip-api.com')
+  // Filter captures to only those tagged with our token.
+  const res = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
+  assertStatus(res.status, 200, res.data);
+  const calls = (res.data as { captures: CapturedCall[] }).captures;
+
+  // Synchronous calls (model pricing, geoip) should be INITIATED before
+  // fire-and-forget calls (github, chat). Compare request-start `timestamp`
+  // values rather than array indices — captures are pushed on response
+  // completion, so fast-forward caching can invert array order.
+  const syncCall = calls.find(
+    (c) => c.url.includes('openrouter.ai/api/v1/models') || c.url.includes('ip-api.com')
   );
-  const asyncCallIdx = calls.findIndex(
-    (c) => c.url.includes('api.github.com') || c.url.includes('completions')
+  const asyncCall = calls.find(
+    (c) => c.url.includes('api.github.com') || c.url.includes('/chat/completions')
   );
 
-  if (syncCallIdx >= 0 && asyncCallIdx >= 0) {
+  if (syncCall && asyncCall) {
+    const syncT = new Date(syncCall.timestamp).getTime();
+    const asyncT = new Date(asyncCall.timestamp).getTime();
     assert(
-      syncCallIdx < asyncCallIdx,
-      `Synchronous boundary calls (idx ${syncCallIdx}) should precede fire-and-forget calls (idx ${asyncCallIdx})`
+      syncT <= asyncT,
+      `Synchronous boundary call (${syncCall.url} @ ${syncCall.timestamp}) should be initiated before fire-and-forget call (${asyncCall.url} @ ${asyncCall.timestamp})`
     );
   }
   // If either set is empty (e.g., cached or unconfigured), the ordering check is vacuously true

@@ -1,14 +1,17 @@
 /**
  * Generator LLM - Second step in chat mode.
  * Generates the user-facing response with streaming support.
- * Uses Supabase completions endpoint for rose-labs models.
+ * Uses the in-process Rose completions client.
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
-import { createStreamingCompletion } from './supabaseCompletions';
+import { createStreamingCompletion } from '../rose';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { downloadFromStorage } from '../storage';
+import { createLogger } from '../logger';
+
+const log = createLogger('GeneratorLLM');
 
 // FilePointer interface for type safety when processing
 interface FilePointer {
@@ -20,14 +23,31 @@ interface FilePointer {
   created_at: string;
 }
 
+// Runtime validation — DB JSON must match the FilePointer shape before we
+// trust it enough to call downloadFromStorage() or build a multimodal block.
+function isValidFilePointer(value: unknown): value is FilePointer {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.storage_path === 'string' &&
+    v.storage_path.length > 0 &&
+    typeof v.mime_type === 'string' &&
+    v.mime_type.length > 0 &&
+    typeof v.size_bytes === 'number' &&
+    Number.isFinite(v.size_bytes) &&
+    v.size_bytes >= 0 &&
+    typeof v.original_filename === 'string'
+  );
+}
+
 // ============================================
 // Message format for LLM calls
 // ============================================
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
-  filePointer?: any; // FilePointer from DB JSON - validated at runtime
-  metadata?: Record<string, any>;
+  filePointer?: Record<string, unknown>; // FilePointer from DB JSON - validated at runtime
+  metadata?: Record<string, unknown>;
 }
 
 // File size threshold for inline content (20MB)
@@ -54,11 +74,18 @@ const TEXT_MIME_TYPES = new Set([
 // Build multimodal content from a file pointer
 // Downloads from storage and converts to base64 for LLM
 // ============================================
+type MultimodalContentBlock = {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+  file?: { filename: string; file_data: string };
+};
+
 async function buildMultimodalContentFromFile(
   text: string,
   filePointer: FilePointer
-): Promise<Array<{ type: string; text?: string; image_url?: { url: string } }>> {
-  const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+): Promise<MultimodalContentBlock[]> {
+  const content: MultimodalContentBlock[] = [];
 
   // File too large for inline content
   if (filePointer.size_bytes >= LLM_INLINE_THRESHOLD) {
@@ -111,7 +138,7 @@ async function buildMultimodalContentFromFile(
           filename: filePointer.original_filename,
           file_data: `data:${filePointer.mime_type};base64,${base64}`,
         },
-      } as any);
+      });
     } else {
       // Other file types: just metadata
       content.push({
@@ -122,7 +149,9 @@ async function buildMultimodalContentFromFile(
       });
     }
   } catch (error) {
-    console.error('[GeneratorLLM] Failed to download file from storage:', error);
+    log.error('[GeneratorLLM] Failed to download file from storage', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     content.push({
       type: 'text',
       text: text
@@ -275,7 +304,7 @@ export async function callGeneratorLlm(params: {
   // Convert messages to OpenAI format (with multimodal support)
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
-    content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    content: string | MultimodalContentBlock[];
   }> = [{ role: 'system', content: GENERATOR_SYSTEM_PROMPT }];
 
   for (const msg of params.messages) {
@@ -293,12 +322,25 @@ export async function callGeneratorLlm(params: {
     } else if (msg.role === 'USER') {
       // Check for file attachment
       if (msg.filePointer) {
-        // Build multimodal content from file (downloads from storage)
-        const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
-        openaiMessages.push({
-          role: 'user',
-          content,
-        });
+        if (isValidFilePointer(msg.filePointer)) {
+          // Build multimodal content from file (downloads from storage)
+          const content = await buildMultimodalContentFromFile(msg.text, msg.filePointer);
+          openaiMessages.push({
+            role: 'user',
+            content,
+          });
+        } else {
+          // Malformed persisted JSON — degrade to a plain-text attachment
+          // marker so routing doesn't crash on bad DB data.
+          log.warn('[GeneratorLLM] Invalid filePointer shape, degrading to text', {
+            agentId: params.agentId,
+          });
+          const marker = '[attachment metadata invalid, file unavailable]';
+          openaiMessages.push({
+            role: 'user',
+            content: msg.text ? `${msg.text}\n\n${marker}` : marker,
+          });
+        }
       } else if (msg.text) {
         openaiMessages.push({ role: 'user', content: msg.text });
       }
@@ -310,17 +352,26 @@ export async function callGeneratorLlm(params: {
   }
 
   const startTime = Date.now();
-  console.log('[GeneratorLLM] Starting streaming response', {
+  log.info('[GeneratorLLM] Starting streaming response', {
     agentId: params.agentId,
     model: params.model,
     streamId,
     messageCount: openaiMessages.length,
   });
 
-  // Log full context being sent to generator (no truncation)
-  console.log('[GeneratorLLM] Context being sent to LLM:');
+  // Log metadata only — never full message bodies. Multimodal messages
+  // carry base64 file data; normal messages carry raw user text. Logging
+  // the bodies leaks sensitive data and blows up log volume on attachments.
+  log.info('[GeneratorLLM] Context being sent to LLM');
   openaiMessages.forEach((msg, i) => {
-    console.log(`[GeneratorLLM] Message ${i}: role=${msg.role}, content=${msg.content}`);
+    const contentType = typeof msg.content === 'string' ? 'string' : 'array';
+    const length = typeof msg.content === 'string' ? msg.content.length : msg.content.length;
+    log.info('[GeneratorLLM] Message', {
+      index: i,
+      role: msg.role,
+      contentType,
+      length,
+    });
   });
 
   // Create streaming completion via Supabase completions endpoint
@@ -395,9 +446,12 @@ export async function callGeneratorLlm(params: {
 
     // Log progress every 50 chunks
     if (chunkCount % 50 === 0) {
-      console.log(
-        `[GeneratorLLM] Progress: chunk=${chunkCount}, reasoning=${accumulatedReasoning.length}, json=${accumulatedJson.length}, streamed=${sequence}`
-      );
+      log.info('[GeneratorLLM] Progress', {
+        chunk: chunkCount,
+        reasoning: accumulatedReasoning.length,
+        json: accumulatedJson.length,
+        streamed: sequence,
+      });
     }
   }
 
@@ -408,7 +462,7 @@ export async function callGeneratorLlm(params: {
   await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude);
 
   const streamDuration = Date.now() - startTime;
-  console.log('[GeneratorLLM] Streaming complete', {
+  log.info('[GeneratorLLM] Streaming complete', {
     agentId: params.agentId,
     streamId,
     durationMs: streamDuration,
@@ -420,7 +474,7 @@ export async function callGeneratorLlm(params: {
 
   // Parse the complete JSON
   if (!fullJson) {
-    console.error('[GeneratorLLM] No content received from LLM', {
+    log.error('[GeneratorLLM] No content received from LLM', {
       agentId: params.agentId,
       streamId,
     });
@@ -431,7 +485,7 @@ export async function callGeneratorLlm(params: {
   try {
     parsed = JSON.parse(fullJson);
   } catch (error) {
-    console.error('[GeneratorLLM] Failed to parse JSON response', {
+    log.error('[GeneratorLLM] Failed to parse JSON response', {
       agentId: params.agentId,
       streamId,
       error: error instanceof Error ? error.message : String(error),
@@ -440,7 +494,7 @@ export async function callGeneratorLlm(params: {
     throw new Error(`Failed to parse generator response as JSON: ${fullJson.substring(0, 200)}`);
   }
 
-  console.log('[GeneratorLLM] Response parsed successfully', {
+  log.info('[GeneratorLLM] Response parsed successfully', {
     agentId: params.agentId,
     streamId,
     totalDurationMs: Date.now() - startTime,

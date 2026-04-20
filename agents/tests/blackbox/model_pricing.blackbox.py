@@ -1,48 +1,24 @@
 """Blackbox tests for model-pricing domain."""
 
 import asyncio
-import json
 from unittest.mock import patch
 
-from _test_utils import (
-    BlackboxResult,
-    assert_captured_call,
-    get_captured_requests,
-    setup_mock,
-    teardown_mock,
-)
+from _test_utils import BlackboxResult
 
 
-def _setup():
-    setup_mock({
-        "/cost": {
-            "status": 200,
-            "json": {
-                "pricing": {
-                    "costPerMillionInputTokens": 1.25,
-                    "costPerMillionOutputTokens": 5.0,
-                },
-            },
-        },
-    })
-
-
-async def test_fetch_pricing_happy_path():
-    """fetch_model_pricing returns cents-per-1k pricing from Supabase cost endpoint."""
-    _setup()
-    # Clear the module-level cache to ensure we hit the HTTP endpoint
-    import helpers.model_pricing as mp
-    mp._model_pricing_cache.clear()
-
+async def test_fetch_pricing_pool_average():
+    """fetch_model_pricing averages waterfall pricing for a Rose pool."""
     with patch("temporalio.activity.heartbeat"):
         from helpers.model_pricing import fetch_model_pricing
 
         result = await fetch_model_pricing("rose-1-ultra")
 
-    # costPerMillionInputTokens=1.25 => 1.25 / 10 = 0.125 cents per 1k
-    assert result["input_cents_per_1k"] == 0.125
-    # costPerMillionOutputTokens=5.0 => 5.0 / 10 = 0.5 cents per 1k
-    assert result["output_cents_per_1k"] == 0.5
+    # rose-1-ultra waterfall: anthropic/claude-opus-4.7 ($5/$25 per M) +
+    # google/gemini-3.1-pro-preview ($2/$12 per M).
+    # Average input: (5+2)/2 = $3.5/M -> 0.35 cents/1k
+    assert abs(result["input_cents_per_1k"] - 0.35) < 1e-9
+    # Average output: (25+12)/2 = $18.5/M -> 1.85 cents/1k
+    assert abs(result["output_cents_per_1k"] - 1.85) < 1e-9
 
 
 def test_get_anthropic_pricing_claude():
@@ -54,6 +30,17 @@ def test_get_anthropic_pricing_claude():
     assert result is not None
     assert result["input_cents_per_1k"] == 0.3
     assert result["output_cents_per_1k"] == 1.5
+
+
+def test_get_anthropic_pricing_claude_auth_zero():
+    """claudeAuth-suffixed models bill $0 to Rose."""
+    from helpers.model_pricing import get_anthropic_pricing
+
+    result = get_anthropic_pricing("claude-opus-4-7-claude")
+
+    assert result is not None
+    assert result["input_cents_per_1k"] == 0.0
+    assert result["output_cents_per_1k"] == 0.0
 
 
 def test_get_default_pricing():
@@ -69,10 +56,10 @@ def test_get_default_pricing():
 async def run_all_tests():
     print("model-pricing blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("fetch_pricing_happy_path", test_fetch_pricing_happy_path)
+    await r.record_async("fetch_pricing_pool_average", test_fetch_pricing_pool_average)
     r.record("get_anthropic_pricing_claude", test_get_anthropic_pricing_claude)
+    r.record("get_anthropic_pricing_claude_auth_zero", test_get_anthropic_pricing_claude_auth_zero)
     r.record("get_default_pricing", test_get_default_pricing)
-    teardown_mock()
     return r.all_passed
 
 

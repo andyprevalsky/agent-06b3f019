@@ -31,9 +31,8 @@ import asyncio
 import csv
 import json
 import os
-import tempfile
-
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -42,29 +41,33 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from tests.e2e.test_helpers import (
-    authenticate,
-    get_auth_headers,
-    _auth_state,
-)
-
 from benchmarks.benchmark_tasks import (
     BenchmarkTask,
     all_tasks,
+    get_smoke_cap,
     get_task_by_name,
     get_tasks_by_tag,
     list_all_tasks,
 )
-from benchmarks.context_validator import validate_context, ContextViolation, format_violations
-from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
+from benchmarks.context_validator import validate_context
 from benchmarks.logs import (
-    collect_logs, collect_tree_logs, format_tree_diagnostics,
-    load_env_var, start_fly_log_collector, stop_fly_log_collector,
+    collect_logs,
+    load_env_var,
+    start_fly_log_collector,
+    stop_fly_log_collector,
 )
+from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
+)
+from benchmarks.timeout_history import (
     get_timeout as _history_get_timeout,
+)
+from benchmarks.timeout_history import (
     summary as _history_summary,
+)
+from tests.e2e.test_helpers import (
+    authenticate,
 )
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
@@ -73,14 +76,14 @@ DEFAULT_BASE_URL = os.environ.get(
 )
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 POLL_INTERVAL = 5  # seconds
-STALL_THRESHOLD = 180  # seconds without new messages/agents across ENTIRE tree → warning
-# Note: Activities (set_plan, spawn_browser_agent, LLM calls) can take 30-120s without
-# producing messages. Only flag stalls after 3 minutes of zero activity across ALL agents.
-AGENT_STALL_SECONDS = 120  # per-agent early-fail threshold — see poll_agent
-# 60s was too tight: a single claude-code file write or a slow browser
-# screenshot+judge cycle routinely takes 60-90s of wall-time with no new
-# messages emitted. 120s catches real silent deaths while letting one step
-# finish. Tree-level STALL_THRESHOLD (180s) catches total silence above this.
+STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
+# Per-agent early-fail threshold: if a single agent emits no new messages for
+# this many seconds, fail fast instead of burning the full task timeout on a
+# silent worker. Matches STALL_THRESHOLD because DAG reasoning activities can
+# stream for 60–90s via Supabase Realtime without posting intermediate rows to
+# the messages table — 60s here produces false-positive stalls on the synthesis
+# step of research-heavy smoke tasks.
+AGENT_STALL_SECONDS = 120
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
@@ -403,7 +406,10 @@ async def poll_agent(
     while True:
         elapsed = time.time() - start
         if elapsed > resolved_timeout:
-            reason = f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+            reason = (
+                f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+                f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
+            )
             print(f"    ⏰ {reason}")
             data = await get_agent(base_url, agent_id)
             return data, approvals_triggered, approvals_resolved, reason
@@ -569,6 +575,7 @@ async def poll_agent(
                     f"{role} {aid[:12]} stalled: no new messages for {idle:.0f}s "
                     f"(threshold={AGENT_STALL_SECONDS}s, status={st['status']}, "
                     f"messages={st['count']})"
+                    f" | Investigate: python agents/benchmarks/agent_latency.py {aid}"
                 )
                 print(f"    🛑 AGENT STALL — {reason}")
                 return data, approvals_triggered, approvals_resolved, reason
@@ -610,7 +617,7 @@ async def poll_agent(
                 replied_waiting_msgs.add(msg_id)
                 question = (m.get("text") or m.get("message") or "")[:200]
                 print(f"    💬 Agent asked a question: {question}")
-                print(f"    → Auto-replying to unblock workflow")
+                print("    → Auto-replying to unblock workflow")
                 try:
                     await post_message(
                         base_url, agent_id,
@@ -821,9 +828,9 @@ async def run_single_task(
                 fp = await upload_attachment(base_url, agent_id, filepath)
                 if fp:
                     file_pointers.append(fp)
-                    print(f"    ✅ Uploaded, FilePointer received")
+                    print("    ✅ Uploaded, FilePointer received")
                 else:
-                    print(f"    ⚠ Upload returned no FilePointer, continuing anyway")
+                    print("    ⚠ Upload returned no FilePointer, continuing anyway")
 
             # Post a message with all file pointers so the agent can see them
             if file_pointers:
@@ -877,7 +884,7 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         # Collect prod logs for diagnostics
-        print(f"    Collecting prod logs...")
+        print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
         log_summary = []
         for key, label in [("backend_logs", "backend"), ("worker_logs", "worker"), ("research_logs", "research")]:
@@ -941,7 +948,10 @@ async def run_single_task(
             duration_seconds=round(duration, 1),
             cost_cents=0,
             message_count=0,
-            failure_reason=str(e),
+            failure_reason=(
+                f"{e}"
+                + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
+            ),
             logs=logs,
         )
     finally:
@@ -1017,7 +1027,7 @@ async def _warmup_edge_functions(base_url: str):
                 if attempt == 1:
                     print(f" (attempt {attempt}: {type(e).__name__})", end="", flush=True)
             await asyncio.sleep(2)
-    print(f" ⚠ warmup did not succeed after 10 attempts (continuing anyway)", flush=True)
+    print(" ⚠ warmup did not succeed after 10 attempts (continuing anyway)", flush=True)
 
 
 async def _terminate_stale_workflows():
@@ -1030,22 +1040,37 @@ async def _terminate_stale_workflows():
     """
     try:
         from temporalio.client import Client, TLSConfig
+
         from config import load_config
 
         config = load_config()
 
-        # Safety check: only terminate workflows on local Temporal or when explicitly allowed
+        # Safety check: terminate workflows only when we can prove the queue is
+        # worktree-scoped. Local Temporal, a worktree-derived queue (via
+        # CONDUCTOR_WORKSPACE_NAME), or explicit ALLOW_TEMPORAL_CLEANUP=true all
+        # qualify. Cloud Temporal with a shared queue does not — that could
+        # nuke another worktree's live runs.
         temporal_addr = config.temporal.address
         is_local = any(h in temporal_addr for h in ("localhost", "127.0.0.1"))
         allow_cleanup = os.environ.get("ALLOW_TEMPORAL_CLEANUP", "").lower() == "true"
-        if not is_local and not allow_cleanup:
-            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local and ALLOW_TEMPORAL_CLEANUP is not set")
+        is_worktree_scoped = bool(os.environ.get("CONDUCTOR_WORKSPACE_NAME"))
+        if not is_local and not allow_cleanup and not is_worktree_scoped:
+            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local, queue is not worktree-scoped, and ALLOW_TEMPORAL_CLEANUP is not set")
             return
 
-        # run.sh exports TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-        # but config.py may load a different value from .env. Prefer the env var
-        # that the running worker actually uses.
-        task_queue = os.environ.get("TEMPORAL_TASK_QUEUE", config.temporal.task_queue)
+        # Inside Conductor, run.sh overrides TEMPORAL_TASK_QUEUE to
+        # navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME for the worker. The default
+        # TEMPORAL_TASK_QUEUE from .env (e.g. navi-agent-tasks-test) is shared
+        # across worktrees and is NOT what the local worker polls. Prefer the
+        # workspace-derived queue so cleanup targets the same queue the worker
+        # is actually polling.
+        workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+        derived = f"navi-agent-tasks-{workspace}" if workspace else None
+        task_queue = (
+            derived
+            or os.environ.get("TEMPORAL_TASK_QUEUE")
+            or config.temporal.task_queue
+        )
 
         client = await Client.connect(
             config.temporal.address,
@@ -1075,6 +1100,54 @@ async def _terminate_stale_workflows():
         print(f"  ✅ Terminated {terminated} stale workflow(s)")
     except Exception as e:
         print(f"  ⚠ Could not clean stale workflows: {e}")
+
+
+async def _fail_stale_active_agents():
+    """Mark any Agent rows stuck in ACTIVE for >30 min as FAILED.
+
+    These are orphans from aborted prior runs — their workflow was terminated
+    (or never finished) but the DB row was left ACTIVE. Without this cleanup,
+    the backend's agent-scoped polling + realtime listeners keep firing on
+    ghosts and the next smoke run sees confusing stats.
+
+    Runs via `docker exec psql` against the worktree's DB container so no
+    psycopg/asyncpg dependency is introduced. Skipped silently if the
+    container isn't running (run.sh will start a fresh one).
+    """
+    import subprocess
+
+    workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    if not workspace:
+        return
+    container = f"victoria-db-{workspace}"
+    ps = subprocess.run(
+        ["docker", "ps", "--filter", f"name=^{container}$", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    )
+    if container not in ps.stdout:
+        return
+
+    sql = (
+        'UPDATE "Agent" SET status = \'FAILED\', "updatedAt" = NOW() '
+        'WHERE status = \'ACTIVE\' AND "createdAt" < NOW() - INTERVAL \'30 minutes\' '
+        "RETURNING id;"
+    )
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container, "psql", "-U", "postgres", "-d", "victoria",
+             "-t", "-A", "-c", sql],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            ids = [line for line in result.stdout.splitlines() if line.strip() and line[0].isalnum()]
+            if ids:
+                print(f"  🧹 Marked {len(ids)} stale ACTIVE agent(s) as FAILED")
+            else:
+                print("  ✅ No stale ACTIVE agents")
+        else:
+            print(f"  ⚠ Stale-agent SQL failed: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"  ⚠ Could not run stale-agent cleanup: {e}")
 
 
 async def _check_claude_code_credentials(base_url: str) -> bool:
@@ -1145,13 +1218,17 @@ async def main_async(args):
     print("\n  Authenticating...")
     try:
         await authenticate()
-        print(f"  ✅ Authenticated")
+        print("  ✅ Authenticated")
     except Exception as e:
         print(f"  ⚠ Auth failed ({e}), falling back to API key")
 
-    # Pre-flight for local runs: clean stale workflows and warm up edge functions
+    # Pre-flight for local runs: clean stale workflows + DB agents, warm up edge functions.
+    # Cleanup invariant: at most 1 of each service per worktree; no ACTIVE agent orphans
+    # on the task queue this run will use. Belt-and-braces with scripts/pre-smoke-cleanup.sh
+    # (which handles the process/container side); this block handles the Temporal + DB side.
     if not args.prod and base_url.startswith("http://localhost"):
         await _terminate_stale_workflows()
+        await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
 
     # Pre-flight: check Claude Code credentials for tests that need them
@@ -1175,29 +1252,31 @@ async def main_async(args):
     for t in tasks:
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
-            s = _history_summary(t.name)
+            s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
             print(f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
-                  f"(history n={s['count']}, p95={s['p95']}s)")
+                  f"(history n={s['count']}, recent_max={s['recent_max']}s)")
             continue
+        cap = get_smoke_cap(t.name)
         try:
-            t._resolved_timeout_seconds = _history_get_timeout(t.name)
+            t._resolved_timeout_seconds = _history_get_timeout(t.name, max_seconds=cap)
         except InsufficientHistoryError as e:
             missing_history.append(f"{t.name} ({e.have}/{e.need})")
         else:
-            s = _history_summary(t.name)
+            s = _history_summary(t.name, max_seconds=cap)
+            cap_note = f", cap={cap}s" if cap else ""
             print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                  f"(p50={s['p50']}s, p95={s['p95']}s, n={s['count']})")
+                  f"(recent_max={s['recent_max']}s, n={s['count']}{cap_note})")
     if missing_history:
         print("\n  ❌ Timeout history is insufficient for the following tasks:")
         for m in missing_history:
             print(f"      - {m}")
         print("\n  Bootstrap the corpus by running smoke with --bootstrap until")
-        print(f"  every task has ≥5 passed runs, e.g.:")
-        print(f"    cd agents && for i in 1 2 3 4 5; do \\")
+        print("  every task has ≥5 passed runs, e.g.:")
+        print("    cd agents && for i in 1 2 3 4 5; do \\")
         print(f"      python benchmarks/run_benchmark.py --suite {suite_name_for_error(args)} \\")
-        print(f"          --port $CONDUCTOR_PORT --ci --parallel --bootstrap; \\")
-        print(f"    done")
-        print(f"  Then commit agents/benchmarks/history/task_durations.jsonl.")
+        print("          --port $CONDUCTOR_PORT --ci --parallel --bootstrap; \\")
+        print("    done")
+        print("  Then commit agents/benchmarks/history/task_durations.jsonl.")
         sys.exit(1)
 
     # Start Fly.io log streaming
@@ -1206,7 +1285,7 @@ async def main_async(args):
 
     suite_name = args.suite or args.task or "all"
     print(f"\n{'='*60}")
-    print(f"  Agent Benchmark Harness")
+    print("  Agent Benchmark Harness")
     print(f"  URL:   {base_url}")
     print(f"  Suite: {suite_name}")
     print(f"  Tasks: {len(tasks)}{f' (+{len(skipped_claude_tasks)} skipped)' if skipped_claude_tasks else ''}")

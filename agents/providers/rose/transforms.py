@@ -1,0 +1,656 @@
+"""Provider-shape transforms for the Rose client.
+
+Ports the message/tool-config/response transforms that previously lived in
+`research/supabase/functions/completions/service/anthropic.ts` and `vision.ts`
+into Python. Behavior here must stay byte-for-byte identical with the TS
+originals — every consumer of the Rose API expects the same envelopes the
+edge function produced.
+
+What's in here:
+  - transform_messages_for_anthropic: OpenAI-style messages -> Anthropic
+    Messages API shape (system pulled out, tool_calls -> tool_use,
+    tool role -> tool_result user message, image_url -> image, file -> document).
+  - apply_anthropic_tool_config: writes `tools` / `tool_choice` /
+    `output_config` onto an Anthropic request body. Returns True iff
+    "native tool mode" is active (caller must reconstruct the response).
+  - reconstruct_agent_response: builds the agent-side
+    {"reasoning","response","tool_calls"} envelope from native tool_use blocks.
+  - get_messages_for_model: vision-capable models get screenshot markers
+    expanded into multimodal user messages; everything else passes through.
+  - transform_messages_for_openai: pass-through for OpenRouter / OpenAI
+    providers — the TS code does not normalize these (generic.ts forwards
+    messages verbatim), so neither do we.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+import structlog
+
+logger = structlog.get_logger()
+
+
+# Mirrors VISION_CAPABLE_MODELS in research/domains/completions/config.ts.
+# Kept as a literal set so the source-of-truth lives next to the transform
+# that uses it (matches the TS module structure).
+VISION_MODELS: frozenset[str] = frozenset({
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "openai/gpt-5.2",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+    "google/gemini-3-pro-preview",
+    "anthropic/claude-sonnet-4",
+    "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-haiku-4.5",
+    "anthropic/claude-opus-4",
+    "anthropic/claude-opus-4.7",
+    "anthropic/claude-sonnet-4.6",
+    "x-ai/grok-4.1-fast",
+    "x-ai/grok-4.1",
+})
+
+
+_DATA_URI_RE = re.compile(r"^data:([^;]+);base64,(.+)$", re.DOTALL)
+
+
+# ---------------------------------------------------------------------------
+# Anthropic message + content transforms
+# ---------------------------------------------------------------------------
+
+
+def is_anthropic_model(model: str) -> bool:
+    """Mirrors isAnthropicModel — substring match on 'anthropic/' or 'claude'."""
+    lowered = model.lower()
+    return "anthropic/" in lowered or "claude" in lowered
+
+
+def transform_content_block_for_anthropic(block: Any) -> Any:
+    """Convert one OpenAI-style content block to its Anthropic equivalent.
+
+    image_url(data:) -> image/base64, image_url(http) -> image/url,
+    file(data:) -> document/base64. Any other block type passes through.
+    """
+    if not isinstance(block, dict):
+        return block
+
+    block_type = block.get("type")
+
+    if block_type == "image_url":
+        image_url = block.get("image_url") or {}
+        url = image_url.get("url")
+        if isinstance(url, str):
+            if url.startswith("data:"):
+                match = _DATA_URI_RE.match(url)
+                if match:
+                    media_type, data = match.group(1), match.group(2)
+                    return {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    }
+            return {
+                "type": "image",
+                "source": {"type": "url", "url": url},
+            }
+
+    if block_type == "file":
+        file_obj = block.get("file") or {}
+        file_data = file_obj.get("file_data")
+        if isinstance(file_data, str) and file_data.startswith("data:"):
+            match = _DATA_URI_RE.match(file_data)
+            if match:
+                media_type, data = match.group(1), match.group(2)
+                return {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                }
+
+    return block
+
+
+def transform_messages_for_anthropic(
+    messages: List[Dict[str, Any]],
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """OpenAI-style messages -> (system_text, anthropic_messages).
+
+    - system messages are concatenated (joined by blank line) and pulled
+      out into the first return value. None when there were none.
+    - assistant messages with tool_calls become assistant messages with
+      tool_use content blocks (preserving any preceding text/content).
+    - tool-role messages become user messages with a single tool_result
+      block; consecutive tool_result user messages get bundled into one
+      message (Anthropic expects all tool results from one turn together).
+    - Any image_url / file blocks anywhere get rewritten in-place via
+      transform_content_block_for_anthropic.
+    - Trailing assistant messages are stripped (Anthropic disallows
+      assistant prefill alongside structured output).
+
+    Raises ValueError on malformed assistant tool_calls (missing id/name,
+    invalid arguments JSON, non-object arguments) and tool messages with
+    no tool_call_id — these mirror the TS Error throws so callers get the
+    same fail-fast semantics.
+    """
+    system_parts: List[str] = []
+    anthropic_messages: List[Dict[str, Any]] = []
+
+    for idx, msg in enumerate(messages):
+        role = msg.get("role")
+
+        if role == "system":
+            content = msg.get("content")
+            if isinstance(content, str):
+                system_parts.append(content)
+            else:
+                system_parts.append(json.dumps(content))
+            continue
+
+        tool_calls = msg.get("tool_calls")
+        if (
+            role == "assistant"
+            and isinstance(tool_calls, list)
+            and len(tool_calls) > 0
+        ):
+            content_blocks: List[Dict[str, Any]] = []
+            content = msg.get("content")
+
+            if isinstance(content, list):
+                content_blocks.extend(
+                    transform_content_block_for_anthropic(b) for b in content
+                )
+            elif isinstance(content, str):
+                if len(content) > 0:
+                    content_blocks.append({"type": "text", "text": content})
+            elif content is not None:
+                content_blocks.append({"type": "text", "text": json.dumps(content)})
+
+            for tool_idx, tc in enumerate(tool_calls):
+                tc = tc or {}
+                tool_call_id = tc.get("id")
+                function = tc.get("function") or {}
+                tool_name = function.get("name")
+                raw_args = function.get("arguments")
+
+                if not isinstance(tool_call_id, str) or len(tool_call_id) == 0:
+                    raise ValueError(
+                        "transform_messages_for_anthropic: assistant tool_call missing id "
+                        f"(message_index={idx}, tool_index={tool_idx})"
+                    )
+                if not isinstance(tool_name, str) or len(tool_name) == 0:
+                    raise ValueError(
+                        "transform_messages_for_anthropic: assistant tool_call missing function.name "
+                        f"(message_index={idx}, tool_index={tool_idx})"
+                    )
+
+                if raw_args is None or raw_args == "":
+                    parsed_args: Any = {}
+                elif isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        preview = raw_args[:200]
+                        raise ValueError(
+                            "transform_messages_for_anthropic: invalid tool_call arguments JSON "
+                            f"(message_index={idx}, tool_index={tool_idx}, "
+                            f"tool_name={tool_name}, preview={preview})"
+                        )
+                elif isinstance(raw_args, dict) or isinstance(raw_args, list):
+                    parsed_args = raw_args
+                else:
+                    raise ValueError(
+                        "transform_messages_for_anthropic: unsupported tool_call arguments type "
+                        f"(message_index={idx}, tool_index={tool_idx}, "
+                        f"tool_name={tool_name}, type={type(raw_args).__name__})"
+                    )
+
+                if not isinstance(parsed_args, dict):
+                    raise ValueError(
+                        "transform_messages_for_anthropic: tool_call arguments must decode to an object "
+                        f"(message_index={idx}, tool_index={tool_idx}, tool_name={tool_name})"
+                    )
+
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tool_call_id,
+                    "name": tool_name,
+                    "input": parsed_args,
+                })
+
+            anthropic_messages.append({
+                "role": "assistant",
+                "content": content_blocks if len(content_blocks) > 0 else [{"type": "text", "text": ""}],
+            })
+            continue
+
+        if role == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or len(tool_call_id) == 0:
+                raise ValueError(
+                    "transform_messages_for_anthropic: tool message missing tool_call_id "
+                    f"(message_index={idx})"
+                )
+
+            content = msg.get("content")
+            if isinstance(content, list):
+                tool_result_content: Any = [
+                    transform_content_block_for_anthropic(b) for b in content
+                ]
+            elif isinstance(content, str):
+                tool_result_content = content
+            elif content is None:
+                tool_result_content = ""
+            else:
+                tool_result_content = json.dumps(content)
+
+            anthropic_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": tool_result_content,
+                }],
+            })
+            continue
+
+        content = msg.get("content")
+        if isinstance(content, list):
+            transformed = [transform_content_block_for_anthropic(b) for b in content]
+            new_msg = dict(msg)
+            new_msg["content"] = transformed
+            anthropic_messages.append(new_msg)
+        else:
+            anthropic_messages.append(msg)
+
+    bundled: List[Dict[str, Any]] = []
+    for msg in anthropic_messages:
+        prev = bundled[-1] if bundled else None
+        prev_is_tool_result = bool(
+            prev
+            and prev.get("role") == "user"
+            and isinstance(prev.get("content"), list)
+            and len(prev["content"]) > 0
+            and all(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in prev["content"]
+            )
+        )
+        curr_content = msg.get("content")
+        curr_is_tool_result = bool(
+            msg.get("role") == "user"
+            and isinstance(curr_content, list)
+            and len(curr_content) > 0
+            and all(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in curr_content
+            )
+        )
+
+        if prev_is_tool_result and curr_is_tool_result and prev is not None:
+            prev["content"].extend(curr_content)
+        else:
+            bundled.append(msg)
+
+    while len(bundled) > 0 and bundled[-1].get("role") == "assistant":
+        bundled.pop()
+
+    system_text: Optional[str] = "\n\n".join(system_parts) if system_parts else None
+    return system_text, bundled
+
+
+# ---------------------------------------------------------------------------
+# Schema sanitization + tool extraction
+# ---------------------------------------------------------------------------
+
+
+_UNSUPPORTED_SCHEMA_KEYS = (
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "multipleOf",
+    "minItems",
+    "maxItems",
+)
+
+
+def transform_schema_for_anthropic(schema: Any) -> Any:
+    """Strip JSON-schema constraints Anthropic rejects.
+
+    Anthropic's tool input_schema validator throws on numeric/length/array
+    bounds (`minimum`, `maximum`, `minLength`, …) and on
+    `additionalProperties: <schema-object>` (Dict[str, str]-style maps).
+    We delete the bounds and collapse object-typed additionalProperties
+    to `false` so the schema still validates but loses no semantic content
+    Anthropic actually enforces.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    transformed: Dict[str, Any] = dict(schema)
+
+    for key in _UNSUPPORTED_SCHEMA_KEYS:
+        transformed.pop(key, None)
+
+    if (
+        transformed.get("type") == "object"
+        and isinstance(transformed.get("additionalProperties"), dict)
+    ):
+        transformed["additionalProperties"] = False
+
+    if "properties" in transformed and isinstance(transformed["properties"], dict):
+        new_props = {}
+        for key, value in transformed["properties"].items():
+            new_props[key] = transform_schema_for_anthropic(value)
+        transformed["properties"] = new_props
+
+    if "items" in transformed:
+        transformed["items"] = transform_schema_for_anthropic(transformed["items"])
+
+    if "$defs" in transformed and isinstance(transformed["$defs"], dict):
+        new_defs = {}
+        for key, value in transformed["$defs"].items():
+            new_defs[key] = transform_schema_for_anthropic(value)
+        transformed["$defs"] = new_defs
+
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        if keyword in transformed and isinstance(transformed[keyword], list):
+            transformed[keyword] = [
+                transform_schema_for_anthropic(item) for item in transformed[keyword]
+            ]
+
+    return transformed
+
+
+def _extract_tools_from_response_format(
+    response_format: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Pull native Anthropic tools out of an OpenAI-style response_format.
+
+    Our agent ships structured-output schemas where `tool_calls.items.anyOf`
+    enumerates each tool variant (with a `tool` const discriminator). Anthropic
+    chokes on grammars over ~8 anyOf branches, so we lift those variants
+    into actual `tools` entries and switch to native tool mode instead.
+
+    Returns None when the schema doesn't fit the expected shape (lets the
+    caller fall back to structured output).
+    """
+    if not response_format:
+        return None
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict):
+        return None
+    schema = json_schema.get("schema")
+    if not isinstance(schema, dict):
+        return None
+
+    properties = schema.get("properties") or {}
+    tool_calls = properties.get("tool_calls") or {}
+    items = tool_calls.get("items") or {}
+    any_of = items.get("anyOf")
+    if not isinstance(any_of, list) or len(any_of) == 0:
+        return None
+
+    for variant in any_of:
+        if not isinstance(variant, dict):
+            return None
+        variant_props = variant.get("properties") or {}
+        tool_field = variant_props.get("tool") or {}
+        if "const" not in tool_field:
+            return None
+
+    tools: List[Dict[str, Any]] = []
+    for variant in any_of:
+        variant_props = dict(variant.get("properties") or {})
+        tool_name = variant_props["tool"]["const"]
+        description = variant.get("description", "") or ""
+
+        input_properties = dict(variant_props)
+        input_properties.pop("tool", None)
+
+        required = [r for r in (variant.get("required") or []) if r != "tool"]
+
+        input_schema: Dict[str, Any] = {
+            "type": "object",
+            "properties": input_properties,
+            "required": required,
+        }
+        if "additionalProperties" in variant:
+            input_schema["additionalProperties"] = variant["additionalProperties"]
+
+        tools.append({
+            "name": tool_name,
+            "description": description,
+            "input_schema": transform_schema_for_anthropic(input_schema),
+        })
+
+    response_field_schema = properties.get("response") or {"type": "string"}
+    return {"tools": tools, "response_field_schema": response_field_schema}
+
+
+def apply_anthropic_tool_config(
+    body: Dict[str, Any],
+    response_format: Optional[Dict[str, Any]],
+    use_native_tools: bool,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+) -> bool:
+    """Configure an Anthropic request body for tools / structured output.
+
+    Mutates `body` in place. Priority matches the TS original:
+      1. Explicit `tools` (OpenAI-shape) — converted to native Anthropic
+         tools, optional explicit `tool_choice` translated.
+      2. `response_format.json_schema` with `use_native_tools=True` (the
+         claudeAuth path) — try to lift tool_calls.items.anyOf into native
+         tools to dodge "compiled grammar too large".
+      3. Otherwise — install structured output via `output_config`
+         (claudeAuth) or `output_format` (legacy).
+
+    Returns True iff native tool mode is now active (caller must use
+    reconstruct_agent_response on the response).
+    """
+    if tools:
+        body["tools"] = [
+            {
+                "name": (t.get("function") or {}).get("name") or t.get("name"),
+                "description": (t.get("function") or {}).get("description")
+                or t.get("description"),
+                "input_schema": (t.get("function") or {}).get("parameters")
+                or t.get("input_schema"),
+            }
+            for t in tools
+        ]
+        if tool_choice is not None:
+            if tool_choice == "auto":
+                body["tool_choice"] = {"type": "auto"}
+            elif tool_choice in ("required", "any"):
+                body["tool_choice"] = {"type": "any"}
+            elif (
+                isinstance(tool_choice, dict)
+                and isinstance(tool_choice.get("function"), dict)
+                and tool_choice["function"].get("name")
+            ):
+                body["tool_choice"] = {
+                    "type": "tool",
+                    "name": tool_choice["function"]["name"],
+                }
+        return False
+
+    if response_format and isinstance(response_format.get("json_schema"), dict):
+        schema = response_format["json_schema"].get("schema")
+        if isinstance(schema, dict):
+            if use_native_tools:
+                extracted = _extract_tools_from_response_format(response_format)
+                if extracted is not None:
+                    body["tools"] = extracted["tools"]
+                    body["tool_choice"] = {"type": "any"}
+                    body.pop("output_config", None)
+                    body.pop("output_format", None)
+                    return True
+
+            transformed_schema = transform_schema_for_anthropic(schema)
+            if use_native_tools:
+                body["output_config"] = {
+                    "format": {"type": "json_schema", "schema": transformed_schema},
+                }
+            else:
+                body["output_format"] = {
+                    "type": "json_schema",
+                    "schema": transformed_schema,
+                }
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Response reconstruction
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_agent_response(
+    text_content: str,
+    tool_use_blocks: List[Dict[str, Any]],
+) -> str:
+    """Build the {"reasoning","response","tool_calls"} JSON envelope the
+    agent's parser expects from Anthropic's native text + tool_use blocks.
+
+    Each tool_use block contributes one tool_call shaped as
+    `{"tool": <name>, **<input>}` — the same shape `reconstructNativeToolJson`
+    in claude-token.ts produces, which the agent's response parser was
+    written against.
+    """
+    tool_calls = []
+    for block in tool_use_blocks:
+        name = block.get("name")
+        input_obj = block.get("input") or {}
+        if not isinstance(input_obj, dict):
+            input_obj = {}
+        call: Dict[str, Any] = {"tool": name}
+        call.update(input_obj)
+        tool_calls.append(call)
+
+    return json.dumps({
+        "reasoning": "",
+        "response": text_content,
+        "tool_calls": tool_calls,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Vision / OpenAI message handling
+# ---------------------------------------------------------------------------
+
+
+def is_vision_capable(model: str) -> bool:
+    """True iff the model is in VISION_MODELS (mirrors isVisionCapable)."""
+    return model in VISION_MODELS
+
+
+def has_screenshot_markers(messages: List[Dict[str, Any]]) -> bool:
+    """True iff any tool-role message carries a `__screenshot_base64__` payload."""
+    for msg in messages:
+        if msg.get("role") == "tool":
+            content = msg.get("content")
+            if isinstance(content, str) and "__screenshot_base64__" in content:
+                return True
+    return False
+
+
+def transform_messages_for_vision(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Expand `__screenshot_base64__` markers into trailing user image_url messages.
+
+    OpenAI/OpenRouter reject image_url blocks attached to a tool-role message,
+    so we keep the cleaned tool message (with the base64 stripped and a
+    `screenshot_attached: true` flag) and append a synthetic user message
+    that carries the image. Mirrors transformMessagesForVision in vision.ts.
+    """
+    transformed: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        content = msg.get("content")
+        is_tool_message = (
+            msg.get("role") == "tool"
+            and isinstance(content, str)
+            and "__screenshot_base64__" in content
+        )
+
+        if not is_tool_message:
+            transformed.append(msg)
+            continue
+
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            transformed.append(msg)
+            continue
+
+        if not isinstance(parsed, dict):
+            transformed.append(msg)
+            continue
+
+        base64_data = parsed.get("__screenshot_base64__")
+        if not base64_data:
+            transformed.append(msg)
+            continue
+
+        tool_content = dict(parsed)
+        tool_content.pop("__screenshot_base64__", None)
+        tool_content["screenshot_attached"] = True
+
+        cleaned_msg = dict(msg)
+        cleaned_msg["content"] = json.dumps(tool_content)
+        transformed.append(cleaned_msg)
+        transformed.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[Screenshot from browser]"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_data}"},
+                },
+            ],
+        })
+
+    return transformed
+
+
+def get_messages_for_model(
+    messages: List[Dict[str, Any]],
+    model: str,
+) -> List[Dict[str, Any]]:
+    """Return the right messages array for the target model.
+
+    Mirrors getMessagesForModel in vision.ts: vision-capable models with
+    embedded screenshot markers get the markers expanded into multimodal
+    user messages; everything else passes through untouched. Note that the
+    TS function does NOT strip image content for non-vision models — it
+    leaves the marker in place. That behavior is preserved here.
+    """
+    if is_vision_capable(model) and has_screenshot_markers(messages):
+        return transform_messages_for_vision(messages)
+    return messages
+
+
+def transform_messages_for_openai(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Pass-through for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
+    Kimi-via-OR).
+
+    The TS code in `generic.ts` forwards the messages array verbatim to
+    OpenRouter, so this function does the same. Kept as an explicit hook
+    in case provider-specific normalization needs to slot in later without
+    touching every call site.
+    """
+    return list(messages)

@@ -462,7 +462,6 @@ async def main():
     # Log environment mode
     is_production = config.environment == "production"
     print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
-    print(f"   Rose API URL: {config.rose.api_url}")
 
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
     # Exposes worker_task_slots_used/available from the resource-based tuner

@@ -102,9 +102,14 @@ fi
 
 echo "Backend ready at $TEST_BASE_URL"
 
-# Run the blackbox test suite (the comprehensive test that exercises business logic)
+# Run the blackbox test suite (the comprehensive test that exercises business logic).
+# Propagate NODE_V8_COVERAGE so test processes ALSO dump V8 coverage — this
+# picks up module-level fetch-stubbed suites (e.g. rose.blackbox.ts) that
+# exercise provider code in the test process rather than via HTTP to the
+# instrumented backend. All per-process coverage files merge at report time.
 echo "Running blackbox tests..."
 TEST_EXIT=0
+NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
   bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?
 

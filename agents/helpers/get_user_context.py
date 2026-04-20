@@ -355,7 +355,12 @@ async def _fetch_user_settings(client: httpx.AsyncClient, config, user_id: str) 
         return {}
 
 
-async def _fetch_recent_messages(client: httpx.AsyncClient, config, user_id: str, limit: int = 200) -> List[dict]:
+RECENT_MESSAGES_CONTEXT_LIMIT = 20
+
+
+async def _fetch_recent_messages(
+    client: httpx.AsyncClient, config, user_id: str, limit: int = RECENT_MESSAGES_CONTEXT_LIMIT
+) -> List[dict]:
     """Fetch recent messages from backend."""
     try:
         response = await client.get(
@@ -375,7 +380,12 @@ async def _fetch_recent_messages(client: httpx.AsyncClient, config, user_id: str
         return []
 
 
-async def _fetch_top_contacts(client: httpx.AsyncClient, config, user_id: str, limit: int = 2000) -> List[dict]:
+NETWORK_CONTEXT_LIMIT = 100
+
+
+async def _fetch_top_contacts(
+    client: httpx.AsyncClient, config, user_id: str, limit: int = NETWORK_CONTEXT_LIMIT
+) -> List[dict]:
     """Fetch top contacts sorted by message count (tiebreak: most recent message)."""
     try:
         response = await client.get(
@@ -509,7 +519,7 @@ def _format_user_context(  # noqa: C901
     # Section: Recent Communications
     if recent_messages:
         message_lines = []
-        for msg in recent_messages[:200]:  # Limit to 200 messages
+        for msg in recent_messages[:RECENT_MESSAGES_CONTEXT_LIMIT]:
             channel = msg.get("channel", "UNKNOWN")
             timestamp = msg.get("timestamp", "")
             # Parse timestamp and format nicely
@@ -533,7 +543,13 @@ def _format_user_context(  # noqa: C901
             message_lines.append(f"[{channel}] {time_str} | {direction}\n{message_text}")
 
         if message_lines:
-            sections.append("RECENT COMMUNICATIONS (past 24 hours)\n\n" + "\n\n".join(message_lines))
+            messages_body = "\n\n".join(message_lines)
+            if len(recent_messages) >= RECENT_MESSAGES_CONTEXT_LIMIT:
+                messages_body += (
+                    f'\n\n… (showing {RECENT_MESSAGES_CONTEXT_LIMIT} most recent — '
+                    'use grep with source="messages" to search by keyword, person_id, or time range)'
+                )
+            sections.append("RECENT COMMUNICATIONS\n\n" + messages_body)
 
     # Section: Network (top contacts by message volume)
     if frequent_contacts:
@@ -579,7 +595,13 @@ def _format_user_context(  # noqa: C901
             contact_lines.append(" | ".join(parts))
 
         if contact_lines:
-            sections.append("YOUR NETWORK\n" + "\n".join(contact_lines))
+            network_body = "\n".join(contact_lines)
+            if len(frequent_contacts) >= NETWORK_CONTEXT_LIMIT:
+                network_body += (
+                    f'\n… (showing top {NETWORK_CONTEXT_LIMIT} by message volume — '
+                    'use grep with source="network" to search all contacts)'
+                )
+            sections.append("YOUR NETWORK\n" + network_body)
 
     # Combine all sections
     if not sections:
