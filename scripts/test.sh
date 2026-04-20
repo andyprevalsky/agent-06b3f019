@@ -95,6 +95,14 @@ if $SMOKE && [ -z "$PORT" ]; then
   echo "Example: bash scripts/test.sh --port=3001"
   exit 1
 fi
+# Validate PORT is a decimal integer in the IANA range — downstream arithmetic
+# ($((PORT + 1)) / $((PORT + 3))) silently misbehaves on non-numeric input.
+if [ -n "$PORT" ]; then
+  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "ERROR: invalid port '$PORT' — must be an integer in 1..65535."
+    exit 1
+  fi
+fi
 
 # ── Track results ──
 SUITE_NAMES=()
@@ -186,6 +194,20 @@ should_run() {
 BUILD_PIDS=()
 BUILD_NAMES=()
 BUILD_LOGS=()
+
+# Reap any background builds / bg_suite processes still running when the
+# script exits (e.g. if the semantic-test preflight fails with `exit 1`).
+# Without this, `vite build` / benchmark subprocesses get orphaned.
+cleanup_bg() {
+  local pid
+  # ${arr[@]+"${arr[@]}"} is the set -u-safe way to iterate possibly-empty arrays.
+  for pid in ${BUILD_PIDS[@]+"${BUILD_PIDS[@]}"} ${BG_PIDS[@]+"${BG_PIDS[@]}"}; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_bg EXIT
 
 if should_run "front-end"; then
   FE_BUILD_LOG="$TMPDIR_BASE/fe_build.log"
