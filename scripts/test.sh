@@ -263,18 +263,20 @@ collect_bg_suites
 
 # ── Smoke tests (parallel, only if --smoke --port=N) ──
 if $SMOKE; then
-  # Derive TEMPORAL_TASK_QUEUE from CONDUCTOR_WORKSPACE_NAME so the benchmark's
-  # stale-workflow cleanup targets the correct Temporal Cloud task queue.
-  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME:-local}"
-  bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
-
-  # Frontend semantic tests (Playwright/Chromium, requires running frontend)
+  # Frontend semantic tests require a running frontend — guard BEFORE any
+  # background smoke process spawns, so a missing frontend can't leave
+  # orphaned benchmark runs behind.
   SEMANTIC_BACKEND_PORT="$PORT"
   SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
   if ! curl -sf "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
     echo "ERROR: semantic tests require frontend on port $SEMANTIC_FRONTEND_PORT (start it or pass --no-smoke to skip)."
     exit 1
   fi
+
+  # Derive TEMPORAL_TASK_QUEUE from CONDUCTOR_WORKSPACE_NAME so the benchmark's
+  # stale-workflow cleanup targets the correct Temporal Cloud task queue.
+  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME:-local}"
+  bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
   bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
 
   collect_bg_suites

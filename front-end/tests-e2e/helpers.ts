@@ -5,11 +5,16 @@ export const BACKEND_URL =
 export const FRONTEND_URL =
   process.env.FRONTEND_URL ?? `http://localhost:${process.env.FRONTEND_PORT ?? '3002'}`;
 
-export const TEST_API_KEY = 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
-export const TEST_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
-export const TEST_PHONE_DIGITS = '9729777432';
-export const TEST_PHONE_E164 = '+19729777432';
-export const TEST_OTP = '181818';
+// Dev-only test credentials. The default key is the shared local-backend
+// dev key (also documented in CLAUDE.md "Test Credentials"); override via
+// env for CI or alternate environments.
+export const TEST_API_KEY =
+  process.env.TEST_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
+export const TEST_USER_ID =
+  process.env.TEST_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+export const TEST_PHONE_DIGITS = process.env.TEST_PHONE_DIGITS ?? '9729777432';
+export const TEST_PHONE_E164 = process.env.TEST_PHONE_E164 ?? '+19729777432';
+export const TEST_OTP = process.env.TEST_OTP ?? '181818';
 
 export interface Recorder {
   console: { type: string; text: string }[];
