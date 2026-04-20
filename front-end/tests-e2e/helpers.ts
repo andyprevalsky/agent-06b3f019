@@ -73,12 +73,20 @@ export async function createAgent(goal: string, startPhase?: 'plan' | 'execute')
     },
     body: JSON.stringify(body),
   });
-  const json: unknown = await res.json();
+  const raw = await res.text();
+  let json: unknown = raw;
+  try {
+    json = raw ? JSON.parse(raw) : {};
+  } catch {
+    // Non-JSON body (proxy HTML, empty, etc.) — keep raw text in the error.
+  }
   const id =
     (json as { agent_id?: string; id?: string }).agent_id ??
     (json as { agent_id?: string; id?: string }).id;
-  if (!res.ok || !id)
-    throw new Error(`Agent creation failed: ${res.status} ${JSON.stringify(json)}`);
+  if (!res.ok || !id) {
+    const body = typeof json === 'string' ? json.slice(0, 500) : JSON.stringify(json);
+    throw new Error(`Agent creation failed: ${res.status} ${body}`);
+  }
   return id;
 }
 
@@ -104,19 +112,33 @@ export async function loadBenchmarkTask(name: string): Promise<BenchmarkTask> {
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
-  await fetch(`${BACKEND_URL}/api/agents/${agentId}`, {
-    method: 'DELETE',
-    headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': TEST_USER_ID },
-  }).catch(() => {});
+  // Cleanup helper: surface failures via console.warn so leaked agents are
+  // visible in CI logs, but don't throw — test teardown must not mask the
+  // real assertion failure that caused it to run.
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': TEST_USER_ID },
+    });
+    if (!res.ok) {
+      console.warn(`deleteAgent(${agentId}) returned ${res.status} ${res.statusText}`);
+    }
+  } catch (err) {
+    console.warn(`deleteAgent(${agentId}) network failure:`, err);
+  }
 }
 
 export function hasUncaughtErrors(rec: Recorder): string[] {
   const textErrors = rec.console
-    .filter(
-      (m) =>
-        (m.type === 'error' || m.type === 'warning') &&
-        (m.text.includes('Uncaught') || m.text.includes('unhandledrejection')),
-    )
+    .filter((m) => {
+      if (m.type !== 'error' && m.type !== 'warning') return false;
+      const t = m.text.toLowerCase();
+      return (
+        t.includes('uncaught') ||
+        t.includes('unhandledrejection') ||
+        t.includes('unhandled promise rejection')
+      );
+    })
     .map((m) => m.text);
   return [...rec.pageErrors, ...textErrors];
 }

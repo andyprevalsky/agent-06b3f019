@@ -80,6 +80,12 @@ if $LIST; then
 fi
 
 # ── Smoke validation ──
+# Smoke only runs on full-repo (unscoped) invocations. When REPO is set
+# (e.g. `scripts/test.sh back-end`), smoke is off regardless of default.
+if [ -n "$REPO" ]; then
+  SMOKE=false
+fi
+
 # Auto-derive port from CONDUCTOR_PORT if --port not explicitly passed
 if $SMOKE && [ -z "$PORT" ] && [ -n "${CONDUCTOR_PORT:-}" ]; then
   PORT="$CONDUCTOR_PORT"
