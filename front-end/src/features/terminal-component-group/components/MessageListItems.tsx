@@ -48,20 +48,25 @@ export function MessageListItems({
   return (
     <>
       {filteredMessages.map((message) => (
-        <MessageBubble
+        <div
           key={message.message_id}
-          message={message}
-          shouldType={message.message_id === currentAnimatingId}
-          onTypingComplete={onAnimationComplete}
-          onNavigateToAgent={onNavigateToAgent}
-          agentId={selectedAgentId || undefined}
-          onSendMessage={selectedAgentId ? onSendMessage : undefined}
-          compact={compact}
-          onSubmitFeedback={onSubmitFeedback}
-          exploreStepHistory={exploreStepMap.get(message.message_id)}
-          waitForChecks={waitForCheckMap.get(message.message_id)}
-          planCharCount={resolvePlanCharCount(message, streamingPlanCharCount)}
-        />
+          data-message-id={message.message_id}
+          data-message-role={message.role}
+        >
+          <MessageBubble
+            message={message}
+            shouldType={message.message_id === currentAnimatingId}
+            onTypingComplete={onAnimationComplete}
+            onNavigateToAgent={onNavigateToAgent}
+            agentId={selectedAgentId || undefined}
+            onSendMessage={selectedAgentId ? onSendMessage : undefined}
+            compact={compact}
+            onSubmitFeedback={onSubmitFeedback}
+            exploreStepHistory={exploreStepMap.get(message.message_id)}
+            waitForChecks={waitForCheckMap.get(message.message_id)}
+            planCharCount={resolvePlanCharCount(message, streamingPlanCharCount)}
+          />
+        </div>
       ))}
     </>
   );

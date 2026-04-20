@@ -34,9 +34,9 @@ Run all services via Conductor (see `conductor.json`).
 
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 ```bash
-bash scripts/test.sh                              # all offline tests
-bash scripts/test.sh --smoke --port=3001           # + smoke benchmarks (requires running services)
-bash scripts/test.sh agents web-search             # single repo/domain
+bash scripts/test.sh --port=3001                   # everything: offline + smoke + semantic (requires running services)
+bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + semantic)
+bash scripts/test.sh --no-smoke agents web-search  # single repo/domain (offline)
 bash scripts/test.sh --list                        # list available repos/domains
 ```
 

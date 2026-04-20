@@ -539,7 +539,7 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 
 ## Step 6b: Semantic tests + fix
 
-Semantic tests exercise real user flows through Chrome CDP against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
+Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
 **Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
 
@@ -550,29 +550,25 @@ With the full stack from Step 5 still running (backend, worker, research, **and 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
-  bash front-end/scripts/run-semantic-tests.sh --list
+  bash front-end/scripts/run-semantic-tests.sh
 ```
 
-For each listed test (currently `login`, `agent-realtime`), run the test and execute its instructions using `mcp__claude-in-chrome__*` browser tools:
+This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
 ```bash
 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
-  bash front-end/scripts/run-semantic-tests.sh <test-name>
+  bash front-end/scripts/run-semantic-tests.sh login
 ```
 
-The script validates pre-conditions (backend health, frontend accessible) and emits the structured test body (`pre-conditions`, `steps`, `invariants`, `termination`). You (Claude) must then execute those steps via Chrome CDP:
-1. Call `mcp__claude-in-chrome__tabs_context_mcp` to get tab context (MUST be first — never reuse stale tab IDs from earlier runs).
-2. Navigate/interact per the test's steps.
-3. Verify each invariant holds. Capture console output via `mcp__claude-in-chrome__read_console_messages` and network activity via `mcp__claude-in-chrome__read_network_requests` as needed.
-4. Stop at the termination condition.
+If Chromium is missing, install once: `cd front-end && npx playwright install chromium`.
 
 ### Pass criteria
 
-**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15 (semantic tests must use Chrome, no workarounds): if a semantic test fails, you diagnose and fix the root cause. "Chrome CDP not available", "realtime broadcast didn't arrive", "extension missing" — none of those are excuses. Fix the underlying issue.
+**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15: if a semantic test fails, you diagnose and fix the root cause. "Flaky selector", "realtime broadcast didn't arrive", "timeout" — none of those are excuses. Fix the underlying issue.
 
 ### On failure
 
-1. Read the failing invariant. Capture the browser console + network tab output.
+1. Read the failing invariant from the Playwright output. Trace artifacts land in `front-end/test-results/` and `front-end/playwright-report/` (video/trace are retained on failure).
 2. Check `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt` for backend-side errors that correlate with the UI failure.
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
