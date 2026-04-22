@@ -13,10 +13,12 @@ import { expect, test } from '@playwright/test';
 
 import {
   FRONTEND_URL,
+  IS_PROD,
   attachRecorder,
   createAgent,
   deleteAgent,
   hasUncaughtErrors,
+  injectProdSession,
   loadBenchmarkTask,
 } from './helpers';
 
@@ -35,14 +37,33 @@ test.describe('agent-realtime', () => {
         waitUntil: 'domcontentloaded',
       });
 
-      // Dev auto-login only fires for the real test user (+19729777432);
-      // seeing the completion log is sufficient to assert non-anonymous auth.
-      await expect
-        .poll(() => rec.console.some((m) => m.text.includes('[Auth] Dev auto-login complete')), {
-          timeout: 15_000,
-          message: 'Dev auto-login did not complete',
-        })
-        .toBe(true);
+      if (IS_PROD) {
+        // Prod: inject a pre-generated JWT session, then reload so the app
+        // picks it up from localStorage on boot (no dev auto-login available).
+        await injectProdSession(page);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+
+        // Wait for auth hook to recognise the injected session.
+        await expect
+          .poll(
+            () =>
+              rec.console.some(
+                (m) =>
+                  m.text.includes('[Auth] State changed') &&
+                  m.text.includes('isFullySignedIn: true'),
+              ),
+            { timeout: 15_000, message: 'Injected prod session was not recognised by auth hook' },
+          )
+          .toBe(true);
+      } else {
+        // Dev: auto-login fires automatically for the real test user (+19729777432).
+        await expect
+          .poll(() => rec.console.some((m) => m.text.includes('[Auth] Dev auto-login complete')), {
+            timeout: 15_000,
+            message: 'Dev auto-login did not complete',
+          })
+          .toBe(true);
+      }
 
       // ── Step 1: Channel subscribes ─────────────────────────────────────
       await expect

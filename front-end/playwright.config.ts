@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 const FRONTEND_PORT = process.env.FRONTEND_PORT ?? '3002';
 const BACKEND_PORT = process.env.BACKEND_PORT ?? '3001';
+const BASE_URL =
+  process.env.FRONTEND_URL ?? `http://localhost:${FRONTEND_PORT}`;
 
 export default defineConfig({
   testDir: './tests-e2e',
@@ -13,7 +15,7 @@ export default defineConfig({
   retries: 0,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report' }]],
   use: {
-    baseURL: `http://localhost:${FRONTEND_PORT}`,
+    baseURL: BASE_URL,
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',

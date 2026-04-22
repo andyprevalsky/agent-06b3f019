@@ -4,26 +4,41 @@ set -euo pipefail
 # Frontend Semantic Test Runner (Playwright)
 #
 # Runs browser-based e2e tests via Playwright/Chromium against the running
-# local stack. These tests are the only gate proving realtime broadcasts
-# reach the UI and that the login path works end-to-end.
+# local stack or production.
 #
 # Usage:
-#   bash scripts/run-semantic-tests.sh              # run all semantic tests
-#   bash scripts/run-semantic-tests.sh <name>       # run specific test (e.g. login, agent-realtime)
+#   bash scripts/run-semantic-tests.sh              # run all (local)
+#   bash scripts/run-semantic-tests.sh <name>       # run specific test (local)
+#   bash scripts/run-semantic-tests.sh --prod       # run all against production
+#   bash scripts/run-semantic-tests.sh --prod <name> # run specific test against production
 #   bash scripts/run-semantic-tests.sh --list       # list available tests
 #
-# Requirements:
+# Requirements (local):
 #   - Backend running on $BACKEND_PORT (default: 3001)
 #   - Frontend running on $FRONTEND_PORT (default: 3002)
+#   - Chromium downloaded: `npx playwright install chromium`
+#
+# Requirements (--prod):
+#   - SUPABASE_JWT_SECRET set in back-end/.env (shared across environments)
 #   - Chromium downloaded: `npx playwright install chromium`
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(dirname "$FRONTEND_DIR")"
 cd "$FRONTEND_DIR"
 
-BACKEND_PORT="${BACKEND_PORT:-3001}"
-FRONTEND_PORT="${FRONTEND_PORT:-3002}"
-export BACKEND_PORT FRONTEND_PORT
+PROD_MODE=0
+
+# Parse --prod flag (can appear anywhere in args)
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--prod" ]]; then
+    PROD_MODE=1
+  else
+    ARGS+=("$arg")
+  fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 if [[ "${1:-}" == "--list" ]]; then
   for f in tests-e2e/*.spec.ts; do
@@ -34,14 +49,49 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
-# Pre-condition: backend + frontend reachable.
-if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
-  echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
-  exit 1
-fi
-if ! curl -sf "http://localhost:$FRONTEND_PORT" > /dev/null 2>&1; then
-  echo "FAIL: Frontend not accessible at http://localhost:$FRONTEND_PORT" >&2
-  exit 1
+if [[ "$PROD_MODE" -eq 1 ]]; then
+  # ── Production mode ──────────────────────────────────────────────────
+  export BACKEND_URL="https://navi-j9a9.onrender.com"
+  export FRONTEND_URL="https://roselabs.ai"
+  export SEMANTIC_PROD=1
+
+  echo "=== Semantic tests: PRODUCTION mode ==="
+  echo "  Backend:  $BACKEND_URL"
+  echo "  Frontend: $FRONTEND_URL"
+
+  # Health checks against prod
+  if ! curl -sf "$BACKEND_URL/health" > /dev/null 2>&1; then
+    echo "FAIL: Prod backend not healthy at $BACKEND_URL/health" >&2
+    exit 1
+  fi
+  if ! curl -sf -o /dev/null -w '' "$FRONTEND_URL" 2>&1; then
+    echo "FAIL: Prod frontend not accessible at $FRONTEND_URL" >&2
+    exit 1
+  fi
+
+  # Generate a JWT session for the test user via back-end helper
+  echo "Generating prod session token..."
+  PROD_SESSION=$(cd "$REPO_DIR/back-end" && npx tsx scripts/generate-test-session.ts 2>/dev/null)
+  if [[ -z "$PROD_SESSION" ]]; then
+    echo "FAIL: Could not generate prod session. Check SUPABASE_JWT_SECRET in back-end/.env" >&2
+    exit 1
+  fi
+  export PROD_SESSION
+  echo "  Session generated for test user"
+else
+  # ── Local mode (default) ─────────────────────────────────────────────
+  BACKEND_PORT="${BACKEND_PORT:-3001}"
+  FRONTEND_PORT="${FRONTEND_PORT:-3002}"
+  export BACKEND_PORT FRONTEND_PORT
+
+  if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
+    echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
+    exit 1
+  fi
+  if ! curl -sf "http://localhost:$FRONTEND_PORT" > /dev/null 2>&1; then
+    echo "FAIL: Frontend not accessible at http://localhost:$FRONTEND_PORT" >&2
+    exit 1
+  fi
 fi
 
 if [[ $# -eq 0 ]]; then

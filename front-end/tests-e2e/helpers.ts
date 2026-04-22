@@ -5,6 +5,15 @@ export const BACKEND_URL =
 export const FRONTEND_URL =
   process.env.FRONTEND_URL ?? `http://localhost:${process.env.FRONTEND_PORT ?? '3002'}`;
 
+/** Whether tests are running against production (set by run-semantic-tests.sh --prod). */
+export const IS_PROD = process.env.SEMANTIC_PROD === '1';
+
+/**
+ * Pre-generated session JSON from back-end/scripts/generate-test-session.ts.
+ * Set by the shell runner when --prod is active.
+ */
+const PROD_SESSION = process.env.PROD_SESSION ?? '';
+
 // Dev-only test credentials. The default key is the shared local-backend
 // dev key (also documented in CLAUDE.md "Test Credentials"); override via
 // env for CI or alternate environments.
@@ -41,6 +50,21 @@ export async function clearAppSession(page: Page): Promise<void> {
       }
     }
   });
+}
+
+/**
+ * Inject a pre-generated session into localStorage so the app boots as
+ * an authenticated user. Used in --prod mode where dev auto-login is
+ * unavailable.
+ *
+ * Must be called AFTER page.goto() (localStorage requires an origin) but
+ * BEFORE the app's auth hook runs — so call it right after goto, then reload.
+ */
+export async function injectProdSession(page: Page): Promise<void> {
+  if (!PROD_SESSION) throw new Error('PROD_SESSION env var not set — run with --prod flag');
+  await page.evaluate((session) => {
+    window.localStorage.setItem('rose-session', session);
+  }, PROD_SESSION);
 }
 
 /**
