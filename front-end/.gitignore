@@ -9,4 +9,5 @@ coverage/
 # Playwright semantic test artifacts
 test-results/
 playwright-report/
+playwright-mobile-screenshots/
 
