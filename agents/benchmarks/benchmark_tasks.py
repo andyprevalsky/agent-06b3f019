@@ -3,7 +3,7 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -26,6 +26,7 @@ class BenchmarkTask:
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
+    context_gates: Optional[Dict[str, bool]] = None  # Gate user context sections (None = all open)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

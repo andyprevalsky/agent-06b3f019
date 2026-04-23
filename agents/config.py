@@ -259,7 +259,7 @@ def load_config() -> AppConfig:
     )
 
     parallel = ParallelConfig(
-        api_key=os.environ["PARRALLEL_API_KEY"],
+        api_key=os.getenv("PARRALLEL_API_KEY", ""),
     )
 
     environment = os.getenv("ENVIRONMENT", "production")

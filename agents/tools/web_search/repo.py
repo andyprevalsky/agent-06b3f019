@@ -1,4 +1,4 @@
-"""Web search data access -- HTTP calls to Parallel AI."""
+"""Web search data access -- HTTP calls to Parallel AI with DDGS fallback."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ async def fetch_search_results(
 
     Returns:
         List of result dicts from the API response.
+
+    Raises:
+        httpx.HTTPStatusError: On non-2xx response (e.g. 401 expired key).
+        httpx.TimeoutException: On request timeout.
     """
     headers = {
         "x-api-key": api_key,
@@ -48,3 +52,29 @@ async def fetch_search_results(
         data = response.json()
 
     return data.get("results", [])
+
+
+def fetch_search_results_ddgs(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict[str, Any]]:
+    """Fetch search results via DuckDuckGo (no API key required).
+
+    Converts DDGS result format (title, href, body) to the same shape
+    used by Parallel AI (title, url, excerpts list) so callers are
+    provider-agnostic.
+
+    Args:
+        query: Search query string.
+        max_results: Maximum number of results to return.
+
+    Returns:
+        List of result dicts with keys: title, url, excerpts.
+    """
+    from ddgs import DDGS  # lazy import — only needed on fallback path
+
+    raw = DDGS().text(query, max_results=max_results)
+    results = []
+    for r in raw or []:
+        title = r.get("title", "")
+        body = r.get("body", "")
+        url = r.get("href", "")
+        results.append({"title": title, "url": url, "excerpts": [body] if body else []})
+    return results

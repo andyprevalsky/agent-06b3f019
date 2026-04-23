@@ -14,9 +14,12 @@ USAGE:
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
 
 import structlog
 from pydantic import BaseModel
@@ -139,6 +142,11 @@ async def run_agent(  # noqa: C901
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
+    consecutive_llm_failures = 0  # Track consecutive LLM call failures for early exit
+    consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
+    recent_verifier_scores: List[float] = []  # Track last N scores for trend feedback
+    recent_call_hashes: Deque[str] = deque(maxlen=6)  # Track last N tool-call signatures for repetition detection
+    same_call_streak = 0  # Consecutive iterations where all tool calls were identical
 
     # Track last_checked timestamp FOR THIS RUN - start with epoch if no context
     # This ensures we get ALL messages on first poll, not just recent ones
@@ -522,6 +530,7 @@ async def run_agent(  # noqa: C901
             # Check if paused (cost limit may have been triggered by on_tokens)
             if check_paused and await check_paused():
                 logger.info("Agent paused after cost check")
+                _pending_llm_context.pop(agent_id, None)
                 return {
                     "status": "paused",
                     "context": context,
@@ -574,11 +583,25 @@ async def run_agent(  # noqa: C901
                 "context_size": context_size,
             }
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            await asyncio.sleep(2)
+            consecutive_llm_failures += 1
+            logger.error(f"LLM call failed (consecutive={consecutive_llm_failures}): {e}")
+            if consecutive_llm_failures >= 3:
+                _pending_llm_context.pop(agent_id, None)
+                return {
+                    "status": "error",
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {e}",
+                }
+            backoff = min(2 * (2 ** (consecutive_llm_failures - 1)), 30)
+            await asyncio.sleep(backoff)
             continue
 
         # 8. Extract response and tool calls
+        consecutive_llm_failures = 0  # Reset on successful LLM call
         response_text = result.response if hasattr(result, "response") else ""
         tool_calls = result.tool_calls if hasattr(result, "tool_calls") else []
 
@@ -785,6 +808,36 @@ async def run_agent(  # noqa: C901
                 if tool_name == "set_plan" and not is_error:
                     set_plan_succeeded = True
 
+        # Repetition detection: if the agent keeps calling the same tools with identical
+        # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
+        if processed_tools:
+            call_sig = hashlib.md5(
+                json.dumps(
+                    sorted([(t, json.dumps(a, sort_keys=True, default=str)) for t, a, _ in processed_tools]),
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            recent_call_hashes.append(call_sig)
+            if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
+                same_call_streak += 1
+                logger.warning(
+                    f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
+                    f"{[t for t, _, _ in processed_tools]}"
+                )
+                context.append({
+                    "role": "SYSTEM",
+                    "text": (
+                        f"WARNING: You have called the same tool(s) with identical arguments "
+                        f"{same_call_streak + 2} times in a row without making progress. "
+                        "The previous approach is not working. You MUST try a fundamentally different strategy: "
+                        "use different arguments, a different tool, or decompose the problem differently. "
+                        "Do not repeat the same call again."
+                    ),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                same_call_streak = 0
+
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
         if attempt_completion_tool:
             tool_name, tool_args, tool_call_id = attempt_completion_tool
@@ -931,6 +984,30 @@ async def run_agent(  # noqa: C901
                 v_reasoning = verifier_result.get("reasoning", "")
                 structured_response = verifier_result.get("structured_response")
 
+                # Track consecutive verifier errors (score=0.5 with "Progress check failed" reasoning)
+                if v_reasoning.startswith("Progress check failed"):
+                    consecutive_verifier_errors += 1
+                    logger.warning(
+                        f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
+                    )
+                    if consecutive_verifier_errors >= 3:
+                        return {
+                            "status": "error",
+                            "context": context,
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "token_count": token_count,
+                            "context_size": context_size,
+                            "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
+                        }
+                else:
+                    consecutive_verifier_errors = 0
+
+                # Track score history for trend feedback (keep last 5)
+                recent_verifier_scores.append(score)
+                if len(recent_verifier_scores) > 5:
+                    recent_verifier_scores.pop(0)
+
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
@@ -946,8 +1023,11 @@ async def run_agent(  # noqa: C901
                         "structured_response": structured_response,
                     }
 
-                # Not complete - add feedback to context
+                # Not complete - add feedback to context, including score trend
                 feedback_text = f"Verifier: {score * 100:.0f}% - {v_reasoning}"
+                if len(recent_verifier_scores) > 1:
+                    trend = " → ".join(f"{s * 100:.0f}%" for s in recent_verifier_scores)
+                    feedback_text += f"\nScore trend: {trend}"
                 feedback_text += "\n\nIMPORTANT: Your ASSISTANT text responses are NOT visible to the verifier. Only TOOL results (tool call outputs, files, structured responses) are evaluated. If you have completed work but scored low, you must produce visible output through tool calls — e.g., use spawn_claude_code_agent to write results to files, or use other tools that produce visible TOOL messages."
                 context.append(
                     {
