@@ -26,17 +26,13 @@ const BANNER_STYLE: React.CSSProperties = {
 
 function PausedBanner() {
   return (
-    <div className="flex gap-3">
+    <div className="flex gap-3" data-testid="paused-banner">
       <div
-        className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-1.5 px-3 rounded-2xl border border-border"
         style={BANNER_STYLE}
       >
-        <div className="flex items-center justify-center w-5 h-5 rounded-full border-[1.5px] border-muted-foreground">
-          <svg
-            className="w-2 h-2 text-muted-foreground"
-            fill="currentColor"
-            viewBox="0 0 24 24"
-          >
+        <div className="flex items-center justify-center w-5 h-5 rounded-full border-[1.5px] border-muted-foreground flex-shrink-0">
+          <svg className="w-2 h-2 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
             <rect x="6" y="5" width="4" height="14" rx="1" />
             <rect x="14" y="5" width="4" height="14" rx="1" />
           </svg>
@@ -74,12 +70,7 @@ function CostLimitBanner({ onIncreaseCostLimit }: { onIncreaseCostLimit?: () => 
           agent cost limit reached
         </p>
         {onIncreaseCostLimit && (
-          <Button
-            size="sm"
-            variant="default"
-            onClick={onIncreaseCostLimit}
-            className="h-7 text-xs"
-          >
+          <Button size="sm" variant="default" onClick={onIncreaseCostLimit} className="h-7 text-xs">
             Increase Cost Limit
           </Button>
         )}
@@ -99,9 +90,9 @@ export function StatusBanners({ agent, onAddCredits, onIncreaseCostLimit }: Stat
 
 export function WebPreviewBanner() {
   return (
-    <div className="flex gap-3">
+    <div className="flex gap-3" data-testid="web-preview-banner">
       <div
-        className="flex items-center gap-2 py-1.5 px-3 rounded-full border border-border"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-1.5 px-3 rounded-2xl border border-border"
         style={BANNER_STYLE}
       >
         <span className="text-muted-foreground text-sm">
@@ -110,7 +101,7 @@ export function WebPreviewBanner() {
         </span>
         <a
           href="/download"
-          className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity"
+          className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity whitespace-nowrap flex-shrink-0"
         >
           Download for Mac
         </a>

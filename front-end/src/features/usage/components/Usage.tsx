@@ -33,7 +33,7 @@ export default function Usage() {
   return (
     <div className="flex-1 overflow-auto">
       <div className="pt-24 p-6 space-y-6 max-w-6xl mx-auto">
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
           <CreditUsageCard usage={usage} />
           <TokenConsumptionCard totalTokens={totalTokens} />
         </div>

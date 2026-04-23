@@ -93,12 +93,22 @@ export default function Settings() {
         )}
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-5">
-            <TabsTrigger value="customization">Customization</TabsTrigger>
-            <TabsTrigger value="info">Personal Info</TabsTrigger>
-            <TabsTrigger value="payment">Agent Payment</TabsTrigger>
-            <TabsTrigger value="billing">Billing</TabsTrigger>
-            <TabsTrigger value="keys">API Keys</TabsTrigger>
+          <TabsList className="flex w-full overflow-x-auto">
+            <TabsTrigger value="customization" className="flex-shrink-0 text-xs sm:text-sm">
+              Customization
+            </TabsTrigger>
+            <TabsTrigger value="info" className="flex-shrink-0 text-xs sm:text-sm">
+              Personal Info
+            </TabsTrigger>
+            <TabsTrigger value="payment" className="flex-shrink-0 text-xs sm:text-sm">
+              Agent Payment
+            </TabsTrigger>
+            <TabsTrigger value="billing" className="flex-shrink-0 text-xs sm:text-sm">
+              Billing
+            </TabsTrigger>
+            <TabsTrigger value="keys" className="flex-shrink-0 text-xs sm:text-sm">
+              API Keys
+            </TabsTrigger>
           </TabsList>
 
           <SettingsTabContent

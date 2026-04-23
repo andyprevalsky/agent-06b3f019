@@ -150,17 +150,14 @@ function DetailsPanelContent({
           rows={3}
         />
       </div>
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <Checkbox
             id="helpImprove"
             checked={helpImprove}
             onCheckedChange={(checked) => setHelpImprove(checked === true)}
           />
-          <label
-            htmlFor="helpImprove"
-            className="text-sm text-muted-foreground cursor-pointer"
-          >
+          <label htmlFor="helpImprove" className="text-sm text-muted-foreground cursor-pointer">
             Help Rose improve with my feedback
           </label>
         </div>

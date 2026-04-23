@@ -29,7 +29,7 @@ export const AttachmentItem = memo(function AttachmentItem({
         <img
           src={imageSrc}
           alt={fp.original_filename}
-          className="w-60 h-60 object-cover rounded-lg border border-border hover:border-primary transition-colors"
+          className="w-60 h-60 max-w-full object-cover rounded-lg border border-border hover:border-primary transition-colors"
         />
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 rounded-lg transition-colors flex items-center justify-center">
           <span className="opacity-0 group-hover:opacity-100 text-white text-sm font-medium transition-opacity">
@@ -43,7 +43,7 @@ export const AttachmentItem = memo(function AttachmentItem({
   if (isImage && !imageSrc && fp.storage_path) {
     return (
       <div
-        className="relative group cursor-pointer w-60 h-60 bg-muted rounded-lg border border-border hover:border-primary transition-colors flex flex-col items-center justify-center gap-2"
+        className="relative group cursor-pointer w-60 h-60 max-w-full bg-muted rounded-lg border border-border hover:border-primary transition-colors flex flex-col items-center justify-center gap-2"
         onClick={() => onOpenLightbox(fp)}
       >
         <div className="animate-pulse">

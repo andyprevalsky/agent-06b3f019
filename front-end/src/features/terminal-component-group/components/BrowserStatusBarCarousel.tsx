@@ -37,7 +37,7 @@ interface CarouselNavProps {
 
 function CarouselNav({ activeIndex, total, onPrev, onNext }: CarouselNavProps) {
   return (
-    <div className="absolute -left-12 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1">
+    <div className="absolute -left-6 sm:-left-12 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1">
       <button
         onClick={onPrev}
         className="p-1.5 rounded-lg border border-border bg-card/50 hover:bg-card/80 transition-colors"

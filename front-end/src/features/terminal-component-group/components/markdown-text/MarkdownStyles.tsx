@@ -105,6 +105,13 @@ const MARKDOWN_STYLES = `
   .prose a:hover {
     text-decoration: underline;
   }
+
+  .prose table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
 `;
 
 export function MarkdownStyles(): JSX.Element {

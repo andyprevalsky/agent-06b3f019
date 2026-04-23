@@ -25,7 +25,7 @@ export function OpeningMessageDisplay({
       : 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)';
 
   return (
-    <div className="relative min-w-[600px] h-8 flex items-center justify-center">
+    <div className="relative w-full md:min-w-[600px] h-8 flex items-center justify-center">
       <p
         className="text-muted-foreground absolute inset-0 flex items-center justify-center"
         style={{

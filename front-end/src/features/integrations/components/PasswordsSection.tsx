@@ -65,7 +65,7 @@ function KeyIcon() {
 
 function DesktopOnlyRow({ icon, label }: { icon: string; label: string }) {
   return (
-    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+    <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
         <img
           src={icon}

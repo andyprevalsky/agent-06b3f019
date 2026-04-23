@@ -9,7 +9,7 @@ interface FullscreenActionsPanelProps {
 export function FullscreenActionsPanel({ taskId }: FullscreenActionsPanelProps) {
   return (
     <div
-      className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
+      className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
       style={{
         backdropFilter: 'blur(8px)',
         WebkitBackdropFilter: 'blur(8px)',

@@ -73,18 +73,15 @@ export interface HeaderProps {
 export function CompactHeader({ state, outputSchema, githubRepoUrl, onMaximize }: HeaderProps) {
   const { indicator, text } = STATUS_CONFIG[state];
   return (
-    <div className="flex items-center justify-between px-2 py-1.5 border-b border-border">
-      <div className="flex items-center gap-2">
-        <img src={ClaudeIcon} alt="Claude Code" className="h-4 w-4" />
+    <div className="flex items-center justify-between px-2 py-1.5 border-b border-border min-w-0">
+      <div className="flex items-center gap-2 min-w-0">
+        <img src={ClaudeIcon} alt="Claude Code" className="h-4 w-4 flex-shrink-0" />
         {indicator}
-        <span className="text-xs font-medium">{text}</span>
+        <span className="text-xs font-medium truncate">{text}</span>
         <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
         <GithubRepoLink url={githubRepoUrl} />
       </div>
-      <button
-        onClick={onMaximize}
-        className="p-1 rounded hover:bg-muted transition-colors"
-      >
+      <button onClick={onMaximize} className="p-1 rounded hover:bg-muted transition-colors">
         <Maximize2 className="h-3.5 w-3.5 text-muted-foreground" />
       </button>
     </div>
@@ -110,15 +107,18 @@ export function FullscreenView({
   const { indicator, text } = STATUS_CONFIG[state];
   return createPortal(
     <div className="fixed inset-0 z-50 bg-background flex flex-col">
-      <div className="flex items-center justify-between p-4 border-b border-border">
-        <div className="flex items-center gap-3">
-          <img src={ClaudeIcon} alt="Claude Code" className="h-5 w-5" />
+      <div className="flex items-center justify-between p-4 border-b border-border min-w-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <img src={ClaudeIcon} alt="Claude Code" className="h-5 w-5 flex-shrink-0" />
           {indicator}
-          <span className="text-sm font-medium">{text}</span>
+          <span className="text-sm font-medium truncate">{text}</span>
           <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
           <GithubRepoLink url={githubRepoUrl} />
         </div>
-        <button onClick={onClose} className="p-2 rounded hover:bg-muted transition-colors">
+        <button
+          onClick={onClose}
+          className="p-2 rounded hover:bg-muted transition-colors flex-shrink-0"
+        >
           <X className="h-5 w-5 text-muted-foreground" />
         </button>
       </div>
@@ -268,11 +268,11 @@ export function SpinningUpChip({
   }
 
   return (
-    <div className="flex items-center gap-3 p-3 rounded-xl border border-border bg-card/50 backdrop-blur-sm">
-      <img src={ClaudeIcon} alt="Claude Code" className="h-5 w-5" />
-      <div className="flex-1 flex items-center gap-2">
-        <Loader2 className="h-4 w-4 animate-spin text-yellow-500" />
-        <span className="text-sm text-muted-foreground">Claude Code Spinning up...</span>
+    <div className="flex items-center gap-3 p-3 rounded-xl border border-border bg-card/50 backdrop-blur-sm min-w-0">
+      <img src={ClaudeIcon} alt="Claude Code" className="h-5 w-5 flex-shrink-0" />
+      <div className="flex-1 flex items-center gap-2 min-w-0">
+        <Loader2 className="h-4 w-4 animate-spin text-yellow-500 flex-shrink-0" />
+        <span className="text-sm text-muted-foreground truncate">Claude Code Spinning up...</span>
       </div>
       <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
       <GithubRepoLink url={githubRepoUrl} />
