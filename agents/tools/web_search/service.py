@@ -9,7 +9,7 @@ from temporalio import activity
 
 from config import load_config
 from tools.web_search.config import DEFAULT_MAX_TOKENS
-from tools.web_search.repo import fetch_search_results
+from tools.web_search.repo import fetch_search_results, fetch_search_results_ddgs
 
 if TYPE_CHECKING:
     from tools.web_search.types import SearchResult
@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 
 
 def format_search_results(results: list[dict]) -> str:
-    """Format Parallel AI search results into a readable answer."""
+    """Format search results into a readable answer."""
     if not results:
         return "No results found."
 
@@ -37,9 +37,10 @@ def format_search_results(results: list[dict]) -> str:
 
 
 async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> SearchResult:
-    """Perform a web search via Parallel AI and return structured result.
+    """Perform a web search and return structured result.
 
-    This is the core business logic -- called by the Temporal activity.
+    Tries Parallel AI first; falls back to DuckDuckGo (no API key needed)
+    if Parallel AI is unavailable, returns an auth error, or times out.
 
     Args:
         query: Search query or question.
@@ -53,11 +54,28 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
     app_config = load_config()
     api_key = app_config.parallel.api_key
 
-    raw_results = await fetch_search_results(
-        query=query,
-        api_key=api_key,
-        max_chars_per_result=max_tokens * 4,
-    )
+    raw_results: list[dict] = []
+    provider = "parallel-ai"
+
+    if api_key:
+        try:
+            raw_results = await fetch_search_results(
+                query=query,
+                api_key=api_key,
+                max_chars_per_result=max_tokens * 4,
+            )
+        except Exception as parallel_err:
+            logger.warning(
+                "Parallel AI search failed, falling back to DuckDuckGo",
+                query=query,
+                error=str(parallel_err),
+            )
+            raw_results = fetch_search_results_ddgs(query)
+            provider = "ddgs"
+    else:
+        logger.info("No Parallel AI key configured, using DuckDuckGo", query=query)
+        raw_results = fetch_search_results_ddgs(query)
+        provider = "ddgs"
 
     answer = format_search_results(raw_results)
     sources = [r.get("url") for r in raw_results if r.get("url")]
@@ -66,7 +84,7 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         "answer": answer,
         "sources": sources,
         "query": query,
-        "provider": "parallel-ai",
+        "provider": provider,
     }
 
     logger.info(
@@ -74,6 +92,7 @@ async def execute_search(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> Se
         query=query,
         answer_length=len(answer),
         results_count=len(raw_results),
+        provider=provider,
     )
 
     return result

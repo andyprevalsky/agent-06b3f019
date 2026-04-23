@@ -76,6 +76,48 @@ async def test_web_search_boundary():
     assert "parallel-beta" in headers_lower
 
 
+async def test_web_search_ddgs_fallback():
+    """When Parallel AI raises, execute_search falls back to DuckDuckGo."""
+    from unittest.mock import MagicMock, patch
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch("tools.web_search.service.fetch_search_results", side_effect=Exception("parallel offline")):
+            with patch(
+                "tools.web_search.service.fetch_search_results_ddgs",
+                return_value=[
+                    {"title": "DDG Result", "url": "https://ddg.example.com", "excerpts": ["Some body text"]},
+                ],
+            ):
+                from tools.web_search.service import execute_search
+
+                result = await execute_search("test query")
+
+    assert result["provider"] == "ddgs"
+    assert "DDG Result" in result["answer"]
+    assert "https://ddg.example.com" in result["sources"]
+
+
+async def test_web_search_ddgs_no_api_key():
+    """When no API key is configured, goes directly to DuckDuckGo."""
+    from unittest.mock import patch
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch("tools.web_search.service.load_config") as mock_cfg:
+            mock_cfg.return_value.parallel.api_key = ""
+            with patch(
+                "tools.web_search.service.fetch_search_results_ddgs",
+                return_value=[
+                    {"title": "DDG No Key", "url": "https://ddg.example.com", "excerpts": ["content"]},
+                ],
+            ) as mock_ddgs:
+                from tools.web_search.service import execute_search
+
+                result = await execute_search("no key query")
+                mock_ddgs.assert_called_once_with("no key query")
+
+    assert result["provider"] == "ddgs"
+
+
 # -------------------- handler.py tests --------------------
 
 
@@ -166,6 +208,8 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("happy_path", test_web_search_happy_path)
     await r.record_async("boundary", test_web_search_boundary)
+    await r.record_async("ddgs_fallback", test_web_search_ddgs_fallback)
+    await r.record_async("ddgs_no_api_key", test_web_search_ddgs_no_api_key)
     await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
     await r.record_async("manager_execute_tool_raises", test_manager_execute_tool_raises_on_error)
     await r.record_async("manager_long_query_truncates", test_manager_execute_tool_long_query_truncates)

@@ -4,6 +4,7 @@ temporalio>=1.18.1
 # HTTP and async support
 aiohttp>=3.9.0
 httpx>=0.25.0
+ddgs>=9.14.1
 
 # Database and backend integration
 supabase>=2.0.0
