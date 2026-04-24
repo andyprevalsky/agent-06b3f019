@@ -13,16 +13,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": null,
-    "context_gates": {
-      "user_profile": false,
-      "authenticated_sessions": false,
-      "integrations": false,
-      "recent_communications": false,
-      "network": false,
-      "custom_system_prompt": false,
-      "shared_files": false
-    }
+    "start_phase": null
   },
   {
     "name": "spawn-sub-agents",
@@ -38,16 +29,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan",
-    "context_gates": {
-      "user_profile": false,
-      "authenticated_sessions": false,
-      "integrations": false,
-      "recent_communications": false,
-      "network": false,
-      "custom_system_prompt": false,
-      "shared_files": false
-    }
+    "start_phase": "plan"
   },
   {
     "name": "parallel-tool-calls",
@@ -63,16 +45,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan",
-    "context_gates": {
-      "user_profile": false,
-      "authenticated_sessions": false,
-      "integrations": false,
-      "recent_communications": false,
-      "network": false,
-      "custom_system_prompt": false,
-      "shared_files": false
-    }
+    "start_phase": "plan"
   },
   {
     "name": "message-person",
@@ -120,16 +93,7 @@
     "requires_claude_code": true,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute",
-    "context_gates": {
-      "user_profile": false,
-      "authenticated_sessions": false,
-      "integrations": false,
-      "recent_communications": false,
-      "network": false,
-      "custom_system_prompt": false,
-      "shared_files": false
-    }
+    "start_phase": "execute"
   },
   {
     "name": "browser-smoke",
@@ -145,16 +109,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute",
-    "context_gates": {
-      "user_profile": false,
-      "authenticated_sessions": false,
-      "integrations": false,
-      "recent_communications": false,
-      "network": false,
-      "custom_system_prompt": false,
-      "shared_files": false
-    }
+    "start_phase": "execute"
   },
   {
     "name": "image-handling",

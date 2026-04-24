@@ -164,9 +164,6 @@ async def create_agent(
     if task.start_phase:
         body["start_phase"] = task.start_phase
 
-    if task.context_gates:
-        body["context_gates"] = task.context_gates
-
     async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
         if resp.status_code not in (200, 201):
