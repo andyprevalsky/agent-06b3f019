@@ -121,7 +121,7 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
     <button
       onClick={handleClick}
       type="button"
-      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors cursor-pointer"
+      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors cursor-pointer max-w-full"
     >
       <ProgressRing progressOffset={progressOffset} isComplete={isComplete} />
       <span
@@ -133,7 +133,7 @@ const SubAgentToolBubble = memo(function SubAgentToolBubble({
         )}
       >
         {emoji && <span style={{ filter: 'grayscale(1) brightness(0)' }}>{emoji}</span>}
-        <span>{titleText}</span>
+        <span className="truncate">{titleText}</span>
       </span>
       <ChevronRight className="h-4 w-4 text-gray-400 dark:text-gray-500" />
     </button>

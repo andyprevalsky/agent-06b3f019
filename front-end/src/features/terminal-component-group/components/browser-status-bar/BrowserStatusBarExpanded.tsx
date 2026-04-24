@@ -40,7 +40,7 @@ function ExpandedHeader({
   onCollapse: () => void;
 }) {
   return (
-    <div className="relative flex items-center gap-3 p-3 pl-40 border-b border-border">
+    <div className="relative flex items-center gap-3 p-3 pl-3 sm:pl-40 border-b border-border">
       <BrowserThumbnail
         browserUrl={browserUrl}
         width={144}
@@ -48,7 +48,7 @@ function ExpandedHeader({
         iframeWidth={1440}
         iframeHeight={900}
         scale={0.1}
-        wrapperClassName="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40"
+        wrapperClassName="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40 hidden sm:block"
         onClick={onThumbnailClick}
       />
       <div className="flex-1 min-w-0 ml-2">

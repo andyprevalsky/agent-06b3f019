@@ -52,11 +52,11 @@ export function BrowserStatusBarMinimized({
 }: MinimizedProps) {
   const cursorClass = forceMinimized ? '' : 'cursor-pointer';
   const thumbnailInteractive = !forceMinimized;
-  const thumbnailWrapperClass = `absolute left-2 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden shadow-lg transition-all z-40 ${thumbnailInteractive ? 'cursor-pointer hover:shadow-xl hover:ring-2 hover:ring-primary/50' : ''}`;
+  const thumbnailWrapperClass = `absolute left-2 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden shadow-lg transition-all z-40 hidden sm:block ${thumbnailInteractive ? 'cursor-pointer hover:shadow-xl hover:ring-2 hover:ring-primary/50' : ''}`;
 
   return (
     <div onClick={forceMinimized ? undefined : onExpand} className={`w-full ${cursorClass}`}>
-      <div className="relative flex items-center gap-3 p-2 pr-3 pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
+      <div className="relative flex items-center gap-3 p-2 pr-3 pl-3 sm:pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
         <BrowserThumbnail
           browserUrl={browserUrl}
           width={128}

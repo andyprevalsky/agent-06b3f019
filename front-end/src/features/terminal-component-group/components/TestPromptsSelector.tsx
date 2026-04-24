@@ -64,7 +64,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[400px] max-h-[400px] overflow-y-auto p-4 z-50"
+        className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4 z-50"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}

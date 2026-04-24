@@ -151,9 +151,7 @@ function ToolRow({ tool }: { tool: RoseTool }) {
             </span>
           )}
         </div>
-        <div className="text-xs text-muted-foreground leading-snug mt-0.5">
-          {tool.description}
-        </div>
+        <div className="text-xs text-muted-foreground leading-snug mt-0.5">{tool.description}</div>
         {tool.desktopOnly && (
           <a
             href="/download"
@@ -199,7 +197,7 @@ export default function RoseToolSetChip() {
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[400px] max-h-[500px] overflow-y-auto p-4 z-50"
+        className="w-[min(400px,calc(100vw-32px))] max-h-[500px] overflow-y-auto p-4 z-50"
         align="start"
         onMouseEnter={() => setIsOpen(true)}
         onMouseLeave={() => setIsOpen(false)}

@@ -18,7 +18,7 @@ export function ModalWrapper({ isOpen, onClose, children }: ModalWrapperProps) {
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div className="absolute top-12 right-0 z-50 w-[500px] bg-card dark:bg-navi-black border border-border dark:border-navi-light-black rounded-lg shadow-lg">
+      <div className="absolute top-12 right-0 z-50 w-[min(500px,calc(100vw-32px))] bg-card dark:bg-navi-black border border-border dark:border-navi-light-black rounded-lg shadow-lg">
         <div className="p-4 space-y-4">{children}</div>
       </div>
     </>

@@ -20,11 +20,7 @@ import { SchemaChip } from '../SchemaChip';
 import type { Message } from '../../hooks';
 import { BrowserWriteLockApproval } from './BrowserWriteLockApproval';
 import { StepProgressBar } from './StepProgressBar';
-import type {
-  OutputSchemaRef,
-  PendingWriteLockApproval,
-  StepProgress,
-} from './types';
+import type { OutputSchemaRef, PendingWriteLockApproval, StepProgress } from './types';
 
 interface FullscreenProps {
   taskId: string;
@@ -122,7 +118,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   return createPortal(
     <div className="fixed inset-0 z-50 bg-background flex flex-row">
       <div
-        className="w-80 h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
+        className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
         style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}
       >
         <div className="p-3 border-b border-border">

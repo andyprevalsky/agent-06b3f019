@@ -79,7 +79,7 @@ function ClaudeRow({
     );
   }
   return (
-    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+    <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
         <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
         <div className="flex items-center gap-2">

@@ -46,7 +46,7 @@ function BrowserCookiesIcon() {
 
 function DesktopOnlyFallback() {
   return (
-    <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-card/60">
+    <div className="flex items-center justify-between flex-wrap gap-2 p-4 border border-border rounded-lg bg-card/60">
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
           <BrowserCookiesIcon />
