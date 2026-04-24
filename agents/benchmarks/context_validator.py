@@ -394,11 +394,16 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
     - Verifier TOOL messages converted to assistant role for context.
     - DAG reasoning output posted as a standalone ASSISTANT row by dag_executor.
       A [dag-reasoning→assistant, LLM→assistant] pair is expected, not corruption.
+    - Text-only ASSISTANT (no tool_calls) followed by a tool-calling ASSISTANT.
+      When the LLM writes a reasoning/acknowledgement message before calling tools,
+      run_agent posts two consecutive ASSISTANT rows. build_llm_messages merges them
+      automatically, so this is NOT a dual-write bug — the LLM pipeline handles it.
     """
     violations: List[ContextViolation] = []
     prev_role = None
     prev_exempt = False
     prev_idx = 0
+    prev_has_tool_calls = False  # Whether the previous assistant message had tool_calls
 
     for idx, msg in enumerate(openai_msgs):
         role = msg.get("role")
@@ -410,8 +415,11 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
             or msg.get("_file_output", False)
         )
         if role == "assistant" and prev_role == "assistant":
-            # Skip if either message is a known non-dual-write pattern
-            if not is_exempt and not prev_exempt:
+            # Exempt: prev was text-only (no tool_calls). This is a "think then act"
+            # pattern — the LLM wrote an interim text response before calling tools.
+            # build_llm_messages merges these, so this is NOT a corruption.
+            prev_is_text_only = not prev_has_tool_calls
+            if not is_exempt and not prev_exempt and not prev_is_text_only:
                 violations.append(ContextViolation(
                     rule="role_alternation",
                     severity="error",
@@ -424,6 +432,7 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
         prev_role = role
         prev_exempt = is_exempt
         prev_idx = idx
+        prev_has_tool_calls = bool(msg.get("tool_calls")) if role == "assistant" else prev_has_tool_calls
 
     return violations
 
