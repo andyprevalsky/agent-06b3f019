@@ -32,6 +32,11 @@ echo "Root: $ROOT"
 echo "OS:   $(uname) $(uname -m)"
 echo ""
 
+# ── 0. Git identity (required for Vercel deploy — must match a GitHub account) ─
+git config user.name  "Andy Prevalsky"
+git config user.email "andyprevalsky@yahoo.com"
+echo "✅ Git identity: Andy Prevalsky <andyprevalsky@yahoo.com>"
+
 # ── 1. Conductor-compatible env vars ─────────────────────────────────────
 if [ -f .cloud-env ]; then
     echo "✅ .cloud-env exists — keeping existing workspace id"
