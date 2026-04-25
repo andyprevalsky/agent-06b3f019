@@ -446,10 +446,6 @@ async def run_agent(  # noqa: C901
                 except Exception:
                     pass
             else:
-                # Workflow context - call LLM via activity (streams to Supabase Realtime inside)
-                # Pass agent_id as first arg so the activity builds messages from _pending_llm_context
-                # (shared in-process memory). This avoids serializing large messages with base64 file
-                # content through Temporal's 2MB payload limit.
                 call_site_label = "plan_loop" if is_plan_loop else "execute_loop"
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
@@ -463,6 +459,7 @@ async def run_agent(  # noqa: C901
                         task_id,
                         current_claude_token,
                         call_site_label,
+                        current_system_prompt,
                     ],
                     start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=3),

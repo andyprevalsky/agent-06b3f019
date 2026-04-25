@@ -43,10 +43,8 @@ from utils.tool_schemas import (
 
 logger = structlog.get_logger()
 
-# Shared in-process state for passing large data between workflow and activities
-# without going through Temporal's 2MB payload serialization limit.
-# Safe because workflows and activities run in the same worker process (single Fly.io machine).
-# Keyed by agent_id to avoid cross-agent interference.
+# Same-machine optimization: passes large LLM context without Temporal serialization.
+# On cross-machine miss, call_llm_activity falls back to fetching from backend API.
 _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
 
 
@@ -2406,6 +2404,7 @@ async def call_llm_activity(  # noqa: C901
     task_id: Optional[str] = None,
     claude_token: Optional[str] = None,
     call_site: str = "unknown",
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -2418,12 +2417,16 @@ async def call_llm_activity(  # noqa: C901
             When agent_id string: reads context from _pending_llm_context shared state,
             builds messages inside the activity (so file downloads work and base64
             content never crosses the Temporal 2MB payload boundary).
+            On cross-machine miss, falls back to fetching context from backend API.
         model: Model to use
         tool_names: List of tool names for dynamic AgentAction model
         reasoning_max_tokens: Max reasoning tokens (0 disables)
         agent_id: Agent ID for streaming (optional)
         stream_id: Stream session ID for ordering (optional)
         task_id: Sub-agent task ID for routing to browser panel (optional)
+        system_prompt: System prompt for cross-machine fallback. When the activity
+            runs on a different worker, _pending_llm_context is empty; the activity
+            fetches messages from the backend API and uses this prompt.
 
     Returns:
         Dict with:
@@ -2437,17 +2440,28 @@ async def call_llm_activity(  # noqa: C901
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
         if isinstance(messages_or_agent_id, str):
-            # Agent ID passed — build messages from shared state (avoids 2MB payload limit)
             _context_key = messages_or_agent_id
             pending = _pending_llm_context.get(_context_key)
             if pending is None:
-                # Temporal activity retry may race with context population — brief wait
                 await asyncio.sleep(0.5)
                 pending = _pending_llm_context.get(_context_key)
-            if pending is None:
-                raise ValueError(f"No pending LLM context for agent {_context_key}")
-            context, system_prompt, pre_resolved_ids = pending
-            messages = await build_llm_messages(context, system_prompt, pre_resolved_ids=pre_resolved_ids)
+            if pending is not None:
+                context, _sys_prompt, pre_resolved_ids = pending
+                messages = await build_llm_messages(context, _sys_prompt, pre_resolved_ids=pre_resolved_ids)
+            elif system_prompt:
+                # Cross-machine fallback: activity landed on a different worker.
+                # Fetch messages from backend; files download live via activity.in_activity().
+                from helpers.fetch_config import _fetch_agent_data_impl
+
+                logger.info("Cross-machine LLM context fallback", agent_id=_context_key)
+                data = await _fetch_agent_data_impl(_context_key)
+                context = data.get("messages", [])
+                messages = await build_llm_messages(context, system_prompt, pre_resolved_ids=None)
+                _pending_llm_context[_context_key] = (context, system_prompt, None)
+            else:
+                raise ValueError(
+                    f"No pending LLM context for agent {_context_key} and no system_prompt provided"
+                )
         else:
             # Legacy: pre-built messages list passed directly
             messages = messages_or_agent_id
