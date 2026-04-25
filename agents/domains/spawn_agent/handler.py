@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid as uuid_module
+from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import structlog
@@ -41,6 +42,7 @@ from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
+from domains.spawn_sub_agents.service import fetch_parent_attachments_activity
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 
 logger = structlog.get_logger()
@@ -345,6 +347,8 @@ class SpawnAgentManager(ToolManager):
         workflow_instance,
         tool_call: Dict[str, Any],
         tool_call_id: str,
+        *,
+        parent_attachments: Dict[str, Any] | None = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnSubAgentManager."""
         sub_agent_config = {
@@ -370,7 +374,10 @@ class SpawnAgentManager(ToolManager):
         }
 
         manager = get_sub_agent_manager()
-        async for event in manager.execute_tool(workflow_instance, sub_agent_tool_call, tool_call_id):
+        async for event in manager.execute_tool(
+            workflow_instance, sub_agent_tool_call, tool_call_id,
+            parent_attachments=parent_attachments,
+        ):
             yield event
 
     async def _spawn_for_each(  # noqa: C901
@@ -403,6 +410,14 @@ class SpawnAgentManager(ToolManager):
         output_schema = tool_call.get("output_schema")
         context_gates = tool_call.get("context_gates")
 
+        # Pre-fetch parent attachments once for the entire batch
+        parent_attachments = await workflow.execute_activity(
+            fetch_parent_attachments_activity,
+            args=[workflow_instance.agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
         # Build per-item tool_calls shaped as spawn_agent(type=sub_agent)
         per_item_calls: List[tuple] = []
         for i, item in enumerate(items):
@@ -429,7 +444,10 @@ class SpawnAgentManager(ToolManager):
             async with spawn_semaphore:
                 # Hold off spawning while parent is paused
                 await workflow.wait_condition(lambda: not workflow_instance.is_paused)
-                gen = self._spawn_sub_agent(workflow_instance, tc, tcid)
+                gen = self._spawn_sub_agent(
+                    workflow_instance, tc, tcid,
+                    parent_attachments=parent_attachments,
+                )
                 try:
                     event = await gen.__anext__()
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")

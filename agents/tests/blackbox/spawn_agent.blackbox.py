@@ -423,7 +423,7 @@ class _FakeDelegateManager:
         self._events = events
         self.last_call = None
 
-    def execute_tool(self, workflow_instance, tool_call, tool_call_id):
+    def execute_tool(self, workflow_instance, tool_call, tool_call_id, **kwargs):
         self.last_call = {"tool_call": tool_call, "tool_call_id": tool_call_id}
 
         async def _gen():

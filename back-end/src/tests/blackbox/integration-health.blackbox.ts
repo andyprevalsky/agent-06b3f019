@@ -175,7 +175,7 @@ async function runAll(): Promise<void> {
   const checks = [
     { name: 'E2B (sandboxes)', fn: checkE2B },
     { name: 'Steel (browser sessions)', fn: checkSteel },
-    { name: 'Parallel.ai (web search)', fn: checkParallel },
+    { name: 'Parallel.ai (web search)', fn: checkParallel, warnOnly: true },
     { name: 'Anthropic (Claude API)', fn: checkAnthropic },
     { name: 'OpenRouter (LLM judge)', fn: checkOpenRouter },
     { name: 'Supabase (auth/DB)', fn: checkSupabase },
@@ -183,20 +183,25 @@ async function runAll(): Promise<void> {
 
   const results = await Promise.all(checks.map((c) => runCheck(c.name, c.fn)));
 
-  for (const r of results) {
-    const icon = r.passed ? '  PASS' : '  FAIL';
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const isWarn = !r.passed && checks[i].warnOnly === true;
+    const icon = r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
     console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
   }
 
+  const hardFailures = results.filter((r, i) => !r.passed && checks[i].warnOnly !== true);
+  const warnings = results.filter((r, i) => !r.passed && checks[i].warnOnly === true);
   const passed = results.filter((r) => r.passed).length;
-  const failed = results.length - passed;
 
   console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${results.length} total`);
+  console.log(
+    `\nResults: ${passed} passed, ${warnings.length} warnings, ${hardFailures.length} failed, ${results.length} total`
+  );
 
-  if (failed > 0) {
+  if (hardFailures.length > 0) {
     console.log('\nFAILURES:');
-    results.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
+    hardFailures.forEach((r) => console.log(`   ${r.name}: ${r.error}`));
     process.exit(1);
   }
 

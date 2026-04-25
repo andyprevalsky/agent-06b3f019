@@ -23,6 +23,38 @@ from helpers.tracing import traced
 
 logger = structlog.get_logger()
 
+# Type alias for the serialisable attachment dicts returned by
+# fetch_parent_attachments_activity and accepted by spawn_sub_agent_activity.
+ParentAttachments = Dict[str, Dict[str, Dict[str, Any]]]
+
+
+# ---------------------------------------------------------------------------
+# Temporal activity — fetch parent attachments (called once, reused by N spawns)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn
+@traced("fetch_parent_attachments_activity")
+async def fetch_parent_attachments_activity(parent_agent_id: str) -> ParentAttachments:
+    """Fetch the parent agent's attachment metadata from the backend.
+
+    Returns a serialisable dict with two sub-dicts:
+        {"filename_to_pointer": {...}, "all_pointers_by_id": {...}}
+    """
+    config = load_config()
+    backend_url = config.backend.api_url.rstrip("/")
+    api_key = config.backend.api_key
+    if not api_key:
+        raise ValueError("BACKEND_API_KEY not configured")
+
+    filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(
+        backend_url, api_key, parent_agent_id,
+    )
+    return {
+        "filename_to_pointer": filename_to_pointer,
+        "all_pointers_by_id": all_pointers_by_id,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -170,6 +202,7 @@ async def spawn_sub_agent_activity(
     parent_model: str = "rose-labs/rose-1-lite",
     bus_id: str | None = None,
     parent_source: str = "WEB",
+    parent_attachments: ParentAttachments | None = None,
 ) -> SpawnResult:
     """Activity: Spawn multiple sub-agents to work on parallel subtasks.
 
@@ -187,6 +220,10 @@ async def spawn_sub_agent_activity(
         parent_model: Model from parent agent (inherited by all sub-agents)
         bus_id: Shared bus channel ID for sub-agent tree updates
         parent_source: Agent source from parent (WEB or MAC_APP), inherited by sub-agents
+        parent_attachments: Pre-fetched parent attachment dicts (from
+            fetch_parent_attachments_activity).  When provided the activity
+            skips re-fetching them, eliminating N-1 redundant backend calls
+            during batch spawns.
 
     Returns:
         Dict with summary: {"spawned": int, "completed": int, "failed": int, "agents": [...]}
@@ -203,9 +240,12 @@ async def spawn_sub_agent_activity(
         if not api_key:
             raise ValueError("BACKEND_API_KEY not configured - required for spawning sub-agents")
 
-        # Fetch parent attachments
-        activity.heartbeat("Fetching parent agent's attachments...")
-        filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(backend_url, api_key, parent_agent_id)
+        if parent_attachments is not None:
+            filename_to_pointer = parent_attachments.get("filename_to_pointer", {})
+            all_pointers_by_id = parent_attachments.get("all_pointers_by_id", {})
+        else:
+            activity.heartbeat("Fetching parent agent's attachments...")
+            filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(backend_url, api_key, parent_agent_id)
 
         # Spawn with bounded concurrency
         async with spawn_http_client() as client:

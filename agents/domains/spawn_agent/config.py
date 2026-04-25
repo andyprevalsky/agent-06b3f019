@@ -22,7 +22,7 @@ SUB_ACTIVITY_MAX_ATTEMPTS = 2
 
 # ── For-each ──
 FOR_EACH_MAX_DEPTH = 4
-FOR_EACH_MAX_INFLIGHT = 3  # TODO: bump to 10 for prod
+FOR_EACH_MAX_INFLIGHT = 5
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

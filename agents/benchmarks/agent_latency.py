@@ -17,11 +17,28 @@ Tree is built from span_id / parent_span_id. When those are absent
 (legacy events or uninstrumented code paths), we fall back to
 time-window containment + request_id correlation.
 
-USAGE
+USAGE — LOCAL (full span depth: worker + backend + research)
 
   python benchmarks/agent_latency.py <agent_id>           # summary + hot paths
   python benchmarks/agent_latency.py <agent_id> -v        # fully expanded tree
-  python benchmarks/agent_latency.py <agent_id> --speedscope out.json
+
+  Reads: navi-worker-log.txt, backend-logs.log, research-logs.log
+
+USAGE — PROD (backend spans only, unless --fly-stream is used)
+
+  # Post-hoc (backend-only — Fly.io buffer expired):
+  python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com
+
+  # Live (full depth — stream worker logs during benchmark):
+  python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com --fly-stream 300
+
+  Fetches: Render API (backend), Fly.io flyctl (worker via --fly-stream)
+  Requires: RENDER_API_KEY in back-end/.env, FLY_API_TOKEN in agents/.env
+
+SPAN DEPTH COMPARISON
+
+  Local:  worker(run_agent → execute_iteration → call_llm_activity) → backend(http.request → db.query)
+  Prod:   backend(http.request → db.query)  [worker spans missing without --fly-stream]
 
 Flags:
   -v, --verbose          Expand every span (sub-agents, DB, broadcasts, HTTP internals).
@@ -29,11 +46,14 @@ Flags:
   --stall-threshold N    Seconds of idle time to annotate (default 5).
   --slow-threshold N     Milliseconds above which a span is counted as "bad" (default 300).
   --no-color             Disable ANSI colors.
+  --url URL              Prod mode: fetch logs from Render/Fly.io APIs.
+  --fly-stream SECONDS   Stream Fly.io worker logs for N seconds (use during live benchmarks).
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -47,6 +67,20 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKER_LOG = os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
 BACKEND_LOG = os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
 RESEARCH_LOG = os.path.join(REPO_ROOT, "research", "research-logs.log")
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from benchmarks.logs import (
+    FlyLogCollector,
+    fetch_flyio_logs_snapshot,
+    fetch_render_logs,
+    load_env_var,
+)
+
+_AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
+_BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
+API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
+USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 AGENTS_SRC = os.path.join(REPO_ROOT, "agents")
 BACKEND_SRC = os.path.join(REPO_ROOT, "back-end", "src")
@@ -1052,9 +1086,48 @@ def _render_executive_summary(
     )
     if stats.get("sub_agent_ids"):
         lines.append(
-            "Sub-agents         "
-            + ", ".join(sorted(stats["sub_agent_ids"]))
+            f"Sub-agents         {len(stats['sub_agent_ids'])} discovered"
         )
+
+    worker_span_names = {s.name for s in all_spans if s.source == "worker"}
+    backend_span_names = {s.name for s in all_spans if s.source == "backend"}
+    expected_worker = {
+        "run_agent", "execute_iteration", "call_llm", "call_llm_activity",
+        "check_progress", "call_planner_llm_activity",
+        "spawn_sub_agent_activity", "spawn_explore_agent_activity",
+        "web_search_activity", "web_fetch_activity",
+        "generate_message_activity", "fetch_recent_messages_activity",
+    }
+    found_worker = worker_span_names & expected_worker
+    missing_worker = expected_worker - worker_span_names
+    lines.append("")
+    lines.append(_c("SPAN COVERAGE", BOLD, color))
+    lines.append("-" * 100)
+    lines.append(f"  Backend spans:  {sum(1 for s in all_spans if s.source == 'backend')}"
+                 f"  (http.request, db.*, broadcast.*)")
+    lines.append(f"  Worker spans:   {sum(1 for s in all_spans if s.source == 'worker')}"
+                 f"  (LLM calls, tool execution, iterations)")
+    lines.append(f"  Research spans: {sum(1 for s in all_spans if s.source == 'research')}"
+                 f"  (completions edge function)")
+    if found_worker:
+        lines.append(f"  Worker present: {', '.join(sorted(found_worker))}")
+    if missing_worker and stats["worker_events"] == 0:
+        lines.append(_c(
+            f"  Worker MISSING:  {', '.join(sorted(missing_worker))}",
+            YELLOW, color,
+        ))
+        lines.append(_c(
+            "  → Without worker spans, LLM call latency and tool execution timing are invisible.",
+            YELLOW, color,
+        ))
+        lines.append(_c(
+            "  → For live runs: use --fly-stream <seconds> to capture worker logs in real-time.",
+            YELLOW, color,
+        ))
+        lines.append(_c(
+            "  → For local runs: omit --url to read from navi-worker-log.txt directly.",
+            YELLOW, color,
+        ))
     lines.append("")
     lines.append(_c("Re-run with full tree:", BOLD, color))
     lines.append(f"  python agents/benchmarks/agent_latency.py {agent_id} --verbose")
@@ -1183,7 +1256,288 @@ def export_speedscope(
 # ---------------------------------------------------------------------------
 
 
-def build_trace(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
+async def _fetch_prod_agent_tree(base_url: str, agent_id: str) -> Tuple[dict, Set[str]]:
+    """Fetch agent details and discover all sub-agent IDs via the tree API."""
+    import httpx
+    headers = {"X-API-Key": API_KEY, "X-User-Id": USER_ID}
+    async with httpx.AsyncClient(timeout=30) as client:
+        agent_resp = await client.get(f"{base_url}/api/agents/{agent_id}", headers=headers)
+        if agent_resp.status_code != 200:
+            raise SystemExit(f"Failed to fetch agent: {agent_resp.status_code} {agent_resp.text[:200]}")
+        agent_data = agent_resp.json()
+
+        tree_resp = await client.get(
+            f"{base_url}/api/agents/tree", headers=headers, params={"busId": agent_id}
+        )
+        sub_ids: Set[str] = set()
+        if tree_resp.status_code == 200:
+            for a in tree_resp.json().get("agents", []):
+                aid = a.get("agent_id", "")
+                if aid and aid != agent_id:
+                    sub_ids.add(aid)
+    return agent_data, sub_ids
+
+
+def _parse_fly_line_to_raw_event(line: str) -> Optional[_RawEvent]:
+    """Parse a Fly.io log line (raw or pre-extracted JSON) into a _RawEvent."""
+    json_str = line
+    json_start = line.find("{")
+    if json_start > 0:
+        json_str = line[json_start:]
+    if not json_str.startswith("{"):
+        return None
+    try:
+        d = json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+    ts_str = d.get("timestamp")
+    if not ts_str:
+        return None
+    return _RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d)
+
+
+def _parse_render_line_to_raw_event(line: str) -> Optional[_RawEvent]:
+    """Parse a Render backend log line into a _RawEvent.
+    Handles both JSON format (prod API) and text format (local file)."""
+    line = ANSI_RE.sub("", line).rstrip("\n")
+
+    if line.startswith("{"):
+        try:
+            d = json.loads(line)
+            ts_str = d.get("timestamp")
+            if not ts_str:
+                return None
+            msg = d.get("message", "")
+            return _RawEvent(parse_ts(ts_str), "backend", msg, d)
+        except json.JSONDecodeError:
+            pass
+
+    head = re.compile(
+        r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
+    )
+    m = head.match(line)
+    if not m:
+        return None
+    ts = parse_ts(m.group("ts"))
+    rest = m.group("rest")
+    mm = re.match(r"(?P<msg>.*?)(?=\s+\w+=)(?P<kv>.*)$", rest)
+    if mm:
+        msg = mm.group("msg").strip()
+        kv_str = mm.group("kv")
+    else:
+        msg = rest.strip()
+        kv_str = ""
+    data: Dict[str, Any] = {
+        "level": m.group("level"),
+        "component": m.group("comp"),
+        "message": msg,
+    }
+    for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
+        data[km.group(1)] = km.group(2).strip()
+    return _RawEvent(ts, "backend", msg, data)
+
+
+async def _fetch_render_logs_bulk(
+    all_ids: Set[str], start_time: datetime, end_time: Optional[datetime] = None,
+) -> List[_RawEvent]:
+    """Fetch ALL backend logs from Render in the time window, filter locally by agent IDs."""
+    import httpx
+    from benchmarks.logs import RENDER_API_KEY, RENDER_SERVICE_ID, RENDER_OWNER_ID
+
+    if not RENDER_API_KEY:
+        print("  [render] RENDER_API_KEY not set in back-end/.env")
+        return []
+
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+
+    headers = {"Authorization": f"Bearer {RENDER_API_KEY}"}
+    all_events: List[_RawEvent] = []
+    page = 0
+    max_pages = 40
+    current_end = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while page < max_pages:
+            params: Dict[str, str] = {
+                "ownerId": RENDER_OWNER_ID,
+                "resource": RENDER_SERVICE_ID,
+                "limit": "500",
+                "direction": "backward",
+                "startTime": start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "endTime": current_end,
+            }
+
+            resp = await client.get("https://api.render.com/v1/logs", headers=headers, params=params)
+            if resp.status_code == 429:
+                print(f"  [render] Rate limited on page {page}, waiting 3s...")
+                await asyncio.sleep(3)
+                continue
+            if resp.status_code != 200:
+                print(f"  [render] API {resp.status_code}: {resp.text[:200]}")
+                break
+
+            data = resp.json()
+            logs = data.get("logs", []) if isinstance(data, dict) else []
+            if not logs:
+                break
+
+            for entry in logs:
+                msg = entry.get("message", "") if isinstance(entry, dict) else str(entry)
+                matches_agent = any(aid in msg or aid[:12] in msg for aid in all_ids)
+                if matches_agent:
+                    ev = _parse_render_line_to_raw_event(msg)
+                    if ev:
+                        all_events.append(ev)
+
+            has_more = data.get("hasMore", False)
+            next_end = data.get("nextEndTime")
+            page += 1
+            print(f"  [render] Page {page}: {len(logs)} entries, {len(all_events)} matched so far")
+
+            if not has_more or not next_end:
+                break
+            current_end = next_end
+
+    return all_events
+
+
+async def _fetch_fly_logs_bulk(all_ids: Set[str], fly_stream_seconds: int = 0) -> List[_RawEvent]:
+    """Fetch worker logs from Fly.io.
+
+    If fly_stream_seconds > 0, start a real-time streaming collector and collect
+    for that many seconds. Otherwise, fall back to the --no-tail snapshot (only
+    holds ~30s of recent buffer).
+    """
+    from benchmarks.logs import FLY_API_TOKEN
+    if not FLY_API_TOKEN:
+        print("  [fly.io] FLY_API_TOKEN not set — worker logs unavailable")
+        return []
+
+    lines: List[str] = []
+
+    if fly_stream_seconds > 0:
+        print(f"  [fly.io] Starting real-time stream for {fly_stream_seconds}s...")
+        collector = FlyLogCollector()
+        status = await collector.start()
+        print(f"  [fly.io] {status}")
+        if "error" in status.lower() or "not found" in status.lower():
+            return []
+        await asyncio.sleep(fly_stream_seconds)
+        for aid in all_ids:
+            agent_lines = collector.get_logs_for_agent(aid, limit=2000)
+            for l in agent_lines:
+                if not l.startswith("[fly.io]"):
+                    lines.append(l)
+        await collector.stop()
+        print(f"  [fly.io] Collected {len(lines)} lines from stream ({collector.total_lines} total streamed)")
+    else:
+        from benchmarks.logs import _find_flyctl
+        env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _find_flyctl(), "logs", "-a", "navi-whisper-lux", "--no-tail",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            lines = stdout.decode().strip().splitlines()
+        except Exception as e:
+            print(f"  [fly.io] Error fetching snapshot: {e}")
+            return []
+
+    events: List[_RawEvent] = []
+    for line in lines:
+        ev = _parse_fly_line_to_raw_event(line)
+        if ev:
+            aid = _event_agent_id(ev)
+            if aid in all_ids:
+                events.append(ev)
+
+    if not events and lines:
+        print(f"  [fly.io] 0 matching events from {len(lines)} lines"
+              + (" (buffer only holds ~30s)" if fly_stream_seconds == 0 else ""))
+    return events
+
+
+def build_trace(
+    agent_id: str, url: Optional[str] = None,
+    fly_stream_seconds: int = 0, worker_log_file: Optional[str] = None,
+) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
+    if url:
+        return asyncio.run(_build_trace_prod(agent_id, url, fly_stream_seconds, worker_log_file))
+    return _build_trace_local(agent_id)
+
+
+def _read_worker_log_file(path: str, all_ids: Set[str]) -> List[_RawEvent]:
+    """Read saved worker JSONL file and filter by agent IDs."""
+    events: List[_RawEvent] = []
+    total = 0
+    with open(path, errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            ev = _parse_fly_line_to_raw_event(line)
+            if ev:
+                aid = _event_agent_id(ev)
+                if aid in all_ids:
+                    events.append(ev)
+    print(f"  [worker-log] Read {path}: {total} lines, {len(events)} matched")
+    return events
+
+
+async def _build_trace_prod(
+    agent_id: str, base_url: str,
+    fly_stream_seconds: int = 0, worker_log_file: Optional[str] = None,
+) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
+    try:
+        agent_data, sub_ids = await _fetch_prod_agent_tree(base_url, agent_id)
+    except SystemExit:
+        if worker_log_file and os.path.exists(worker_log_file):
+            print(f"  Agent {agent_id[:12]} not found via API (deleted?), discovering from log file...")
+            agent_data = {}
+            sub_ids = set()
+        else:
+            raise
+
+    all_ids = {agent_id, *sub_ids}
+
+    agent_obj = agent_data.get("agent", agent_data)
+    created_at_str = agent_obj.get("created_at") or agent_obj.get("createdAt", "")
+    start_time = parse_ts(created_at_str) if created_at_str else datetime.now(timezone.utc) - timedelta(hours=1)
+
+    if worker_log_file and os.path.exists(worker_log_file):
+        worker_raw_unfiltered = _read_worker_log_file(worker_log_file, {agent_id})
+        if not sub_ids:
+            for ev in worker_raw_unfiltered:
+                aid = _event_agent_id(ev)
+                if aid and aid != agent_id:
+                    sub_ids.add(aid)
+            if sub_ids:
+                print(f"  Discovered {len(sub_ids)} sub-agents from worker log")
+            all_ids = {agent_id, *sub_ids}
+        worker_raw = _read_worker_log_file(worker_log_file, all_ids)
+        if not created_at_str and worker_raw:
+            start_time = worker_raw[0].ts - timedelta(seconds=10)
+        backend_raw = await _fetch_render_logs_bulk(all_ids, start_time)
+    else:
+        print(f"Fetching prod logs for {len(all_ids)} agents ({len(sub_ids)} sub-agents)...")
+        worker_raw, backend_raw = await asyncio.gather(
+            _fetch_fly_logs_bulk(all_ids, fly_stream_seconds),
+            _fetch_render_logs_bulk(all_ids, start_time),
+        )
+    research_raw: List[_RawEvent] = []
+
+    print(f"  Worker events: {len(worker_raw)}, Backend events: {len(backend_raw)}")
+
+    if not (worker_raw or backend_raw):
+        raise SystemExit(f"No prod log lines found for agent {agent_id}.")
+
+    return _build_trace_from_events(worker_raw, backend_raw, research_raw, sub_ids)
+
+
+def _build_trace_local(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
     worker_raw_all = _read_worker_raw()
     backend_raw_all = _read_backend_raw()
     research_raw_all = _read_research_raw()
@@ -1198,15 +1552,20 @@ def build_trace(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str
     if not (worker_raw or backend_raw or research_raw):
         raise SystemExit(f"No log lines found for agent {agent_id}.")
 
+    return _build_trace_from_events(worker_raw, backend_raw, research_raw, sub_ids)
+
+
+def _build_trace_from_events(
+    worker_raw: List[_RawEvent],
+    backend_raw: List[_RawEvent],
+    research_raw: List[_RawEvent],
+    sub_ids: Set[str],
+) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
     combined = worker_raw + backend_raw + research_raw
     combined.sort(key=lambda e: e.ts)
 
     spans, leftover = _build_spans_from_events(combined)
 
-    # Legacy fallbacks — apply per source: only reconstruct spans for layers
-    # that didn't emit native span.start events. A partially-traced run (e.g.
-    # a backend mid-rollout) shouldn't disable legacy reconstruction for the
-    # other sources.
     worker_has_spans = any(e.event == "span.start" for e in worker_raw)
     backend_has_spans = any(e.event == "span.start" for e in backend_raw)
     worker_leftover = [e for e in leftover if e.source == "worker"]
@@ -1217,7 +1576,6 @@ def build_trace(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str
     if not backend_has_spans:
         spans.extend(_legacy_backend_http_spans(backend_leftover))
 
-    # Research events always hang off LLM spans; add them as point-width.
     spans.extend(_research_event_spans(leftover))
 
     roots = _assemble_tree(spans)
@@ -1248,9 +1606,22 @@ def main() -> int:
     ap.add_argument("--slow-threshold", type=int, default=300,
                     help="Milliseconds above which a span is counted as 'bad' (default 300).")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--url", default=None,
+                    help="Base URL for prod mode (e.g. https://navi-j9a9.onrender.com). "
+                         "Fetches logs from Render/Fly.io APIs instead of local files.")
+    ap.add_argument("--fly-stream", type=int, default=0, metavar="SECONDS",
+                    help="Stream Fly.io worker logs for N seconds before analysis. "
+                         "Use during a live benchmark to capture LLM call spans. "
+                         "Requires --url and FLY_API_TOKEN in agents/.env.")
+    ap.add_argument("--worker-log", default=None, metavar="FILE",
+                    help="Path to a saved worker log file (JSONL from Fly.io). "
+                         "Generated by benchmark_monitor.py on exit. "
+                         "Provides full worker span depth for prod analysis.")
     args = ap.parse_args()
 
-    roots, t0, t1, stats = build_trace(args.agent_id)
+    roots, t0, t1, stats = build_trace(args.agent_id, url=args.url,
+                                        fly_stream_seconds=args.fly_stream,
+                                        worker_log_file=args.worker_log)
 
     if args.speedscope:
         payload = export_speedscope(roots, args.agent_id, t0, t1)

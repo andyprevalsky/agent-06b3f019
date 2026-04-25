@@ -25,7 +25,12 @@ from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from benchmarks.logs import _detect_anomalies, extract_message_transcript, load_env_var
+from benchmarks.logs import (
+    FlyLogCollector,
+    _detect_anomalies,
+    extract_message_transcript,
+    load_env_var,
+)
 
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
@@ -237,11 +242,55 @@ async def monitor(agent_id: str, base_url: str, interval: int = 60, count_only_a
     prev_total_msgs = -1
     seen_approval_ids: set = set()
 
+    fly_collector = FlyLogCollector()
+    fly_status = await fly_collector.start()
+    fly_active = "started" in fly_status.lower()
+
     print(f"{DIM}── {_elapsed_str(start)} {'─' * 56}{RESET}")
     print(f"  Monitoring agent {BOLD}{agent_id[:12]}{RESET}")
     print(f"  Polling every {interval}s. Will exit on: COMPLETED, error, or stall.")
+    if fly_active:
+        print(f"  Fly.io log streaming: active (worker spans will be saved on exit)")
+    else:
+        print(f"  Fly.io log streaming: {fly_status}")
     print()
 
+    exit_code = 1
+    try:
+        exit_code = await _monitor_loop(agent_id, base_url, interval, count_only_approvals,
+                                        start, prev_total_msgs, seen_approval_ids)
+    finally:
+        if fly_active:
+            await _save_fly_logs(fly_collector, agent_id, base_url, start)
+            await fly_collector.stop()
+    return exit_code
+
+
+async def _save_fly_logs(collector: FlyLogCollector, agent_id: str, base_url: str, start: float):
+    """Save captured Fly.io worker logs to disk for post-hoc latency analysis."""
+    import json
+    logs_dir = os.path.join(os.path.dirname(__file__), "runs")
+    os.makedirs(logs_dir, exist_ok=True)
+    out_path = os.path.join(logs_dir, f"{agent_id[:12]}-worker.jsonl")
+
+    all_lines = collector.get_logs_for_agent("")
+    if not all_lines or (len(all_lines) == 1 and all_lines[0].startswith("[fly.io]")):
+        with collector._lock:
+            all_lines = list(collector._lines)
+
+    with open(out_path, "w") as f:
+        for line in all_lines:
+            f.write(line + "\n")
+
+    print(f"\n  Saved {len(all_lines)} Fly.io worker log lines → {out_path}")
+    print(f"  Use with: python benchmarks/agent_latency.py {agent_id} --url {base_url} --worker-log {out_path}")
+
+
+async def _monitor_loop(
+    agent_id: str, base_url: str, interval: int,
+    count_only_approvals: Optional[int],
+    start: float, prev_total_msgs: int, seen_approval_ids: set,
+) -> int:
     while True:
         await asyncio.sleep(interval)
 

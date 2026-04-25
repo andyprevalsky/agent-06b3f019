@@ -30,11 +30,26 @@ Supabase note:
 import asyncio
 import json
 import os
+import shutil
 import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
+
+
+def _find_flyctl() -> str:
+    """Locate flyctl binary — check PATH, then common install locations."""
+    found = shutil.which("flyctl")
+    if found:
+        return found
+    for candidate in [
+        os.path.expanduser("~/.fly/bin/flyctl"),
+        "/root/.fly/bin/flyctl",
+    ]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "flyctl"
 
 # ---------------------------------------------------------------------------
 # Config — load from env, fall back to .env files
@@ -174,7 +189,7 @@ class FlyLogCollector:
             env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
             # Use default format (not --json) — gives one line per log entry
             self._process = await asyncio.create_subprocess_exec(
-                "flyctl", "logs", "-a", FLY_APP_NAME,
+                _find_flyctl(), "logs", "-a", FLY_APP_NAME,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -219,18 +234,14 @@ class FlyLogCollector:
         except Exception:
             pass
 
-    def get_logs_for_agent(self, agent_id: str, limit: int = 200) -> List[str]:
+    def get_logs_for_agent(self, agent_id: str) -> List[str]:
         """Filter captured logs for a specific agent_id."""
         with self._lock:
             snapshot = list(self._lines)
 
         filtered = []
         for raw_line in snapshot:
-            # Default format: "timestamp app[instance] region [level]{structlog JSON}"
-            # The structlog JSON contains "agent_id": "<uuid>" when an agent is running.
-            # We search the entire line for the agent_id.
             if agent_id in raw_line or agent_id[:12] in raw_line:
-                # Extract the JSON portion from the line for cleaner output
                 json_start = raw_line.find("{")
                 if json_start >= 0:
                     json_part = raw_line[json_start:]
@@ -244,7 +255,7 @@ class FlyLogCollector:
 
         if not filtered:
             return [f"[fly.io] 0 logs for agent {agent_id[:12]} ({len(snapshot)} total captured)"]
-        return filtered[:limit]
+        return filtered
 
     async def stop(self):
         """Stop the background flyctl process."""
@@ -301,7 +312,7 @@ async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
     try:
         env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
         proc = await asyncio.create_subprocess_exec(
-            "flyctl", "logs", "-a", FLY_APP_NAME, "--no-tail",
+            _find_flyctl(), "logs", "-a", FLY_APP_NAME, "--no-tail",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,

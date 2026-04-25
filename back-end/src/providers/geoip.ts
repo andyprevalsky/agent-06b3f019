@@ -1,4 +1,7 @@
 import { Request } from 'express';
+import { createLogger } from './logger';
+
+const log = createLogger('GeoIP');
 
 export interface ProxyGeoLocation {
   country: string; // 2-letter country code (e.g., "US")
@@ -118,12 +121,39 @@ function isPrivateIP(ip: string): boolean {
   );
 }
 
+const GEO_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const geoCache = new Map<string, { result: ProxyGeoLocation | null; expiresAt: number }>();
+const inflightGeo = new Map<string, Promise<ProxyGeoLocation | null>>();
+
 /**
  * Look up geolocation from IP address using ip-api.com.
  * Free tier: 45 requests/minute, no API key needed.
+ * Results are cached in-memory for 10 minutes to avoid rate-limit exhaustion
+ * during batch sub-agent spawns (same worker IP repeated N times).
+ * Concurrent lookups for the same IP are deduplicated.
  * Returns null if lookup fails or IP is not geolocatable.
  */
 export async function getGeoFromIP(ip: string): Promise<ProxyGeoLocation | null> {
+  const cached = geoCache.get(ip);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
+
+  const pending = inflightGeo.get(ip);
+  if (pending) {
+    return pending;
+  }
+
+  const promise = _fetchGeo(ip);
+  inflightGeo.set(ip, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightGeo.delete(ip);
+  }
+}
+
+async function _fetchGeo(ip: string): Promise<ProxyGeoLocation | null> {
   try {
     // ip-api.com free API (HTTP only for free tier)
     const response = await fetch(
@@ -132,7 +162,7 @@ export async function getGeoFromIP(ip: string): Promise<ProxyGeoLocation | null>
     );
 
     if (!response.ok) {
-      console.warn(`[GeoIP] Failed to fetch geolocation for ${ip}: ${response.status}`);
+      log.warn(`Failed to fetch geolocation for ${ip}: ${response.status}`);
       return null;
     }
 
@@ -144,7 +174,7 @@ export async function getGeoFromIP(ip: string): Promise<ProxyGeoLocation | null>
     };
 
     if (data.status !== 'success') {
-      console.warn(`[GeoIP] Geolocation lookup failed for ${ip}: ${data.status}`);
+      log.warn(`Geolocation lookup failed for ${ip}: ${data.status}`);
       return null;
     }
 
@@ -164,10 +194,11 @@ export async function getGeoFromIP(ip: string): Promise<ProxyGeoLocation | null>
       ...(city && { city: city.toUpperCase() }),
     };
 
-    console.log(`[GeoIP] Resolved ${ip} -> ${result.city}, ${result.state}, ${result.country}`);
+    geoCache.set(ip, { result, expiresAt: Date.now() + GEO_CACHE_TTL_MS });
+    log.info(`Resolved ${ip} -> ${result.city}, ${result.state}, ${result.country}`);
     return result;
   } catch (error) {
-    console.warn(`[GeoIP] Error looking up geolocation for ${ip}:`, error);
+    log.warn(`Error looking up geolocation for ${ip}`, { error: String(error) });
     return null;
   }
 }

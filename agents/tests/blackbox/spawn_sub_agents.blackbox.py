@@ -688,6 +688,64 @@ async def test_execute_tool_posts_assistant_events_for_file_pointers():
     assert assistant[0].file_pointer["id"] == "fp-1"
 
 
+# ── pre-fetched parent_attachments bypass ─────────────────────────────
+
+
+async def test_spawn_with_prefetched_attachments():
+    """When parent_attachments is provided, activity skips the GET fetch."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.spawn_sub_agents import spawn_sub_agent_activity
+
+        prefetched = {
+            "filename_to_pointer": {"report.pdf": {"id": "fp-1", "original_filename": "report.pdf", "storage_path": "u/1/report.pdf"}},
+            "all_pointers_by_id": {"fp-1": {"id": "fp-1", "original_filename": "report.pdf", "storage_path": "u/1/report.pdf"}},
+        }
+        result = await spawn_sub_agent_activity(
+            user_id="user-42",
+            sub_agents=[{
+                "goal": "Research competitors",
+                "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Did they research?"},
+            }],
+            parent_agent_id="agent-parent",
+            parent_workflow_id="wf-parent",
+            depth=0,
+            parent_is_paused=False,
+            parent_model="rose-labs/rose-1-lite",
+            parent_attachments=prefetched,
+        )
+
+    assert result["spawned"] == 1
+    reqs = get_captured_requests()
+    get_reqs = [r for r in reqs if r["method"] == "GET"]
+    assert len(get_reqs) == 0, f"Expected no GET requests but got {len(get_reqs)}"
+
+
+async def test_fetch_parent_attachments_activity():
+    """fetch_parent_attachments_activity returns the expected dict structure."""
+    setup_mock({
+        "/api/agents/parent-99": {
+            "status": 200,
+            "json": {
+                "messages": [
+                    {"role": "USER", "text": "", "file_pointer": {"id": "fp-a", "storage_path": "u/1/a.pdf", "original_filename": "a.pdf"}},
+                    {"role": "ASSISTANT", "text": "done"},
+                ],
+            },
+        },
+    })
+    with patch("temporalio.activity.heartbeat"):
+        from domains.spawn_sub_agents.service import fetch_parent_attachments_activity
+
+        result = await fetch_parent_attachments_activity("parent-99")
+
+    assert "filename_to_pointer" in result
+    assert "all_pointers_by_id" in result
+    assert "a.pdf" in result["filename_to_pointer"]
+    assert "fp-a" in result["all_pointers_by_id"]
+    teardown_mock()
+
+
 # ── get_manager singleton ────────────────────────────────────────────
 
 
@@ -735,6 +793,9 @@ async def run_all_tests():
     await r.record_async("exec_no_bus_id", test_execute_tool_happy_path_no_parent_bus_id_sets_it)
     await r.record_async("exec_failed_child", test_execute_tool_failed_child_yields_failure_events)
     await r.record_async("exec_file_pointers", test_execute_tool_posts_assistant_events_for_file_pointers)
+    # pre-fetched attachments
+    await r.record_async("prefetched_attachments", test_spawn_with_prefetched_attachments)
+    await r.record_async("fetch_parent_attachments_activity", test_fetch_parent_attachments_activity)
     # singleton
     r.record("get_manager_singleton", test_get_manager_singleton)
     teardown_mock()

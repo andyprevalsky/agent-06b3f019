@@ -17,6 +17,7 @@ from temporalio.common import RetryPolicy
 from domains.spawn_sub_agents.config import MAX_DEPTH
 from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
+    fetch_parent_attachments_activity,
     spawn_sub_agent_activity,
 )
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -33,7 +34,8 @@ class SpawnSubAgentManager(ToolManager):
         return "spawn_sub_agent"
 
     async def execute_tool(  # noqa: C901
-        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
+        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str,
+        *, parent_attachments: Dict[str, Any] | None = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Execute spawn_sub_agent tool with event-driven architecture.
 
@@ -41,6 +43,9 @@ class SpawnSubAgentManager(ToolManager):
             workflow_instance: The workflow instance
             tool_call: Dict with "sub_agent" field (single sub-agent config)
             tool_call_id: Unique ID for this tool call
+            parent_attachments: Pre-fetched parent attachment dicts (from
+                fetch_parent_attachments_activity).  Skips redundant backend
+                fetch when provided.
 
         Yields:
             - Pre-execution status
@@ -97,6 +102,7 @@ class SpawnSubAgentManager(ToolManager):
                     parent_model,
                     bus_id,
                     parent_source,
+                    parent_attachments,
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
