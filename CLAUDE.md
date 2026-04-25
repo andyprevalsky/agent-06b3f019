@@ -187,6 +187,7 @@ The `/deploy` skill automatically moves the related plan from `active/` to `comp
 
 - Workflows must be **deterministic** - no random, no wall-clock time, use `workflow.now()`
 - Activities must be **idempotent** - safe on retry
+- Activities may run on **any machine** — never rely on module-level shared state; add backend-API fallback (Claim Check pattern)
 - Error handling: catch → format → yield error event → **don't raise**
 - See `agents/tools/base.py` for ToolManager pattern
 

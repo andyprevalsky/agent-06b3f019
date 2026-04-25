@@ -1570,7 +1570,7 @@ async def test_call_llm_activity_with_agent_id_reads_shared_context():
 
 
 async def test_call_llm_activity_missing_context_raises():
-    """call_llm_activity raises if _pending_llm_context has no entry for agent_id."""
+    """call_llm_activity raises if _pending_llm_context has no entry and no system_prompt."""
     from helpers.llm import call_llm_activity, _pending_llm_context
 
     agent_id_key = "agent-missing-ctx-404"
@@ -1587,6 +1587,65 @@ async def test_call_llm_activity_missing_context_raises():
             assert False, "Should have raised ValueError"
         except ValueError as e:
             assert "No pending LLM context" in str(e)
+            assert "no system_prompt" in str(e)
+
+
+async def test_call_llm_activity_cross_machine_fallback():
+    """When local context is missing but system_prompt is provided, fetches from backend."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id_key = "agent-cross-machine-fb-1"
+    _pending_llm_context.pop(agent_id_key, None)
+
+    agent_data = {
+        "agent": {"id": agent_id_key, "model": "rose"},
+        "messages": [{"role": "USER", "text": "Hello from backend!", "timestamp": "2024-01-01T00:00:00Z"}],
+    }
+
+    llm_payload = {
+        "actual_model": "claude-opus-4-7",
+        "choices": [
+            {
+                "delta": {"content": '{"response": "cross-machine ok", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+    }
+    body = _sse_body([llm_payload])
+
+    backend_called = [False]
+
+    def handler(req):
+        url = str(req.url)
+        if f"/api/agents/{agent_id_key}" in url:
+            backend_called[0] = True
+            return httpx.Response(200, json=agent_data)
+        if "/completions" in url:
+            return httpx.Response(200, text=body)
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"), patch(
+        "helpers.llm.activity.in_activity", return_value=False
+    ):
+        result = await call_llm_activity(
+            messages_or_agent_id=agent_id_key,
+            model="rose",
+            tool_names=[],
+            reasoning_max_tokens=0,
+            agent_id="agent-llm-xm",
+            stream_id="stream-xm",
+            call_site="cross-machine-test",
+            system_prompt="You are a test assistant.",
+        )
+
+    assert result["response"] == "cross-machine ok"
+    assert backend_called[0], "Should have fetched context from backend API"
+    assert agent_id_key not in _pending_llm_context
 
 
 async def test_call_planner_llm_activity_failure_raises():
@@ -2984,6 +3043,7 @@ async def run_all_tests():
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
     await r.record_async("call_llm_activity_agent_id_shared_ctx", test_call_llm_activity_with_agent_id_reads_shared_context)
     await r.record_async("call_llm_activity_missing_ctx", test_call_llm_activity_missing_context_raises)
+    await r.record_async("call_llm_activity_cross_machine_fb", test_call_llm_activity_cross_machine_fallback)
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)
     await r.record_async("verifier_schema_list_file_pointer", test_build_verifier_json_schema_list_file_pointer_type)
