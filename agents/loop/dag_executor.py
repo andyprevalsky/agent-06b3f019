@@ -23,6 +23,8 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from domains.param_populator.config import SPAWN_PARAM_REQUIREMENTS
+from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
@@ -49,6 +51,34 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_sub_agent": {"type": "sub_agent"},
     "spawn_sub_agent_for_each": {"type": "for_each"},
 }
+
+
+def _build_param_population_message(goal: str, tool_name: str, alias_hint: str = "") -> str:
+    """Build user message that prompts the LLM to call a specific tool.
+
+    Appended to the existing agent context so the system prompt, tools, and
+    conversation are identical to the main agent loop — giving us cache reads
+    on the entire prefix.
+    """
+    msg = (
+        f"Execute this task by calling the `{tool_name}` tool with the correct parameters.\n\n"
+        f"Task: {goal}\n\n"
+        f"You MUST call exactly one tool: `{tool_name}`. Do not respond with text only."
+    )
+
+    if tool_name == "spawn_agent" or alias_hint.startswith("spawn_"):
+        msg += (
+            "\n\nThe spawned agent has NO access to your conversation or prior context. "
+            "The goal string is its ONLY source of information — embed ALL relevant details. "
+            "Prefer @ref:message: pointers over rewriting content. "
+            "Pass files via `attachments` using exact `original_filename` values. "
+            "For file outputs in output_schema, use type='file_pointer'."
+        )
+
+    if alias_hint in SPAWN_PARAM_REQUIREMENTS:
+        msg += f"\n{SPAWN_PARAM_REQUIREMENTS[alias_hint]}"
+
+    return msg
 
 
 def extract_error_message(e: Exception) -> str:
@@ -239,6 +269,8 @@ async def execute_dag(
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
     claude_token: Optional[str] = None,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
+    system_prompt_text: Optional[str] = None,
+    tool_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Execute DAG with maximum parallelism.
@@ -309,6 +341,8 @@ async def execute_dag(
                     handle_tool_event_fn=handle_tool_event_fn,
                     claude_token=claude_token,
                     on_tokens=on_tokens,
+                    system_prompt_text=system_prompt_text,
+                    tool_names=tool_names,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -377,6 +411,8 @@ async def _execute_single_task(
     handle_tool_event_fn: Callable[[ToolEvent, str, str], Awaitable[None]],
     claude_token: Optional[str] = None,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
+    system_prompt_text: Optional[str] = None,
+    tool_names: Optional[List[str]] = None,
 ) -> bool:
     """
     Execute a single task from the DAG.
@@ -392,7 +428,6 @@ async def _execute_single_task(
     Returns:
         True if successful, False if failed
     """
-    from activities.param_populator import populate_tool_params_activity
     from activities.reasoning import execute_reasoning_activity
 
     tool_call_id = str(uuid.uuid4())
@@ -466,22 +501,53 @@ async def _execute_single_task(
                     task.tool_name,
                 )
 
-            param_result = await execute_activity(
-                populate_tool_params_activity,
-                args=[actual_tool, task.goal, agent_id, model, task.tool_name, claude_token],
-                start_to_close_timeout=timedelta(seconds=60),
+            # Populate tool params by extending the current agent context with a
+            # user message that prompts the LLM to call the specific tool.
+            # Same system prompt + tools + conversation = cache prefix hit.
+            extra_msg = _build_param_population_message(task.goal, actual_tool, task.tool_name)
+
+            # Store context snapshot in shared memory for same-machine activity pickup.
+            # Parallel DAG tasks share the key — same data, and worst case the
+            # second task falls back to backend API after the first cleans up.
+            _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
+
+            llm_result = await execute_activity(
+                call_llm_activity,
+                args=[
+                    agent_id,
+                    model,
+                    tool_names or [],
+                    256,
+                    agent_id,
+                    None,
+                    None,
+                    claude_token,
+                    "dag_param_populator",
+                    system_prompt_text,
+                    extra_msg,
+                    actual_tool,
+                    True,
+                ],
+                start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
+                heartbeat_timeout=timedelta(seconds=60),
             )
 
-            # Unpack param result (returns {"params": dict, "usage": dict})
-            if isinstance(param_result, dict) and "params" in param_result:
-                params = param_result["params"]
-                param_usage = param_result.get("usage", {})
+            # Extract params from the matching tool call
+            tool_calls = llm_result.get("tool_calls", [])
+            matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
+            if matching:
+                params = {k: v for k, v in matching[0].items() if k != "tool"}
+            elif tool_calls:
+                workflow.logger.warning(
+                    f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}"
+                )
+                params = {k: v for k, v in tool_calls[0].items() if k != "tool"}
             else:
-                params = param_result
-                param_usage = {}
+                raise ValueError(f"LLM returned no tool calls for task {task.index}")
 
-            # Track param_populator LLM cost
+            # Track param population LLM cost
+            param_usage = llm_result.get("usage", {})
             if on_tokens and param_usage:
                 p_in = param_usage.get("prompt_tokens", 0)
                 p_out = param_usage.get("completion_tokens", 0)

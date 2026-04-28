@@ -2405,6 +2405,9 @@ async def call_llm_activity(  # noqa: C901
     claude_token: Optional[str] = None,
     call_site: str = "unknown",
     system_prompt: Optional[str] = None,
+    extra_user_message: Optional[str] = None,
+    required_tool: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -2427,6 +2430,14 @@ async def call_llm_activity(  # noqa: C901
         system_prompt: System prompt for cross-machine fallback. When the activity
             runs on a different worker, _pending_llm_context is empty; the activity
             fetches messages from the backend API and uses this prompt.
+        extra_user_message: Optional user message appended after building messages.
+            Used for param population — prompts the LLM to call a specific tool
+            without changing system prompt/tools (preserves cache prefix).
+        required_tool: If set, validates the LLM called this tool. Raises ValueError
+            if the tool is not in the response.
+        skip_cache_write: If True, reads from prompt cache but does not create new
+            cache entries (the extra user message creates a unique suffix that would
+            never be hit again).
 
     Returns:
         Dict with:
@@ -2465,6 +2476,9 @@ async def call_llm_activity(  # noqa: C901
         else:
             # Legacy: pre-built messages list passed directly
             messages = messages_or_agent_id
+
+        if extra_user_message:
+            messages.append({"role": "user", "content": extra_user_message})
 
         # Create dynamic action model
         AgentActionModel = create_agent_action_model(tool_names)
@@ -2524,6 +2538,7 @@ async def call_llm_activity(  # noqa: C901
             claude_token=claude_token,
             on_model_detected=on_model_detected,
             call_site=call_site,
+            skip_cache=skip_cache_write,
         )
 
         # Send final done=True chunk
@@ -2558,6 +2573,14 @@ async def call_llm_activity(  # noqa: C901
                 if tc is not None:
                     tc_dict = tc.model_dump() if hasattr(tc, "model_dump") else tc.dict()
                     tool_calls_dict.append(tc_dict)
+
+        if required_tool:
+            matching = [tc for tc in tool_calls_dict if tc.get("tool") == required_tool]
+            if not matching:
+                got = [tc.get("tool") for tc in tool_calls_dict]
+                raise ValueError(
+                    f"LLM did not call required tool '{required_tool}'. Got: {got}"
+                )
 
         logger.info(
             "LLM activity completed",

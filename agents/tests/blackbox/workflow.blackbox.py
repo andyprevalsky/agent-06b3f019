@@ -410,8 +410,28 @@ async def mock_call_llm_activity(
     task_id: Optional[str] = None,
     claude_token: Optional[str] = None,
     call_site: str = "unknown",
+    system_prompt: Optional[str] = None,
+    extra_user_message: Optional[str] = None,
+    required_tool: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> Dict[str, Any]:
-    """Mock LLM activity that returns an attempt_completion tool call to end the loop."""
+    """Mock LLM activity that returns an attempt_completion tool call to end the loop.
+
+    When called for DAG param population (extra_user_message set), returns
+    the required_tool so the DAG executor can extract params.
+    """
+    if extra_user_message and required_tool:
+        return {
+            "response": "",
+            "tool_calls": [{"tool": required_tool, "goal": "mock goal"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "actual_model": "mock-model",
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        }
     return {
         "response": "Task complete.",
         "tool_calls": [

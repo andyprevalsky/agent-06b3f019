@@ -210,8 +210,37 @@ def test_tool_aliases_constants():
     assert ALIAS_TYPE_OVERRIDES["spawn_code_agent"] == {"type": "code"}
 
 
+def test_build_param_population_message_basic():
+    """_build_param_population_message includes tool name and goal."""
+    from loop.dag_executor import _build_param_population_message
+
+    msg = _build_param_population_message("Search for restaurants", "web_search")
+    assert "web_search" in msg
+    assert "Search for restaurants" in msg
+    assert "MUST call exactly one tool" in msg
+
+
+def test_build_param_population_message_spawn_adds_context_warning():
+    """Spawn-type alias adds self-contained goal warning and spawn requirements."""
+    from loop.dag_executor import _build_param_population_message
+
+    msg = _build_param_population_message("Explore competitors", "spawn_agent", "spawn_explore_agent")
+    assert "NO access to your conversation" in msg
+    assert "SPAWN TYPE: explore" in msg
+
+
+def test_build_param_population_message_non_spawn_no_extra():
+    """Non-spawn tool does not include spawn-specific warnings."""
+    from loop.dag_executor import _build_param_population_message
+
+    msg = _build_param_population_message("Wait 10s", "wait_for")
+    assert "NO access to your conversation" not in msg
+    assert "SPAWN TYPE" not in msg
+
+
 async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=None):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
+    from helpers.llm import _pending_llm_context
     from loop.dag_executor import TaskDAG, execute_dag
 
     dag = TaskDAG(plan_data)
@@ -235,8 +264,14 @@ async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=N
         fn_name = getattr(fn, "__name__", "") or str(fn)
         if "reasoning" in fn_name:
             return reasoning_result or {"content": "reasoning output", "usage": {}}
-        # param populator
-        return {"params": {"query": "x"}, "usage": {}}
+        # call_llm_activity for param population — return tool_calls format
+        tool_name = args[11] if args and len(args) > 11 else "unknown"
+        return {
+            "response": "",
+            "tool_calls": [{"tool": tool_name, "query": "x"}],
+            "usage": {},
+            "detected_tools_ordered": [],
+        }
 
     # Patch workflow.logger (only valid inside workflow event loop) with a stub
     fake_logger = MagicMock()
@@ -251,7 +286,12 @@ async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=N
             post_message=post_message,
             execute_tool=execute_tool_impl,
             handle_tool_event_fn=handle_tool_event_fn,
+            system_prompt_text="test system prompt",
+            tool_names=["web_search", "spawn_agent", "attempt_completion"],
         )
+
+    _pending_llm_context.pop("agent-1", None)
+
     return result, events, dag
 
 
@@ -385,6 +425,9 @@ async def run_all_tests():
     r.record("extract_plan_from_context_empty", test_extract_plan_from_context_empty)
     r.record("extract_plan_from_context_ignores_in_progress", test_extract_plan_from_context_ignores_in_progress)
     r.record("tool_aliases_constants", test_tool_aliases_constants)
+    r.record("build_param_population_message_basic", test_build_param_population_message_basic)
+    r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
+    r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)

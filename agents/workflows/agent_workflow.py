@@ -747,6 +747,8 @@ class AgentWorkflow:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
                 dag = TaskDAG(plan_data)
 
+                execute_system_prompt = await self.build_system_prompt()
+
                 dag_result = await execute_dag(
                     dag=dag,
                     agent_id=agent_id,
@@ -760,6 +762,8 @@ class AgentWorkflow:
                     poll_messages=self._poll_messages,
                     claude_token=self.claude_max_token,
                     on_tokens=self._on_tokens,
+                    system_prompt_text=execute_system_prompt,
+                    tool_names=execute_tools,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
