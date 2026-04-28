@@ -55,7 +55,7 @@ async def test_execute_tool_success():
     workflow_instance = MagicMock()
     
     # Mock workflow.sleep
-    with patch('tools.wait_seconds.workflow.sleep', new_callable=AsyncMock) as mock_sleep:
+    with patch('domains.wait_seconds.handler.workflow.sleep', new_callable=AsyncMock) as mock_sleep:
         tool_call = {"seconds": 2}
         tool_call_id = "test-123"
         
@@ -108,8 +108,8 @@ async def test_execute_tool_invalid_duration():
     assert error_event.status == MessageStatus.ERROR
     assert "Invalid wait duration" in error_event.title
     
-    # Test duration too long
-    tool_call = {"seconds": 5000}
+    # Test duration too long (MAX_WAIT is 2_678_400 = 31 days)
+    tool_call = {"seconds": 3_000_000}
     events = []
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         events.append(event)
@@ -128,7 +128,7 @@ async def test_execute_tool_error_handling():
     workflow_instance = MagicMock()
     
     # Mock workflow.sleep to raise an error
-    with patch('tools.wait_seconds.workflow.sleep', new_callable=AsyncMock) as mock_sleep:
+    with patch('domains.wait_seconds.handler.workflow.sleep', new_callable=AsyncMock) as mock_sleep:
         mock_sleep.side_effect = Exception("Test error")
         
         tool_call = {"seconds": 1}
@@ -166,7 +166,7 @@ async def test_various_durations():
         (3600, "1 hour"),
     ]
     
-    with patch('tools.wait_seconds.workflow.sleep', new_callable=AsyncMock):
+    with patch('domains.wait_seconds.handler.workflow.sleep', new_callable=AsyncMock):
         for seconds, expected_text in test_cases:
             tool_call = {"seconds": seconds}
             events = []

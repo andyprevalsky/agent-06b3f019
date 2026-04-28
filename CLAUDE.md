@@ -49,7 +49,7 @@ cd back-end && npm run test:coverage:report  # Coverage report without threshold
 cd front-end && npm run test            # Front-end blackbox + structural tests
 cd front-end && npm run test:coverage   # Front-end coverage check (enforces thresholds)
 cd front-end && npm run test:coverage:report  # Front-end detailed coverage report
-cd agents && python tests/run_all_tests.py  # Agent tool tests
+cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py  # Agent blackbox tests
 cd agents && python tests/e2e/run_e2e_tests.py --basic  # E2E agent tests (spawns real agents via API)
 cd agents && bash scripts/run-coverage.sh            # Agents coverage check (enforces fail_under)
 cd agents && bash scripts/run-coverage.sh --report   # Detailed report without threshold

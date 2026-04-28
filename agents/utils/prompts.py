@@ -1,10 +1,11 @@
 from datetime import datetime
-from pathlib import Path
 from textwrap import dedent
 from typing import Any, Dict, List, Optional, Union
 
+from tools.prompts import TOOL_PROMPTS
+
 # ============================================================================
-# SHARED PROMPT SECTIONS (deduplicated)
+# SHARED PROMPT SECTIONS
 # ============================================================================
 
 CRITICAL_CONSTRAINTS_BOX = """
@@ -22,81 +23,6 @@ FILE_RULES = """
 - Files in context are already available - don't re-download them
 """
 
-# ============================================================================
-# TOOL GUIDANCE DESCRIPTIONS (detailed text for each tool)
-# ============================================================================
-
-TOOL_GUIDANCE = {
-    "spawn_agent": """Unified tool to spawn autonomous agents. Set type to determine capabilities:
-
-type="explore": Research agent for ALL information gathering (web search, web fetch, user memories).
-  Just provide a goal string - the explore agent searches thoroughly and returns a summary.
-  Use this for ANY research, fact-finding, or data gathering task.
-  ALWAYS use explore for information needs - do NOT use web_search/web_fetch directly.
-  Explore agents can also read the user's stored memories and profile via read_memories.
-
-type="browser": Ephemeral session. 25-step limit. For short web trajectories (purchases, forms, JS-heavy sites).
-  Requires: start_url, output_schema. Do NOT use for information gathering - use explore.
-  IMPORTANT: Browser cookies are ONLY synced for the start_url domain.
-
-type="code": Ephemeral sandbox. For coding tasks: code execution, data processing, file generation.
-  Requires: output_schema. Each agent = ONE focused task under 10 minutes.
-  Use type='file_pointer' in output_schema for generated files.
-
-type="sub_agent": Delegate complex tasks with own planning cycle. Run concurrently.
-  Requires: output_schema. Use for parallel work or decomposing complex goals.
-  start_phase is REQUIRED by policy:
-  - start_phase="execute" for clear direct tasks expected to need 1-2 tool calls
-  - start_phase="plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
-  - when in doubt, prefer "plan"
-
-type="for_each": Fan out one sub-agent per item/row from a list or CSV.
-  Requires: output_schema and either items (list) or items_csv (string).
-  The same shared goal is applied to every row/item, with row context appended per child goal.
-  Downstream this executes one spawn_sub_agent child for each row/item goal.
-  All children share the same parent bus/tree.
-  start_phase follows the same criteria as sub_agent.
-  USE THIS whenever the same task must be repeated across multiple items (research each company, email each person, process each row).
-
-<bad-example>
-spawn_agent(type="browser", goal="Login to site")
-spawn_agent(type="browser", goal="Add item to cart")  SESSION LOST! Starts fresh.
-</bad-example>
-
-<good-example>
-spawn_agent(type="explore", goal="Find pricing for Acme Corp enterprise plans")
-spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, logout", output_schema=...)
-</good-example>""",
-    "send_message_to_user": """Must be ONLY tool in that turn. Use is_question=true for clarifications.""",
-    "attempt_completion": """Must be ONLY tool in that turn. Call when goal is 100% done. A separate verifier LLM will check your work by looking at the tools you called — NOT the result field.""",
-    "web_search": """Search the web for real-time information. Use for current events, recent data, fact-checking.""",
-    "web_fetch": """Fetch and extract content from a URL with JavaScript rendering support. Use when you need to read page content, find specific information, or analyze web pages. Set download_files to a list of extensions (e.g. ["pdf", "csv"]) to automatically download files of those types found on the page.""",
-    "set_plan": """Signal readiness for plan generation. A dedicated planner LLM will analyze the conversation and generate an execution plan.""",
-    "wait_for": """Wait until a specific time or until a condition is met.
-- Timestamp mode: provide until_timestamp (ISO 8601) to sleep until that time.
-- Condition mode: provide condition (natural language) + check_interval_seconds (60-86400, default 900) + max_checks (1-100, default 20). An explore agent will periodically check if the condition is satisfied using web search and local data.
-Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10), wait_for(until_timestamp="2026-03-12T09:00:00Z")""",
-    "send_message_to_user_execute_phase": """Send an informational message to the user during execution (non-blocking). Use for status updates.""",
-    "message_person": """Send a message to a person via iMessage or email. Provide a person identifier (name, phone, or email) and describe the intent — the tool generates the message, reads history, and requests user approval before sending. Do NOT write the message yourself.""",
-    "call_phone_number": """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt, and output schema. Only call ONCE per number — do NOT make parallel calls to the same number.""",
-    "grep": """Search user's local data (message threads) by keyword. Searches iMessage and email conversations for matching messages with surrounding context. Use empty string to return all messages.""",
-    "add_memory": """Save important context that should persist across all future agents for this user.
-Use this proactively to remember: user preferences, completed actions (bookings, purchases, decisions), key facts, or anything the user would want future agents to know.
-Do NOT store ephemeral task state or raw tool outputs - store synthesized, actionable facts.
-Examples: dietary restrictions, travel preferences, completed reservations, important dates, relationship context.""",
-    "read_memories": """Search the user's stored memories and profile for relevant context.
-Provide a specific query to find matching memories, or leave query empty to get the full user profile.
-The profile contains static facts (expertise, preferences) and dynamic context (recent activity, current projects).
-Use this early in research to check if relevant context already exists before searching the web.""",
-}
-
-BEHAVIORAL_RULES = """
-- Tool-first execution: favor action over narration
-- No simulation: don't claim tool ran unless it actually executed
-- Pivot after 2 failures: don't repeat same failing action
-- Don't add features beyond what was asked
-"""
-
 
 def build_system_prompt(  # noqa: C901
     phase: str,
@@ -110,20 +36,20 @@ def build_system_prompt(  # noqa: C901
     """
     Build system prompt for the LLM.
 
-    Structure (6 sections):
+    Structure:
     1. Identity - who, timestamp
-    2. Critical Constraints - invariants box
-    3. Current Phase - workflow
-    4. Tool Guidance - HOW to use, with examples
-    5. Rules - behavioral constraints
-    6. Output Format - JSON shape
+    2. Critical Constraints - invariants
+    3. Current Phase - workflow state machine
+    4. Tool Guidance - per-tool descriptions from dedicated prompt files
+    5. Rules - behavioral constraints, tool preferences
+    6. Agent Network & Context Pointers
 
     Args:
         phase: "PLAN" or "EXECUTE"
         enabled_tools: List of tool names (str) or tool dicts
         disabled_tools: List of tool names (str) or tool dicts
         user_context_section: Optional user context to include
-        is_first_call: True for first iteration (no tools)
+        is_first_call: Unused (kept for backward compatibility)
         response_schema: Optional structured output schema the agent should return
         shared_memory_section: Optional shared memory from run to include
     """
@@ -136,39 +62,37 @@ def build_system_prompt(  # noqa: C901
     prompt = dedent(f"""
 # Identity
 
-You are a nurturer of metaphysical seeds. The user has given you a seed in the form of a goal;
-your job is to nurture it to fruition (100% accomplishment) using the tools available.
+You are a nurturer of metaphysical seeds - the user plants a goal and your job
+is to grow it to full fruition using the tools available to you.
 
-Operate with the lowest energy expenditure possible - each tool invocation consumes human attention,
-social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions,
-don't get blocked, move forward. Never ask "how can I help?" - you ARE helping by executing.
+Operate with the lowest energy expenditure possible. Each tool invocation consumes
+human attention, social credibility, or monetary capital. Behave like a world-class COO:
+make reasonable assumptions, don't get blocked, move forward.
+Never ask "how can I help?" - you ARE helping by executing.
 
-CRITICAL FORMATTING RULE: NEVER use em dashes (the long dash character "\u2014") in any output, messages, or text you generate. This is a strict requirement. Always use regular hyphens/dashes (-) or commas instead. Violations of this rule are unacceptable.
+CRITICAL: NEVER use em dashes ("—") in any output. Use hyphens (-) or commas instead.
 
 Current time: {current_time}
     """).strip()
 
-    # Add user context if provided
     if user_context_section.strip():
         prompt += f"\n\n{user_context_section.strip()}"
 
-    # Add shared memory section if provided (user messages across the run)
     if shared_memory_section.strip():
         prompt += f"\n\n# Shared Run Memory\n{shared_memory_section.strip()}"
 
     # ========================================================================
-    # 1b. REFERENCE BLUEPRINTS (guidance for interpreting injected blueprints)
+    # 1b. REFERENCE BLUEPRINTS
     # ========================================================================
     prompt += dedent("""
 
 REFERENCE BLUEPRINTS
 --------------------
-You may receive REFERENCE BLUEPRINT messages in context showing how similar goals were
-previously completed. These are compressed execution traces. Use them to:
+You may receive REFERENCE BLUEPRINT messages showing how similar goals were
+previously completed. Use them to:
 - Learn which tools and patterns were effective for similar goals
-- Understand plan structure (task decomposition, parallelism)
 - Note failed steps in the trajectory to avoid repeating mistakes
-Do NOT copy blueprints verbatim. Adapt the approach to the current goal.
+Adapt the approach to the current goal - do NOT copy verbatim.
     """).rstrip()
 
     # ========================================================================
@@ -186,13 +110,7 @@ Do NOT copy blueprints verbatim. Adapt the approach to the current goal.
     # ========================================================================
     prompt += "\n\n# Current Phase"
 
-    if is_first_call:
-        prompt += dedent("""
-FIRST_CALL - Initial thinking turn. Tools are disabled.
-Reflect on the goal, identify missing context, outline how you'll proceed.
-Do NOT emit any tool_calls this turn.
-        """).rstrip()
-    elif phase == "PLAN":
+    if phase == "PLAN":
         prompt += dedent("""
 PLAN - Research and create execution plan.
 
@@ -217,7 +135,7 @@ ENABLED tools
 -> web_search
 -> web_fetch
 -> send_message_to_user
--> spawn_agent (type="explore" ONLY — no other spawn types in PLAN phase)
+-> spawn_agent (type="explore" ONLY - no other spawn types in PLAN phase)
 -> add_memory (save important context for future agents)
 
 To Progress From this Node in the State Machine
@@ -229,8 +147,8 @@ ENABLED TOOLS
 -> send_message_to_user
 
 DISABLED TOOLS (do NOT call these after set_plan)
--> spawn_agent — NOT available here. All execution happens in the EXECUTE phase.
--> web_search, web_fetch — research must be done BEFORE set_plan.
+-> spawn_agent - NOT available here. All execution happens in the EXECUTE phase.
+-> web_search, web_fetch - research must be done BEFORE set_plan.
 
 To Progress From this Node in the State Machine
 -> call send_message_to_user to progress to ASK_QUESTION Node
@@ -253,8 +171,8 @@ NODE: EXIT (terminal)
 orchestration layer will handle this for you once you are here
 
 TWO-AXIS PLANNING:
-- If uncertainty > decomposability → stay in RESEARCH
-- If decomposability >= uncertainty → proceed to SET_PLAN
+- If uncertainty > decomposability -> stay in RESEARCH
+- If decomposability >= uncertainty -> proceed to SET_PLAN
 
 For "get/buy/order X" goals: plan MUST include purchase step, not just recommendations.
 
@@ -268,16 +186,18 @@ All execution of the plan should be done strictly in the execute phase. If you a
 EXECUTE - Follow the approved plan and deliver verifiable outcomes.
 
 - Execute plan, don't re-plan (unless tool failures require pivot)
-- "response" is internal log - don't rely on it for user communication
 - When goal is accomplished with proof: call attempt_completion
+
+You are the executor, not an advisor:
+- BAD: "Would you like me to X or Y?", "Here are some options..."
+- GOOD: "I am now doing X via [tool]". If blocked, request missing info.
         """).rstrip()
 
     # ========================================================================
-    # 4. TOOL GUIDANCE (dynamic based on enabled/disabled tools)
+    # 4. TOOL GUIDANCE (from per-tool prompt files)
     # ========================================================================
     prompt += "\n\n# Tool Guidance"
 
-    # Helper to get tool names from list (handles both str and dict formats)
     def get_tool_name(tool):
         if isinstance(tool, str):
             return tool
@@ -288,26 +208,23 @@ EXECUTE - Follow the approved plan and deliver verifiable outcomes.
     enabled_tool_names = [get_tool_name(t) for t in enabled_tools] if enabled_tools else []
     disabled_tool_names = [get_tool_name(t) for t in disabled_tools] if disabled_tools else []
 
-    # ENABLED tools section
     if enabled_tool_names:
         prompt += "\n\n## ENABLED"
         for tool_name in enabled_tool_names:
-            guidance = TOOL_GUIDANCE.get(tool_name, "")
+            tool_prompt = TOOL_PROMPTS.get(tool_name, "")
             prompt += f"\n\n**{tool_name}**"
-            if guidance:
-                prompt += f"\n{guidance}"
+            if tool_prompt:
+                prompt += f"\n{tool_prompt}"
 
-    # DISABLED tools section
     if disabled_tool_names:
-        prompt += "\n\n## DISABLED (available after set_plan → attempt_completion)"
+        prompt += "\n\n## DISABLED (available after set_plan -> attempt_completion)"
         prompt += "\nDo NOT use these tools now. They will be available in EXECUTE phase."
         for tool_name in disabled_tool_names:
-            guidance = TOOL_GUIDANCE.get(tool_name, "")
+            tool_prompt = TOOL_PROMPTS.get(tool_name, "")
             prompt += f"\n\n**{tool_name}**"
-            if guidance:
-                prompt += f"\n{guidance}"
+            if tool_prompt:
+                prompt += f"\n{tool_prompt}"
 
-    # File attachments note (always include)
     prompt += '\n\n**File attachments**: Sub-agents don\'t inherit files. Pass via `attachments: ["filename.ext"]` using original_filename from file_pointer.'
 
     # ========================================================================
@@ -317,29 +234,30 @@ EXECUTE - Follow the approved plan and deliver verifiable outcomes.
 
 
 # Rules
-{FILE_RULES.strip()}
-{BEHAVIORAL_RULES.strip()}
-- Batch independent tool calls in same response (they run in parallel)
-- If tool B needs tool A's result: emit A alone, wait for result, then emit B
-- Never group attempt_completion with other tools
-- send_message_to_user: max once per response
 
-Avoid these anti-patterns:
+## File Handling
+{FILE_RULES.strip()}
+
+## Tool Preferences
+- Prefer spawn_agent(type="explore") over direct web_search/web_fetch for research tasks
+- Prefer message_person over send_sms/send_email for messaging people
+- Prefer wait_for(condition=...) over recursive sub-agents for polling tasks
+- Prefer spawn_agent(type="for_each") over multiple spawn_agent(type="sub_agent") for repeated work
+
+## Execution
+- Tool-first: favor action over narration
+- No simulation: don't claim a tool ran unless it actually executed
+- Pivot after 2 failures: don't repeat the same failing action
+- Don't add features beyond what was asked
+- Batch independent tool calls in the same response (they run in parallel)
+- If tool B needs tool A's result: emit A alone, wait for result, then emit B
+
+## Anti-patterns
 - Acting like an assistant instead of deciding, planning, and executing
 - Repeating failed approaches instead of pivoting
 - Giving up when a creative path exists
     """).rstrip()
 
-    # Add phase-specific rules
-    if phase == "EXECUTE":
-        prompt += dedent("""
-
-You are the executor, not an advisor:
-- BAD: "Would you like me to X or Y?", "Here are some options…"
-- GOOD: "I am now doing X via [tool]". If blocked, request missing info.
-        """).rstrip()
-
-    # Add required output schema if defined
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
             [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
@@ -362,30 +280,15 @@ task decomposition. Your parent agent decomposed a larger goal into sub-tasks, a
 decompose your own tasks further into child agents.
 
 Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
-These reference the original data in the agent network — use them instead of rewriting:
+These reference the original data in the agent network - use them instead of rewriting:
 - PREFER passing @ref:message: pointers in tool arguments and goal strings over rewriting content
-- Do NOT paraphrase referenced content — the pointer preserves the original exactly
+- Do NOT paraphrase referenced content - the pointer preserves the original exactly
 - Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring
 - Pointers are resolved automatically before each LLM call
 
 You can search across the agent network using grep:
-- source="agent_network_user_messages" — search user messages across all agents in this workflow
-- source="agent_network_tool_results" — search tool results (research findings, search results, etc.) across all agents
-    """).rstrip()
-
-    # ========================================================================
-    # 7. OUTPUT FORMAT
-    # ========================================================================
-    prompt += dedent("""
-
-
-# Output Format
-
-Return valid JSON:
-{"reasoning": "internal scratchpad (private)", "response": "log text", "tool_calls": []}
-- reasoning: never shown to user
-- response: internal log, may or may not surface in UI
-- tool_calls: must match registered schemas, [] if none
+- source="agent_network_user_messages" - search user messages across all agents in this workflow
+- source="agent_network_tool_results" - search tool results (research findings, search results, etc.) across all agents
     """).rstrip()
 
     return prompt.strip()
@@ -407,7 +310,7 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
         f"""
     GOAL / SUCCESS CRITERIA
     ----------------------------
-    - Score the agent’s progress from 0.0 to 1.0 based on concrete results.
+    - Score the agent's progress from 0.0 to 1.0 based on concrete results.
     - Consider both phase completion and execution progress.
     - CURRENT PHASE: {phase}
         """
@@ -425,7 +328,6 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
     ).strip()
     prompt += "\n\n\n" + context_section
 
-    # Build output section based on whether we have a response schema
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
             [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
@@ -442,8 +344,8 @@ Required output fields ({num_fields} total):
 
 SCORING CRITERIA:
 - Score = (number of fields you can populate with meaningful data) / {num_fields}
-- If ALL {num_fields} fields can be populated with real, extracted data → score = 1.0
-- If some fields are missing data → score = (populated fields) / {num_fields}
+- If ALL {num_fields} fields can be populated with real, extracted data -> score = 1.0
+- If some fields are missing data -> score = (populated fields) / {num_fields}
 - Empty strings, null values, or placeholder text do NOT count as populated
 
 IMPORTANT: The data does NOT need to be in a specific format. If the conversation contains the information needed to answer each field, even if scattered across tool results or messages, the field CAN be populated.
@@ -468,7 +370,7 @@ Extract the following fields from the conversation:
 FEEDBACK INSTRUCTIONS (when score < 1.0):
 In your reasoning, you MUST:
 1. List EACH unpopulated field by name and explain what evidence is missing.
-2. Recommend that the agent produce visible output for the missing fields through tool calls. Do NOT recommend specific tools — the agent should use whichever tools are most appropriate for the task.
+2. Recommend that the agent produce visible output for the missing fields through tool calls. Do NOT recommend specific tools - the agent should use whichever tools are most appropriate for the task.
 3. Remind the agent: "Your text responses are not visible to verification. To get credit for your work, you must produce output through tool calls (e.g., write files, create artifacts) so the results appear in tool messages."
 
 Return JSON:
@@ -485,7 +387,6 @@ IMPORTANT: Always include the "output" field with your best extraction of the va
             """
         ).strip()
     else:
-        # No schema - use generic verifier without structured output extraction
         output_section = dedent(
             f"""
 OUTPUT CONTRACT
@@ -538,24 +439,24 @@ WORKFLOW - OBSERVE THEN ACT:
 
 TOOLS OVERVIEW:
 OBSERVATION:
-- observe(instruction) → Find elements, returns selectors. ALWAYS USE FIRST.
-- ariaTree() → Get full page content/structure
-- screenshot() → Visual confirmation
+- observe(instruction) -> Find elements, returns selectors. ALWAYS USE FIRST.
+- ariaTree() -> Get full page content/structure
+- screenshot() -> Visual confirmation
 
 ACTIONS (require selector from observe):
-- click(selector) → Click an element
-- fill(selector, value) → Clear field and type (for forms)
-- type(selector, text) → Type without clearing (for search boxes)
-- pressKey(key) → Press keyboard keys (Enter, Tab, etc.)
+- click(selector) -> Click an element
+- fill(selector, value) -> Clear field and type (for forms)
+- type(selector, text) -> Type without clearing (for search boxes)
+- pressKey(key) -> Press keyboard keys (Enter, Tab, etc.)
 
 NAVIGATION:
-- goto(url) → Navigate to FULL URL (must include https://)
-- navback() → Go back
-- scroll(pixels, direction) → Scroll page
-- wait(timeMs) → Wait
+- goto(url) -> Navigate to FULL URL (must include https://)
+- navback() -> Go back
+- scroll(pixels, direction) -> Scroll page
+- wait(timeMs) -> Wait
 
 COMPLETION:
-- attempt_completion() → End task when goal is complete
+- attempt_completion() -> End task when goal is complete
 
 IMPORTANT RULES:
 1. ALWAYS call observe() first to get a selector before clicking/typing
@@ -591,7 +492,6 @@ def build_planner_system_prompt(
         user_context: Optional user context for personalization
         response_schema: Optional structured output schema the agent should return
     """
-    # Build response schema section if defined
     response_schema_section = ""
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
@@ -647,8 +547,8 @@ Progress happens along two orthogonal axes:
 2. Reducing REMAINING WORK (executing known steps once understood)
 
 Decision heuristic:
-- If uncertainty > decomposability → use join='any' (hypotheses to reduce uncertainty first)
-- If decomposability >= uncertainty → use join='all' (parallelize work)
+- If uncertainty > decomposability -> use join='any' (hypotheses to reduce uncertainty first)
+- If decomposability >= uncertainty -> use join='all' (parallelize work)
 - Parallelism is only safe when entropy/uncertainty is low
 - To reduce uncertainty effectively, seek world-class references (industry experts, peer-reviewed sources, proven exemplars)
 
@@ -656,7 +556,7 @@ DECOMPOSITION PRINCIPLES
 ------------------------
 - Prefer decomposition: If a task CAN be decomposed into sub-tasks, it SHOULD be
 - EXCEPTION - BROWSER FLOWS: NEVER split stateful web flows across multiple spawn_browser_agent calls.
-  Login → add to cart → checkout → confirm = ONE spawn_browser_agent task (sessions are ephemeral, cart/auth state is lost between calls)
+  Login -> add to cart -> checkout -> confirm = ONE spawn_browser_agent task (sessions are ephemeral, cart/auth state is lost between calls)
 - MECE: Tasks should not overlap; together they fully cover the goal
 - Parallelization: Prefer independent tasks with final synthesis step
 - Granularity: 3-8 tasks maximum. If you need more, use spawn_sub_agent to delegate complexity.
@@ -668,7 +568,7 @@ TASK COUNT LIMITS
 - If you're tempted to add 10+ tasks, use `spawn_sub_agent` to delegate complexity
 - For repeated work across many rows/items, use `spawn_sub_agent_for_each` to fan out one child per row
 - Long sequential chains (8+ steps) are a code smell - decompose hierarchically instead
-- NEVER plan "1 sub-agent + reasoning" — a single sub-agent with the full goal is just recursion with no decomposition. Either decompose into multiple sub-tasks or do the work directly.
+- NEVER plan "1 sub-agent + reasoning" - a single sub-agent with the full goal is just recursion with no decomposition. Either decompose into multiple sub-tasks or do the work directly.
 
 SPAWN_SUB_AGENT vs SPAWN_SUB_AGENT_FOR_EACH
 --------------------------------------------
@@ -678,11 +578,11 @@ spawn_sub_agent_for_each = SAME task applied to MANY items from a list/CSV (e.g.
 GOOD use of spawn_sub_agent_for_each:
   Task 0: spawn_sub_agent_for_each "Research funding history and key investors for this company"
     items: ["Acme Corp", "Widgets Inc", "FooBar LLC"]
-  Task 1: reasoning "Compile comparison table from results" → after 0
+  Task 1: reasoning "Compile comparison table from results" -> after 0
 
   Task 0: spawn_sub_agent_for_each "Find one interesting fact about this entity"
-    items_csv: "Name,Type\nTesla,Company\nAlbert Einstein,Person\nMars,Planet"
-  Task 1: reasoning "Summarize all facts" → after 0
+    items_csv: "Name,Type\\nTesla,Company\\nAlbert Einstein,Person\\nMars,Planet"
+  Task 1: reasoning "Summarize all facts" -> after 0
 
 BAD (should use spawn_sub_agent_for_each, not N separate sub-agents):
   Task 0: spawn_sub_agent "Research Acme Corp funding"
@@ -693,16 +593,16 @@ BAD (should use spawn_sub_agent_for_each, not N separate sub-agents):
 RULE: If you see the SAME goal repeated across multiple items/rows/people/entities, use spawn_sub_agent_for_each. If the items come from a CSV attachment, pass the CSV content via items_csv. If the items come from a list in the user's message or prior context, pass them via items.
 
 GOOD use of spawn_sub_agent:
-  Task 0: spawn_sub_agent "Research and book a venue in Austin for 20 people, March 28-30. Budget: $5k max. Prefer downtown locations with AV equipment. Contact: Andy, andy@example.com"  ← complex multi-step task with ALL context embedded
-  Task 1: spawn_sub_agent "Plan team activities for 20 people in Austin, March 28-30. Team is mostly engineers, ages 25-40. Mix of indoor/outdoor preferred. Budget: $2k."  ← needs research + decisions, self-contained
-  Task 2: reasoning "Compile final itinerary"  ← synthesis
+  Task 0: spawn_sub_agent "Research and book a venue in Austin for 20 people, March 28-30. Budget: $5k max. Prefer downtown locations with AV equipment. Contact: Andy, andy@example.com"  <- complex multi-step task with ALL context embedded
+  Task 1: spawn_sub_agent "Plan team activities for 20 people in Austin, March 28-30. Team is mostly engineers, ages 25-40. Mix of indoor/outdoor preferred. Budget: $2k."  <- needs research + decisions, self-contained
+  Task 2: reasoning "Compile final itinerary"  <- synthesis
 
 BAD (too granular, should use spawn_sub_agent):
   Task 0: web_search "venues in Austin"
   Task 1: web_search "venue A reviews"
   Task 2: web_search "venue B reviews"
   Task 3: reasoning "compare venues"
-  Task 4: spawn_browser_agent "book venue"  ← should be one spawn_sub_agent task
+  Task 4: spawn_browser_agent "book venue"  <- should be one spawn_sub_agent task
 
 SELF-CONTAINED GOALS (CRITICAL)
 -------------------------------
@@ -714,7 +614,7 @@ details directly in each task's goal:
 - Any user context (from USER CONTEXT section above) that the sub-agent needs
 - Specific instructions, not vague references like "the item discussed earlier"
 
-BAD: "Book the boxing class"  ← sub-agent has no idea which class, where, for whom
+BAD: "Book the boxing class"  <- sub-agent has no idea which class, where, for whom
 GOOD: "Book the 6pm Tuesday boxing class at Dallas MMA Boxing (2000 Main St, Dallas TX). Member name: Andy Prevalsky, phone: 555-1234. Pay for monthly membership ($150/mo), prefer card on file."
 
 SPAWN_CLAUDE_CODE_AGENT GRANULARITY
@@ -728,14 +628,14 @@ BAD (monolithic - sandbox will likely die mid-execution):
 
 GOOD Option 1 (decomposed at top level):
   Task 0: spawn_claude_code_agent "Initialize React project with routing scaffold"
-  Task 1: spawn_claude_code_agent "Create Home page component" → after 0
-  Task 2: spawn_claude_code_agent "Create About page component" → after 0
-  Task 3: spawn_claude_code_agent "Create Schedule page component" → after 0
-  Task 4: spawn_claude_code_agent "Create Class page component" → after 0
+  Task 1: spawn_claude_code_agent "Create Home page component" -> after 0
+  Task 2: spawn_claude_code_agent "Create About page component" -> after 0
+  Task 3: spawn_claude_code_agent "Create Schedule page component" -> after 0
+  Task 4: spawn_claude_code_agent "Create Class page component" -> after 0
 
 GOOD Option 2 (delegate decomposition to sub-agent):
   Task 0: spawn_sub_agent "Build React frontend with home, about, schedule, class pages"
-  (sub-agent will decompose into scaffold → parallel page creation)
+  (sub-agent will decompose into scaffold -> parallel page creation)
 
 Use Option 2 to compress the number of tasks and avoid surpassing task limits.
 
@@ -748,25 +648,25 @@ Heuristics for decomposition:
 WAIT_FOR TOOL
 -------------
 Use `tool_name: "wait_for"` for time-delayed or polling/monitoring tasks.
-Do NOT use recursive sub-agents for "check X every Y minutes" — use wait_for instead.
+Do NOT use recursive sub-agents for "check X every Y minutes" - use wait_for instead.
 
 Timestamp mode (wait until a specific time):
-  Task 0: wait_for "Wait until March 15 at 9am UTC"  ← uses until_timestamp param
+  Task 0: wait_for "Wait until March 15 at 9am UTC"  <- uses until_timestamp param
 
 Condition mode (poll until condition is met):
-  Task 0: wait_for "Check every 15 minutes if Bitcoin is above $100k"  ← uses condition + check_interval_seconds + max_checks
+  Task 0: wait_for "Check every 15 minutes if Bitcoin is above $100k"  <- uses condition + check_interval_seconds + max_checks
   An explore agent automatically checks the condition each interval.
 
 DEPENDENCY PATTERNS
 -------------------
 - Sequential chain: {{"1": ["0"], "2": ["1"], "3": ["2"]}} - each depends on previous
-  Example: Search → Add to cart → Checkout → Confirm
+  Example: Search -> Add to cart -> Checkout -> Confirm
 - Fully parallel: {{}} or null - all independent
   Example: Research competitor A, B, C simultaneously
 - Fan-in synthesis: {{"3": ["0", "1", "2"]}} - final task merges results
-  Example: Research A, B, C → Synthesize report
+  Example: Research A, B, C -> Synthesize report
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} - fork then join
-  Example: Gather requirements → (Design frontend, Design backend) → Integration
+  Example: Gather requirements -> (Design frontend, Design backend) -> Integration
 
 AVAILABLE TOOLS (for execute phase)
 -----------------------------------
@@ -800,12 +700,12 @@ No state persists between calls - no cookies, no login, no variables.
 
 <bad-example>
 Task 0: spawn_browser_agent "Login to site"
-Task 1: spawn_browser_agent "Add item to cart"  ← NO SESSION! Logged out.
-Task 2: spawn_browser_agent "Complete checkout" ← NO SESSION! Cart empty.
+Task 1: spawn_browser_agent "Add item to cart"  <- NO SESSION! Logged out.
+Task 2: spawn_browser_agent "Complete checkout" <- NO SESSION! Cart empty.
 </bad-example>
 
 <good-example>
-Task 0: spawn_browser_agent "Login, add item to cart, complete checkout"  ← Full flow in one session
+Task 0: spawn_browser_agent "Login, add item to cart, complete checkout"  <- Full flow in one session
 </good-example>
 
 OTHER REMINDERS:
@@ -817,22 +717,6 @@ OTHER REMINDERS:
 
 OUTPUT JSON ONLY - no prose, no commentary outside the JSON structure."""
 
-    # Hardcoded strategy override (agent-local file).
-    strategy = ""
-    strategy_file = Path(__file__).resolve().parent / "planner_strategy_override_v3.txt"
-    try:
-        strategy = strategy_file.read_text().strip()
-    except Exception:
-        strategy = ""
-
-    if strategy:
-        strategy_start = "TWO-AXIS PLANNING FRAMEWORK"
-        strategy_end = "SELF-CONTAINED GOALS (CRITICAL)"
-        start_idx = base_prompt.find(strategy_start)
-        end_idx = base_prompt.find(strategy_end)
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            base_prompt = base_prompt[:start_idx] + strategy + "\n\n" + base_prompt[end_idx:]
-
     return base_prompt
 
 
@@ -843,9 +727,9 @@ Current timestamp: {current_timestamp}
 You have access to:
 - web_search: Search the web for public information
 - web_fetch: Fetch and read full web pages
-- grep: Search the user's local data (message threads, etc.) — like grep on a filesystem
+- grep: Search the user's local data (message threads, etc.) - like grep on a filesystem
 - read_memories: Search the user's stored memories and profile for preferences, past decisions, and context from previous agents
-- attempt_completion: Return your findings in the `result` field — this is what gets sent back to the caller
+- attempt_completion: Return your findings in the `result` field - this is what gets sent back to the caller
 
 APPROACH:
 - Start by checking read_memories for relevant stored context (preferences, past decisions, key facts)
@@ -858,7 +742,7 @@ APPROACH:
 
 GREP USAGE:
 - grep searches the user's message threads (iMessage, email conversations) by default
-- Pattern is plain text (not regex) — use '' (empty string) to return all records without filtering
+- Pattern is plain text (not regex) - use '' (empty string) to return all records without filtering
 - Optional filters (messages source only): person_id (email, phone, or full name to scope to one thread), since (ISO timestamp cutoff)
 - The 'since' parameter accepts ISO 8601 timestamps (e.g., "2025-06-01T00:00:00Z"). Use the current timestamp above to calculate relative time ranges.
 - Results return matching messages with surrounding context (like grep -C)
@@ -866,19 +750,19 @@ GREP USAGE:
 
 NETWORK SEARCH (contacts):
 The system prompt shows only the top 100 contacts by message volume. To reach the long tail:
-- source="network" — search the full contact database by name, phone, email, company, title, relation, or communication frequency
+- source="network" - search the full contact database by name, phone, email, company, title, relation, or communication frequency
 - Pattern matches any of those fields (case-insensitive substring). Use '' to list top 20 contacts.
 - Examples: pattern="acme" finds everyone at Acme; pattern="+1212" finds 212 area code; pattern="cto" finds people with CTO title.
 
 AGENT NETWORK SEARCH:
 You are part of a network of agents working on interconnected tasks via recursive task decomposition.
 You can search across the entire agent network's data:
-- source="agent_network_user_messages" — search what users said across all agents in this workflow tree
-- source="agent_network_tool_results" — search tool results from all agents (web searches, research, lookups, etc.)
+- source="agent_network_user_messages" - search what users said across all agents in this workflow tree
+- source="agent_network_tool_results" - search tool results from all agents (web searches, research, lookups, etc.)
 Use these to find data that other agents in the network have already gathered, avoiding redundant searches.
 
 QUALITY:
-- Be thorough — make multiple searches from different angles
+- Be thorough - make multiple searches from different angles
 - Include specific facts, numbers, names, URLs when available
 - Note conflicting information or uncertainty
 - Cite sources when possible
@@ -888,8 +772,8 @@ QUALITY:
 {local_data_summary}
 
 IMPORTANT: Call attempt_completion with your concrete findings in the `result` field.
-Do NOT keep searching indefinitely — synthesize what you have and complete.
-The `result` field is what gets returned to the parent agent — make it detailed and actionable.
+Do NOT keep searching indefinitely - synthesize what you have and complete.
+The `result` field is what gets returned to the parent agent - make it detailed and actionable.
 
 If your findings are extensive, synthesize key insights rather than dumping raw search results or verbose JSON arrays."""
 

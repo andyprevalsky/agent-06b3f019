@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, model_validator
 
 logger = structlog.get_logger(__name__)
 
@@ -222,6 +222,14 @@ class WaitForTool(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def check_mutual_exclusion(self) -> "WaitForTool":
+        if self.until_timestamp and self.condition:
+            raise ValueError("until_timestamp and condition are mutually exclusive. Provide one, not both.")
+        if not self.until_timestamp and not self.condition:
+            raise ValueError("Either until_timestamp or condition must be provided.")
+        return self
+
 
 class WebSearchTool(BaseModel):
     """Tool call for searching the web with real-time information."""
@@ -242,6 +250,12 @@ class WebFetchTool(BaseModel):
         default=None,
         description="File extensions to auto-download from the page (e.g. ['pdf', 'csv', 'xlsx']). Discovered URLs matching these extensions are downloaded and returned as file pointers.",
     )
+
+    @model_validator(mode="after")
+    def check_fetch_mode(self) -> "WebFetchTool":
+        if self.excerpts and self.full_content:
+            raise ValueError("excerpts and full_content are mutually exclusive. Set one to true, not both.")
+        return self
 
 
 class GrepTool(BaseModel):
@@ -518,6 +532,29 @@ class SpawnAgentTool(BaseModel):
             'Example: {"network": false, "recent_communications": false} for pure web research tasks.'
         ),
     )
+
+    @model_validator(mode="after")
+    def check_spawn_agent_constraints(self) -> "SpawnAgentTool":
+        if self.type == "browser" and not self.start_url:
+            raise ValueError("start_url is required when type='browser'.")
+        if self.type in ("sub_agent", "for_each") and not self.start_phase:
+            raise ValueError("start_phase is required when type='sub_agent' or type='for_each'. Use 'plan' or 'execute'.")
+        if self.type == "for_each":
+            if self.items and self.items_csv:
+                raise ValueError("items and items_csv are mutually exclusive. Provide one, not both.")
+            if not self.items and not self.items_csv:
+                raise ValueError("type='for_each' requires either items or items_csv.")
+        if self.type in ("browser", "code", "sub_agent", "for_each") and not self.output_schema:
+            raise ValueError(f"output_schema is required when type='{self.type}'.")
+        if self.type == "explore" and self.output_schema:
+            raise ValueError("output_schema must NOT be provided when type='explore'. Explore agents return free-form summaries.")
+        if self.type in ("browser", "code", "sub_agent", "for_each") and len(self.goal) < 50:
+            raise ValueError(
+                f"Goal is too short ({len(self.goal)} chars). Sub-agents have NO access to your conversation - "
+                "the goal is their ONLY context. Include all relevant details (preferences, constraints, addresses, "
+                "names, budget, deadlines). Minimum 50 characters."
+            )
+        return self
 
 
 class SearchUserNetworkTool(BaseModel):
@@ -1114,8 +1151,8 @@ def create_agent_action_model(
         response=(
             str,
             Field(
-                description="Thinking/reasoning about what to do next. Explain your observations "
-                "and strategy. This is shown to the user as 'Thinking...' text. "
+                description="Thinking about what to do next. This IS shown to the user as thinking text, "
+                "but is NOT seen by the verifier (verifier only evaluates tool calls and their results). "
                 "Write in plain prose. No markup, no bullet prefixes, no special formatting symbols."
             ),
         ),

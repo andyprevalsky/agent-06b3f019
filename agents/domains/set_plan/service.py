@@ -20,12 +20,12 @@ from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
     PLANNER_MODEL,
-    PLANNING_TOOL_DESCRIPTIONS,
     SCHEMA_ACTIVITY_MAX_ATTEMPTS,
     SCHEMA_ACTIVITY_TIMEOUT_SECONDS,
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
+from tools.prompts import TOOL_PROMPTS
 from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, TOOL_MODELS
 
 
@@ -115,11 +115,15 @@ def convert_dependencies_list_to_dict(deps_list: list[dict[str, Any]]) -> dict[s
 
 
 def get_planner_tools_description() -> str:
-    """Get description of tools the planner can assign to tasks."""
+    """Get description of tools the planner can assign to tasks.
+
+    Single source of truth: TOOL_PROMPTS (per-tool prompt files).
+    Falls back to Pydantic docstrings for any tool not in TOOL_PROMPTS.
+    """
     lines = []
     for name in PLANNER_ASSIGNABLE_TOOLS:
-        if name in PLANNING_TOOL_DESCRIPTIONS:
-            lines.append(f"- {name}: {PLANNING_TOOL_DESCRIPTIONS[name]}")
+        if name in TOOL_PROMPTS:
+            lines.append(f"- {name}: {TOOL_PROMPTS[name]}")
         elif name in TOOL_MODELS:
             model = TOOL_MODELS[name]
             doc = (model.__doc__ or "").strip()

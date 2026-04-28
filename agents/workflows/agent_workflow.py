@@ -1160,6 +1160,15 @@ class AgentWorkflow:
                 "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents.",
             }
 
+        # Semantic validation: validate tool args against Pydantic model_validators
+        from utils.tool_schemas import TOOL_MODELS
+
+        if tool_name in TOOL_MODELS:
+            try:
+                TOOL_MODELS[tool_name](**{"tool": tool_name, **tool_args})
+            except Exception as e:
+                return {"error": True, "message": f"Invalid parameters for {tool_name}: {e}"}
+
         # Track tool as in-use with human-readable display string
         tool_display = format_tool_display(tool_name, tool_args)
         self.tools_in_use.add(tool_display)

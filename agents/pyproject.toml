@@ -86,6 +86,10 @@ known-first-party = [
 "helpers.utils".msg = "Moved to utils.utils — use `from utils.utils import ...`."
 "helpers.tool_schemas".msg = "Moved to utils.tool_schemas — use `from utils.tool_schemas import ...`."
 
+# ── Pytest: async test support ──
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 # =============================================================================
 # Coverage configuration (coverage.py)
 #
