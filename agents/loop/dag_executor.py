@@ -303,6 +303,32 @@ async def execute_dag(
 
     workflow.logger.info(f"[DAG] Starting execution with {len(dag.tasks)} tasks, join={dag.join}")
 
+    # Warm the Anthropic prompt cache before parallel DAG tasks fire.
+    # A throwaway LLM call with the execute-phase system+tools+context
+    # writes the cache prefix once; subsequent parallel param-populator
+    # calls all read from it without needing serialization.
+    has_llm_tasks = any(
+        t.tool_name != "reasoning" for t in dag.tasks
+    )
+    if has_llm_tasks and system_prompt_text and claude_token:
+        try:
+            _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
+            await execute_activity(
+                call_llm_activity,
+                args=[
+                    agent_id, model, tool_names or [], 1,
+                    agent_id, None, None, claude_token,
+                    "dag_cache_warm", system_prompt_text,
+                    None, None, False,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+                heartbeat_timeout=timedelta(seconds=20),
+            )
+            workflow.logger.info("[DAG] Cache warm complete")
+        except Exception as e:
+            workflow.logger.warning(f"[DAG] Cache warm failed (non-fatal): {e}")
+
     first_iteration = True
     # Seed last_checked from existing context to avoid fetching entire message history
     last_checked = datetime.fromtimestamp(0, tz=timezone.utc)

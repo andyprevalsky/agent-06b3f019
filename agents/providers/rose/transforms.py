@@ -121,11 +121,14 @@ def transform_content_block_for_anthropic(block: Any) -> Any:
 
 def transform_messages_for_anthropic(
     messages: List[Dict[str, Any]],
-) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    """OpenAI-style messages -> (system_text, anthropic_messages).
+) -> Tuple[Optional[str], Optional[str], List[Dict[str, Any]]]:
+    """OpenAI-style messages -> (static_system, dynamic_system, anthropic_messages).
 
-    - system messages are concatenated (joined by blank line) and pulled
-      out into the first return value. None when there were none.
+    System messages are concatenated and split at the SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    marker into static (globally cacheable) and dynamic (per-call) portions.
+    If the boundary marker is absent, static_system contains the full text and
+    dynamic_system is None.
+
     - assistant messages with tool_calls become assistant messages with
       tool_use content blocks (preserving any preceding text/content).
     - tool-role messages become user messages with a single tool_result
@@ -304,7 +307,19 @@ def transform_messages_for_anthropic(
         bundled.pop()
 
     system_text: Optional[str] = "\n\n".join(system_parts) if system_parts else None
-    return system_text, bundled
+
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    static_system: Optional[str] = None
+    dynamic_system: Optional[str] = None
+    if system_text and SYSTEM_PROMPT_DYNAMIC_BOUNDARY in system_text:
+        parts = system_text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 1)
+        static_system = parts[0].strip() or None
+        dynamic_system = parts[1].strip() or None
+    else:
+        static_system = system_text
+
+    return static_system, dynamic_system, bundled
 
 
 # ---------------------------------------------------------------------------
@@ -446,19 +461,50 @@ def apply_anthropic_tool_config(
 ) -> bool:
     """Configure an Anthropic request body for tools / structured output.
 
-    Mutates `body` in place. Priority matches the TS original:
-      1. Explicit `tools` (OpenAI-shape) — converted to native Anthropic
-         tools, optional explicit `tool_choice` translated.
-      2. `response_format.json_schema` with `use_native_tools=True` (the
-         claudeAuth path) — try to lift tool_calls.items.anyOf into native
-         tools to dodge "compiled grammar too large".
-      3. Otherwise — install structured output via `output_config`
-         (claudeAuth) or `output_format` (legacy).
+    Mutates `body` in place. Priority:
+      1. Explicit `tools` with `use_native_tools=True` (claudeAuth path) —
+         tools are already in Anthropic-native shape; install directly,
+         default tool_choice to "auto", return True (native tool mode).
+      2. Explicit `tools` without native mode (waterfall path) — convert
+         from OpenAI function-shape to Anthropic, return False.
+      3. `response_format.json_schema` — install as structured output via
+         `output_config` (claudeAuth) or `output_format` (legacy).
 
     Returns True iff native tool mode is now active (caller must use
     reconstruct_agent_response on the response).
     """
     if tools:
+        if use_native_tools:
+            body["tools"] = [
+                {
+                    "name": t.get("name"),
+                    "description": t.get("description"),
+                    "input_schema": t.get("input_schema"),
+                }
+                for t in tools
+            ]
+            if tool_choice is not None:
+                if tool_choice == "auto":
+                    body["tool_choice"] = {"type": "auto"}
+                elif tool_choice in ("required", "any"):
+                    body["tool_choice"] = {"type": "any"}
+                elif (
+                    isinstance(tool_choice, dict)
+                    and isinstance(tool_choice.get("function"), dict)
+                    and tool_choice["function"].get("name")
+                ):
+                    body["tool_choice"] = {
+                        "type": "tool",
+                        "name": tool_choice["function"]["name"],
+                    }
+                else:
+                    body["tool_choice"] = {"type": "any"}
+            else:
+                body["tool_choice"] = {"type": "auto"}
+            body.pop("output_config", None)
+            body.pop("output_format", None)
+            return True
+
         body["tools"] = [
             {
                 "name": (t.get("function") or {}).get("name") or t.get("name"),
@@ -488,15 +534,6 @@ def apply_anthropic_tool_config(
     if response_format and isinstance(response_format.get("json_schema"), dict):
         schema = response_format["json_schema"].get("schema")
         if isinstance(schema, dict):
-            if use_native_tools:
-                extracted = _extract_tools_from_response_format(response_format)
-                if extracted is not None:
-                    body["tools"] = extracted["tools"]
-                    body["tool_choice"] = {"type": "any"}
-                    body.pop("output_config", None)
-                    body.pop("output_format", None)
-                    return True
-
             transformed_schema = transform_schema_for_anthropic(schema)
             if use_native_tools:
                 body["output_config"] = {
@@ -642,15 +679,42 @@ def get_messages_for_model(
     return messages
 
 
+def _add_openrouter_cache_breakpoint(msg: Dict[str, Any]) -> None:
+    """Add cache_control to a message's last content block (mutates in place).
+
+    Works for OpenRouter's Gemini/Anthropic paths. Converts string content to
+    the content-array format required for per-block cache_control.
+    """
+    content = msg.get("content")
+    if isinstance(content, str):
+        msg["content"] = [
+            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+        ]
+    elif isinstance(content, list) and content:
+        target = content[-1]
+        if isinstance(target, dict):
+            target["cache_control"] = {"type": "ephemeral"}
+
+
 def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Pass-through for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
+    """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR).
 
-    The TS code in `generic.ts` forwards the messages array verbatim to
-    OpenRouter, so this function does the same. Kept as an explicit hook
-    in case provider-specific normalization needs to slot in later without
-    touching every call site.
+    Adds cache_control breakpoints so OpenRouter can leverage provider-native
+    caching (Gemini context cache, Anthropic-via-OR, Moonshot automatic).
+    Breakpoints on: first system message (stable prefix) and last message
+    (growing conversation edge).
     """
-    return list(messages)
+    out = [dict(m) for m in messages]
+    if not out:
+        return out
+
+    for m in out:
+        if m.get("role") == "system":
+            _add_openrouter_cache_breakpoint(m)
+            break
+
+    _add_openrouter_cache_breakpoint(out[-1])
+    return out

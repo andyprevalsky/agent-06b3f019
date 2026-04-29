@@ -34,6 +34,13 @@ EXECUTE_PHASE_TOOLS = [
     "add_memory",
 ]
 
+# Stable union of PLAN + EXECUTE tools for LLM schema generation.
+# Passing the same tool set in every call makes the Anthropic tools array
+# identical across phases, enabling cross-phase cache hits on the
+# system+tools prefix. The system prompt's ENABLED/DISABLED sections
+# control which tools the model actually uses.
+ALL_PHASE_TOOLS = list(dict.fromkeys(PLAN_PHASE_TOOLS + EXECUTE_PHASE_TOOLS))
+
 # Tools the planner can assign to tasks (what shows up in task.tool_name)
 # These use separate names so the planner doesn't need to understand spawn_agent params.
 # The DAG executor converts these to spawn_agent via TOOL_ALIASES.

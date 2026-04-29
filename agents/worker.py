@@ -13,8 +13,10 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import ResourceBasedSlotConfig, Worker, WorkerTuner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
-# Load .env file before anything else
-load_dotenv()
+# Load .env file — override=False ensures env vars inherited from run.sh
+# (e.g. TEMPORAL_TASK_QUEUE derived from CONDUCTOR_WORKSPACE_NAME) take
+# precedence over the static values in .env.
+load_dotenv(override=False)
 
 # Verify critical env vars
 if not os.getenv("BACKEND_API_KEY"):
@@ -63,7 +65,8 @@ from domains.spawn_agent.service import (
 )
 from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
-from domains.spawn_sub_agents.service import fetch_parent_attachments_activity, spawn_sub_agent_activity
+from domains.spawn_sub_agents.service import spawn_sub_agent_activity
+from helpers.attachments import fetch_parent_attachments_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity
 from domains.x402_bazaar.repo import pay_for_x402_service_activity, search_x402_bazaar_activity

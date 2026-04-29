@@ -61,6 +61,7 @@ def build_openrouter_body(
         "model": model,
         "messages": transform_messages_for_openai(messages),
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if tools:
         body["tools"] = tools

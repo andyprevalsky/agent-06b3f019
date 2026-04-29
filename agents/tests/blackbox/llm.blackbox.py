@@ -672,8 +672,8 @@ async def test_call_llm_rose_path():
     assert result["usage"]["total_tokens"] == 30
 
 
-async def test_call_llm_rose_with_claude_token_and_skip_cache():
-    """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache disables prompt caching."""
+async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
+    """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache_write keeps system markers."""
     sse = _anthropic_sse_body(text="ok")
     setup_mock({
         "api.anthropic.com/v1/messages": {
@@ -687,29 +687,34 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache():
         from helpers.llm import call_llm
 
         await call_llm(
-            messages=[{"role": "user", "content": "q"}],
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "q"},
+            ],
             model="rose",
             response_format={"type": "json_object"},
             claude_token="ct-123",
-            skip_cache=True,
+            skip_cache_write=True,
             call_site="tester",
         )
 
-    # Verify the claudeAuth path was taken: Anthropic was called with the
-    # OAuth Bearer token and the request body shape matches Anthropic's API.
     captures = get_captured_requests()
     anthropic_calls = [c for c in captures if "api.anthropic.com" in c["url"]]
     assert anthropic_calls, f"Expected an Anthropic call, got {[c['url'] for c in captures]}"
     call = anthropic_calls[0]
-    # Authorization header is redacted in capture; just assert it was present.
     assert any(k.lower() == "authorization" for k in call["requestHeaders"])
     body = json.loads(call["requestBody"])
     assert body["model"] == "claude-sonnet-4-6"
     assert body["stream"] is True
-    assert isinstance(body["system"], list)  # identity + disclaimer + system blocks
-    # skip_cache=True means the system text block should NOT carry cache_control.
+    assert isinstance(body["system"], list)
+    # skip_cache_write=True keeps system cache_control for reads but strips message breakpoint
     user_system_blocks = [b for b in body["system"] if "cache_control" in b]
-    assert user_system_blocks == [], f"skip_cache=True should disable cache_control, got {user_system_blocks}"
+    assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
+    last_msg = body["messages"][-1]
+    content = last_msg.get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            assert "cache_control" not in block, "message breakpoint should be stripped"
 
 
 async def test_call_llm_rose_http_error_raises():
@@ -1461,11 +1466,11 @@ async def test_call_planner_llm_activity_happy_path():
         f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
     )
     planner_body = anthropic_calls[0]["body"]
-    # Planner skips cache → no cache_control on user system blocks.
+    # Planner uses skip_cache_write → system blocks KEEP cache_control for reads.
     user_system_blocks = [
         b for b in planner_body.get("system", []) if "cache_control" in b
     ]
-    assert user_system_blocks == [], "skip_cache=True should disable cache_control"
+    assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
     # claude_token is forwarded as the Anthropic Bearer token, not in the body.
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
@@ -2688,7 +2693,7 @@ async def test_build_llm_messages_system_role_gets_prefix():
     # First is system, then user + system-as-user
     assert messages[0]["role"] == "system"
     assert any(
-        m["role"] == "user" and isinstance(m.get("content"), str) and m["content"].startswith("[SYSTEM]:")
+        m["role"] == "user" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"]
         for m in messages
     ), f"Expected a [SYSTEM]: user message, got: {messages}"
 
@@ -2709,7 +2714,7 @@ async def test_build_llm_messages_non_terminal_tool_becomes_user_text():
     ]
     with _patch("helpers.llm.activity.in_activity", return_value=False):
         messages = await build_llm_messages(context, "sys")
-    tool_as_user = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("[TOOL]:")]
+    tool_as_user = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str) and "[TOOL]:" in m["content"]]
     assert tool_as_user, f"Expected a [TOOL]:-prefixed user message, got: {messages}"
 
 
@@ -3021,7 +3026,7 @@ async def run_all_tests():
     await r.record_async("set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned)
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
-    await r.record_async("call_llm_rose_with_claude_token_and_skip_cache", test_call_llm_rose_with_claude_token_and_skip_cache)
+    await r.record_async("call_llm_rose_with_claude_token_and_skip_cache_write", test_call_llm_rose_with_claude_token_and_skip_cache_write)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
     await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)

@@ -1,8 +1,11 @@
-from datetime import datetime
 from textwrap import dedent
 from typing import Any, Dict, List, Optional, Union
 
-from tools.prompts import TOOL_PROMPTS
+# Boundary marker separating static (globally-cacheable) system prompt sections
+# from dynamic (per-call) sections. transform_messages_for_anthropic splits on
+# this to return (static_system, dynamic_system) so build_anthropic_body can
+# assign different cache_control scopes to each block.
+SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 
 # ============================================================================
 # SHARED PROMPT SECTIONS
@@ -32,34 +35,31 @@ def build_system_prompt(  # noqa: C901
     is_first_call: bool = False,
     response_schema: Optional[Dict[str, Any]] = None,
     shared_memory_section: str = "",
+    tool_prompts: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Build system prompt for the LLM.
 
-    Structure:
-    1. Identity - who, timestamp
-    2. Critical Constraints - invariants
-    3. Current Phase - workflow state machine
-    4. Tool Guidance - per-tool descriptions from dedicated prompt files
-    5. Rules - behavioral constraints, tool preferences
-    6. Agent Network & Context Pointers
+    Static section (above boundary — identical across PLAN/EXECUTE for cache sharing):
+    1. Identity
+    2. Critical Constraints
+    3. Rules
+    4. Agent Network & Context Pointers
 
-    Args:
-        phase: "PLAN" or "EXECUTE"
-        enabled_tools: List of tool names (str) or tool dicts
-        disabled_tools: List of tool names (str) or tool dicts
-        user_context_section: Optional user context to include
-        is_first_call: Unused (kept for backward compatibility)
-        response_schema: Optional structured output schema the agent should return
-        shared_memory_section: Optional shared memory from run to include
+    Dynamic section (below boundary — per-call):
+    5. Current Phase (PLAN state machine or EXECUTE instructions)
+    6. Tool Guidance (enabled/disabled per phase)
+    7. User Context, Shared Memory, Response Schema
     """
     disabled_tools = disabled_tools or []
-    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
+    _tool_prompts = tool_prompts or {}
 
     # ========================================================================
-    # 1. IDENTITY
+    # STATIC SECTION (globally cacheable — identical across PLAN/EXECUTE)
     # ========================================================================
-    prompt = dedent(f"""
+
+    # 1. IDENTITY
+    prompt = dedent("""
 # Identity
 
 You are a nurturer of metaphysical seeds - the user plants a goal and your job
@@ -71,19 +71,9 @@ make reasonable assumptions, don't get blocked, move forward.
 Never ask "how can I help?" - you ARE helping by executing.
 
 CRITICAL: NEVER use em dashes ("—") in any output. Use hyphens (-) or commas instead.
-
-Current time: {current_time}
     """).strip()
 
-    if user_context_section.strip():
-        prompt += f"\n\n{user_context_section.strip()}"
-
-    if shared_memory_section.strip():
-        prompt += f"\n\n# Shared Run Memory\n{shared_memory_section.strip()}"
-
-    # ========================================================================
     # 1b. REFERENCE BLUEPRINTS
-    # ========================================================================
     prompt += dedent("""
 
 REFERENCE BLUEPRINTS
@@ -95,9 +85,7 @@ previously completed. Use them to:
 Adapt the approach to the current goal - do NOT copy verbatim.
     """).rstrip()
 
-    # ========================================================================
     # 2. CRITICAL CONSTRAINTS
-    # ========================================================================
     prompt += dedent(f"""
 
 
@@ -105,9 +93,64 @@ Adapt the approach to the current goal - do NOT copy verbatim.
 {CRITICAL_CONSTRAINTS_BOX}
     """).rstrip()
 
+    # 3. RULES (phase-independent — stays in static section for cache sharing)
+    prompt += dedent(f"""
+
+
+# Rules
+
+## File Handling
+{FILE_RULES.strip()}
+
+## Tool Preferences
+- Prefer spawn_agent(type="explore") over direct web_search/web_fetch for research tasks
+- Prefer message_person over send_sms/send_email for messaging people
+- Prefer wait_for(condition=...) over recursive sub-agents for polling tasks
+- Prefer spawn_agent(type="for_each") over multiple spawn_agent(type="sub_agent") for repeated work
+
+## Execution
+- Tool-first: favor action over narration
+- No simulation: don't claim a tool ran unless it actually executed
+- Pivot after 2 failures: don't repeat the same failing action
+- Don't add features beyond what was asked
+- Batch independent tool calls in the same response (they run in parallel)
+- If tool B needs tool A's result: emit A alone, wait for result, then emit B
+
+## Anti-patterns
+- Acting like an assistant instead of deciding, planning, and executing
+- Repeating failed approaches instead of pivoting
+- Giving up when a creative path exists
+    """).rstrip()
+
+    # 4. AGENT NETWORK & CONTEXT POINTERS
+    prompt += dedent("""
+
+
+# Agent Network & Context Pointers
+You are part of a network of agents working on interconnected tasks generated through recursive
+task decomposition. Your parent agent decomposed a larger goal into sub-tasks, and you may
+decompose your own tasks further into child agents.
+
+Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
+These reference the original data in the agent network - use them instead of rewriting:
+- PREFER passing @ref:message: pointers in tool arguments and goal strings over rewriting content
+- Do NOT paraphrase referenced content - the pointer preserves the original exactly
+- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring
+- Pointers are resolved automatically before each LLM call
+
+You can search across the agent network using grep:
+- source="agent_network_user_messages" - search user messages across all agents in this workflow
+- source="agent_network_tool_results" - search tool results (research findings, search results, etc.) across all agents
+    """).rstrip()
+
+    # === BOUNDARY: everything above is static and globally cacheable ===
+    prompt += f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+
     # ========================================================================
-    # 3. CURRENT PHASE
+    # DYNAMIC SECTION (per-call — phase, tools, user context)
     # ========================================================================
+
+    # 5. CURRENT PHASE (moved below boundary so PLAN/EXECUTE share static prefix)
     prompt += "\n\n# Current Phase"
 
     if phase == "PLAN":
@@ -193,9 +236,7 @@ You are the executor, not an advisor:
 - GOOD: "I am now doing X via [tool]". If blocked, request missing info.
         """).rstrip()
 
-    # ========================================================================
-    # 4. TOOL GUIDANCE (from per-tool prompt files)
-    # ========================================================================
+    # 6. TOOL GUIDANCE (per-phase enabled/disabled — moved below boundary)
     prompt += "\n\n# Tool Guidance"
 
     def get_tool_name(tool):
@@ -211,7 +252,7 @@ You are the executor, not an advisor:
     if enabled_tool_names:
         prompt += "\n\n## ENABLED"
         for tool_name in enabled_tool_names:
-            tool_prompt = TOOL_PROMPTS.get(tool_name, "")
+            tool_prompt = _tool_prompts.get(tool_name, "")
             prompt += f"\n\n**{tool_name}**"
             if tool_prompt:
                 prompt += f"\n{tool_prompt}"
@@ -220,43 +261,19 @@ You are the executor, not an advisor:
         prompt += "\n\n## DISABLED (available after set_plan -> attempt_completion)"
         prompt += "\nDo NOT use these tools now. They will be available in EXECUTE phase."
         for tool_name in disabled_tool_names:
-            tool_prompt = TOOL_PROMPTS.get(tool_name, "")
+            tool_prompt = _tool_prompts.get(tool_name, "")
             prompt += f"\n\n**{tool_name}**"
             if tool_prompt:
                 prompt += f"\n{tool_prompt}"
 
     prompt += '\n\n**File attachments**: Sub-agents don\'t inherit files. Pass via `attachments: ["filename.ext"]` using original_filename from file_pointer.'
 
-    # ========================================================================
-    # 5. RULES
-    # ========================================================================
-    prompt += dedent(f"""
+    # 7. USER CONTEXT & SCHEMA
+    if user_context_section.strip():
+        prompt += f"\n\n{user_context_section.strip()}"
 
-
-# Rules
-
-## File Handling
-{FILE_RULES.strip()}
-
-## Tool Preferences
-- Prefer spawn_agent(type="explore") over direct web_search/web_fetch for research tasks
-- Prefer message_person over send_sms/send_email for messaging people
-- Prefer wait_for(condition=...) over recursive sub-agents for polling tasks
-- Prefer spawn_agent(type="for_each") over multiple spawn_agent(type="sub_agent") for repeated work
-
-## Execution
-- Tool-first: favor action over narration
-- No simulation: don't claim a tool ran unless it actually executed
-- Pivot after 2 failures: don't repeat the same failing action
-- Don't add features beyond what was asked
-- Batch independent tool calls in the same response (they run in parallel)
-- If tool B needs tool A's result: emit A alone, wait for result, then emit B
-
-## Anti-patterns
-- Acting like an assistant instead of deciding, planning, and executing
-- Repeating failed approaches instead of pivoting
-- Giving up when a creative path exists
-    """).rstrip()
+    if shared_memory_section.strip():
+        prompt += f"\n\n# Shared Run Memory\n{shared_memory_section.strip()}"
 
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
@@ -267,29 +284,6 @@ You are the executor, not an advisor:
 REQUIRED OUTPUT - gather this data before calling attempt_completion:
 {fields_desc}
         """).rstrip()
-
-    # ========================================================================
-    # 6. AGENT NETWORK & CONTEXT POINTERS
-    # ========================================================================
-    prompt += dedent("""
-
-
-# Agent Network & Context Pointers
-You are part of a network of agents working on interconnected tasks generated through recursive
-task decomposition. Your parent agent decomposed a larger goal into sub-tasks, and you may
-decompose your own tasks further into child agents.
-
-Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
-These reference the original data in the agent network - use them instead of rewriting:
-- PREFER passing @ref:message: pointers in tool arguments and goal strings over rewriting content
-- Do NOT paraphrase referenced content - the pointer preserves the original exactly
-- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring
-- Pointers are resolved automatically before each LLM call
-
-You can search across the agent network using grep:
-- source="agent_network_user_messages" - search user messages across all agents in this workflow
-- source="agent_network_tool_results" - search tool results (research findings, search results, etc.) across all agents
-    """).rstrip()
 
     return prompt.strip()
 
@@ -509,13 +503,10 @@ The final plan must ensure the following data is gathered:
 
 Plan tasks to explicitly capture this information before completion."""
 
-    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
     base_prompt = f"""ROLE
 ----
 Plan a goal into minimal, parallelizable tasks with a precise, acyclic dependency graph.
 Each task maps to exactly ONE tool call. Do not execute; only plan.
-
-Current time: {current_time}
 
 OUTPUT CONTRACT (STRICT)
 ------------------------
@@ -668,7 +659,7 @@ DEPENDENCY PATTERNS
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} - fork then join
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
 
-AVAILABLE TOOLS (for execute phase)
+{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}AVAILABLE TOOLS (for execute phase)
 -----------------------------------
 {available_tools_description}
 

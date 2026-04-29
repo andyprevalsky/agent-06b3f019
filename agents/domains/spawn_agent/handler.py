@@ -42,7 +42,7 @@ from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
-from domains.spawn_sub_agents.service import fetch_parent_attachments_activity
+from helpers.attachments import fetch_parent_attachments_activity
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 
 logger = structlog.get_logger()

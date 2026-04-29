@@ -32,6 +32,8 @@ orchestration.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
@@ -48,6 +50,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_anthropic_sse
 from providers.rose.transforms import (
+    _extract_tools_from_response_format,
     apply_anthropic_tool_config,
     transform_messages_for_anthropic,
 )
@@ -78,6 +81,31 @@ _DISCLAIMER_BLOCK = {
 }
 
 
+def _add_cache_breakpoint(messages: List[Dict[str, Any]]) -> None:
+    """Add cache_control to the last content block of the last message.
+
+    Mutates in place. Mirrors Claude Code's addCacheBreakpoints: exactly one
+    message-level marker so the server knows where the reusable prefix ends.
+    """
+    if not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content:
+        target = content[-1]
+        if isinstance(target, dict):
+            target["cache_control"] = {"type": "ephemeral"}
+
+
+def _add_tool_cache_breakpoint(body: Dict[str, Any]) -> None:
+    """Add cache_control to the last tool definition so system+tools prefix is cached."""
+    tools = body.get("tools")
+    if tools and isinstance(tools, list) and len(tools) > 0:
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
+
+
 def build_anthropic_body(
     *,
     pool_spec: PoolSpec,
@@ -86,15 +114,25 @@ def build_anthropic_body(
     tool_choice: Any,
     response_format: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
-    skip_cache: bool = False,
+    skip_cache_write: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
 
     Returns a dict ready to pass as JSON to `post_anthropic_stream`. The body
     is deterministic in its inputs — callers can safely reuse it across
     token rotations without rebuilding.
+
+    skip_cache_write: when True, system+tools still get cache markers (so the
+    shared prefix can be READ from cache), but the message-level breakpoint is
+    omitted so the one-off trailing message doesn't WRITE a new cache entry.
     """
-    system_text, anthropic_messages = transform_messages_for_anthropic(messages)
+    static_system, dynamic_system, anthropic_messages = transform_messages_for_anthropic(messages)
+
+    if not anthropic_messages:
+        raise RoseInvalidRequest(
+            "claudeAuth: messages list is empty after transform (only system prompt, no user/assistant messages)",
+            status=400,
+        )
 
     body: Dict[str, Any] = {
         "model": pool_spec.claude_auth_model,
@@ -104,34 +142,67 @@ def build_anthropic_body(
     }
 
     system_blocks: List[Dict[str, Any]] = []
-    if system_text:
-        if skip_cache:
-            system_blocks.append({"type": "text", "text": system_text})
-        else:
-            system_blocks.append({
-                "type": "text",
-                "text": system_text,
-                "cache_control": {"type": "ephemeral"},
-            })
+    if static_system:
+        system_blocks.append({
+            "type": "text",
+            "text": static_system,
+            "cache_control": {"type": "ephemeral", "scope": "global"},
+        })
+    if dynamic_system:
+        system_blocks.append({"type": "text", "text": dynamic_system})
     body["system"] = [_IDENTITY_BLOCK, _DISCLAIMER_BLOCK, *system_blocks]
 
-    # Adaptive thinking — Anthropic requires temperature=1 when thinking is on.
+    if not skip_cache_write and anthropic_messages:
+        _add_cache_breakpoint(anthropic_messages)
+
     body["thinking"] = {"type": "adaptive"}
     body["temperature"] = 1
+
+    # Resolve native tools: prefer explicit tools; fall back to extracting
+    # from response_format (the Pydantic-schema → anyOf → native-tools path).
+    # Extraction happens once here so the body is self-contained and
+    # deterministic across retries/rotations.
+    native_tools = tools
+    if native_tools is None and response_format is not None:
+        extracted = _extract_tools_from_response_format(response_format)
+        if extracted is not None:
+            native_tools = extracted["tools"]
 
     native_tool_mode = apply_anthropic_tool_config(
         body,
         response_format,
         True,  # always native tools on claudeAuth
-        tools,
+        native_tools,
         tool_choice,
     )
 
-    # Anthropic rejects `thinking` when `tool_choice` forces a specific tool.
-    # Drop thinking (and the forced temp=1) so the call is accepted.
-    if native_tool_mode and "thinking" in body:
+    _add_tool_cache_breakpoint(body)
+
+    # Anthropic rejects thinking when tool_choice forces tool use.
+    # Both "any" (must use some tool) and "tool" (must use specific tool)
+    # count as forced — only "auto" (model decides) allows thinking.
+    tc = body.get("tool_choice") or {}
+    if native_tool_mode and tc.get("type") in ("any", "tool") and "thinking" in body:
         body.pop("thinking", None)
         body.pop("temperature", None)
+
+    # Set effort AFTER apply_anthropic_tool_config (which may pop output_config
+    # for json_schema reasons) — effort is always valid regardless of tool mode.
+    oc = body.get("output_config") or {}
+    oc["effort"] = "high"
+    body["output_config"] = oc
+
+    def _h(obj: Any) -> str:
+        return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]
+
+    logger.info(
+        "cache.prefix_fingerprint",
+        static_sys_hash=_h(static_system),
+        dynamic_sys_hash=_h(dynamic_system),
+        tools_hash=_h(body.get("tools")),
+        msg_count=len(anthropic_messages),
+        skip_cache_write=skip_cache_write,
+    )
 
     return body
 
@@ -144,7 +215,7 @@ async def claude_auth_complete(
     tool_choice: Any = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
-    skip_cache: bool = False,
+    skip_cache_write: bool = False,
     auth: ClaudeAuthContext,
     request_id: str,
     agent_id: Optional[str] = None,
@@ -166,7 +237,7 @@ async def claude_auth_complete(
         tool_choice=tool_choice,
         response_format=response_format,
         max_tokens=max_tokens,
-        skip_cache=skip_cache,
+        skip_cache_write=skip_cache_write,
     )
     actual_model = f"{pool_spec.claude_auth_model}-claude"
     current_auth = auth

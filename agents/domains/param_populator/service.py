@@ -19,6 +19,7 @@ from domains.param_populator.config import (
 )
 from domains.param_populator.repo import fetch_agent_context
 from helpers.llm import build_llm_messages, call_llm_structured_streaming
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 from utils.tool_schemas import TOOL_MODELS, create_agent_action_model
 
 if TYPE_CHECKING:
@@ -38,7 +39,8 @@ def build_agent_system_prompt(tool_name: str, goal: str, alias_hint: str = "") -
     Returns:
         System prompt string.
     """
-    prompt = f"""You are an AI agent executing a specific task from a plan. Your role is to ensure that the Required Tool is called with exactly the parameters necessary in order to complete the Goal below. The Goal below is the objective that the tool you are calling must accomplish — for agent-spawning tools, this means the Goal becomes the spawned agent's mission.
+    # --- Static prefix (shared across all param populator calls → cached) ---
+    prompt = """You are an AI agent executing a specific task from a plan. Your role is to ensure that the Required Tool is called with exactly the parameters necessary in order to complete the Goal below. The Goal below is the objective that the tool you are calling must accomplish — for agent-spawning tools, this means the Goal becomes the spawned agent's mission.
 
 When calling a tool that creates an agent, the parameters you pass are the ONLY context that agent will have. If you mention a file but don't include that file-pointer in attachments, the agent will NOT have access to that file. You may not assume any context gets transferred over — if there is context from the conversation that the agent will rely on to complete its goal, you MUST reiterate that context in the goal string. This is very important.
 
@@ -58,7 +60,25 @@ When populating tool parameters (especially goal strings for spawn_agent):
 - Example: Instead of rewriting "Call John Smith at 555-1234", pass the pointer:
   "Call the person mentioned in @ref:message:abc123[start="John Smith"|end="555-1234"]"
 
-CURRENT TASK:
+CRITICAL - FILE OUTPUT SCHEMA RULES:
+When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):
+- You MUST use type='file_pointer' for single files
+- You MUST use type='list[file_pointer]' for multiple files
+- NEVER use type='str' for file paths - files will NOT be transferred!
+The file_pointer type enables automatic file transfer from remote environments.
+
+FILE ATTACHMENTS - HOW TO PASS FILES TO SUB-AGENTS:
+When using spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
+- Sub-agents do NOT automatically inherit files from your context
+- You MUST pass files via the `attachments` parameter
+- Use the EXACT `original_filename` value from file_pointer objects in your context
+- Example: if you see `"original_filename": "rs.jpeg"` in a file_pointer, use `attachments: ["rs.jpeg"]`
+- Do NOT use the file's `id` field, storage_path, or any `file:` prefix format"""
+
+    # --- Dynamic suffix (per-call unique: goal, tool, alias-specific rules) ---
+    prompt += SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    prompt += f"""CURRENT TASK:
 Goal: {goal}
 Required Tool: {tool_name}
 
@@ -73,21 +93,6 @@ INSTRUCTIONS:
         prompt += SPAWN_PARAM_REQUIREMENTS[alias_hint]
 
     prompt += f"""
-
-CRITICAL - FILE OUTPUT SCHEMA RULES:
-When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):
-- You MUST use type='file_pointer' for single files
-- You MUST use type='list[file_pointer]' for multiple files
-- NEVER use type='str' for file paths - files will NOT be transferred!
-The file_pointer type enables automatic file transfer from remote environments.
-
-FILE ATTACHMENTS - HOW TO PASS FILES TO SUB-AGENTS:
-When using spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
-- Sub-agents do NOT automatically inherit files from your context
-- You MUST pass files via the `attachments` parameter
-- Use the EXACT `original_filename` value from file_pointer objects in your context
-- Example: if you see `"original_filename": "rs.jpeg"` in a file_pointer, use `attachments: ["rs.jpeg"]`
-- Do NOT use the file's `id` field, storage_path, or any `file:` prefix format
 
 Execute the task now by calling {tool_name} with the correct parameters."""
 
@@ -158,7 +163,7 @@ async def populate_tool_params(
         response_model=agent_action,
         on_chunk=_noop_callback,
         reasoning_max_tokens=REASONING_MAX_TOKENS,
-        skip_cache=True,
+        skip_cache_write=True,
         call_site=CALL_SITE,
         claude_token=claude_token,
     )

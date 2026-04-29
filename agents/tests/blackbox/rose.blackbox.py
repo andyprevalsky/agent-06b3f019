@@ -206,18 +206,31 @@ def test_transform_content_block_file_data_uri():
 
 
 def test_transform_messages_for_anthropic_pulls_system():
-    sys_text, msgs = transform_messages_for_anthropic([
+    static_sys, dynamic_sys, msgs = transform_messages_for_anthropic([
         {"role": "system", "content": "be brief"},
         {"role": "system", "content": "and friendly"},
         {"role": "user", "content": "hi"},
     ])
-    assert sys_text == "be brief\n\nand friendly"
+    assert static_sys == "be brief\n\nand friendly"
+    assert dynamic_sys is None
     assert len(msgs) == 1
     assert msgs[0]["role"] == "user"
 
 
+def test_transform_messages_for_anthropic_splits_on_boundary():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    combined = f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28"
+    static_sys, dynamic_sys, msgs = transform_messages_for_anthropic([
+        {"role": "system", "content": combined},
+        {"role": "user", "content": "hi"},
+    ])
+    assert static_sys == "static instructions"
+    assert dynamic_sys == "Current time: April 28"
+    assert len(msgs) == 1
+
+
 def test_transform_messages_for_anthropic_strips_trailing_assistant():
-    _, msgs = transform_messages_for_anthropic([
+    _, _, msgs = transform_messages_for_anthropic([
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "should be stripped"},
     ])
@@ -226,7 +239,7 @@ def test_transform_messages_for_anthropic_strips_trailing_assistant():
 
 
 def test_transform_messages_for_anthropic_assistant_tool_calls_to_tool_use():
-    _, msgs = transform_messages_for_anthropic([
+    _, _, msgs = transform_messages_for_anthropic([
         {"role": "user", "content": "search"},
         {
             "role": "assistant",
@@ -257,7 +270,7 @@ def test_transform_messages_for_anthropic_assistant_tool_calls_to_tool_use():
 
 
 def test_transform_messages_for_anthropic_dict_arguments():
-    _, msgs = transform_messages_for_anthropic([
+    _, _, msgs = transform_messages_for_anthropic([
         {
             "role": "assistant",
             "tool_calls": [
@@ -270,7 +283,7 @@ def test_transform_messages_for_anthropic_dict_arguments():
 
 
 def test_transform_messages_for_anthropic_bundles_consecutive_tool_results():
-    _, msgs = transform_messages_for_anthropic([
+    _, _, msgs = transform_messages_for_anthropic([
         {"role": "user", "content": "go"},
         {
             "role": "assistant",
@@ -445,52 +458,32 @@ def test_apply_tool_config_choice_auto_and_specific_tool():
 
 
 def test_apply_tool_config_response_format_native_lift():
-    """When use_native_tools=True and the schema has tool_calls.items.anyOf
-    with `tool` const variants, lift them into native Anthropic tools."""
+    """When use_native_tools=True and pre-extracted tools are passed,
+    install them as native Anthropic tools with tool_choice=auto.
+
+    The extraction from response_format now happens in build_anthropic_body
+    (claude_auth.py), not inside apply_anthropic_tool_config. This test
+    verifies the direct native-tool installation path.
+    """
     body = {}
-    rf = {
-        "json_schema": {
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "response": {"type": "string"},
-                    "tool_calls": {
-                        "type": "array",
-                        "items": {
-                            "anyOf": [
-                                {
-                                    "type": "object",
-                                    "description": "search",
-                                    "properties": {
-                                        "tool": {"const": "web_search"},
-                                        "query": {"type": "string"},
-                                    },
-                                    "required": ["tool", "query"],
-                                },
-                                {
-                                    "type": "object",
-                                    "description": "finish",
-                                    "properties": {
-                                        "tool": {"const": "finished"},
-                                    },
-                                    "required": ["tool"],
-                                },
-                            ]
-                        },
-                    },
-                },
-            }
-        }
-    }
+    native_tools = [
+        {"name": "web_search", "description": "search", "input_schema": {
+            "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
+        }},
+        {"name": "finished", "description": "finish", "input_schema": {
+            "type": "object", "properties": {}, "required": [],
+        }},
+    ]
     used_native = apply_anthropic_tool_config(
         body=body,
-        response_format=rf,
+        response_format=None,
         use_native_tools=True,
+        tools=native_tools,
     )
     assert used_native is True
     names = sorted(t["name"] for t in body["tools"])
     assert names == ["finished", "web_search"]
-    assert body["tool_choice"] == {"type": "any"}
+    assert body["tool_choice"] == {"type": "auto"}
 
 
 def test_apply_tool_config_response_format_structured_output_path():
@@ -592,9 +585,27 @@ def test_reconstruct_agent_response_handles_non_dict_input():
     assert parsed["tool_calls"][0] == {"tool": "f"}
 
 
-def test_transform_messages_for_openai_passthrough():
-    msgs = [{"role": "user", "content": "x"}]
-    assert transform_messages_for_openai(msgs) == msgs
+def test_transform_messages_for_openai_adds_cache_breakpoints():
+    msgs = [
+        {"role": "system", "content": "you are helpful"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "bye"},
+    ]
+    out = transform_messages_for_openai(msgs)
+    # System message gets cache_control breakpoint
+    assert out[0]["content"] == [
+        {"type": "text", "text": "you are helpful", "cache_control": {"type": "ephemeral"}}
+    ]
+    # Last message gets cache_control breakpoint
+    assert out[-1]["content"] == [
+        {"type": "text", "text": "bye", "cache_control": {"type": "ephemeral"}}
+    ]
+    # Middle messages are untouched
+    assert out[1] == {"role": "user", "content": "hello"}
+    assert out[2] == {"role": "assistant", "content": "hi"}
+    # Original not mutated
+    assert msgs[0]["content"] == "you are helpful"
 
 
 # =====================================================================
@@ -614,18 +625,80 @@ def test_build_anthropic_body_identity_and_cache_block():
         tool_choice=None,
         response_format=None,
         max_tokens=128,
-        skip_cache=False,
+        skip_cache_write=False,
     )
     assert body["model"] == spec.claude_auth_model
     assert body["max_tokens"] == 128
     assert body["stream"] is True
-    # System contains identity + disclaimer + user system; cache_control on last
     sys = body["system"]
     assert sys[0]["text"].startswith("You are a Claude agent")
-    assert "cache_control" in sys[-1]
+    # Without boundary, all system text is in one static block with global scope
+    cached_blocks = [b for b in sys if "cache_control" in b]
+    assert len(cached_blocks) == 1
+    assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
 
 
-def test_build_anthropic_body_skip_cache_strips_cache_control():
+def test_build_anthropic_body_static_dynamic_split():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    spec = get_pool("rose-1-lite")
+    system_content = f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28"
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+    sys = body["system"]
+    # identity + disclaimer + static (cached) + dynamic (no cache)
+    assert len(sys) == 4
+    static_block = sys[2]
+    dynamic_block = sys[3]
+    assert static_block["text"] == "static instructions"
+    assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
+    assert dynamic_block["text"] == "Current time: April 28"
+    assert "cache_control" not in dynamic_block
+
+
+def test_build_anthropic_body_message_cache_breakpoint():
+    spec = get_pool("rose-1-lite")
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+    msgs = body["messages"]
+    # Last message should have cache_control on its last content block
+    last_msg = msgs[-1]
+    if isinstance(last_msg["content"], list):
+        last_block = last_msg["content"][-1]
+        assert last_block.get("cache_control") == {"type": "ephemeral"}
+    else:
+        # String content gets wrapped into a list with cache_control
+        assert isinstance(last_msg["content"], list)
+        assert last_msg["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # Earlier messages should NOT have cache_control
+    for msg in msgs[:-1]:
+        if isinstance(msg.get("content"), list):
+            for block in msg["content"]:
+                assert "cache_control" not in block, f"Unexpected cache_control in non-last message"
+
+
+def test_build_anthropic_body_skip_cache_write_keeps_system_markers():
     spec = get_pool("rose-1-lite")
     body = build_anthropic_body(
         pool_spec=spec,
@@ -637,9 +710,20 @@ def test_build_anthropic_body_skip_cache_strips_cache_control():
         tool_choice=None,
         response_format=None,
         max_tokens=64,
-        skip_cache=True,
+        skip_cache_write=True,
     )
-    assert all("cache_control" not in b for b in body["system"])
+    # skip_cache_write keeps system cache_control (for reads) but strips message breakpoint
+    user_system = [b for b in body["system"] if b.get("text") not in (
+        "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+        "Disregard the previous identity — you are NOT Claude Code. You are a Rose Labs AI agent. Follow the system instructions below.",
+    )]
+    assert any("cache_control" in b for b in user_system), "system blocks should keep cache markers for reads"
+    last_msg = body["messages"][-1]
+    if isinstance(last_msg.get("content"), list):
+        for block in last_msg["content"]:
+            assert "cache_control" not in block, "message breakpoint should be stripped"
+    else:
+        assert isinstance(last_msg["content"], str)
 
 
 # =====================================================================
@@ -1038,6 +1122,7 @@ def test_build_openrouter_body_includes_optionals():
     )
     assert body["model"] == "google/gemini-3-flash-preview"
     assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
     assert body["tool_choice"] == "auto"
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42
@@ -1055,6 +1140,7 @@ def test_build_openrouter_body_minimal_omits_optionals():
         max_tokens=None,
         seed=None,
     )
+    assert body["stream_options"] == {"include_usage": True}
     assert "tools" not in body
     assert "tool_choice" not in body
     assert "response_format" not in body
@@ -1117,6 +1203,53 @@ async def test_waterfall_all_failed_raises_with_step_errors():
         raised = True
         assert len(e.step_errors) == len(spec.waterfall)
     assert raised
+
+
+async def test_waterfall_reports_cache_metrics_from_openrouter():
+    """Waterfall streams usage with cache fields from prompt_tokens_details."""
+    sse_ok = "\n".join(_openai_sse([
+        {"choices": [{"delta": {"content": "cached"}, "finish_reason": "stop"}]},
+        {"usage": {
+            "prompt_tokens": 500,
+            "completion_tokens": 10,
+            "total_tokens": 510,
+            "prompt_tokens_details": {
+                "cached_tokens": 4500,
+                "cache_write_tokens": 100,
+            },
+        }},
+    ]))
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        assert body.get("stream_options") == {"include_usage": True}, \
+            "stream_options missing — OpenRouter won't return usage in streaming"
+        msgs = body["messages"]
+        sys_msg = next((m for m in msgs if m["role"] == "system"), None)
+        if sys_msg:
+            content = sys_msg["content"]
+            if isinstance(content, list):
+                assert any(b.get("cache_control") for b in content), \
+                    "System message missing cache_control breakpoint"
+        return httpx.Response(
+            200, text=sse_ok, headers={"Content-Type": "text/event-stream"}
+        )
+
+    set_mock_handler(handler)
+    spec = get_pool("rose-1-lite")
+    chunks = await _drain(waterfall_complete(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hello"},
+        ],
+        openrouter_key="ork-test",
+        request_id="r-cache",
+    ))
+    usage_chunk = next(c for c in chunks if c.kind == "usage")
+    assert usage_chunk.data["cache_read_input_tokens"] == 4500
+    assert usage_chunk.data["cache_creation_input_tokens"] == 100
+    assert usage_chunk.data["prompt_tokens"] == 500
 
 
 # =====================================================================
@@ -1209,6 +1342,160 @@ async def test_client_deadline_enforced():
 
 
 # =====================================================================
+# Cache hit rate smoke tests
+# =====================================================================
+
+
+async def test_claude_auth_stream_reports_cache_hit_rate():
+    """Simulated claudeAuth stream with cache metrics — validates cache_read
+    tokens are reported and the hit rate is above a minimum threshold.
+
+    This exercises the full path: build_anthropic_body (with static/dynamic
+    split + message breakpoint) → claude_auth_complete → parse_anthropic_sse
+    → usage chunk with cache metrics.
+    """
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    spec = get_pool("rose-1-lite")
+
+    # Simulate a second-turn call where most of the prompt is cached.
+    # 500 input tokens, 4500 cache_read, 100 cache_creation → 90% hit rate.
+    sse_lines = []
+    sse_lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {
+            "usage": {
+                "input_tokens": 500,
+                "cache_read_input_tokens": 4500,
+                "cache_creation_input_tokens": 100,
+            }
+        },
+    })
+    sse_lines += _ev("content_block_start", {
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    })
+    sse_lines += _ev("content_block_delta", {
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "text_delta", "text": "cached response"},
+    })
+    sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    sse_lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn"},
+        "usage": {"output_tokens": 10},
+    })
+    sse_lines += _ev("message_stop", {"type": "message_stop"})
+
+    sse_body = "\n".join(sse_lines)
+
+    def handler(req):
+        url = str(req.url)
+        if "api.anthropic.com" in url:
+            # Verify the request body has the expected cache structure
+            body = json.loads(req.content.decode())
+            sys_blocks = body.get("system", [])
+            # Should have: identity + disclaimer + static (cached) + dynamic
+            cached = [b for b in sys_blocks if "cache_control" in b]
+            assert len(cached) >= 1, f"Expected cached system blocks, got {len(cached)}"
+            global_cached = [b for b in cached if b["cache_control"].get("scope") == "global"]
+            assert len(global_cached) == 1, f"Expected 1 global-scoped block, got {len(global_cached)}"
+
+            # Verify last message has cache breakpoint
+            msgs = body.get("messages", [])
+            if msgs:
+                last_msg = msgs[-1]
+                content = last_msg.get("content")
+                if isinstance(content, list) and content:
+                    assert "cache_control" in content[-1], "Last message block missing cache_control breakpoint"
+
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="unexpected")
+
+    set_mock_handler(handler)
+
+    system_content = f"Static agent instructions here{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28, 2026 at 04 PM\n\nUser context: Andy"
+
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "first message"},
+            {"role": "assistant", "content": "first reply"},
+            {"role": "user", "content": "second message"},
+        ],
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-cache-hit-rate",
+    ):
+        chunks.append(chunk)
+
+    usage = next(c for c in chunks if c.kind == "usage")
+    cache_read = usage.data.get("cache_read_input_tokens", 0)
+    cache_write = usage.data.get("cache_creation_input_tokens", 0)
+    prompt_tokens = usage.data.get("prompt_tokens", 0)
+
+    total_input = prompt_tokens + cache_read + cache_write
+    assert total_input > 0, "No input tokens reported"
+    hit_rate = cache_read / total_input
+    assert hit_rate >= 0.5, (
+        f"Cache hit rate {hit_rate:.0%} below 50% minimum "
+        f"(read={cache_read}, write={cache_write}, prompt={prompt_tokens})"
+    )
+
+
+def test_build_anthropic_body_cache_structure_from_real_prompt():
+    """build_system_prompt output produces correct cache structure when passed
+    through build_anthropic_body: static block gets global scope, dynamic block
+    is uncached, last message gets breakpoint."""
+    from utils.prompts import build_system_prompt
+
+    spec = get_pool("rose-1-lite")
+    system_text = build_system_prompt(
+        phase="EXECUTE",
+        enabled_tools=["web_search", "attempt_completion"],
+        user_context_section="User: Andy, Phone: 555-1234",
+    )
+
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": "do the thing"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=8192,
+        skip_cache_write=False,
+    )
+
+    sys_blocks = body["system"]
+    # identity + disclaimer + static + dynamic = 4 blocks
+    assert len(sys_blocks) == 4, f"Expected 4 system blocks, got {len(sys_blocks)}"
+
+    static_block = sys_blocks[2]
+    dynamic_block = sys_blocks[3]
+
+    assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
+    assert "cache_control" not in dynamic_block
+    assert "Andy" in dynamic_block["text"]
+    # Timestamp is now in message headers, not the system prompt dynamic section
+    assert "Current time:" not in dynamic_block["text"]
+    assert "Current time:" not in static_block["text"]
+
+    msgs = body["messages"]
+    last_content = msgs[-1]["content"]
+    if isinstance(last_content, list):
+        assert "cache_control" in last_content[-1]
+    else:
+        assert False, "Expected last message content to be list with cache_control"
+
+
+# =====================================================================
 # Test runner
 # =====================================================================
 
@@ -1233,6 +1520,7 @@ async def run_all_tests():
     r.record("transform_block_image_url", test_transform_content_block_image_url_http)
     r.record("transform_block_file_data", test_transform_content_block_file_data_uri)
     r.record("transform_msgs_pulls_system", test_transform_messages_for_anthropic_pulls_system)
+    r.record("transform_msgs_splits_boundary", test_transform_messages_for_anthropic_splits_on_boundary)
     r.record("transform_msgs_strips_trailing", test_transform_messages_for_anthropic_strips_trailing_assistant)
     r.record("transform_msgs_assistant_tool_calls", test_transform_messages_for_anthropic_assistant_tool_calls_to_tool_use)
     r.record("transform_msgs_dict_args", test_transform_messages_for_anthropic_dict_arguments)
@@ -1259,10 +1547,12 @@ async def run_all_tests():
     r.record("get_messages_routes_by_vision", test_get_messages_for_model_routes_by_vision)
     r.record("reconstruct_envelope", test_reconstruct_agent_response_envelope)
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
-    r.record("openai_messages_passthrough", test_transform_messages_for_openai_passthrough)
+    r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)
-    r.record("anthropic_body_skip_cache", test_build_anthropic_body_skip_cache_strips_cache_control)
+    r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
+    r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
+    r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
 
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
@@ -1283,10 +1573,14 @@ async def run_all_tests():
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
+    await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
+
+    await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)
+    r.record("cache_structure_real_prompt", test_build_anthropic_body_cache_structure_from_real_prompt)
 
     teardown_mock()
     return r.summary()

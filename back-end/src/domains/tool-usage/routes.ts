@@ -1,8 +1,9 @@
 /**
  * Tool-usage routes — thin controller layer.
  *
- * POST /api/tool-usage       - Save tool usage (internal service-to-service)
- * GET  /api/tool-usage/:agentId - Get tool usage for an agent
+ * POST /api/tool-usage                - Save tool usage (internal service-to-service)
+ * GET  /api/tool-usage/tree/:agentId  - Get aggregated tool usage for agent tree
+ * GET  /api/tool-usage/:agentId       - Get tool usage for a single agent
  */
 
 import { type Response, Router } from 'express';
@@ -12,6 +13,7 @@ import { createLogger } from '../../providers/logger';
 import {
   saveToolUsage,
   getToolUsageForAgent,
+  getToolUsageForTree,
   AgentNotFoundError,
   AgentOwnershipError,
   AccessDeniedError,
@@ -78,6 +80,41 @@ router.post(
         error: error instanceof Error ? error.message : String(error),
       });
       res.status(500).json({ error: 'Failed to save tool usage' });
+    }
+  })
+);
+
+/**
+ * Get aggregated tool usage for an agent tree (root + all sub-agents)
+ * GET /api/tool-usage/tree/:agentId
+ * Auth: API Key or JWT (must own root agent)
+ */
+router.get(
+  '/tree/:agentId',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    try {
+      const { agentId } = req.params;
+      const userId = req.user?.id;
+
+      const result = await getToolUsageForTree(agentId, userId, req.isInternal === true);
+
+      res.json(result);
+    } catch (error) {
+      if (error instanceof AgentNotFoundError) {
+        res.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof AccessDeniedError) {
+        res.status(403).json({ error: error.message });
+        return;
+      }
+
+      log.error('Error fetching tree tool usage', {
+        agent_id: req.params.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: 'Failed to fetch tree tool usage' });
     }
   })
 );

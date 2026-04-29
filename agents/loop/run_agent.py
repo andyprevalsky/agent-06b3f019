@@ -535,6 +535,8 @@ async def run_agent(  # noqa: C901
                     "tokens_out": tokens_out,
                     "token_count": token_count,
                     "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
                 }
 
             # Calculate tree tokens (own + children's accumulated tokens)
@@ -578,6 +580,8 @@ async def run_agent(  # noqa: C901
                 "tokens_out": tokens_out,
                 "token_count": token_count,
                 "context_size": context_size,
+                "cache_read_input_tokens": cache_read_total,
+                "cache_creation_input_tokens": cache_write_total,
             }
         except Exception as e:
             consecutive_llm_failures += 1
@@ -591,6 +595,8 @@ async def run_agent(  # noqa: C901
                     "tokens_out": tokens_out,
                     "token_count": token_count,
                     "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {e}",
                 }
             backoff = min(2 * (2 ** (consecutive_llm_failures - 1)), 30)
@@ -746,6 +752,8 @@ async def run_agent(  # noqa: C901
                             "tokens_out": tokens_out,
                             "token_count": token_count,
                             "context_size": context_size,
+                            "cache_read_input_tokens": cache_read_total,
+                            "cache_creation_input_tokens": cache_write_total,
                             **result,
                         }
 
@@ -757,6 +765,8 @@ async def run_agent(  # noqa: C901
                             "tokens_out": tokens_out,
                             "token_count": token_count,
                             "context_size": context_size,
+                            "cache_read_input_tokens": cache_read_total,
+                            "cache_creation_input_tokens": cache_write_total,
                             **result,
                         }
 
@@ -907,6 +917,8 @@ async def run_agent(  # noqa: C901
                         "tokens_out": tokens_out,
                         "token_count": token_count,
                         "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
                         "message": "",
                     }
 
@@ -924,6 +936,8 @@ async def run_agent(  # noqa: C901
                         "tokens_out": tokens_out,
                         "token_count": token_count,
                         "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
                         "message": "",
                         "final_response": completion_result,
                     }
@@ -995,6 +1009,8 @@ async def run_agent(  # noqa: C901
                             "tokens_out": tokens_out,
                             "token_count": token_count,
                             "context_size": context_size,
+                            "cache_read_input_tokens": cache_read_total,
+                            "cache_creation_input_tokens": cache_write_total,
                             "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
                         }
                 else:
@@ -1015,6 +1031,8 @@ async def run_agent(  # noqa: C901
                         "tokens_out": tokens_out,
                         "token_count": token_count,
                         "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
                         "message": v_reasoning,
                         "score": score,
                         "structured_response": structured_response,
@@ -1049,6 +1067,8 @@ async def run_agent(  # noqa: C901
                     "tokens_out": tokens_out,
                     "token_count": token_count,
                     "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM returned no tool calls {no_tool_count} consecutive times",
                 }
 
@@ -1141,6 +1161,8 @@ async def run_agent(  # noqa: C901
         "tokens_out": tokens_out,
         "token_count": token_count,
         "context_size": context_size,
+        "cache_read_input_tokens": cache_read_total,
+        "cache_creation_input_tokens": cache_write_total,
         "message": f"Reached max iterations ({max_iterations})",
         # Final verifier results for failure context
         "verifier_progress": final_verifier_progress,

@@ -21,6 +21,9 @@ class TaskResult:
     failure_reason: Optional[str] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_hit_pct: float = 0.0
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
 
@@ -42,6 +45,10 @@ class BenchmarkRun:
         eligible = total - skipped
         total_cost = sum(r.cost_cents for r in self.task_results)
         total_duration = sum(r.duration_seconds for r in self.task_results)
+        agg_cache_read = sum(r.cache_read_input_tokens for r in self.task_results)
+        agg_cache_write = sum(r.cache_creation_input_tokens for r in self.task_results)
+        agg_cache_total = agg_cache_read + agg_cache_write
+        agg_cache_hit_pct = round(agg_cache_read / agg_cache_total * 100, 1) if agg_cache_total > 0 else 0.0
         result = {
             "total": total,
             "passed": passed,
@@ -49,6 +56,9 @@ class BenchmarkRun:
             "total_cost_cents": round(total_cost, 2),
             "total_duration_seconds": round(total_duration, 1),
             "pass_rate": round(passed / eligible, 2) if eligible > 0 else 0.0,
+            "cache_read_input_tokens": agg_cache_read,
+            "cache_creation_input_tokens": agg_cache_write,
+            "cache_hit_pct": agg_cache_hit_pct,
         }
         if skipped > 0:
             result["skipped"] = skipped

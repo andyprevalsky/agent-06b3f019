@@ -158,7 +158,7 @@ Format your response as:
             model=model,
             temperature=0.3,
             max_tokens=1000,
-            skip_cache=True,  # One-shot call — no cache reuse
+            skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="context_compression",
         )
 
@@ -260,7 +260,7 @@ Just write plain text describing what was done."""
             model=model,
             temperature=0.3,
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
-            skip_cache=True,  # One-shot call — no cache reuse
+            skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="completion_summary",
         )
 

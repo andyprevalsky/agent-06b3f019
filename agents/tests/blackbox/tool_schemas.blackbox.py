@@ -43,6 +43,20 @@ def test_execute_phase_tools_subset():
         )
 
 
+def test_all_phase_tools_superset():
+    """ALL_PHASE_TOOLS contains every tool from both phases."""
+    from utils.tool_schemas import ALL_PHASE_TOOLS, EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
+
+    for tool_name in PLAN_PHASE_TOOLS:
+        assert tool_name in ALL_PHASE_TOOLS
+    for tool_name in EXECUTE_PHASE_TOOLS:
+        assert tool_name in ALL_PHASE_TOOLS
+    for tool_name in ALL_PHASE_TOOLS:
+        assert tool_name in TOOL_MODELS, (
+            f"ALL_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
+        )
+
+
 def test_create_agent_action_model():
     """create_agent_action_model returns a Pydantic model class."""
     from utils.tool_schemas import create_agent_action_model

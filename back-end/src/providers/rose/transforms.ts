@@ -43,13 +43,19 @@ function transformContentBlockForAnthropic(block: ContentBlock): unknown {
   return block;
 }
 
+const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n';
+
 export interface AnthropicMessages {
-  systemText: string | null;
+  staticSystem: string | null;
+  dynamicSystem: string | null;
   messages: Array<{ role: string; content: unknown }>;
 }
 
 /**
- * OpenAI-style messages → (system_text, anthropic_messages).
+ * OpenAI-style messages → (staticSystem, dynamicSystem, anthropic_messages).
+ *
+ * System messages are concatenated and split at SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+ * into static (globally cacheable) and dynamic (per-call) portions.
  *
  * Slim port: chat callers don't have assistant tool_calls or tool-role
  * messages, so we don't handle them. If a caller needs them, copy the
@@ -80,10 +86,19 @@ export function transformMessagesForAnthropic(messages: CompletionMessage[]): An
     out.pop();
   }
 
-  return {
-    systemText: systemParts.length > 0 ? systemParts.join('\n\n') : null,
-    messages: out,
-  };
+  const systemText = systemParts.length > 0 ? systemParts.join('\n\n') : null;
+
+  let staticSystem: string | null = null;
+  let dynamicSystem: string | null = null;
+  if (systemText && systemText.includes(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)) {
+    const idx = systemText.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+    staticSystem = systemText.slice(0, idx).trim() || null;
+    dynamicSystem = systemText.slice(idx + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length).trim() || null;
+  } else {
+    staticSystem = systemText;
+  }
+
+  return { staticSystem, dynamicSystem, messages: out };
 }
 
 const UNSUPPORTED_SCHEMA_KEYS = [

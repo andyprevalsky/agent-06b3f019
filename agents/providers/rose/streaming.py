@@ -413,14 +413,28 @@ async def parse_openai_sse(
             f"(request_id={request_id}, saw_done={saw_done})"
         )
 
+    # Anthropic-native fields (direct claudeAuth path) live at the top level.
+    # OpenRouter wraps them under prompt_tokens_details with different names.
+    ptd = usage.get("prompt_tokens_details") or {}
+    cache_write = (
+        usage.get("cache_creation_input_tokens")
+        or ptd.get("cache_write_tokens")
+        or 0
+    )
+    cache_read = (
+        usage.get("cache_read_input_tokens")
+        or ptd.get("cached_tokens")
+        or 0
+    )
+
     yield StreamChunk(
         kind="usage",
         data={
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
-            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
-            "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cache_write,
+            "cache_read_input_tokens": cache_read,
             "finish_reason": finish_reason,
         },
     )

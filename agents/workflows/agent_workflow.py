@@ -76,8 +76,9 @@ with workflow.unsafe.imports_passed_through():
     from tools.x402_bazaar import pay_for_x402_bazaar_service, search_x402_bazaar
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
+    from tools.prompts import TOOL_PROMPTS
     from utils.prompts import build_system_prompt, build_verifier_prompt
-    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.tool_schemas import ALL_PHASE_TOOLS, EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
 
@@ -665,6 +666,10 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
+        # Unified tool list for LLM schema generation — makes the Anthropic
+        # tools array identical across phases so system+tools cache prefix
+        # is shared between PLAN and EXECUTE calls.
+        all_tools = ALL_PHASE_TOOLS
 
         # Determine whether to skip PLAN phase and/or DAG
         skip_plan = start_phase in ("execute", "execute_continued")
@@ -687,7 +692,7 @@ class AgentWorkflow:
                     "PLAN", self.verifier.get("llmJudgePrompt", "")
                 ),
                 model=model,
-                tools=plan_tools,
+                tools=all_tools,
                 is_inside_temporal_activity=False,
                 check_paused=self._check_paused,
                 wait_for_messages=self._wait_for_messages,
@@ -763,7 +768,7 @@ class AgentWorkflow:
                     claude_token=self.claude_max_token,
                     on_tokens=self._on_tokens,
                     system_prompt_text=execute_system_prompt,
-                    tool_names=execute_tools,
+                    tool_names=all_tools,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
@@ -790,7 +795,7 @@ class AgentWorkflow:
                 "EXECUTE", self.verifier.get("llmJudgePrompt", "")
             ),
             model=model,
-            tools=execute_tools,
+            tools=all_tools,
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=self._check_paused,
@@ -886,6 +891,7 @@ class AgentWorkflow:
             user_context_section=self.user_context_section,
             response_schema=self.output_schema,
             shared_memory_section=shared_memory_section,
+            tool_prompts=TOOL_PROMPTS,
         )
 
     async def _wait_for_messages(self) -> bool:
@@ -1759,6 +1765,8 @@ class AgentWorkflow:
                             "tokens_in": tokens_in_delta,
                             "tokens_out": tokens_out_delta,
                             "model": model_for_usage,
+                            "cache_read_input_tokens": cache_read_input_tokens,
+                            "cache_creation_input_tokens": cache_creation_input_tokens,
                         }
                     ],
                 ],

@@ -19,7 +19,7 @@ def _ensure_dotenv_loaded():
     if not _dotenv_loaded:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=False)
         _dotenv_loaded = True
 
 
@@ -208,7 +208,7 @@ def load_config() -> AppConfig:
         api_key=os.environ["TEMPORAL_API_KEY"],
         namespace=os.environ["TEMPORAL_NAMESPACE"],
         address=os.environ["TEMPORAL_ADDRESS"],
-        task_queue=os.getenv("TEMPORAL_TASK_QUEUE", "navi-agent-tasks"),
+        task_queue=os.environ["TEMPORAL_TASK_QUEUE"],
         max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "50")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),

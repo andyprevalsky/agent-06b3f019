@@ -735,7 +735,7 @@ async def test_fetch_parent_attachments_activity():
         },
     })
     with patch("temporalio.activity.heartbeat"):
-        from domains.spawn_sub_agents.service import fetch_parent_attachments_activity
+        from helpers.attachments import fetch_parent_attachments_activity
 
         result = await fetch_parent_attachments_activity("parent-99")
 

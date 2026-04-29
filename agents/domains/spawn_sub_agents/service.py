@@ -29,34 +29,6 @@ ParentAttachments = Dict[str, Dict[str, Dict[str, Any]]]
 
 
 # ---------------------------------------------------------------------------
-# Temporal activity — fetch parent attachments (called once, reused by N spawns)
-# ---------------------------------------------------------------------------
-
-
-@activity.defn
-@traced("fetch_parent_attachments_activity")
-async def fetch_parent_attachments_activity(parent_agent_id: str) -> ParentAttachments:
-    """Fetch the parent agent's attachment metadata from the backend.
-
-    Returns a serialisable dict with two sub-dicts:
-        {"filename_to_pointer": {...}, "all_pointers_by_id": {...}}
-    """
-    config = load_config()
-    backend_url = config.backend.api_url.rstrip("/")
-    api_key = config.backend.api_key
-    if not api_key:
-        raise ValueError("BACKEND_API_KEY not configured")
-
-    filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(
-        backend_url, api_key, parent_agent_id,
-    )
-    return {
-        "filename_to_pointer": filename_to_pointer,
-        "all_pointers_by_id": all_pointers_by_id,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
 

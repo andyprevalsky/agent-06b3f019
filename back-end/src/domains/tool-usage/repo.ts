@@ -45,3 +45,34 @@ export async function findToolUsagesByAgentId(agentId: string) {
     orderBy: { createdAt: 'asc' },
   });
 }
+
+/**
+ * Find an agent by ID returning id, userId, and busId (for tree lookups).
+ */
+export async function findAgentWithBusId(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { id: true, userId: true, busId: true },
+  });
+}
+
+/**
+ * Find all agent IDs that share the same busId (i.e. the whole sub-agent tree).
+ */
+export async function findAgentIdsByBusId(busId: string) {
+  const agents = await prisma.agent.findMany({
+    where: { busId },
+    select: { id: true },
+  });
+  return agents.map((a) => a.id);
+}
+
+/**
+ * Get all tool usage records for multiple agents, ordered by creation time ascending.
+ */
+export async function findToolUsagesByAgentIds(agentIds: string[]) {
+  return prisma.toolUsage.findMany({
+    where: { agentId: { in: agentIds } },
+    orderBy: { createdAt: 'asc' },
+  });
+}

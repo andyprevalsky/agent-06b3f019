@@ -112,6 +112,29 @@
     "start_phase": "execute"
   },
   {
+    "name": "cache-coverage",
+    "title": "Cache Coverage: All LLM Paths",
+    "prompt": "Do these tasks in order:\n\n1. EXPLORE: Use an explore agent to find the current population of Japan (a single number).\n\n2. SIAS (Super-Intelligent Autonomous System): Spawn a sub-agent to do this multi-step task:\n   a. Use a browser agent to visit https://www.random.org/integers/?num=1&min=1&max=100&col=1&base=10&format=plain and return the number shown on the page.\n   b. Use Claude Code to run this Python script and return the output: import random; random.seed(42); print(random.randint(1, 100))\n   c. Multiply the two numbers (browser result × code result) and return the product.\n\n3. MULTIPLY: Take the population of Japan from step 1 and multiply it by the product from step 2.\n\n4. MESSAGE: Send an email to andy@roselabs.ai with the subject 'Cache Benchmark Result' containing the final number from step 3.",
+    "eval_prompt": "Agent used all required tool paths: explore agent (population lookup), SIAS sub-agent (which internally used browser agent and Claude Code), reasoning/multiplication, and message_person (email to andy@roselabs.ai). An approval was triggered for the message. Each tool type was used exactly once.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent", "message_person"],
+    "tags": ["cache"],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "start_phase": "plan",
+    "expected_tool_counts": {
+      "spawn_agent": 1,
+      "spawn_sub_agent": 1,
+      "spawn_browser_agent": 1,
+      "spawn_claude_code_agent": 1,
+      "message_person": 1
+    }
+  },
+  {
     "name": "image-handling",
     "title": "Image Attachment Processing",
     "prompt": "Make this image completely red-tinted (apply a red color overlay to the entire image).",

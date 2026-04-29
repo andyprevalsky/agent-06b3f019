@@ -159,9 +159,10 @@ When diagnostics show `🔴 ACTION REQUIRED`, the message count stalls across po
    > Working directory: `<cwd>/agents`
    >
    > **Do this:**
-   > 1. Run BOTH summary commands in parallel (they answer different questions — latency vs. errors):
+   > 1. Run ALL THREE summary commands in parallel (they answer different questions):
    >    - `python benchmarks/agent_latency.py <agent_id>` — span-based waterfall: executive summary, top 10 slowest paths, slowest LLM calls, slowest backend HTTP, deduped errors. Best for "why was it slow/stalled." (Local logs only — skip in prod mode.)
    >    - `python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --url <BASE_URL>` — event-timeline tree across worker/backend/research/messages. Best for raw error context.
+   >    - `python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>` — tree-wide token + cache breakdown (root + all sub-agents). Best for "how much did this cost / did caching work?"
    > 2. Based on which summary points at the smoking gun, expand that tool:
    >    - `python benchmarks/agent_latency.py <agent_id> -v` for the full span tree (sub-agents, DB, broadcasts, HTTP internals).
    >    - `python benchmarks/agent_logs.py <agent_id> --tree --source worker --url <BASE_URL> 2>&1 | grep -i 'error\|failed\|traceback\|exception\|"level":"error"'`

@@ -26,6 +26,8 @@ class BenchmarkTask:
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
+    min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
+    expected_tool_counts: Optional[dict] = None  # Exact tool call counts across entire agent tree (toolName → count)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

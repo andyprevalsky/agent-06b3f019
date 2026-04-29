@@ -180,6 +180,70 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
+def build_verifier_context_messages(
+    context: List[Dict[str, Any]],
+    system_prompt: str,
+) -> List[Dict[str, Any]]:
+    """Build verifier messages with compressed tool results and progressive cache.
+
+    Strips ASSISTANT and SYSTEM messages. Compresses USER + TOOL messages into
+    user-role batches, split by prior verifier responses (which become the
+    assistant turns to maintain user/assistant alternation).
+
+    Sequential verifier calls share a growing cached prefix:
+      call N reads [sys, user_batch1, asst_v1, ..., user_batchN-1, asst_vN-1]
+      and writes only user_batchN (the new tool results).
+    """
+    sorted_context = sorted(
+        context,
+        key=lambda m: m.get("timestamp", "1970-01-01"),
+    )
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    current_batch: List[str] = []
+
+    for msg in sorted_context:
+        role = msg.get("role", "")
+        text = msg.get("text", "")
+        metadata = msg.get("metadata", {}) or {}
+
+        if metadata.get("subAgentId"):
+            continue
+        if role in ("SYSTEM", "ASSISTANT"):
+            continue
+
+        if role == "USER":
+            current_batch.append(text)
+            continue
+
+        if role == "TOOL":
+            if metadata.get("toolStatus") == "IN_PROGRESS":
+                continue
+
+            if metadata.get("verifierMessage"):
+                if current_batch:
+                    messages.append({"role": "user", "content": "\n\n".join(current_batch)})
+                    current_batch = []
+                verifier_text = text
+                if metadata.get("title"):
+                    verifier_text = f"{metadata['title']}: {text}"
+                messages.append({"role": "assistant", "content": verifier_text})
+                continue
+
+            tool_name = metadata.get("toolName", "tool")
+            title = metadata.get("title")
+            prefix = f"[{tool_name}]" + (f" {title}:" if title else ":")
+            tool_text = f"{prefix} {text}"
+            if metadata.get("structured_response"):
+                tool_text += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+            current_batch.append(tool_text)
+
+    current_batch.append("Evaluate the agent's progress as JSON.")
+    messages.append({"role": "user", "content": "\n\n".join(current_batch)})
+
+    return messages
+
+
 def convert_context_to_messages(  # noqa: C901
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -281,15 +345,13 @@ def convert_context_to_messages(  # noqa: C901
             messages.append({"role": "user", "content": content})
 
         elif role == "ASSISTANT":
-            # Still track declared tool IDs even if not including assistant messages
-            # This ensures TOOL messages can be properly matched
+            if not include_assistant:
+                continue
+
             if metadata.get("tool_calls"):
                 for tc in metadata["tool_calls"]:
                     tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
-
-            if not include_assistant:
-                continue
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
@@ -463,6 +525,16 @@ async def build_llm_messages(  # noqa: C901
     # Files are already embedded as multimodal content in their respective messages,
     # and the static system prompt already has guidance on passing files via attachments.
 
+    def _ts_header(msg: Dict) -> str:
+        """Format message timestamp as a short header the LLM can use for temporal context."""
+        ts = msg.get("timestamp")
+        if not ts:
+            return ""
+        dt = parse_timestamp(ts)
+        if dt.year == 1970:
+            return ""
+        return f"[{dt.strftime('%Y-%m-%d %H:%M')}] "
+
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
 
@@ -541,9 +613,10 @@ async def build_llm_messages(  # noqa: C901
                 metadata_texts.append(build_attachment_metadata_text(fp))
 
         # Determine LLM role and base text
+        ts_prefix = _ts_header(msg)
         if role == "USER":
             llm_role = "user"
-            full_text = text
+            full_text = ts_prefix + text
 
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
@@ -558,7 +631,7 @@ async def build_llm_messages(  # noqa: C901
 
         if role == "ASSISTANT":
             llm_role = "assistant"
-            full_text = text
+            full_text = ts_prefix + text
 
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
@@ -654,12 +727,12 @@ async def build_llm_messages(  # noqa: C901
                                 fname = block.get("file", {}).get("filename", "file")
                                 tool_content += f"\n\n[Attached file: {fname}]"
                     label = tool_name or "tool"
-                    messages.append({"role": "user", "content": f"[{label} result]: {tool_content}"})
+                    messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
                     continue
 
-                tool_content = text
+                tool_content = ts_prefix + text
                 if metadata.get("title"):
-                    tool_content = f"{metadata['title']}: {tool_content}"
+                    tool_content = f"{ts_prefix}{metadata['title']}: {text}"
                 if metadata.get("structured_response"):
                     tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 if metadata_texts:
@@ -683,7 +756,7 @@ async def build_llm_messages(  # noqa: C901
                 continue
 
             # Non-terminal TOOL messages are passed as context text.
-            full_text = f"[TOOL]: {text}"
+            full_text = f"{ts_prefix}[TOOL]: {text}"
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
             if content:
@@ -695,10 +768,10 @@ async def build_llm_messages(  # noqa: C901
 
         if role == "SYSTEM":
             llm_role = "user"
-            full_text = f"[SYSTEM]: {text}"
+            full_text = f"{ts_prefix}[SYSTEM]: {text}"
         else:
             llm_role = "user"
-            full_text = text
+            full_text = ts_prefix + text
 
         if metadata_texts:
             full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
@@ -766,7 +839,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     ] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
-    skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
+    skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
@@ -806,7 +879,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             "temperature": temperature,
             "max_tokens": max_tokens,
             "reasoning_max_tokens": reasoning_max_tokens,
-            "skip_cache": skip_cache,
+            "skip_cache_write": skip_cache_write,
             "has_claude_token": claude_token is not None,
         },
     )
@@ -820,7 +893,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         # spans nest under the caller; only mint when nothing is bound.
         request_id = current_request_id() or str(uuid.uuid4())[:8]
         logger.info(
-            f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
+            f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
         )
 
         # Build JSON schema from Pydantic model
@@ -883,7 +956,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=model_seed,
-                skip_cache=skip_cache,
+                skip_cache_write=skip_cache_write,
                 claude_auth=claude_auth_from_token(claude_token),
                 agent_id=agent_id,
                 request_id=request_id,
@@ -1239,7 +1312,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 on_raw_progress=on_raw_progress,
                 claude_token=claude_token,
                 on_model_detected=on_model_detected,
-                skip_cache=skip_cache,
+                skip_cache_write=skip_cache_write,
                 call_site=call_site,
                 _is_escalation=True,
             )
@@ -1771,7 +1844,7 @@ async def call_llm(
     max_tokens: int = 4096,
     response_format: Optional[Dict] = None,
     claude_token: Optional[str] = None,
-    skip_cache: bool = False,
+    skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1807,7 +1880,7 @@ async def call_llm(
             extra={
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "skip_cache": skip_cache,
+                "skip_cache_write": skip_cache_write,
                 "has_claude_token": claude_token is not None,
             },
         )
@@ -1819,7 +1892,7 @@ async def call_llm(
         if pool is not None:
             request_id = current_request_id() or str(uuid.uuid4())[:8]
             logger.info(
-                f"📤 [{request_id}] [{call_site}] Routing Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
+                f"📤 [{request_id}] [{call_site}] Routing Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
             )
 
             rose_client = RoseClient()
@@ -1830,7 +1903,7 @@ async def call_llm(
                     response_format=response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    skip_cache=skip_cache,
+                    skip_cache_write=skip_cache_write,
                     claude_auth=claude_auth_from_token(claude_token),
                     agent_id=agent_id,
                     request_id=request_id,
@@ -2295,14 +2368,9 @@ async def check_progress(
         _safe_heartbeat("Checking progress with LLM judge")
 
         config = load_config()
-        # Use the pre-built verifier prompt directly (no double-building)
         system_prompt = verifier_system_prompt
 
-        # Convert full context to OpenAI message format (no truncation)
-        # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False))
-        messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})
+        messages = build_verifier_context_messages(context, system_prompt)
 
         # Resolve context pointers
         messages = await resolve_pointers_in_messages(messages, local_context=context)
@@ -2435,9 +2503,9 @@ async def call_llm_activity(  # noqa: C901
             without changing system prompt/tools (preserves cache prefix).
         required_tool: If set, validates the LLM called this tool. Raises ValueError
             if the tool is not in the response.
-        skip_cache_write: If True, reads from prompt cache but does not create new
-            cache entries (the extra user message creates a unique suffix that would
-            never be hit again).
+        skip_cache_write: If True, skips message-level cache breakpoint (avoids
+            writing a cache entry for the unique trailing message) but keeps
+            system+tools markers so the shared prefix can still be read from cache.
 
     Returns:
         Dict with:
@@ -2538,7 +2606,7 @@ async def call_llm_activity(  # noqa: C901
             claude_token=claude_token,
             on_model_detected=on_model_detected,
             call_site=call_site,
-            skip_cache=skip_cache_write,
+            skip_cache_write=skip_cache_write,
         )
 
         # Send final done=True chunk
@@ -2918,7 +2986,7 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
             claude_token=claude_max_token,
-            skip_cache=True,  # Plan is generated once per iteration — no cache reuse
+            skip_cache_write=True,  # Plan is generated once per iteration — no cache reuse
             call_site="planner",
         )
         llm_elapsed = time.perf_counter() - llm_start
