@@ -93,7 +93,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     stream: true,
     system: systemBlocks,
     thinking: { type: 'adaptive' },
-    temperature: opts.temperature ?? 1,
+    temperature: 1,
   };
 
   applyAnthropicResponseFormat(body, opts.responseFormat);

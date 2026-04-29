@@ -292,3 +292,14 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     return null;
   }
 }
+
+/**
+ * Fetch a Claude token for a user: tries their personal token first, then pool.
+ * Returns just the access token string, or null if unavailable.
+ */
+export async function fetchClaudeTokenForUser(userId: string): Promise<string | null> {
+  const userToken = await fetchClaudeCodeAccessToken(userId);
+  if (userToken) return userToken;
+  const poolResult = await fetchPoolToken();
+  return poolResult?.accessToken ?? null;
+}

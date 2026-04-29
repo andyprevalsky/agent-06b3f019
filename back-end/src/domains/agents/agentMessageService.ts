@@ -5,6 +5,7 @@
 import { getTemporalClient } from '../../providers/temporal';
 import { handleChatMessage } from '../../providers/chat';
 import { createMessage } from '../../providers/messages';
+import { fetchClaudeTokenForUser } from '../../providers/claudeCredentials';
 import {
   type FilePointer,
   processUploadedFile,
@@ -67,12 +68,12 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
       });
     }
   } else if (agentForChat !== null && agentForChat !== undefined) {
-    // Chat mode: handle message with fixed LLM call sequence
-    // Run in background so we can return response immediately
+    const claudeToken = await fetchClaudeTokenForUser(agentForChat.userId) ?? undefined;
     handleChatMessage({
       agentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
+      claudeToken,
     }).catch((err: unknown) => {
       log.error('Chat handler error in message route', {
         agent_id: agentId,

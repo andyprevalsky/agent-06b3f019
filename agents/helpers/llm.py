@@ -2986,7 +2986,7 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
             claude_token=claude_max_token,
-            skip_cache_write=True,  # Plan is generated once per iteration — no cache reuse
+            skip_cache_write=False,
             call_site="planner",
         )
         llm_elapsed = time.perf_counter() - llm_start

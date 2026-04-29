@@ -50,6 +50,7 @@ export async function handleChatMessage(config: {
   agentId: string;
   userId: string;
   model: string;
+  claudeToken?: string;
 }): Promise<ChatResult> {
   log.info('[ChatHandler] Processing message', {
     agentId: config.agentId,
@@ -77,6 +78,7 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages,
     model: config.model,
+    claudeToken: config.claudeToken,
   });
 
   const { decision, webSearchToolCallId } = routerResponse;
@@ -212,6 +214,7 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages: updatedMessages,
     model: config.model,
+    claudeToken: config.claudeToken,
   });
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);

@@ -8,6 +8,7 @@ import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPri
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { setResponseSchema } from '../../providers/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { fetchClaudeTokenForUser } from '../../providers/claudeCredentials';
 import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
@@ -133,12 +134,12 @@ async function startDirectWorkflow(
 }
 
 /** Start root agent in chat mode (fire-and-forget). */
-function startChatMode(
+async function startChatMode(
   body: CreateAgentBody,
   agentDbId: string,
   agentId: string,
   userId: string
-): void {
+): Promise<void> {
   const repoName = `agent-${agentId.substring(0, 8)}`;
   createGithubRepo(repoName)
     .then(async (repoUrl) => {
@@ -161,7 +162,8 @@ function startChatMode(
       });
     });
 
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
+  const claudeToken = await fetchClaudeTokenForUser(userId) ?? undefined;
+  handleChatMessage({ agentId: agentDbId, userId, model: body.model, claudeToken }).catch((err: unknown) => {
     log.error('Chat handler error', {
       agent_id: agentDbId,
       error: err instanceof Error ? err.message : String(err),

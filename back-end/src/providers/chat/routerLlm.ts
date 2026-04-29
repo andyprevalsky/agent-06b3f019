@@ -345,6 +345,7 @@ export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
+  claudeToken?: string;
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
 
@@ -417,6 +418,7 @@ export async function callRouterLlm(params: {
         schema: ROUTER_JSON_SCHEMA,
       },
     },
+    claude_token: params.claudeToken,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)

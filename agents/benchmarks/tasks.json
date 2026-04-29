@@ -18,8 +18,8 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level Sub-Agent Spawning",
-    "prompt": "I need you to find two numbers: the population of Tokyo and the population of NYC. Spawn a sub-agent for each city to find the answer. Then multiply the two populations together and give me the result.",
-    "eval_prompt": "Agent spawned sub-agents to find population data for Tokyo and NYC, collected their results, and multiplied them. The final answer contains a numeric product of two population figures.",
+    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use the spawn_agent tool exactly twice — once per city. Each sub-agent should search the web for the population and return only the numeric value. After both sub-agents complete, multiply the two populations together and report the final product.",
+    "eval_prompt": "Agent spawned exactly 2 sub-agents (one for Tokyo, one for NYC) using the spawn_agent tool. Collected both population numbers and multiplied them. The final answer contains a numeric product of two population figures.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -29,7 +29,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": null
+    "start_phase": "plan"
   },
   {
     "name": "parallel-tool-calls",
