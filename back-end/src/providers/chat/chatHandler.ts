@@ -15,7 +15,7 @@ import { prisma } from '../database';
 import { startAgentWorkflow } from '../temporal';
 import { createMessage } from '../messages';
 import { setResponseSchema } from '../setResponseSchema';
-import { callRouterLlm, RouterDecision } from './routerLlm';
+import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { executeWebSearch } from './chatTools';
 import {
@@ -80,6 +80,8 @@ export async function handleChatMessage(config: {
   });
 
   const { decision, webSearchToolCallId } = routerResponse;
+
+  recordChatUsage(config.agentId, config.userId, 'chat_router', routerResponse.usage);
 
   log.info('[ChatHandler] Router decision', {
     agentId: config.agentId,
@@ -212,6 +214,8 @@ export async function handleChatMessage(config: {
     model: config.model,
   });
 
+  recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
+
   // 1. Save reasoning as ASSISTANT message (no metadata) - matches worker behavior
   await createMessage({
     agentId: config.agentId,
@@ -322,5 +326,36 @@ async function startTemporalWorkflowForChat(
     agentId,
     workflowId,
     goal: goal.substring(0, 100),
+  });
+}
+
+function recordChatUsage(agentId: string, userId: string, toolName: string, usage: ChatLlmUsage): void {
+  log.info('[ChatHandler] Recording chat usage', {
+    agentId, toolName,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    cache_read: usage.cache_read_input_tokens,
+    cache_write: usage.cache_creation_input_tokens,
+  });
+  prisma.toolUsage.create({
+    data: {
+      userId,
+      agentId,
+      toolName,
+      totalCostCents: 0,
+      usageItems: [{
+        type: 'llm',
+        call_site: 'chat',
+        number_of_tokens: usage.total_tokens,
+        tokens_in: usage.prompt_tokens,
+        tokens_out: usage.completion_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+      }],
+    },
+  }).then(() => {
+    log.info('[ChatHandler] Chat usage recorded successfully', { agentId, toolName });
+  }).catch((err) => {
+    log.warn('[ChatHandler] Failed to record chat usage', { agentId, toolName, error: String(err) });
   });
 }

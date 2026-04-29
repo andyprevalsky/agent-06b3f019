@@ -43,10 +43,19 @@ export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 // ============================================
 // Router Response with streaming metadata
 // ============================================
+export interface ChatLlmUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+}
+
 export interface RouterResponse {
   decision: RouterDecision;
   streamId: string;
-  webSearchToolCallId?: string; // Set if web_search detected during streaming
+  webSearchToolCallId?: string;
+  usage: ChatLlmUsage;
 }
 
 // ============================================
@@ -421,6 +430,10 @@ export async function callRouterLlm(params: {
   let chunkCount = 0;
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
+  const usage: ChatLlmUsage = {
+    prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+    cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+  };
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
@@ -493,6 +506,14 @@ export async function callRouterLlm(params: {
           '🔍 Searching the web'
         );
       }
+    }
+
+    if (chunk.usage) {
+      usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
+      usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
+      usage.total_tokens = chunk.usage.total_tokens ?? 0;
+      usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
+      usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
     }
 
     // Log progress every 50 chunks
@@ -593,5 +614,6 @@ export async function callRouterLlm(params: {
     decision,
     streamId,
     webSearchToolCallId,
+    usage,
   };
 }

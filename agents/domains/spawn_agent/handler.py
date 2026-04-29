@@ -196,7 +196,7 @@ class SpawnAgentManager(ToolManager):
 
             # Run explore agent activity with pause polling
             model = getattr(workflow_instance, "model", EXPLORE_DEFAULT_MODEL)
-            claude_token = None  # Explore uses cheap lite waterfall, no claudeAuth
+            claude_token = getattr(workflow_instance, "claude_max_token", None)
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,

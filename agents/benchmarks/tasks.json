@@ -29,7 +29,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan"
+    "start_phase": null
   },
   {
     "name": "parallel-tool-calls",
@@ -125,7 +125,7 @@
     "requires_claude_code": true,
     "attachment": null,
     "approval_handling": "ignore",
-    "start_phase": "plan",
+    "start_phase": null,
     "expected_tool_counts": {
       "spawn_agent": 1,
       "spawn_sub_agent": 1,

@@ -10,6 +10,7 @@ import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
+import type { ChatLlmUsage } from './routerLlm';
 
 const log = createLogger('GeneratorLLM');
 
@@ -167,9 +168,10 @@ async function buildMultimodalContentFromFile(
 // Generator Response
 // ============================================
 export interface GeneratorResponse {
-  reasoning: string; // Streamed as thinking (ASSISTANT_STREAM)
-  response: string; // Saved as ASSISTANT message (INSERT)
+  reasoning: string;
+  response: string;
   streamId: string;
+  usage: ChatLlmUsage;
 }
 
 // ============================================
@@ -398,6 +400,10 @@ export async function callGeneratorLlm(params: {
   let sequence = 0;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
+  const usage: ChatLlmUsage = {
+    prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+    cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+  };
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
@@ -442,6 +448,14 @@ export async function callGeneratorLlm(params: {
           isClaude
         );
       }
+    }
+
+    if (chunk.usage) {
+      usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
+      usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
+      usage.total_tokens = chunk.usage.total_tokens ?? 0;
+      usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
+      usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
     }
 
     // Log progress every 50 chunks
@@ -506,5 +520,6 @@ export async function callGeneratorLlm(params: {
     reasoning: parsed.reasoning || '',
     response: parsed.response || '',
     streamId,
+    usage,
   };
 }
