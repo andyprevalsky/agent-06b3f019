@@ -23,6 +23,7 @@ import {
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
+import { fetchClaudeCodeAccessToken, fetchPoolToken } from '../claudeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('ChatHandler');
@@ -57,6 +58,30 @@ export async function handleChatMessage(config: {
     model: config.model,
   });
 
+  // Fetch Claude token for direct Anthropic passthrough (enables prompt caching)
+  let claudeToken: string | null = null;
+  try {
+    const userToken = await fetchClaudeCodeAccessToken(config.userId);
+    if (userToken) {
+      claudeToken = userToken;
+      log.info('[ChatHandler] Using user Claude token', { userId: config.userId });
+    } else {
+      const poolResult = await fetchPoolToken();
+      if (poolResult) {
+        claudeToken = poolResult.accessToken;
+        log.info('[ChatHandler] Using pool Claude token', {
+          userId: config.userId,
+          poolTokenId: poolResult.poolTokenId,
+        });
+      }
+    }
+  } catch (error) {
+    log.warn('[ChatHandler] Failed to fetch Claude token, falling back to racing', {
+      userId: config.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   // Fetch messages from DB
   const dbMessages = await prisma.message.findMany({
     where: { agentId: config.agentId },
@@ -78,7 +103,7 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages,
     model: config.model,
-    claudeToken: config.claudeToken,
+    claudeToken,
   });
 
   const { decision, webSearchToolCallId } = routerResponse;
@@ -214,7 +239,7 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages: updatedMessages,
     model: config.model,
-    claudeToken: config.claudeToken,
+    claudeToken,
   });
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);

@@ -300,7 +300,7 @@ export async function callGeneratorLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  claudeToken?: string;
+  claudeToken: string | null;
 }): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
@@ -390,7 +390,7 @@ export async function callGeneratorLlm(params: {
         schema: GENERATOR_JSON_SCHEMA,
       },
     },
-    claude_token: params.claudeToken,
+    claude_token: params.claudeToken ?? undefined,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
@@ -406,13 +406,22 @@ export async function callGeneratorLlm(params: {
     prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
     cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
   };
+  let actualModel = '';
+  let usageData: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    finish_reason?: string;
+  } | undefined;
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
     chunkCount++;
 
     // Detect user's Claude token usage from "-claude" suffix in actual_model
-    const actualModel = chunk.actual_model;
+    if (chunk.actual_model) actualModel = chunk.actual_model;
+    if (chunk.usage) usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
     if (!isClaude && actualModel?.endsWith('-claude')) {
       isClaude = true;
     }
@@ -487,6 +496,26 @@ export async function callGeneratorLlm(params: {
     reasoningLength: accumulatedReasoning.length,
     jsonLength: fullJson.length,
   });
+
+  if (usageData) {
+    const cacheRead = usageData.cache_read_input_tokens ?? 0;
+    const cacheWrite = usageData.cache_creation_input_tokens ?? 0;
+    const promptTokens = usageData.prompt_tokens ?? 0;
+    const totalInput = promptTokens + cacheRead + cacheWrite;
+    const cacheHitPct = totalInput > 0 ? Math.round((cacheRead / totalInput) * 100) : 0;
+    log.info('llm.cache', {
+      call_site: 'generatorLlm',
+      agent_id: params.agentId,
+      actual_model: actualModel,
+      is_claude: isClaude,
+      prompt_tokens: promptTokens,
+      completion_tokens: usageData.completion_tokens ?? 0,
+      cache_read: cacheRead,
+      cache_write: cacheWrite,
+      cache_hit_pct: cacheHitPct,
+      finish: usageData.finish_reason ?? 'unknown',
+    });
+  }
 
   // Parse the complete JSON
   if (!fullJson) {

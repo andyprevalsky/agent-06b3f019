@@ -841,6 +841,8 @@ async def call_llm_structured_streaming(  # noqa: C901
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
+    thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
+    effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
@@ -961,6 +963,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 agent_id=agent_id,
                 request_id=request_id,
                 call_site=call_site,
+                thinking=thinking,
+                effort=effort,
             ):
                 chunk_count += 1
 
@@ -993,12 +997,21 @@ async def call_llm_structured_streaming(  # noqa: C901
                     cache_read = stream_usage.get("cache_read_input_tokens", 0) or 0
                     cache_write = stream_usage.get("cache_creation_input_tokens", 0) or 0
                     prompt_tokens = stream_usage.get("prompt_tokens", 0) or 0
+                    completion_tokens = stream_usage.get("completion_tokens", 0) or 0
                     total_input = prompt_tokens + cache_read + cache_write
                     cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
                     logger.info(
-                        f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} "
-                        f"cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}% "
-                        f"finish={final_finish_reason}"
+                        "llm.cache",
+                        call_site=call_site,
+                        agent_id=agent_id,
+                        actual_model=actual_model,
+                        is_claude=using_claude_auth,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        cache_read=cache_read,
+                        cache_write=cache_write,
+                        cache_hit_pct=cache_pct,
+                        finish=final_finish_reason,
                     )
                     continue
 
@@ -2120,8 +2133,21 @@ async def _call_llm_verifier(  # noqa: C901
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
+    completion_toks = stream_usage.get("completion_tokens", 0) if stream_usage else 0
+    total_input = prompt_toks + cache_read + cache_write
+    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
     logger.info(
-        f"🏁 [{call_site}] Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}"
+        "llm.cache",
+        call_site=call_site,
+        agent_id=agent_id,
+        actual_model=actual_model,
+        is_claude=actual_model.endswith("-claude") if actual_model else False,
+        prompt_tokens=prompt_toks,
+        completion_tokens=completion_toks,
+        cache_read=cache_read,
+        cache_write=cache_write,
+        cache_hit_pct=cache_pct,
+        finish="verifier",
     )
 
     # Parse JSON - handle thinking models that put JSON in reasoning
@@ -2978,7 +3004,6 @@ async def call_planner_llm_activity(
         result, usage, _ = await call_llm_structured_streaming(
             messages=full_messages,
             model=model,
-            # Keep planner sampling conservative to reduce tool-selection drift.
             temperature=0.2,
             max_tokens=16384,
             response_model=PlannerResponse,
@@ -2988,6 +3013,7 @@ async def call_planner_llm_activity(
             claude_token=claude_max_token,
             skip_cache_write=False,
             call_site="planner",
+            effort="max",
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

@@ -534,6 +534,19 @@ def apply_anthropic_tool_config(
     if response_format and isinstance(response_format.get("json_schema"), dict):
         schema = response_format["json_schema"].get("schema")
         if isinstance(schema, dict):
+            if use_native_tools:
+                extracted = _extract_tools_from_response_format(response_format)
+                if extracted is not None:
+                    body["tools"] = extracted["tools"]
+                    body["tool_choice"] = {"type": "any"}
+                    prev_effort = (body.get("output_config") or {}).get("effort")
+                    body.pop("output_config", None)
+                    body.pop("output_format", None)
+                    if prev_effort:
+                        body["output_config"] = {"effort": prev_effort}
+                    return True
+
+
             transformed_schema = transform_schema_for_anthropic(schema)
             if use_native_tools:
                 body["output_config"] = {

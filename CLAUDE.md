@@ -84,7 +84,7 @@ See `agents/benchmarks/README.md` → "Reviewing Benchmark Logs" for CLI snippet
 
 ## Debugging Slow Agents
 
-Three diagnostic tools. Run **all summaries in parallel** whenever an agent is slow, stalled, or fails — they answer different questions. Then fully expand whichever one points at the smoking gun.
+Three diagnostic tools. Run **all three in parallel** whenever an agent is slow, stalled, or fails — they answer different questions. Then fully expand whichever one points at the smoking gun.
 
 ```bash
 cd agents && source venv/bin/activate
@@ -102,6 +102,10 @@ python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
 # Cache metrics are tree-aggregated (root + all sub-agents via /api/tool-usage/tree/:id)
 # Results stored in agents/benchmarks/runs/*.json
+
+# "Where are cache hits/misses?" — file-tree view of prompt caching per LLM call
+python benchmarks/agent_cache.py <agent_id>
+# Flags: --all (all agents), --since 5m, --json, --log <path>
 ```
 
 **`agent_latency.py`** reads `agents/navi-worker-log.txt` and `back-end/backend-logs.log`, builds a span tree from `span.start`/`span.end`/`db.query`/`broadcast.span` events (correlated by `span_id`/`parent_span_id`, falling back to `request_id` + time-window containment), and prints:
@@ -111,6 +115,8 @@ python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
 - `-v` expands every span (DB, broadcasts, HTTP internals).
 
 **`agent_logs.py`** dumps the cross-source event timeline (including prod via Render/Fly APIs with `--url`), grouped into a tree with errors highlighted. Best for reading the exact error message + stack + surrounding context after `agent_latency.py` points at a layer.
+
+**`agent_cache.py`** reads `agents/navi-worker-log.txt` for `llm.cache` events and renders a tree of cache read/write/hit% per LLM call, grouped by agent. Shows every call site (plan_loop, planner, verifier, explore, execute, chat) with its model, whether it used claudeAuth (direct Anthropic = $0) or waterfall, and per-call cache metrics. Use `--all --since 5m` for a cross-agent overview after running benchmarks.
 
 Typical signatures to look for: `peer closed connection` during streaming, `[NO END]` on an LLM call (crashed/cutoff mid-stream), `Failed to fetch pricing` retries (underlying-model 404s burning 30s each), P2024 Prisma pool timeouts (5s × 3 retry on `db.findFirst`), 429 from Anthropic on the `claude_token` path (rate-limit fallback to waterfall), `thinking.adaptive.effort: Extra inputs` (effort must go in `output_config`, not `thinking`), 0% cache hit on claudeAuth (check `cache.prefix_fingerprint` hashes match across calls — differing hashes = different prefix = no cache reuse).
 

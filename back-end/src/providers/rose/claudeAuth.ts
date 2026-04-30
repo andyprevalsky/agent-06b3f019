@@ -94,6 +94,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     system: systemBlocks,
     thinking: { type: 'adaptive' },
     temperature: 1,
+    output_config: { effort: 'high' },
   };
 
   applyAnthropicResponseFormat(body, opts.responseFormat);

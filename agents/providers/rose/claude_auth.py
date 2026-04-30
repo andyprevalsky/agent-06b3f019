@@ -115,6 +115,8 @@ def build_anthropic_body(
     response_format: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
     skip_cache_write: bool = False,
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
 
@@ -155,8 +157,9 @@ def build_anthropic_body(
     if not skip_cache_write and anthropic_messages:
         _add_cache_breakpoint(anthropic_messages)
 
-    body["thinking"] = {"type": "adaptive"}
+    body["thinking"] = thinking or {"type": "adaptive"}
     body["temperature"] = 1
+    body.setdefault("output_config", {})["effort"] = effort or "high"
 
     # Resolve native tools: prefer explicit tools; fall back to extracting
     # from response_format (the Pydantic-schema → anyOf → native-tools path).
@@ -178,18 +181,17 @@ def build_anthropic_body(
 
     _add_tool_cache_breakpoint(body)
 
-    # Anthropic rejects thinking when tool_choice forces tool use.
-    # Both "any" (must use some tool) and "tool" (must use specific tool)
-    # count as forced — only "auto" (model decides) allows thinking.
-    tc = body.get("tool_choice") or {}
-    if native_tool_mode and tc.get("type") in ("any", "tool") and "thinking" in body:
-        body.pop("thinking", None)
-        body.pop("temperature", None)
+    # Anthropic rejects thinking when tool_choice forces tool use (type=any
+    # or type=tool). Downgrade to auto so thinking stays enabled — the model
+    # will still call the tools, it just isn't forced to.
+    tc = body.get("tool_choice", {})
+    if isinstance(tc, dict) and tc.get("type") in ("any", "tool") and "thinking" in body:
+        body["tool_choice"] = {"type": "auto"}
 
     # Set effort AFTER apply_anthropic_tool_config (which may pop output_config
     # for json_schema reasons) — effort is always valid regardless of tool mode.
     oc = body.get("output_config") or {}
-    oc["effort"] = "high"
+    oc["effort"] = effort or "high"
     body["output_config"] = oc
 
     def _h(obj: Any) -> str:
@@ -216,6 +218,8 @@ async def claude_auth_complete(
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
     skip_cache_write: bool = False,
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
     auth: ClaudeAuthContext,
     request_id: str,
     agent_id: Optional[str] = None,
@@ -238,6 +242,8 @@ async def claude_auth_complete(
         response_format=response_format,
         max_tokens=max_tokens,
         skip_cache_write=skip_cache_write,
+        thinking=thinking,
+        effort=effort,
     )
     actual_model = f"{pool_spec.claude_auth_model}-claude"
     current_auth = auth

@@ -102,6 +102,8 @@ class RoseClient:
         request_id: Optional[str] = None,
         call_site: str = "unspecified",
         deadline_s: float = _DEFAULT_DEADLINE_S,
+        thinking: Optional[Dict[str, Any]] = None,
+        effort: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -179,6 +181,8 @@ class RoseClient:
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
+                        thinking=thinking,
+                        effort=effort,
                     )):
                         yield chunk
                     logger.info(
@@ -393,6 +397,8 @@ async def _try_claude_auth(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from claudeAuth, but buffer the metadata chunk so a pre-content
     failure raises `_FallThrough` without the caller ever seeing a
@@ -412,6 +418,8 @@ async def _try_claude_auth(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        thinking=thinking,
+        effort=effort,
     )
     try:
         async for chunk in gen:
