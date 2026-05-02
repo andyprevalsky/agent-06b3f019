@@ -264,15 +264,20 @@ model BrowserSession {
 }
 
 model ClaudeCodeSession {
-  id        String                  @id @default(uuid())
-  agentId   String
-  sandboxId String                  @unique
-  streamUrl String?
-  goal      String
-  status    ClaudeCodeSessionStatus @default(ACTIVE)
-  output    String?
-  createdAt DateTime                @default(now())
-  closedAt  DateTime?
+  id                       String                  @id @default(uuid())
+  agentId                  String
+  sandboxId                String                  @unique
+  streamUrl                String?
+  goal                     String
+  status                   ClaudeCodeSessionStatus @default(ACTIVE)
+  output                   String?
+  createdAt                DateTime                @default(now())
+  closedAt                 DateTime?
+  // Credential tracking — set when the CLI is started with per-user/pool OAuth
+  // credentials so closeClaudeCodeSession() can mark the right Integration as
+  // rate-limited if the CLI output reports "You've hit your limit · resets X:XX (UTC)".
+  claudeTokenSource        String?
+  claudeTokenIntegrationId String?
 
   @@index([agentId])
   @@index([sandboxId])

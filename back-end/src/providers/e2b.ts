@@ -4,7 +4,10 @@ import { createLogger } from './logger';
 import { FilePointer, uploadToStorage, downloadFromStorage } from './storage';
 import mime from 'mime-types';
 import { v4 as uuidv4 } from 'uuid';
-import { fetchClaudeCodeCredentials } from './claudeCredentials';
+import {
+  fetchClaudeCodeCredentialsWithMeta,
+  type ClaudeCodeCredentialResult,
+} from './claudeCredentials';
 
 const log = createLogger('E2B');
 
@@ -55,21 +58,25 @@ export async function createClaudeCodeSession(
     CLAUDE_CODE_GOAL: goal,
   };
 
-  // Try per-user credentials first, fall back to shared ANTHROPIC_API_KEY
-  let usingPerUserCredentials = false;
+  // Try user's own credentials first, then rotate through the pool, then fall
+  // back to ANTHROPIC_API_KEY. The agent's outer loop already rotates through
+  // pool tokens when Anthropic returns 429 — we mirror that here so the inner
+  // CLI doesn't keep replaying a known-exhausted token.
+  let credentialMeta: ClaudeCodeCredentialResult | null = null;
   if (userId) {
-    const credentials = await fetchClaudeCodeCredentials(userId);
-    if (credentials) {
-      envs.CLAUDE_CODE_CREDENTIALS = credentials;
-      usingPerUserCredentials = true;
-      log.info(`Using per-user Claude Code credentials for agent ${agentId}`);
+    credentialMeta = await fetchClaudeCodeCredentialsWithMeta(userId);
+    if (credentialMeta) {
+      envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
+      log.info(
+        `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'})`
+      );
     }
   }
 
-  if (!usingPerUserCredentials) {
+  if (!credentialMeta) {
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error(
-        'No Claude Code credentials available: user has no synced credentials and ANTHROPIC_API_KEY is not set'
+        'No Claude Code credentials available: no synced user credentials, no available pool tokens (all rate-limited or none configured), and ANTHROPIC_API_KEY is not set'
       );
     }
     envs.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -180,6 +187,9 @@ export async function createClaudeCodeSession(
       streamUrl: wsUrl,
       goal,
       status: 'ACTIVE',
+      claudeTokenSource: credentialMeta?.source ?? null,
+      claudeTokenIntegrationId:
+        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
     },
   });
 

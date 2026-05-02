@@ -49,3 +49,31 @@ export async function persistSessionOutput(taskId: string, output: string) {
     },
   });
 }
+
+/**
+ * Find a Claude Code session by id (used to look up credential tracking metadata
+ * after the CLI has finished, so we can mark the right Integration rate-limited
+ * if the output reports exhaustion).
+ */
+export async function findSessionById(taskId: string) {
+  return prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      agentId: true,
+      claudeTokenSource: true,
+      claudeTokenIntegrationId: true,
+    },
+  });
+}
+
+/**
+ * Look up the user that owns an agent (needed to mark a user-owned token
+ * rate-limited when Claude Code reports exhaustion on a user-source session).
+ */
+export async function findAgentById(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { userId: true },
+  });
+}

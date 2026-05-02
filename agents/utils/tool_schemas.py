@@ -153,6 +153,24 @@ class ResponseSchemaConfig(BaseModel):
         description="List of output fields that the agent must return when complete."
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_flat_dict(cls, value: Any) -> Any:
+        # Some models (Gemini, GPT-4) emit `output_schema` as a flat dict
+        # `{"field_name": "description"}` instead of the canonical
+        # `{"fields": [{"name": ..., "description": ..., "type": "str", "required": True}]}`.
+        # Coerce the flat form into the structured form so the waterfall fallback
+        # path doesn't fail on cosmetic differences.
+        if isinstance(value, dict) and "fields" not in value and value:
+            if all(isinstance(v, str) for v in value.values()):
+                return {
+                    "fields": [
+                        {"name": k, "description": v, "type": "str", "required": True}
+                        for k, v in value.items()
+                    ]
+                }
+        return value
+
 
 class WaitForTool(BaseModel):
     """Pause execution until a timestamp or natural-language condition is met."""

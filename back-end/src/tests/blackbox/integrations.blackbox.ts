@@ -3692,6 +3692,157 @@ async function testRotation_defaultCooldownIsBounded() {
   }
 }
 
+// =====================================================================
+// Claude Code CLI exhaustion detection
+// ---------------------------------------------------------------------
+// When the Claude Code CLI inside an E2B sandbox prints
+// `You've hit your limit · resets X:XX (UTC)`, the persistOutput route must
+// mark the underlying Integration rate-limited so subsequent spawns rotate
+// to a different pool token. Anchored against the exact banner format the
+// CLI emits — these tests are the regression net for that flow.
+// =====================================================================
+
+interface SeededSession {
+  taskId: string;
+  agentId: string;
+}
+
+async function seedClaudeCodeSession(
+  agentId: string,
+  source: 'user' | 'pool',
+  poolTokenId: string | null
+): Promise<SeededSession> {
+  const taskId = crypto.randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId,
+      sandboxId: `seed-${taskId}`,
+      goal: 'exhaustion-detection-test',
+      status: 'ACTIVE',
+      claudeTokenSource: source,
+      claudeTokenIntegrationId: poolTokenId,
+    },
+  });
+  return { taskId, agentId };
+}
+
+async function cleanupSessions(taskIds: string[]): Promise<void> {
+  if (taskIds.length === 0) return;
+  await prisma.claudeCodeSession.deleteMany({ where: { id: { in: taskIds } } });
+}
+
+async function testClaudeCodeExhaustion_marksPoolToken() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
+
+  try {
+    const banner = "You've hit your limit · resets 4:00am (UTC)\nbye\n";
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: poolInt.id } });
+    const until = row?.rateLimitedUntil;
+    assert(until instanceof Date, 'pool integration must be rate-limited after exhaustion banner');
+    const utcHour = until!.getUTCHours();
+    const utcMinute = until!.getUTCMinutes();
+    assert(
+      utcHour === 4 && utcMinute === 0,
+      `expected next 04:00 UTC, got ${utcHour}:${String(utcMinute).padStart(2, '0')} UTC`
+    );
+    assert(
+      until!.getTime() > Date.now(),
+      'rateLimitedUntil must be in the future (rolls forward to next 04:00 UTC if past)'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeExhaustion_marksUserToken() {
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'user', null);
+
+  try {
+    const banner = "You've hit your limit · resets 9:30pm (UTC)\n";
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    const until = row?.rateLimitedUntil;
+    assert(until instanceof Date, 'user integration must be rate-limited after exhaustion banner');
+    assert(until!.getUTCHours() === 21, `expected 21:00 UTC, got ${until!.getUTCHours()}:00`);
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
+async function testClaudeCodeExhaustion_noBannerNoOp() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
+
+  try {
+    const benignOutput = 'Computing Collatz sequence... done. Result: 27, 82, 41, ..., 1\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: benignOutput }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: poolInt.id } });
+    assert(
+      row?.rateLimitedUntil === null,
+      'integration must NOT be rate-limited when banner is absent'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([poolInt.id]);
+  }
+}
+
 // --- Claude Code token: exercises internal auth paths ---
 
 async function testClaudeCodeToken_viaApiKeyInternal() {
@@ -4456,6 +4607,18 @@ async function runAll() {
     {
       name: 'rotation -- default cooldown is bounded (not permanent)',
       fn: testRotation_defaultCooldownIsBounded,
+    },
+    {
+      name: 'claude-code exhaustion -- pool token marked rate-limited at parsed reset time',
+      fn: testClaudeCodeExhaustion_marksPoolToken,
+    },
+    {
+      name: 'claude-code exhaustion -- user token marked rate-limited (12h format)',
+      fn: testClaudeCodeExhaustion_marksUserToken,
+    },
+    {
+      name: 'claude-code exhaustion -- benign output is no-op',
+      fn: testClaudeCodeExhaustion_noBannerNoOp,
     },
   ];
 

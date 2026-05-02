@@ -64,10 +64,45 @@ export function decryptCredentialEnvelope(
 }
 
 /**
+ * Result of a Claude Code credential lookup, with tracking metadata so callers
+ * can mark the underlying integration rate-limited if the CLI reports
+ * exhaustion ("You've hit your limit · resets X:XX (UTC)").
+ */
+export interface ClaudeCodeCredentialResult {
+  /** Decrypted credentials JSON string (the `claudeAiOauth` envelope). */
+  credentials: string;
+  /** Whether this came from the user's own integration or the shared pool. */
+  source: 'user' | 'pool';
+  /** Owning user (when source='user') or the foreign user the pool token belongs to (when source='pool'). */
+  userId: string;
+  /** Integration ID — set when source='pool' so rotation can mark it rate-limited. */
+  poolTokenId?: string;
+}
+
+/**
  * Fetch and decrypt Claude Code credentials for a user.
  * Returns the decrypted credentials JSON string, or null if unavailable.
+ *
+ * Skips the user's own integration when `rateLimitedUntil` is in the future —
+ * the agent's outer pool-rotation logic sets this when Anthropic returns 429,
+ * and the same exhaustion almost always applies to the inner Claude Code CLI.
  */
 export async function fetchClaudeCodeCredentials(userId: string): Promise<string | null> {
+  const result = await fetchClaudeCodeCredentialsWithMeta(userId);
+  return result?.credentials ?? null;
+}
+
+/**
+ * Same as `fetchClaudeCodeCredentials` but also returns the source + integration ID
+ * so the caller can mark the right token rate-limited on a "hit your limit" failure.
+ *
+ * Resolution order:
+ *   1. User's own `claude_code` integration (if not rate-limited)
+ *   2. Pool integration (least-recently-used non-rate-limited token)
+ */
+export async function fetchClaudeCodeCredentialsWithMeta(
+  userId: string
+): Promise<ClaudeCodeCredentialResult | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) {
     log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping credential lookup');
@@ -75,36 +110,115 @@ export async function fetchClaudeCodeCredentials(userId: string): Promise<string
   }
 
   try {
-    const integration = await prisma.integration.findFirst({
+    const now = new Date();
+    const userIntegration = await prisma.integration.findFirst({
       where: {
         userId,
         name: 'claude_code',
         status: 'CONNECTED',
+        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
       },
     });
 
-    if (!integration) {
-      log.info(`No claude_code integration found for user ${userId}`);
-      return null;
+    if (userIntegration) {
+      const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
+      if (decrypted) {
+        log.info(`Serving user Claude Code credentials for ${userId}`);
+        return { credentials: decrypted, source: 'user', userId };
+      }
+    } else {
+      log.info(
+        `No active claude_code integration for user ${userId} (none synced or rate-limited) — falling back to pool`
+      );
     }
 
-    const config = integration.config as Record<string, unknown> | null;
-    const encryptedCredentials = config?.encryptedCredentials as string | undefined;
-    if (!encryptedCredentials) {
-      log.info(`claude_code integration has no encryptedCredentials for user ${userId}`);
-      return null;
+    const poolResult = await fetchPoolCredentials();
+    if (poolResult) {
+      return poolResult;
     }
 
-    const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
-    if (!decrypted) {
-      log.error(`Failed to decrypt Claude Code credentials for user ${userId}`);
-      return null;
-    }
-
-    log.info(`Successfully decrypted Claude Code credentials for user ${userId}`);
-    return decrypted;
+    return null;
   } catch (error) {
     log.error(`Error fetching Claude Code credentials for user ${userId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function decryptIntegrationCredentials(
+  integration: { id: string; config: unknown },
+  decryptionKey: string
+): string | null {
+  const config = integration.config as Record<string, unknown> | null;
+  const encryptedCredentials = config?.encryptedCredentials as string | undefined;
+  if (!encryptedCredentials) {
+    log.info(`claude_code integration ${integration.id} has no encryptedCredentials`);
+    return null;
+  }
+
+  const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
+  if (!decrypted) {
+    log.error(`Failed to decrypt claude_code integration ${integration.id}`);
+    return null;
+  }
+  return decrypted;
+}
+
+/**
+ * Fetch and decrypt the FULL credentials envelope for an available pool token,
+ * for use by the inner Claude Code CLI (which needs the OAuth refresh + access
+ * token, not just the access token).
+ *
+ * Selects the least-recently-used non-rate-limited pool integration; updates
+ * `lastUsedAt` for LRU ordering. Returns null if no usable pool token exists.
+ */
+export async function fetchPoolCredentials(
+  excludeIds?: string[]
+): Promise<ClaudeCodeCredentialResult | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) {
+    log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping pool lookup');
+    return null;
+  }
+
+  try {
+    const now = new Date();
+    const poolIntegration = await prisma.integration.findFirst({
+      where: {
+        name: 'claude_code',
+        status: 'CONNECTED',
+        poolingEnabled: true,
+        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+        ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
+      },
+      orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }],
+    });
+
+    if (!poolIntegration) {
+      log.info('No available pool credentials for Claude Code CLI');
+      return null;
+    }
+
+    const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
+    if (!decrypted) return null;
+
+    await prisma.integration.update({
+      where: { id: poolIntegration.id },
+      data: { lastUsedAt: now },
+    });
+
+    log.info(
+      `Serving pool Claude Code credentials from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
+    );
+    return {
+      credentials: decrypted,
+      source: 'pool',
+      userId: poolIntegration.userId,
+      poolTokenId: poolIntegration.id,
+    };
+  } catch (error) {
+    log.error('Error fetching pool credentials', {
       error: error instanceof Error ? error.message : String(error),
     });
     return null;

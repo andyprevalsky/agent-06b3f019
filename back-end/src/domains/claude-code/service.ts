@@ -11,6 +11,10 @@ import {
 import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import {
+  markPoolTokenRateLimited,
+  markUserTokenRateLimited,
+} from '../../providers/claudeCredentials';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -211,4 +215,73 @@ export async function getAgentSessions(agentId: string) {
 export async function persistOutput(taskId: string, output: string) {
   log.info(`Persisting output for session ${taskId} (${output.length} bytes)`);
   await repo.persistSessionOutput(taskId, output);
+  await detectAndMarkExhaustion(taskId, output);
+}
+
+/**
+ * Scan the persisted Claude Code terminal output for the "you've hit your limit"
+ * banner and, if found, mark the underlying Integration as rate-limited so
+ * subsequent spawns rotate to a different pool token.
+ *
+ * Banner format (Claude Code v2.x): `You've hit your limit · resets 3:50am (UTC)`
+ * — the time component is approximate and varies; we conservatively use the
+ * configured POOL_RATE_LIMIT_COOLDOWN_MS (5 min) when we cannot parse it.
+ */
+async function detectAndMarkExhaustion(taskId: string, output: string): Promise<void> {
+  if (!/You've hit your limit/i.test(output)) return;
+
+  const session = await repo.findSessionById(taskId);
+  const tokenSource = session?.claudeTokenSource ?? '';
+  if (tokenSource === '') {
+    log.warn(
+      `Claude Code exhaustion detected for ${taskId} but no credential source recorded — cannot rotate`
+    );
+    return;
+  }
+
+  const resetMatch = output.match(
+    /You've hit your limit\s*·\s*resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\(UTC\))/i
+  );
+  const resetUntil = resetMatch !== null ? parseUtcResetTime(resetMatch[1]) : null;
+  const resetLabel = resetMatch?.[1] ?? 'unknown';
+  const integrationId = session?.claudeTokenIntegrationId ?? '';
+
+  if (tokenSource === 'pool' && integrationId !== '') {
+    log.warn(`Claude Code exhausted on pool integration ${integrationId} (resets ${resetLabel})`);
+    await markPoolTokenRateLimited(integrationId, {
+      rateLimitedUntil: resetUntil,
+    });
+  } else if (tokenSource === 'user' && session?.agentId !== undefined) {
+    const agent = await repo.findAgentById(session.agentId);
+    const ownerId = agent?.userId ?? '';
+    if (ownerId !== '') {
+      log.warn(`Claude Code exhausted on user ${ownerId} (resets ${resetLabel})`);
+      await markUserTokenRateLimited(ownerId, { rateLimitedUntil: resetUntil });
+    }
+  }
+}
+
+/**
+ * Parse the reset-time fragment from Claude Code's exhaustion banner into an
+ * absolute Date. The banner only includes the next-reset *time-of-day* in UTC,
+ * so we anchor it to today/tomorrow depending on whether it has already passed.
+ */
+function parseUtcResetTime(fragment: string): Date | null {
+  const match = fragment.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = match[2] ? Number(match[2]) : 0;
+  const meridiem = match[3]?.toLowerCase();
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  const now = new Date();
+  const candidate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0)
+  );
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setUTCDate(candidate.getUTCDate() + 1);
+  }
+  return candidate;
 }
