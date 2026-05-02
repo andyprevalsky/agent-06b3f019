@@ -160,16 +160,22 @@ interface CapturedCall {
 }
 
 const INFRA_URL_PATTERNS = [
-  'api.github.com',
+  'anthropic.com',
+  'openai.com',
   'openrouter.ai',
+  'supabase.co',
+  'api.github.com',
   'ip-api.com',
-  'supabase.co/realtime',
-  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
   'stripe.com',
   'parallel.ai',
+  'exa.ai',
+  'perplexity.ai',
+  'vapi.ai',
+  'googleapis.com',
+  'api.steel.dev',
 ];
 
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
