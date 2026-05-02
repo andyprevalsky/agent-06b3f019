@@ -189,7 +189,8 @@ export async function handleSmsSupervisorMessage(config: {
 
     // If attempt_completion was called, extract the message and exit
     if (completionCall) {
-      finalResponse = completionCall.arguments?.message || '';
+      const completionMessage = completionCall.arguments?.message;
+      finalResponse = typeof completionMessage === 'string' ? completionMessage : '';
       log.info('[SmsSupervisor] attempt_completion received', {
         round,
         responseLength: finalResponse.length,

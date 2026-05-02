@@ -1,91 +1,34 @@
-import { MessageChannel } from '@prisma/client';
 import fetch, { RequestInit, Response } from 'node-fetch';
 import { logTruncate } from '../../utils/log';
-import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+import { createLogger } from '../../providers/logger';
+import { upsertPersonAndMessageRecords } from './personMessageManager';
+import {
+  ParsedEmail,
+  GmailMessageListResponse,
+  GmailProfileResponse,
+  GmailHistoryResponse,
+  GmailMessageResponse,
+  EmailMetadata,
+  parseGmailMessage,
+  extractEmailAddress,
+  extractEmailAddresses,
+} from './gmailParser.helpers';
+import { identifyNeededMessageIds, transformEmailsToContacts } from './gmailParser.contacts';
 
-export interface ParsedEmail {
-  from: string;
-  fromName: string | null;
-  to: string[];
-  cc: string[];
-  subject: string;
-  date: Date;
-  messageId: string | null;
-  bodyText: string | null;
-  bodyHtml: string | null;
-  isSent: boolean;
-  labels: string[];
-}
+export type {
+  ParsedEmail,
+  GmailMessageListResponse,
+  GmailProfileResponse,
+  GmailHistoryResponse,
+  GmailMessageResponse,
+  GmailMessagePart,
+  EmailContact,
+  EmailMetadata,
+} from './gmailParser.helpers';
 
-interface GmailMessageListResponse {
-  messages?: Array<{ id: string; threadId: string }>;
-  nextPageToken?: string;
-  resultSizeEstimate?: number;
-}
+export { detectImportedAccounts } from './gmailParser.contacts';
 
-interface GmailProfileResponse {
-  emailAddress: string;
-  messagesTotal: number;
-  threadsTotal: number;
-  historyId: string;
-}
-
-interface GmailHistoryResponse {
-  history?: Array<{
-    id: string;
-    messagesAdded?: Array<{ message: { id: string; threadId: string } }>;
-    messagesDeleted?: Array<{ message: { id: string; threadId: string } }>;
-  }>;
-  nextPageToken?: string;
-  historyId: string;
-}
-
-interface GmailMessageResponse {
-  id: string;
-  threadId: string;
-  labelIds?: string[];
-  snippet?: string;
-  payload?: {
-    headers?: Array<{ name: string; value: string }>;
-    body?: { data?: string; size?: number };
-    parts?: GmailMessagePart[];
-    mimeType?: string;
-  };
-  internalDate?: string;
-}
-
-interface GmailMessagePart {
-  partId?: string;
-  mimeType?: string;
-  filename?: string;
-  headers?: Array<{ name: string; value: string }>;
-  body?: { data?: string; size?: number; attachmentId?: string };
-  parts?: GmailMessagePart[];
-}
-
-interface EmailContact {
-  email: string;
-  name: string | null;
-  sentCount: number;
-  receivedCount: number;
-  messages: Array<{
-    from: string;
-    to: string;
-    subject: string;
-    date: Date;
-    body: string | null;
-    isFromMe: boolean;
-  }>;
-}
-
-/** Lightweight email metadata (no body content) for contact detection */
-interface EmailMetadata {
-  id: string;
-  from: string;
-  to: string[];
-  cc: string[];
-  isSent: boolean;
-}
+const log = createLogger('GmailParser');
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -104,7 +47,12 @@ async function fetchWithRetry(
     } catch (err) {
       // Network error (DNS, timeout, connection reset) — retryable
       const wait = Math.pow(2, attempt) * 2;
-      console.warn(`[Gmail] Network error, retrying in ${wait}s (attempt ${attempt + 1}/3):`, err);
+      log.warn('Network error, retrying', {
+        wait_seconds: wait,
+        attempt: attempt + 1,
+        max_attempts: 3,
+        error: err instanceof Error ? err.message : String(err),
+      });
       await sleep(wait * 1000);
       continue;
     }
@@ -114,17 +62,23 @@ async function fetchWithRetry(
     ) {
       const retryAfter = response.headers.get('Retry-After');
       const wait = retryAfter ? Math.min(parseInt(retryAfter), 60) : Math.pow(2, attempt) * 5;
-      console.log(
-        `[Gmail] Rate limited (${response.status}), waiting ${wait}s (attempt ${attempt + 1}/3)...`
-      );
+      log.info('Rate limited, waiting', {
+        status: response.status,
+        wait_seconds: wait,
+        attempt: attempt + 1,
+        max_attempts: 3,
+      });
       await sleep(wait * 1000);
       continue;
     }
     if (response.status >= 500) {
       const wait = Math.pow(2, attempt) * 2;
-      console.warn(
-        `[Gmail] Server error (${response.status}), retrying in ${wait}s (attempt ${attempt + 1}/3)...`
-      );
+      log.warn('Server error, retrying', {
+        status: response.status,
+        wait_seconds: wait,
+        attempt: attempt + 1,
+        max_attempts: 3,
+      });
       await sleep(wait * 1000);
       continue;
     }
@@ -147,7 +101,10 @@ export async function getGmailProfile(accessToken: string): Promise<GmailProfile
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[Gmail] Failed to get profile: ${response.status} - ${logTruncate(errorText)}`);
+    log.error('Failed to get profile', {
+      status: response.status,
+      body: logTruncate(errorText),
+    });
     throw new Error(`Gmail API error: ${response.status}`);
   }
 
@@ -166,7 +123,7 @@ export async function fetchGmailHistory(
   let pageToken: string | undefined;
   let newHistoryId = startHistoryId;
 
-  console.log(`[Gmail] Fetching history since historyId: ${startHistoryId}`);
+  log.info('Fetching history', { start_history_id: startHistoryId });
 
   do {
     const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/history');
@@ -184,12 +141,13 @@ export async function fetchGmailHistory(
       const errorText = await response.text();
       // 404 means historyId is too old or invalid - need full sync
       if (response.status === 404) {
-        console.log('[Gmail] History expired, full sync required');
+        log.info('History expired, full sync required');
         return { addedMessageIds: [], newHistoryId: '' };
       }
-      console.error(
-        `[Gmail] Failed to fetch history: ${response.status} - ${logTruncate(errorText)}`
-      );
+      log.error('Failed to fetch history', {
+        status: response.status,
+        body: logTruncate(errorText),
+      });
       throw new Error(`Gmail API error: ${response.status}`);
     }
 
@@ -209,9 +167,10 @@ export async function fetchGmailHistory(
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  console.log(
-    `[Gmail] Found ${addedMessageIds.length} new messages, new historyId: ${newHistoryId}`
-  );
+  log.info('History fetch complete', {
+    new_messages: addedMessageIds.length,
+    new_history_id: newHistoryId,
+  });
   return { addedMessageIds, newHistoryId };
 }
 
@@ -227,7 +186,7 @@ export async function fetchMessagesByIds(
   const emails: ParsedEmail[] = [];
   const BATCH_SIZE = 100;
 
-  console.log(`[Gmail] Fetching ${messageIds.length} messages by ID...`);
+  log.info('Fetching messages by ID', { message_count: messageIds.length });
 
   for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
     const batch = messageIds.slice(i, i + BATCH_SIZE);
@@ -237,7 +196,9 @@ export async function fetchMessagesByIds(
       const validEmails = batchResults.filter((e): e is ParsedEmail => e !== null);
       emails.push(...validEmails);
     } catch (error) {
-      console.error(`[Gmail] Batch request failed:`, error);
+      log.error('Batch request failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     // Small delay between batches
@@ -246,7 +207,7 @@ export async function fetchMessagesByIds(
     }
   }
 
-  console.log(`[Gmail] Successfully fetched ${emails.length} messages`);
+  log.info('Successfully fetched messages', { count: emails.length });
   return emails;
 }
 
@@ -262,7 +223,7 @@ export async function fetchGmailMessagesSince(
   const unixSeconds = Math.floor(since.getTime() / 1000);
   const query = `after:${unixSeconds}`;
 
-  console.log(`[Gmail] Fetching messages since ${since.toISOString()} (query: ${query})`);
+  log.info('Fetching messages since', { since: since.toISOString(), query });
 
   const messageIds: string[] = [];
   let pageToken: string | undefined;
@@ -280,9 +241,10 @@ export async function fetchGmailMessagesSince(
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
-      console.error(
-        `[Gmail] Failed to list messages: ${listResponse.status} - ${logTruncate(errorText)}`
-      );
+      log.error('Failed to list messages', {
+        status: listResponse.status,
+        body: logTruncate(errorText),
+      });
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
 
@@ -300,7 +262,10 @@ export async function fetchGmailMessagesSince(
     }
   } while (pageToken);
 
-  console.log(`[Gmail] Found ${messageIds.length} messages since ${since.toISOString()}`);
+  log.info('Found messages since', {
+    count: messageIds.length,
+    since: since.toISOString(),
+  });
 
   if (messageIds.length === 0) {
     return [];
@@ -337,7 +302,10 @@ async function fetchMessagesBatch(
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[Gmail] Batch request failed: ${response.status} - ${logTruncate(errorText)}`);
+    log.error('Batch request failed', {
+      status: response.status,
+      body: logTruncate(errorText),
+    });
     throw new Error(`Gmail batch API error: ${response.status}`);
   }
 
@@ -346,7 +314,7 @@ async function fetchMessagesBatch(
   const responseBoundary = response.headers.get('content-type')?.match(/boundary=(.+)/)?.[1];
 
   if (!responseBoundary) {
-    console.error('[Gmail] Could not find boundary in batch response');
+    log.error('Could not find boundary in batch response');
     return messageIds.map(() => null);
   }
 
@@ -412,82 +380,6 @@ async function fetchMessagesBatch(
 }
 
 /**
- * From metadata, determine which message IDs involve contacts the user has sent to.
- * Returns the set of needed message IDs for full content fetch.
- */
-function identifyNeededMessageIds(metadata: EmailMetadata[], userEmail: string): Set<string> {
-  // Build userEmailSet with import detection
-  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
-  for (const e of metadata) {
-    if (e.isSent) userEmailSet.add(e.from);
-  }
-
-  // Detect imported accounts (same dominance logic as transformEmailsToContacts)
-  let foundNew = true;
-  while (foundNew) {
-    foundNew = false;
-    const fromCounts = new Map<string, number>();
-    const toCounts = new Map<string, number>();
-    for (const e of metadata) {
-      const allRecipients = [...e.to, ...e.cc];
-      if (userEmailSet.has(e.from) || allRecipients.some((r) => userEmailSet.has(r))) continue;
-      fromCounts.set(e.from, (fromCounts.get(e.from) || 0) + 1);
-      for (const r of allRecipients) toCounts.set(r, (toCounts.get(r) || 0) + 1);
-    }
-    const candidates = [...fromCounts.entries()]
-      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
-      .sort((a, b) => b[1] - a[1]);
-    if (candidates.length > 0) {
-      const [topAddr, topCount] = candidates[0];
-      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
-      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
-        userEmailSet.add(topAddr);
-        foundNew = true;
-        console.log(
-          `[Gmail] Detected imported account: ${topAddr} (from=${topCount}, next=${secondCount})`
-        );
-      }
-    }
-  }
-
-  // Count sentCount per contact
-  const contactSentCount = new Map<string, number>();
-  for (const e of metadata) {
-    const isFromMe = e.isSent || userEmailSet.has(e.from);
-    if (isFromMe) {
-      for (const r of [...e.to, ...e.cc]) {
-        if (!userEmailSet.has(r)) {
-          contactSentCount.set(r, (contactSentCount.get(r) || 0) + 1);
-        }
-      }
-    }
-  }
-
-  // Contacts with sentCount > 0
-  const validContacts = new Set(
-    [...contactSentCount.entries()].filter(([, c]) => c > 0).map(([e]) => e)
-  );
-
-  console.log(
-    `[Gmail] Contact filter: ${validContacts.size} contacts with sentCount > 0, userEmailSet=${JSON.stringify([...userEmailSet])}`
-  );
-
-  // Collect message IDs that involve valid contacts
-  const neededIds = new Set<string>();
-  for (const e of metadata) {
-    const isFromMe = e.isSent || userEmailSet.has(e.from);
-    const contactEmails = isFromMe
-      ? [...e.to, ...e.cc].filter((addr) => !userEmailSet.has(addr))
-      : [e.from];
-    if (contactEmails.some((ce) => validContacts.has(ce))) {
-      neededIds.add(e.id);
-    }
-  }
-
-  return neededIds;
-}
-
-/**
  * Fetch ALL emails from Gmail API using two-phase approach:
  * Phase 1: Fetch metadata (headers + labels) for all messages — fast, small responses
  * Phase 2: Fetch full content only for messages involving contacts user has sent to
@@ -499,7 +391,7 @@ export async function fetchGmailEmails(
   let pageToken: string | undefined;
   let pageCount = 0;
 
-  console.log(`[Gmail] Starting to fetch all emails...`);
+  log.info('Starting to fetch all emails');
 
   // List all message IDs
   const allMessageIds: string[] = [];
@@ -515,9 +407,10 @@ export async function fetchGmailEmails(
 
     if (!listResponse.ok) {
       const errorText = await listResponse.text();
-      console.error(
-        `[Gmail] Failed to list messages: ${listResponse.status} - ${logTruncate(errorText)}`
-      );
+      log.error('Failed to list messages', {
+        status: listResponse.status,
+        body: logTruncate(errorText),
+      });
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
 
@@ -531,14 +424,17 @@ export async function fetchGmailEmails(
     pageCount++;
 
     if (pageCount % 10 === 0) {
-      console.log(`[Gmail] Listed ${allMessageIds.length} message IDs (page ${pageCount})...`);
+      log.info('Listed message IDs', {
+        listed_count: allMessageIds.length,
+        page: pageCount,
+      });
     }
   } while (pageToken);
 
-  console.log(`[Gmail] Total ${allMessageIds.length} message IDs listed`);
+  log.info('Total message IDs listed', { count: allMessageIds.length });
 
   // Phase 1: Fetch metadata for all messages using concurrent individual requests
-  console.log(`[Gmail] Phase 1: Fetching metadata for ${allMessageIds.length} messages...`);
+  log.info('Phase 1: fetching metadata', { message_count: allMessageIds.length });
   const allMetadata: EmailMetadata[] = [];
   const CONCURRENCY = 20;
   let completed = 0;
@@ -589,9 +485,12 @@ export async function fetchGmailEmails(
     completed += chunk.length;
 
     if (completed % 5000 === 0 || completed >= allMessageIds.length) {
-      console.log(
-        `[Gmail] Metadata: ${completed}/${allMessageIds.length} (${allMetadata.length} valid, ${rateLimited} rate-limited)`
-      );
+      log.info('Metadata progress', {
+        completed,
+        total: allMessageIds.length,
+        valid: allMetadata.length,
+        rate_limited: rateLimited,
+      });
     }
 
     // Back off if we're getting rate limited
@@ -604,7 +503,7 @@ export async function fetchGmailEmails(
 
   // Retry rate-limited messages with exponential backoff
   if (rateLimitedIds.length > 0) {
-    console.log(`[Gmail] Retrying ${rateLimitedIds.length} rate-limited messages...`);
+    log.info('Retrying rate-limited messages', { count: rateLimitedIds.length });
     for (let attempt = 0; attempt < 3 && rateLimitedIds.length > 0; attempt++) {
       await sleep(Math.pow(2, attempt) * 5000); // 5s, 10s, 20s
       const stillLimited: string[] = [];
@@ -646,395 +545,35 @@ export async function fetchGmailEmails(
         await sleep(200);
       }
 
-      console.log(
-        `[Gmail] Retry attempt ${attempt + 1}: recovered ${rateLimitedIds.length - stillLimited.length}, still limited: ${stillLimited.length}`
-      );
+      log.info('Retry attempt', {
+        attempt: attempt + 1,
+        recovered: rateLimitedIds.length - stillLimited.length,
+        still_limited: stillLimited.length,
+      });
       rateLimitedIds = stillLimited;
     }
 
     if (rateLimitedIds.length > 0) {
-      console.warn(
-        `[Gmail] ⚠️ ${rateLimitedIds.length} messages could not be fetched after retries`
-      );
-    }
-  }
-
-  console.log(
-    `[Gmail] Phase 1 complete: ${allMetadata.length} metadata fetched (${rateLimitedIds.length} unrecoverable)`
-  );
-
-  // Phase 2: Identify which messages we actually need
-  const neededIds = identifyNeededMessageIds(allMetadata, userEmail);
-  console.log(`[Gmail] Phase 2: Need ${neededIds.size} messages with full content`);
-
-  // Phase 3: Fetch full content for needed messages only
-  if (neededIds.size === 0) return [];
-  const fullEmails = await fetchMessagesByIds(accessToken, [...neededIds]);
-  console.log(`[Gmail] Phase 3 complete: ${fullEmails.length} full emails fetched`);
-  return fullEmails;
-}
-
-/**
- * Parse a Gmail API message response into our ParsedEmail format
- */
-function parseGmailMessage(msg: GmailMessageResponse): ParsedEmail | null {
-  try {
-    const headers = msg.payload?.headers || [];
-
-    const getHeader = (name: string): string | null => {
-      const header = headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
-      return header?.value || null;
-    };
-
-    const fromHeader = getHeader('From') || '';
-    const from = extractEmailAddress(fromHeader);
-    if (!from) return null;
-
-    const fromName = extractName(fromHeader);
-    const toHeader = getHeader('To') || '';
-    const ccHeader = getHeader('Cc') || '';
-    const to = extractEmailAddresses(toHeader);
-    const cc = extractEmailAddresses(ccHeader);
-    const subject = decodeHeader(getHeader('Subject') || '(No Subject)');
-    const messageId = getHeader('Message-ID');
-
-    // Parse date from internalDate (milliseconds since epoch)
-    let date: Date;
-    if (msg.internalDate) {
-      date = new Date(parseInt(msg.internalDate, 10));
-    } else {
-      const dateHeader = getHeader('Date');
-      date = dateHeader ? new Date(dateHeader) : new Date();
-    }
-
-    if (isNaN(date.getTime())) {
-      date = new Date();
-    }
-
-    // Extract body content
-    const { text: bodyText, html: bodyHtml } = extractBody(msg.payload);
-
-    const labels = msg.labelIds || [];
-    const isSent = labels.includes('SENT');
-
-    return {
-      from,
-      fromName,
-      to,
-      cc,
-      subject,
-      date,
-      messageId,
-      bodyText,
-      bodyHtml,
-      isSent,
-      labels,
-    };
-  } catch (error) {
-    console.error('[Gmail] Error parsing message:', error);
-    return null;
-  }
-}
-
-/**
- * Extract body text and HTML from Gmail message payload
- */
-function extractBody(payload?: GmailMessageResponse['payload']): {
-  text: string | null;
-  html: string | null;
-} {
-  if (!payload) return { text: null, html: null };
-
-  let text: string | null = null;
-  let html: string | null = null;
-
-  // Check if body is directly in payload
-  if (payload.body?.data) {
-    const decoded = decodeBase64Url(payload.body.data);
-    if (payload.mimeType === 'text/html') {
-      html = decoded;
-    } else {
-      text = decoded;
-    }
-  }
-
-  // Check parts recursively
-  if (payload.parts) {
-    const result = extractBodyFromParts(payload.parts);
-    if (!text && result.text) text = result.text;
-    if (!html && result.html) html = result.html;
-  }
-
-  return { text, html };
-}
-
-function extractBodyFromParts(parts: GmailMessagePart[]): {
-  text: string | null;
-  html: string | null;
-} {
-  let text: string | null = null;
-  let html: string | null = null;
-
-  for (const part of parts) {
-    if (part.mimeType === 'text/plain' && part.body?.data && !text) {
-      text = decodeBase64Url(part.body.data);
-    } else if (part.mimeType === 'text/html' && part.body?.data && !html) {
-      html = decodeBase64Url(part.body.data);
-    } else if (part.parts) {
-      // Nested multipart
-      const nested = extractBodyFromParts(part.parts);
-      if (!text && nested.text) text = nested.text;
-      if (!html && nested.html) html = nested.html;
-    }
-  }
-
-  return { text, html };
-}
-
-function decodeBase64Url(data: string): string {
-  // Gmail uses URL-safe base64
-  const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
-  return Buffer.from(base64, 'base64').toString('utf-8');
-}
-
-function extractEmailAddress(str: string): string | null {
-  // Match email in angle brackets: "Name <email@domain.com>"
-  const angleMatch = str.match(/<([^>]+@[^>]+)>/);
-  if (angleMatch) return angleMatch[1].toLowerCase();
-
-  // Match plain email
-  const plainMatch = str.match(/[\w.-]+@[\w.-]+\.\w+/);
-  if (plainMatch) return plainMatch[0].toLowerCase();
-
-  return null;
-}
-
-function extractEmailAddresses(str: string): string[] {
-  const emails: string[] = [];
-
-  // Split by comma, handling quoted names
-  const parts = str.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/);
-
-  for (const part of parts) {
-    const email = extractEmailAddress(part);
-    if (email) emails.push(email);
-  }
-
-  return emails;
-}
-
-function extractName(str: string): string | null {
-  // Match name before angle brackets: "Name <email@domain.com>"
-  const match = str.match(/^"?([^"<]+)"?\s*</);
-  if (match) return match[1].trim();
-
-  // Match quoted name
-  const quotedMatch = str.match(/^"([^"]+)"/);
-  if (quotedMatch) return quotedMatch[1].trim();
-
-  return null;
-}
-
-function decodeHeader(str: string): string {
-  // Decode RFC 2047 encoded words: =?charset?encoding?text?=
-  return str.replace(/=\?([^?]+)\?([BbQq])\?([^?]+)\?=/g, (_, charset, encoding, text) => {
-    try {
-      if (encoding.toUpperCase() === 'B') {
-        return Buffer.from(text, 'base64').toString('utf-8');
-      } else if (encoding.toUpperCase() === 'Q') {
-        return decodeQuotedPrintable(text.replace(/_/g, ' '));
-      }
-    } catch {
-      return text;
-    }
-    return text;
-  });
-}
-
-function decodeQuotedPrintable(str: string): string {
-  return str
-    .replace(/=\r?\n/g, '') // Soft line breaks
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Transform emails into ContactToUpsert format grouped by contact
- */
-function transformEmailsToContacts(emails: ParsedEmail[], userEmail: string): ContactToUpsert[] {
-  const contactMap = new Map<string, EmailContact>();
-
-  // Build user email set using multiple signals:
-  // 1. The connected email address
-  // 2. "from" addresses on SENT-labeled emails (Gmail native sent)
-  // 3. Imported emails: custom-label-only emails where "from" matches the user's name pattern
-  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
-
-  // Collect from SENT-labeled emails
-  for (const email of emails) {
-    if (email.isSent) {
-      userEmailSet.add(email.from.toLowerCase());
-    }
-  }
-
-  // Detect imported accounts: if an email is in the mailbox but neither the "from"
-  // nor any "to"/"cc" contains a known user email, it was imported from another account.
-  // The user's imported address will appear frequently in both "from" (sent) and "to"
-  // (received) roles. External contacts may also appear in both roles (e.g. emailed you
-  // AND was CC'd), but at much lower frequency.
-  let foundNew = true;
-  while (foundNew) {
-    foundNew = false;
-    const fromCounts = new Map<string, number>();
-    const toCounts = new Map<string, number>();
-
-    for (const email of emails) {
-      const from = email.from.toLowerCase();
-      const allRecipients = [...email.to, ...email.cc].map((e) => e.toLowerCase());
-
-      // Skip emails that involve a known user address
-      if (userEmailSet.has(from) || allRecipients.some((r) => userEmailSet.has(r))) continue;
-
-      // This email involves no known user address — it's imported
-      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
-      for (const r of allRecipients) {
-        toCounts.set(r, (toCounts.get(r) || 0) + 1);
-      }
-    }
-
-    // The user's imported address dominates the orphan email pool.
-    // Find the top sender by fromCount, and only accept it if:
-    // 1. fromCount >= 20 (minimum volume)
-    // 2. It also appears as a recipient (toCount >= 5)
-    // 3. It sends at least 3x more than the next non-related candidate
-    const candidates = [...fromCounts.entries()]
-      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
-      .sort((a, b) => b[1] - a[1]);
-
-    if (candidates.length > 0) {
-      const [topAddr, topCount] = candidates[0];
-      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
-      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
-        userEmailSet.add(topAddr);
-        foundNew = true;
-        console.log(
-          `[Gmail] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`
-        );
-      }
-    }
-  }
-
-  console.log(
-    `[Gmail] transformEmailsToContacts: ${emails.length} emails, userEmailSet=${JSON.stringify([...userEmailSet])}`
-  );
-  const fromMeCount = emails.filter(
-    (e) => e.isSent || userEmailSet.has(e.from.toLowerCase())
-  ).length;
-  console.log(`[Gmail]   isFromMe total: ${fromMeCount}`);
-
-  for (const email of emails) {
-    const isFromMe = email.isSent || userEmailSet.has(email.from.toLowerCase());
-
-    // Determine the contact email(s)
-    let contactEmails: string[] = [];
-
-    if (isFromMe) {
-      // User sent this email - contacts are recipients (exclude user's own addresses)
-      contactEmails = [...email.to, ...email.cc].filter((e) => !userEmailSet.has(e.toLowerCase()));
-    } else {
-      // User received this email - contact is sender
-      contactEmails = [email.from];
-    }
-
-    // Get plain text body, stripping HTML if needed
-    let bodyContent = email.bodyText;
-    if (!bodyContent && email.bodyHtml) {
-      bodyContent = stripHtml(email.bodyHtml);
-    }
-
-    // Truncate body to reasonable length
-    if (bodyContent && bodyContent.length > 10000) {
-      bodyContent = bodyContent.substring(0, 10000) + '...';
-    }
-
-    for (const contactEmail of contactEmails) {
-      if (!contactMap.has(contactEmail)) {
-        contactMap.set(contactEmail, {
-          email: contactEmail,
-          name: isFromMe ? null : email.fromName,
-          sentCount: 0,
-          receivedCount: 0,
-          messages: [],
-        });
-      }
-
-      const contact = contactMap.get(contactEmail)!;
-
-      if (isFromMe) {
-        contact.sentCount++;
-      } else {
-        contact.receivedCount++;
-        // Update name if we have one
-        if (email.fromName && !contact.name) {
-          contact.name = email.fromName;
-        }
-      }
-
-      contact.messages.push({
-        from: email.from,
-        to: contactEmail,
-        subject: email.subject,
-        date: email.date,
-        body: bodyContent,
-        isFromMe,
+      log.warn('Messages could not be fetched after retries', {
+        count: rateLimitedIds.length,
       });
     }
   }
 
-  // Filter contacts: user must have SENT at least one email to them
-  const validContacts = Array.from(contactMap.values()).filter((c) => c.sentCount > 0);
-
-  // Transform to ContactToUpsert format
-  return validContacts.map((contact) => {
-    // Parse name into firstName/lastName
-    let firstName = '';
-    let lastName = '';
-    if (contact.name) {
-      const nameParts = contact.name.split(' ');
-      firstName = nameParts[0] || '';
-      lastName = nameParts.slice(1).join(' ') || '';
-    }
-
-    return {
-      identifier: contact.email,
-      identifierType: 'email' as const,
-      firstName,
-      lastName,
-      email: contact.email,
-      emailAddresses: [contact.email],
-      messages: contact.messages.map((msg) => ({
-        channel: MessageChannel.EMAIL,
-        from: msg.from,
-        to: msg.to,
-        timestamp: msg.date,
-        message: msg.subject + (msg.body ? '\n\n' + msg.body : ''),
-      })),
-    };
+  log.info('Phase 1 complete', {
+    metadata_fetched: allMetadata.length,
+    unrecoverable: rateLimitedIds.length,
   });
+
+  // Phase 2: Identify which messages we actually need
+  const neededIds = identifyNeededMessageIds(allMetadata, userEmail);
+  log.info('Phase 2: needed messages identified', { needed_count: neededIds.size });
+
+  // Phase 3: Fetch full content for needed messages only
+  if (neededIds.size === 0) return [];
+  const fullEmails = await fetchMessagesByIds(accessToken, [...neededIds]);
+  log.info('Phase 3 complete', { full_emails_fetched: fullEmails.length });
+  return fullEmails;
 }
 
 /**
@@ -1048,60 +587,26 @@ export async function parseGmailOAuthEmails(
   emails: ParsedEmail[],
   jobId: string
 ): Promise<{ contacts: number; messages: number }> {
-  console.log(`[Job ${jobId}] Processing ${emails.length} Gmail emails for user ${userId}`);
+  log.info('Processing Gmail emails', {
+    job_id: jobId,
+    email_count: emails.length,
+    user_id: userId,
+  });
 
   const contactsToUpsert = transformEmailsToContacts(emails, userEmail);
-  console.log(
-    `[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`
-  );
+  log.info('Found valid contacts', {
+    job_id: jobId,
+    contact_count: contactsToUpsert.length,
+  });
 
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
-  console.log(
-    `[Job ${jobId}] ✅ Gmail sync complete: ${result.contacts} contacts, ${result.messages} messages`
-  );
+  log.info('Gmail sync complete', {
+    job_id: jobId,
+    contacts: result.contacts,
+    messages: result.messages,
+  });
   return result;
-}
-
-/**
- * Detect imported email accounts from parsed emails (without modifying userEmailSet).
- * Returns list of email addresses that appear to be imported user accounts.
- */
-export function detectImportedAccounts(emails: ParsedEmail[], userEmail: string): string[] {
-  const userEmailSet = new Set<string>([userEmail.toLowerCase()]);
-  for (const email of emails) {
-    if (email.isSent) userEmailSet.add(email.from.toLowerCase());
-  }
-
-  const imported: string[] = [];
-  let foundNew = true;
-  while (foundNew) {
-    foundNew = false;
-    const fromCounts = new Map<string, number>();
-    const toCounts = new Map<string, number>();
-    for (const email of emails) {
-      const from = email.from.toLowerCase();
-      const allRecipients = [...email.to, ...email.cc].map((e) => e.toLowerCase());
-      if (userEmailSet.has(from) || allRecipients.some((r) => userEmailSet.has(r))) continue;
-      fromCounts.set(from, (fromCounts.get(from) || 0) + 1);
-      for (const r of allRecipients) {
-        toCounts.set(r, (toCounts.get(r) || 0) + 1);
-      }
-    }
-    const candidates = [...fromCounts.entries()]
-      .filter(([addr]) => (toCounts.get(addr) || 0) >= 5)
-      .sort((a, b) => b[1] - a[1]);
-    if (candidates.length > 0) {
-      const [topAddr, topCount] = candidates[0];
-      const secondCount = candidates.length > 1 ? candidates[1][1] : 0;
-      if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
-        userEmailSet.add(topAddr);
-        imported.push(topAddr);
-        foundNew = true;
-      }
-    }
-  }
-  return imported;
 }
 
 /**
@@ -1132,6 +637,6 @@ export async function searchAndFetchEmails(
 
   if (messageIds.length === 0) return [];
 
-  console.log(`[Gmail] Fetching ${messageIds.length} messages for query "${query}"...`);
+  log.info('Fetching messages for query', { count: messageIds.length, query });
   return fetchMessagesByIds(accessToken, messageIds.slice(0, maxResults));
 }

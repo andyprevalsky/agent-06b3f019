@@ -597,12 +597,30 @@ async function testBoundary_unknownPhoneCapturesSurgeCall() {
   }
 }
 
+const SMS_WEBHOOK_INFRA_HOSTS = [
+  'api.github.com',
+  'openrouter.ai',
+  'anthropic.com',
+  'openai.com',
+  'ip-api.com',
+  'supabase.co',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+  'parallel.ai',
+  'api.steel.dev',
+  'perplexity.ai',
+  'exa.ai',
+  'vapi.ai',
+  'googleapis.com',
+];
+
 async function testBoundary_invalidPayloadZeroCaptures() {
   // Wait for any in-flight async work from prior tests (notably the supervisor
   // LLM call kicked off by testCoverage_routeToSupervisorReturnsImmediately,
   // even though that test issues /clear to abort it) to fully settle before
-  // we read our cursor — any captures that drift in after we read but before
-  // we send our own request would inflate the post-cursor count.
+  // we read our cursor.
   await new Promise((r) => setTimeout(r, 500));
   const cursorRes = await request(`${BASE_URL}/api/test/captures`);
   if (cursorRes.status !== 200) {
@@ -618,9 +636,17 @@ async function testBoundary_invalidPayloadZeroCaptures() {
 
   const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
-  if (body.captures.length > 0) {
-    throw new Error(`Expected 0 captures on invalid payload, got ${body.captures.length}`);
+  const body = capturesRes.data as { captures: { url: string }[] };
+  // Cross-test pollution: prior tests' fire-and-forget LLM/realtime calls
+  // can drift in after our cursor read. Filter to non-infra captures only,
+  // matching the convention used by claude-code.blackbox.ts and friends.
+  const domainCaptures = body.captures.filter(
+    (c) => !SMS_WEBHOOK_INFRA_HOSTS.some((host) => c.url.includes(host))
+  );
+  if (domainCaptures.length > 0) {
+    throw new Error(
+      `Expected 0 domain-side captures on invalid payload, got ${domainCaptures.length}: ${JSON.stringify(domainCaptures.map((c) => c.url))}`
+    );
   }
 }
 

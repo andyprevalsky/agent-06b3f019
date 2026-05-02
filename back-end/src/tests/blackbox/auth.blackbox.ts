@@ -67,7 +67,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 // __dirname (this file's directory) to handle both cases — `__dirname` is
 // .../back-end/src/tests/blackbox so `../../../../.context/...` lands at the
 // repo root regardless of cwd.
-const FF_CACHE_DIR = resolvePath(__dirname, '../../../../.context/fast-forward-cache/outbound-fetch');
+const FF_CACHE_DIR = resolvePath(
+  __dirname,
+  '../../../../.context/fast-forward-cache/outbound-fetch'
+);
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -219,16 +222,22 @@ function assert(condition: boolean, message: string): void {
 
 /** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
 const INFRA_URL_PATTERNS = [
-  'api.github.com',
+  'anthropic.com',
+  'openai.com',
   'openrouter.ai',
+  'supabase.co',
+  'api.github.com',
   'ip-api.com',
-  'supabase.co/realtime',
-  'supabase.co/storage',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
   'stripe.com',
   'parallel.ai',
+  'exa.ai',
+  'perplexity.ai',
+  'vapi.ai',
+  'googleapis.com',
+  'api.steel.dev',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
@@ -502,22 +511,27 @@ function seedSupabaseAdminCreate(
  * Uses an unused-but-syntactically-valid number block so seeded cache entries
  * never collide with real Twilio responses recorded for legitimate test phones.
  *
- * Format: `+1 555 XXX YYYY` (NANP-shaped) where XXX is a per-suite-run random
- * 3-digit prefix and YYYY is a 4-digit monotonic counter. Distinct across
- * concurrent tests in the same suite (counter) and across suite runs (prefix).
+ * Format: `+1 555 XXX YYYY` (NANP-shaped). The 7 trailing digits are derived
+ * from a per-process UUID (32 bits of entropy) plus a monotonic counter, so
+ * concurrent tests in the same process get distinct phones AND historical
+ * users in the local DB from prior test runs do not collide with this run.
  */
+const fakePhoneRunSeed = parseInt(randomUUID().replace(/-/g, '').slice(0, 8), 16) % 10_000_000;
 let fakePhoneCounter = 0;
-const fakePhonePrefix = String(100 + Math.floor(Math.random() * 800)); // 100-899
 function uniqueFakePhone(): string {
   fakePhoneCounter++;
-  const counterPart = String(fakePhoneCounter).padStart(4, '0').slice(-4);
-  // E.164 layout: +1 (country) 555 (area) XXX (prefix) YYYY (counter) = 10 NANP digits
-  return `+1555${fakePhonePrefix}${counterPart}`;
+  const suffix = (fakePhoneRunSeed + fakePhoneCounter) % 10_000_000;
+  // E.164 layout: +1 (country) 555 (area) XXXXXXX (7 unique digits) = 10 NANP digits
+  return `+1555${String(suffix).padStart(7, '0')}`;
 }
 
-/** True if both Twilio and Supabase config are available for seeding. */
+/** True if both Twilio and Supabase config are available for seeding AND
+ *  the backend is in capture mode (without capture mode the fast-forward
+ *  cache files are written but the backend ignores them and makes real
+ *  Twilio/Supabase calls — so seeded tests can't pass).
+ */
 function canSeedAuthFlow(): boolean {
-  return TWILIO_VERIFY_SERVICE_SID !== '' && SUPABASE_URL !== '';
+  return TWILIO_VERIFY_SERVICE_SID !== '' && SUPABASE_URL !== '' && ctx.captureAvailable;
 }
 
 // ==================== SETUP ====================

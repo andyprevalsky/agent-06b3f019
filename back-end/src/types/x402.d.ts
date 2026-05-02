@@ -4,7 +4,7 @@
 
 declare module 'x402-express' {
   import { RequestHandler } from 'express';
-  
+
   interface RouteConfig {
     price: string;
     network: string;
@@ -12,23 +12,23 @@ declare module 'x402-express' {
       description?: string;
       mimeType?: string;
       maxTimeoutSeconds?: number;
-      inputSchema?: Record<string, any>;
-      outputSchema?: Record<string, any>;
+      inputSchema?: Record<string, unknown>;
+      outputSchema?: Record<string, unknown>;
       customPaywallHtml?: string;
       resource?: string;
     };
   }
-  
+
   interface Facilitator {
     url?: string;
   }
-  
+
   export function paymentMiddleware(
     receivingAddress: string,
     routes: Record<string, RouteConfig>,
-    facilitator?: Facilitator | any
+    facilitator?: Facilitator | Record<string, unknown>
   ): RequestHandler;
-  
+
   export enum Network {
     BASE = 'base',
     BASE_SEPOLIA = 'base-sepolia',
@@ -38,6 +38,8 @@ declare module 'x402-express' {
 }
 
 declare module '@coinbase/x402' {
-  export const facilitator: any;
+  export const facilitator: {
+    url?: string;
+    [key: string]: unknown;
+  };
 }
-

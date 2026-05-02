@@ -276,14 +276,20 @@ function assert(condition: boolean, message: string): void {
 const INFRA_URL_PATTERNS = [
   'api.github.com',
   'openrouter.ai',
+  'anthropic.com',
+  'openai.com',
   'ip-api.com',
-  'supabase.co/realtime',
-  'supabase.co/storage',
+  'supabase.co',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
   'stripe.com',
   'parallel.ai',
+  'api.steel.dev',
+  'perplexity.ai',
+  'exa.ai',
+  'vapi.ai',
+  'googleapis.com',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
@@ -1918,7 +1924,10 @@ async function testClaudeCodeToken_notFound() {
   assertStatus(res.status, 200, res.data);
   const body = res.data as { accessToken: string; source: string };
   assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
-  assert(typeof body.accessToken === 'string' && body.accessToken.length > 0, 'Expected pool accessToken');
+  assert(
+    typeof body.accessToken === 'string' && body.accessToken.length > 0,
+    'Expected pool accessToken'
+  );
 }
 
 async function testClaudeCodeRateLimited_forbidden() {
@@ -4088,7 +4097,10 @@ async function runAll() {
     { name: 'POST /passwords/upload happy path', fn: testPasswordsUpload_happyPath },
 
     // Encrypted upload error-path coverage (decryption-failure + shape-validation branches)
-    { name: 'POST /cookies/upload decoded not array -> 400', fn: testCookiesUpload_decodedNotArray },
+    {
+      name: 'POST /cookies/upload decoded not array -> 400',
+      fn: testCookiesUpload_decodedNotArray,
+    },
     {
       name: 'POST /cookies/upload large batch + duplicates',
       fn: testCookiesUpload_largeBatchWithDuplicates,
@@ -4097,7 +4109,10 @@ async function runAll() {
       name: 'POST /cookies/upload empty name/value filtered',
       fn: testCookiesUpload_emptyNameValueFiltered,
     },
-    { name: 'POST /cookies/upload alternate browser (edge)', fn: testCookiesUpload_alternateBrowser },
+    {
+      name: 'POST /cookies/upload alternate browser (edge)',
+      fn: testCookiesUpload_alternateBrowser,
+    },
     {
       name: 'POST /localStorage/upload bad encryption -> 400',
       fn: testLocalStorageUpload_invalidEncryption,

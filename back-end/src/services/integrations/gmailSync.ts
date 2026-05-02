@@ -1,4 +1,5 @@
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
 import { logTruncate } from '../../utils/log';
 import { IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
 import {
@@ -10,6 +11,8 @@ import {
 } from './gmailParser';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 
+const log = createLogger('GmailSync');
+
 // Sync interval: 1 hour
 const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -19,7 +22,10 @@ const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 interface IntegrationConfig {
   provider?: string;
   historyId?: string;
+  historyIds?: Record<string, string>;
   userEmail?: string;
+  contacts?: number;
+  messages?: number;
   [key: string]: unknown;
 }
 
@@ -33,7 +39,7 @@ async function refreshGoogleAccessToken(
   const clientSecret = process.env.GMAIL_WEB_CLIENT_SECRET;
 
   if (!clientId) {
-    console.error('[GmailSync] Missing GMAIL_WEB_CLIENT_ID');
+    log.error('Missing GMAIL_WEB_CLIENT_ID');
     return null;
   }
 
@@ -53,9 +59,10 @@ async function refreshGoogleAccessToken(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(
-        `[GmailSync] Token refresh failed: ${response.status} - ${logTruncate(errorText)}`
-      );
+      log.error('Token refresh failed', {
+        status: response.status,
+        body: logTruncate(errorText),
+      });
       return null;
     }
 
@@ -69,7 +76,7 @@ async function refreshGoogleAccessToken(
       expiresAt: new Date(Date.now() + json.expires_in * 1000),
     };
   } catch (error) {
-    console.error('[GmailSync] Error refreshing token:', error);
+    log.error('Error refreshing token', { error: error instanceof Error ? error.message : error });
     return null;
   }
 }
@@ -94,11 +101,11 @@ export async function getValidAccessToken(credential: {
 
   // Need to refresh
   if (!credential.refreshToken) {
-    console.error('[GmailSync] No refresh token available');
+    log.error('No refresh token available');
     return null;
   }
 
-  console.log('[GmailSync] Refreshing expired access token...');
+  log.info('Refreshing expired access token...');
   const refreshed = await refreshGoogleAccessToken(credential.refreshToken);
 
   if (!refreshed) {
@@ -175,13 +182,16 @@ async function transformAndFilterEmails(
       if (topCount >= 20 && (secondCount === 0 || topCount >= secondCount * 3)) {
         userEmailSet.add(topAddr);
         foundNew = true;
-        console.log(
-          `[GmailSync] Detected imported account: ${topAddr} (from=${topCount}, to=${toCounts.get(topAddr) || 0}, next=${secondCount})`
-        );
+        log.info('Detected imported account', {
+          address: topAddr,
+          from: topCount,
+          to: toCounts.get(topAddr) || 0,
+          next: secondCount,
+        });
       }
     }
   }
-  console.log(`[GmailSync] userEmailSet: ${JSON.stringify([...userEmailSet])}`);
+  log.info('userEmailSet computed', { emails: [...userEmailSet] });
 
   // Group emails by contact
   const contactMap = new Map<
@@ -293,7 +303,7 @@ async function transformAndFilterEmails(
     .filter(([email]) => historicallySentTo.has(email))
     .map(([, contact]) => contact);
 
-  console.log(`[GmailSync] Filtered to ${validContacts.length} contacts (user has sent to them)`);
+  log.info('Filtered contacts (user has sent to them)', { count: validContacts.length });
 
   // Transform to ContactToUpsert format
   return validContacts.map((contact) => {
@@ -339,12 +349,12 @@ async function syncGmailForUser(
   integrationId: string
 ): Promise<{ success: boolean; contacts: number; messages: number }> {
   const credentialEmail = credential.email || '';
-  console.log(`[GmailSync] Starting sync for user ${userId} (${credentialEmail})`);
+  log.info('Starting sync for user', { userId, credentialEmail });
 
   // Get valid access token
   const accessToken = await getValidAccessToken(credential);
   if (!accessToken) {
-    console.error(`[GmailSync] Failed to get valid access token for ${credentialEmail}`);
+    log.error('Failed to get valid access token', { credentialEmail });
     return { success: false, contacts: 0, messages: 0 };
   }
 
@@ -356,7 +366,7 @@ async function syncGmailForUser(
     select: { id: true, config: true },
   });
   if (!integration) {
-    console.error(`[GmailSync] Integration ${integrationId} not found`);
+    log.error('Integration not found', { integrationId });
     return { success: false, contacts: 0, messages: 0 };
   }
 
@@ -364,7 +374,7 @@ async function syncGmailForUser(
 
   // Per-credential historyId: stored in config.historyIds[credentialEmail]
   // Falls back to legacy config.historyId for the primary account
-  const historyIds = (config as any).historyIds as Record<string, string> | undefined;
+  const historyIds = config.historyIds;
   const historyId =
     historyIds?.[credentialEmail] ||
     (credentialEmail === config.userEmail ? config.historyId : undefined);
@@ -376,7 +386,9 @@ async function syncGmailForUser(
       const profile = await getGmailProfile(accessToken);
       userEmail = profile.emailAddress;
     } catch (error) {
-      console.error(`[GmailSync] Failed to get user email:`, error);
+      log.error('Failed to get user email', {
+        error: error instanceof Error ? error.message : error,
+      });
       return { success: false, contacts: 0, messages: 0 };
     }
   }
@@ -386,33 +398,32 @@ async function syncGmailForUser(
 
   if (historyId) {
     // Incremental sync using History API
-    console.log(
-      `[GmailSync] Performing incremental sync for ${credentialEmail} from historyId: ${historyId}`
-    );
+    log.info('Performing incremental sync', { credentialEmail, historyId });
 
     const historyResult = await fetchGmailHistory(accessToken, historyId);
 
     if (historyResult.newHistoryId === '') {
       // History expired, need full sync
-      console.log(`[GmailSync] History expired for ${credentialEmail}, falling back to full sync`);
+      log.info('History expired, falling back to full sync', { credentialEmail });
       emails = await fetchGmailEmails(accessToken, userEmail);
       const profile = await getGmailProfile(accessToken);
       newHistoryId = profile.historyId;
     } else if (historyResult.addedMessageIds.length === 0) {
       // No new messages
-      console.log(`[GmailSync] No new messages for ${credentialEmail}`);
+      log.info('No new messages', { credentialEmail });
       newHistoryId = historyResult.newHistoryId;
     } else {
       // Fetch the new messages
-      console.log(
-        `[GmailSync] ${historyResult.addedMessageIds.length} new messages for ${credentialEmail}`
-      );
+      log.info('New messages found', {
+        credentialEmail,
+        count: historyResult.addedMessageIds.length,
+      });
       emails = await fetchMessagesByIds(accessToken, historyResult.addedMessageIds);
       newHistoryId = historyResult.newHistoryId;
     }
   } else {
     // Full sync (first time for this credential)
-    console.log(`[GmailSync] Performing full sync for ${credentialEmail} (no historyId)`);
+    log.info('Performing full sync (no historyId)', { credentialEmail });
     emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
     newHistoryId = profile.historyId;
@@ -438,8 +449,8 @@ async function syncGmailForUser(
   }
 
   // Get existing counts and add new counts
-  const existingContacts = (config.contacts as number) || 0;
-  const existingMessages = (config.messages as number) || 0;
+  const existingContacts = config.contacts || 0;
+  const existingMessages = config.messages || 0;
 
   // Update integration with per-credential historyId
   const updatedHistoryIds = { ...(historyIds || {}), [credentialEmail]: newHistoryId };
@@ -461,9 +472,11 @@ async function syncGmailForUser(
     },
   });
 
-  console.log(
-    `[GmailSync] ✅ Sync complete for ${credentialEmail}: ${contactCount} new contacts, ${messageCount} new messages`
-  );
+  log.info('Sync complete', {
+    credentialEmail,
+    newContacts: contactCount,
+    newMessages: messageCount,
+  });
   return { success: true, contacts: contactCount, messages: messageCount };
 }
 
@@ -471,7 +484,7 @@ async function syncGmailForUser(
  * Run the Gmail sync job - finds all integrations due for sync and processes them
  */
 export async function runGmailSyncJob(): Promise<void> {
-  console.log('[GmailSync] Starting sync job...');
+  log.info('Starting sync job...');
 
   const syncIntervalCutoff = new Date(Date.now() - SYNC_INTERVAL_MS);
 
@@ -494,7 +507,7 @@ export async function runGmailSyncJob(): Promise<void> {
     },
   });
 
-  console.log(`[GmailSync] Found ${dueIntegrations.length} integrations due for sync`);
+  log.info('Integrations due for sync', { count: dueIntegrations.length });
 
   let successCount = 0;
   let failCount = 0;
@@ -503,7 +516,7 @@ export async function runGmailSyncJob(): Promise<void> {
     const validCredentials = integration.emailCredentials.filter((c) => c.refreshToken);
 
     if (validCredentials.length === 0) {
-      console.log(`[GmailSync] Skipping integration ${integration.id} - no valid credentials`);
+      log.info('Skipping integration - no valid credentials', { integrationId: integration.id });
       continue;
     }
 
@@ -520,9 +533,10 @@ export async function runGmailSyncJob(): Promise<void> {
 
     for (const credential of validCredentials) {
       try {
-        console.log(
-          `[GmailSync] Syncing credential ${credential.email} for integration ${integration.id}`
-        );
+        log.info('Syncing credential', {
+          credentialEmail: credential.email,
+          integrationId: integration.id,
+        });
         const result = await syncGmailForUser(integration.userId, credential, integration.id);
 
         if (!result.success) {
@@ -530,7 +544,10 @@ export async function runGmailSyncJob(): Promise<void> {
           lastError = `Sync failed for ${credential.email}`;
         }
       } catch (error) {
-        console.error(`[GmailSync] Error syncing ${credential.email}:`, error);
+        log.error('Error syncing credential', {
+          credentialEmail: credential.email,
+          error: error instanceof Error ? error.message : error,
+        });
         allSucceeded = false;
         lastError = error instanceof Error ? error.message : 'Unknown error';
       }
@@ -551,5 +568,5 @@ export async function runGmailSyncJob(): Promise<void> {
     }
   }
 
-  console.log(`[GmailSync] ✅ Sync job complete: ${successCount} succeeded, ${failCount} failed`);
+  log.info('Sync job complete', { succeeded: successCount, failed: failCount });
 }

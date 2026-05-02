@@ -147,7 +147,9 @@ function buildPersonEmbeddingTextLocal(signals: Record<string, unknown>): string
     parts.push(`Interests: ${(signals.interests as string[]).join(', ')}`);
   }
   if (signals.total_online_reach) {
-    parts.push(`Online reach: ${(signals.total_online_reach as number).toLocaleString()} followers`);
+    parts.push(
+      `Online reach: ${(signals.total_online_reach as number).toLocaleString()} followers`
+    );
   }
   if (signals.estimated_net_worth_usd) {
     const netWorthFormatted = `$${((signals.estimated_net_worth_usd as number) / 1000000).toFixed(1)}M`;
@@ -211,10 +213,7 @@ function seedOpenAIEmbedding(input: string, embedding: number[]): void {
  * Seed an embedding for a person-shaped signals object — convenience wrapper
  * around seedOpenAIEmbedding that derives the input text from the signals.
  */
-function seedEmbeddingForSignals(
-  signals: Record<string, unknown>,
-  embedding: number[]
-): void {
+function seedEmbeddingForSignals(signals: Record<string, unknown>, embedding: number[]): void {
   const input = buildPersonEmbeddingTextLocal(signals);
   seedOpenAIEmbedding(input, embedding);
 }
@@ -1199,8 +1198,7 @@ async function testSequential_messagesReturnRecords() {
   );
   // ISO timestamps round-trip through formatMessages (line 106 — record.timestamp.toISOString())
   assert(
-    typeof parsed.messages[0].timestamp === 'string' &&
-      parsed.messages[0].timestamp.includes('T'),
+    typeof parsed.messages[0].timestamp === 'string' && parsed.messages[0].timestamp.includes('T'),
     `Expected ISO timestamp, got "${parsed.messages[0].timestamp}"`
   );
   // Channel preserved through formatMessages map (line 103)
@@ -1838,7 +1836,11 @@ async function testCoverage_collisionByEmailAddressesArrayMerges() {
   // Also seed merge-time embedding (post-merge will include first_name/last_name
   // from existing because we provided new ones — actually new override existing).
   seedEmbeddingForSignals(
-    { first_name: signals.first_name, last_name: signals.last_name, profession: signals.profession },
+    {
+      first_name: signals.first_name,
+      last_name: signals.last_name,
+      profession: signals.profession,
+    },
     v
   );
 

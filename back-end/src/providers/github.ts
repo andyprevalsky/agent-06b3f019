@@ -1,4 +1,7 @@
 import { prisma } from './database';
+import { createLogger } from './logger';
+
+const log = createLogger('GitHub');
 
 /**
  * Normalize a GitHub URL to a consistent format.
@@ -7,9 +10,9 @@ import { prisma } from './database';
  */
 export function normalizeGithubUrl(url: string): string | null {
   const patterns = [
-    /^https?:\/\/github\.com\/([^\/\s]+)\/([^\/\s]+)/,
-    /^github\.com\/([^\/\s]+)\/([^\/\s]+)/,
-    /^([^\/\s]+)\/([^\/\s]+)$/,
+    /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)/,
+    /^github\.com\/([^/\s]+)\/([^/\s]+)/,
+    /^([^/\s]+)\/([^/\s]+)$/,
   ];
 
   for (const pattern of patterns) {
@@ -31,7 +34,7 @@ export function parseGithubUrl(url: string): { owner: string; repo: string } | n
   const normalized = normalizeGithubUrl(url);
   if (!normalized) return null;
 
-  const match = normalized.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+  const match = normalized.match(/github\.com\/([^/]+)\/([^/]+)/);
   if (!match) return null;
 
   return { owner: match[1], repo: match[2] };
@@ -87,7 +90,7 @@ export async function checkGithubRepoAccess(
 export async function createGithubRepo(repoName: string): Promise<string | null> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
-    console.error('[GitHub] GITHUB_TOKEN not configured — cannot create repo');
+    log.error('GITHUB_TOKEN not configured — cannot create repo');
     return null;
   }
 
@@ -109,19 +112,23 @@ export async function createGithubRepo(repoName: string): Promise<string | null>
 
     if (!response.ok) {
       const errorBody = await response.text();
-      console.error(
-        `[GitHub] Failed to create repo ${repoName}: HTTP ${response.status}`,
-        errorBody
-      );
+      log.error('Failed to create repo', {
+        repoName,
+        status: response.status,
+        errorBody,
+      });
       return null;
     }
 
     const data = (await response.json()) as { html_url: string };
     const repoUrl = data.html_url;
-    console.log(`[GitHub] Created repo: ${repoUrl}`);
+    log.info('Created repo', { repoUrl });
     return repoUrl;
   } catch (error) {
-    console.error(`[GitHub] Error creating repo ${repoName}:`, error);
+    log.error('Error creating repo', {
+      repoName,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }

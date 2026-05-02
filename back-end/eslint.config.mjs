@@ -26,7 +26,7 @@ const STRICT_DOMAIN_FILES = [
 ];
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'scripts'] },
+  { ignores: ['dist', 'node_modules', 'scripts', 'coverage'] },
 
   // ── Base config: all TypeScript files ──
   {

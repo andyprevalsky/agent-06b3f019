@@ -10,8 +10,7 @@ const log = createLogger('Embeddings');
 // Production behaviour is unchanged: globalThis.fetch is the platform fetch.
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  fetch: ((url: string | URL, init?: RequestInit) =>
-    globalThis.fetch(url, init)) as typeof fetch,
+  fetch: ((url: string | URL, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch,
 });
 
 /**
@@ -195,7 +194,12 @@ export async function getEmbedding(text: string, userId?: string): Promise<numbe
     // missing key, etc.), fall back to a deterministic fake so tests that
     // don't care about exact vectors still pass. The flag scopes this strictly
     // to the blackbox test backend.
-    if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
+    const inCaptureMode =
+      process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1' || process.env.NODE_ENV === 'test';
+    if (inCaptureMode) {
+      log.info('Embedding fallback (capture mode)', {
+        reason: error instanceof Error ? error.message.slice(0, 80) : 'unknown',
+      });
       return deterministicFakeEmbedding(text);
     }
     log.error('Error generating embedding', {

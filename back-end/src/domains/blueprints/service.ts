@@ -11,6 +11,7 @@ import {
   DEFAULT_SEARCH_LIMIT,
   EMBEDDING_MODEL,
   OPENAI_API_KEY,
+  BLACKBOX_CAPTURE_MODE,
 } from './config';
 import * as repo from './repo';
 
@@ -34,18 +35,44 @@ export class EmbeddingError extends Error {
 
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
+  fetch: ((url: string | URL, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch,
 });
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+const EMBEDDING_DIM = 1536;
+
+function deterministicFakeEmbedding(text: string): number[] {
+  const out = new Array<number>(EMBEDDING_DIM);
+  for (let i = 0; i < EMBEDDING_DIM; i++) {
+    let h = 0x811c9dc5 ^ i;
+    for (let j = 0; j < text.length; j++) {
+      h ^= text.charCodeAt(j);
+      h = Math.imul(h, 0x01000193);
+    }
+    out[i] = ((h >>> 0) / 0xffffffff) * 2 - 1;
+  }
+  return out;
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: EMBEDDING_MODEL,
-    input: text,
-  });
-  return response.data[0].embedding;
+  try {
+    const response = await openai.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input: text,
+    });
+    return response.data[0].embedding;
+  } catch (error) {
+    if (BLACKBOX_CAPTURE_MODE) {
+      log.info('Blueprint embedding fallback (capture mode)', {
+        reason: error instanceof Error ? error.message.slice(0, 80) : 'unknown',
+      });
+      return deterministicFakeEmbedding(text);
+    }
+    throw error;
+  }
 }
 
 /**

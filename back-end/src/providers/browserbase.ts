@@ -1,6 +1,9 @@
 import { Browserbase } from '@browserbasehq/sdk';
 import { prisma } from './database';
 import { logJson } from '../utils/log';
+import { createLogger } from './logger';
+
+const log = createLogger('Browserbase');
 
 // Validate required environment variables
 if (!process.env.BROWSERBASE_API_KEY) {
@@ -30,12 +33,12 @@ export async function getOrCreateContext(userId: string): Promise<string> {
   });
 
   if (existing) {
-    console.log(`✓ Using existing context for user ${userId}: ${existing.contextId}`);
+    log.info('Using existing context', { userId, contextId: existing.contextId });
     return existing.id; // ✅ Return database ID (for foreign key)
   }
 
   // Create new context in Steel
-  console.log(`Creating new context for user ${userId}...`);
+  log.info('Creating new context', { userId });
   const bbContext = await bb.contexts.create({ projectId });
 
   // Save to DB
@@ -46,7 +49,7 @@ export async function getOrCreateContext(userId: string): Promise<string> {
     },
   });
 
-  console.log(`✓ Created new context: ${bbContext.id}`);
+  log.info('Created new context', { contextId: bbContext.id });
   return dbContext.id; // ✅ Return database ID (for foreign key)
 }
 
@@ -61,7 +64,7 @@ export async function createSessionWithContext(
   dbContextId: string,
   agentId: string
 ): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
-  console.log(`Creating browser session for context ${dbContextId}...`);
+  log.info('Creating browser session', { dbContextId });
 
   // Look up the Steel context ID from database
   const dbContext = await prisma.browserContext.findUnique({
@@ -103,7 +106,7 @@ export async function createSessionWithContext(
 
   // Get the authenticated live view URLs (debugger, fullscreen, websocket)
   const liveUrls = await bb.sessions.debug(session.id);
-  console.log('📺 Live URLs:', logJson(liveUrls));
+  log.info('Live URLs', { liveUrls: logJson(liveUrls) });
 
   // Use debuggerFullscreenUrl for embedding (no Steel chrome, just the browser)
   const debugUrl = liveUrls.debuggerFullscreenUrl || liveUrls.debuggerUrl;
@@ -123,11 +126,13 @@ export async function createSessionWithContext(
     },
   });
 
-  console.log(`✓ Created session: ${session.id}`);
-  console.log(`  Context (DB): ${dbContextId}`);
-  console.log(`  Context (BB): ${dbContext.contextId}`);
-  console.log(`  Live View URL: ${debugUrl}`);
-  console.log(`  CDP WebSocket URL: ${wsUrl}`);
+  log.info('Created session', {
+    sessionId: session.id,
+    contextDb: dbContextId,
+    contextBb: dbContext.contextId,
+    debugUrl,
+    wsUrl,
+  });
 
   return {
     sessionId: session.id,
@@ -147,7 +152,7 @@ export async function closeSession(
   pause: boolean = false,
   currentUrl?: string
 ): Promise<void> {
-  console.log(`${pause ? 'Pausing' : 'Closing'} browser session ${sessionId}...`);
+  log.info(pause ? 'Pausing browser session' : 'Closing browser session', { sessionId });
 
   try {
     // Close in Steel by requesting release (saves context state, stops billing)
@@ -156,12 +161,15 @@ export async function closeSession(
       status: 'REQUEST_RELEASE',
     });
   } catch (error) {
-    console.error(`Failed to close session in Steel:`, error);
+    log.error('Failed to close session in Steel', {
+      error: error instanceof Error ? error.message : String(error),
+      sessionId,
+    });
     // Continue to update DB even if Steel call fails
   }
 
   // Update DB
-  console.log(`📝 Updating DB with currentUrl: ${currentUrl || 'NONE'}`);
+  log.info('Updating DB with currentUrl', { currentUrl: currentUrl || 'NONE' });
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
@@ -171,11 +179,11 @@ export async function closeSession(
     },
   });
 
-  console.log(`✓ Session ${pause ? 'paused (resumable)' : 'closed (terminal)'}`);
+  log.info(pause ? 'Session paused (resumable)' : 'Session closed (terminal)', { sessionId });
   if (currentUrl) {
-    console.log(`  ✅ Saved current URL to DB: ${currentUrl}`);
+    log.info('Saved current URL to DB', { currentUrl });
   } else {
-    console.log(`  ⚠️ No currentUrl to save`);
+    log.warn('No currentUrl to save', { sessionId });
   }
 }
 
@@ -188,7 +196,7 @@ export async function closeSession(
 export async function resumeSession(
   taskId: string
 ): Promise<{ debugUrl: string; sessionId: string; wsUrl: string; savedUrl?: string }> {
-  console.log(`Resuming browser task ${taskId}...`);
+  log.info('Resuming browser task', { taskId });
 
   // Look up the old session to get context
   const oldSession = await prisma.browserSession.findUnique({
@@ -200,7 +208,7 @@ export async function resumeSession(
     throw new Error(`Browser task not found: ${taskId}`);
   }
 
-  console.log(`  Found old session with currentUrl: ${oldSession.currentUrl || 'NONE'}`);
+  log.info('Found old session', { currentUrl: oldSession.currentUrl || 'NONE' });
 
   // Create NEW Steel session with same context, proxies, and NYC geolocation
   // Documentation: https://docs.browserbase.com/features/proxies
@@ -230,7 +238,7 @@ export async function resumeSession(
     timeout: 7200, // 2 hours in seconds
   });
 
-  console.log(`  ✓ Created new Steel session: ${session.id}`);
+  log.info('Created new Steel session', { sessionId: session.id });
 
   // Get debug URLs for new session
   const liveUrls = await bb.sessions.debug(session.id);
@@ -239,18 +247,21 @@ export async function resumeSession(
 
   // Navigate to saved URL so user can interact from where agent left off
   if (oldSession.currentUrl) {
-    console.log(`  📍 Navigating session to saved URL: ${oldSession.currentUrl}`);
+    log.info('Navigating session to saved URL', { currentUrl: oldSession.currentUrl });
     try {
       const { chromium } = await import('playwright');
       const browser = await chromium.connectOverCDP(liveUrls.wsUrl);
       const context = browser.contexts()[0];
       const page = context.pages()[0];
       await page.goto(oldSession.currentUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-      console.log(`  ✅ Navigation complete`);
+      log.info('Navigation complete', { currentUrl: oldSession.currentUrl });
       // Note: Not calling browser.close() - let connection drop naturally
       // Calling browser.close() causes Steel to terminate the session
     } catch (navError) {
-      console.error(`  ⚠️ Failed to navigate to saved URL:`, navError);
+      log.error('Failed to navigate to saved URL', {
+        error: navError instanceof Error ? navError.message : String(navError),
+        currentUrl: oldSession.currentUrl,
+      });
       // Continue anyway - user can navigate manually
     }
   }
@@ -267,12 +278,13 @@ export async function resumeSession(
     },
   });
 
-  console.log(`✓ Task resumed with new session`);
-  console.log(`  Task ID (stable): ${taskId}`);
-  console.log(`  New session ID: ${session.id}`);
-  console.log(`  Context ID: ${oldSession.context.contextId}`);
-  console.log(`  New debug URL: ${debugUrl}`);
-  console.log(`  CDP WebSocket URL: ${wsUrl}`);
+  log.info('Task resumed with new session', {
+    taskId,
+    sessionId: session.id,
+    contextId: oldSession.context.contextId,
+    debugUrl,
+    wsUrl,
+  });
 
   // Return the saved URL to navigate back to
   return {
@@ -318,7 +330,7 @@ export async function injectUserCookies(
   sessionId: string,
   userId: string
 ): Promise<{ injected: boolean; cookieCount: number }> {
-  console.log(`🍪 Checking for stored cookies for user ${userId}...`);
+  log.info('Checking for stored cookies', { userId });
 
   // Fetch user's chrome_cookies integration
   const integration = await prisma.integration.findUnique({
@@ -331,17 +343,17 @@ export async function injectUserCookies(
   });
 
   if (!integration || !integration.config) {
-    console.log(`  No chrome_cookies integration found for user`);
+    log.info('No chrome_cookies integration found for user', { userId });
     return { injected: false, cookieCount: 0 };
   }
 
   const config = integration.config as { cookies?: StoredCookie[] };
   if (!config.cookies || !Array.isArray(config.cookies) || config.cookies.length === 0) {
-    console.log(`  No cookies stored in integration`);
+    log.info('No cookies stored in integration', { userId });
     return { injected: false, cookieCount: 0 };
   }
 
-  console.log(`  Found ${config.cookies.length} stored cookies, injecting...`);
+  log.info('Found stored cookies, injecting', { count: config.cookies.length });
 
   try {
     // Get the session's websocket URL
@@ -396,19 +408,26 @@ export async function injectUserCookies(
         await context.addCookies(batch);
         injectedCount += batch.length;
       } catch (batchError) {
-        console.error(`  ⚠️ Failed to inject cookie batch ${i}-${i + batch.length}:`, batchError);
+        log.error('Failed to inject cookie batch', {
+          error: batchError instanceof Error ? batchError.message : String(batchError),
+          batchStart: i,
+          batchEnd: i + batch.length,
+        });
         // Continue with other batches
       }
     }
 
-    console.log(`  ✅ Injected ${injectedCount}/${validCookies.length} cookies`);
+    log.info('Injected cookies', { injectedCount, totalCount: validCookies.length });
 
     // Don't close browser - let connection drop naturally
     // Closing would terminate the Steel session
 
     return { injected: true, cookieCount: injectedCount };
   } catch (error) {
-    console.error(`  ❌ Failed to inject cookies:`, error);
+    log.error('Failed to inject cookies', {
+      error: error instanceof Error ? error.message : String(error),
+      userId,
+    });
     return { injected: false, cookieCount: 0 };
   }
 }
@@ -418,14 +437,14 @@ export async function injectUserCookies(
  * Returns count of sessions closed.
  */
 export async function closeAllActiveSessions(): Promise<number> {
-  console.log('🌐 Finding all active browser sessions...');
+  log.info('Finding all active browser sessions');
 
   const activeSessions = await prisma.browserSession.findMany({
     where: { status: 'ACTIVE' },
     select: { sessionId: true, agentId: true },
   });
 
-  console.log(`   Found ${activeSessions.length} active session(s)`);
+  log.info('Found active sessions', { count: activeSessions.length });
 
   if (activeSessions.length === 0) {
     return 0;
@@ -435,16 +454,19 @@ export async function closeAllActiveSessions(): Promise<number> {
 
   for (const session of activeSessions) {
     try {
-      console.log(`   Closing session ${session.sessionId} (agent: ${session.agentId})...`);
+      log.info('Closing session', { sessionId: session.sessionId, agentId: session.agentId });
       await closeSession(session.sessionId);
       closedCount++;
     } catch (error) {
-      console.error(`   ⚠️  Failed to close session ${session.sessionId}:`, error);
+      log.error('Failed to close session', {
+        error: error instanceof Error ? error.message : String(error),
+        sessionId: session.sessionId,
+      });
       // Continue with other sessions even if one fails
     }
   }
 
-  console.log(`✅ Closed ${closedCount}/${activeSessions.length} session(s)`);
+  log.info('Closed sessions', { closedCount, totalCount: activeSessions.length });
 
   return closedCount;
 }

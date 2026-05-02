@@ -64,7 +64,10 @@ const SYSTEM_TOOLS = [
     name: 'send_message_to_user',
     description: 'Message the user (optionally blocking for a reply)',
   },
-  { name: 'request_user_approval', description: "Request explicit user approval before continuing" },
+  {
+    name: 'request_user_approval',
+    description: 'Request explicit user approval before continuing',
+  },
   { name: 'wait_for', description: 'Wait for a specific event or condition' },
   { name: 'wait_seconds', description: 'Pause execution for a specified duration' },
 ];
