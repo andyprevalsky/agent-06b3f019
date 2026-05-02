@@ -34,7 +34,6 @@ import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
 import imessageRouter from './domains/imessage/routes';
-import memoryRouter from './domains/memory/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import { prisma } from './providers/database';
@@ -326,7 +325,6 @@ app.use('/api/billing', billingRouter);
 app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
-app.use('/api/memory', memoryRouter);
 app.use('/api/data', dataRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)

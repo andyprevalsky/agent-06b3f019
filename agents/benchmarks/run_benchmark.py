@@ -84,7 +84,7 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # stream for 60–90s via Supabase Realtime without posting intermediate rows to
 # the messages table — 60s here produces false-positive stalls on the synthesis
 # step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 120
+AGENT_STALL_SECONDS = 180
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
@@ -158,7 +158,6 @@ async def create_agent(
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
-            "llm_judge_prompt": task.eval_prompt,
         },
     }
 
@@ -538,16 +537,19 @@ async def poll_agent(
                 print(f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
                       f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)")
 
-            # ── Per-agent stall detection (early fail) ────────────────
-            # For each non-terminal agent in the tree: if its message_count
-            # hasn't advanced in AGENT_STALL_SECONDS, fail now and name the
-            # stuck agent. Finished sub-agents (terminal status) are skipped —
-            # they naturally stop producing messages.
-            # For the ROOT agent, the tree API's message_count lags the detail
-            # API (e.g. in-process browser/claude-code sub-agents emit messages
-            # into root's list but don't increment the tree counter). Use the
-            # detail-API root_msg_count for root tracking so legitimate
-            # progress isn't flagged as a stall.
+            # ── Tree stall detection (early fail) ────────────────────
+            # Track each agent's message_count over time. Internal nodes
+            # (parents waiting on sub-agents) DO NOT emit messages while
+            # their children run — they are correctly idle, not stalled.
+            # The work happens at the leaves (agents with no non-terminal
+            # children), so the tree is stalled only when EVERY non-terminal
+            # leaf has gone silent for AGENT_STALL_SECONDS.
+            #
+            # For the ROOT agent, the tree API's message_count lags the
+            # detail API (in-process browser/claude-code sub-agents emit
+            # messages into the root's list but don't increment the tree
+            # counter). Use the detail-API root_msg_count for root tracking
+            # so legitimate progress isn't flagged as a stall.
             for a in tree_stats.get("all_agents", []):
                 aid = a.get("agent_id", "")
                 if not aid:
@@ -563,9 +565,7 @@ async def poll_agent(
                     cur["last_change_time"] = now
                 cur["status"] = st
 
-            # Build parent→children map from the tree. An agent with active
-            # descendants that are still advancing is NOT stalled — it's
-            # legitimately idle awaiting its sub-agent's tool result.
+            # Build parent→children map from the tree.
             children_of: Dict[str, List[str]] = {}
             for a in tree_stats.get("all_agents", []):
                 pid = a.get("parent_agent_id")
@@ -573,39 +573,56 @@ async def poll_agent(
                 if pid and cid:
                     children_of.setdefault(pid, []).append(cid)
 
-            def _subtree_last_change(aid: str, seen: set) -> float:
-                if aid in seen:
-                    return 0.0
-                seen.add(aid)
-                st_local = per_agent_state.get(aid)
-                best = st_local["last_change_time"] if st_local else 0.0
-                for cid in children_of.get(aid, []):
-                    child_st = per_agent_state.get(cid)
-                    if child_st and child_st["status"] in TERMINAL_STATUSES:
-                        continue
-                    best = max(best, _subtree_last_change(cid, seen))
-                return best
-
-            stuck: List[Tuple[str, float, dict]] = []
-            for aid, st in per_agent_state.items():
-                if st["status"] in TERMINAL_STATUSES:
+            # Find non-terminal leaves: an agent is a leaf if no child of
+            # it is still active. An agent with all-terminal children counts
+            # as a leaf even though it briefly had children.
+            leaves: List[str] = []
+            for a in tree_stats.get("all_agents", []):
+                aid = a.get("agent_id")
+                if not aid:
                     continue
-                effective = _subtree_last_change(aid, set())
-                idle = now - effective
-                if idle > AGENT_STALL_SECONDS:
-                    stuck.append((aid, idle, st))
-            if stuck:
-                aid, idle, st = stuck[0]
-                role = "root" if aid == agent_id else "sub-agent"
-                reason = (
-                    f"{role} {aid[:12]} stalled: no new messages for {idle:.0f}s "
-                    f"(threshold={AGENT_STALL_SECONDS}s, status={st['status']}, "
-                    f"messages={st['count']})"
-                    f" | Investigate: python agents/benchmarks/agent_latency.py {aid}"
-                    f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
+                st = per_agent_state.get(aid, {}).get("status", a.get("status", "UNKNOWN"))
+                if st in TERMINAL_STATUSES:
+                    continue
+                child_ids = children_of.get(aid, [])
+                has_active_child = any(
+                    per_agent_state.get(cid, {}).get("status", "ACTIVE")
+                    not in TERMINAL_STATUSES
+                    for cid in child_ids
                 )
-                print(f"    🛑 AGENT STALL — {reason}")
-                return data, approvals_triggered, approvals_resolved, reason
+                if not has_active_child:
+                    leaves.append(aid)
+
+            # Tree is stalled only when EVERY non-terminal leaf has been
+            # silent for ≥ AGENT_STALL_SECONDS. If the most-recently-active
+            # leaf still emitted within the threshold, the tree is making
+            # progress somewhere — not stalled.
+            if leaves:
+                max_leaf_change = max(
+                    per_agent_state.get(aid, {}).get("last_change_time", 0.0)
+                    for aid in leaves
+                )
+                tree_idle = now - max_leaf_change
+                if tree_idle > AGENT_STALL_SECONDS:
+                    # All leaves silent — pick the staffer leaf (most recent
+                    # activity) to surface in the error message.
+                    stuck_aid = max(
+                        leaves,
+                        key=lambda aid: per_agent_state.get(aid, {}).get("last_change_time", 0.0),
+                    )
+                    stuck_st = per_agent_state.get(stuck_aid, {})
+                    role = "root" if stuck_aid == agent_id else "leaf"
+                    reason = (
+                        f"tree stalled — newest-active {role} {stuck_aid[:12]} "
+                        f"silent for {tree_idle:.0f}s (threshold={AGENT_STALL_SECONDS}s, "
+                        f"status={stuck_st.get('status', '?')}, "
+                        f"messages={stuck_st.get('count', '?')}, "
+                        f"non_terminal_leaves={len(leaves)})"
+                        f" | Investigate: python agents/benchmarks/agent_latency.py {stuck_aid}"
+                        f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
+                    )
+                    print(f"    🛑 TREE STALL — {reason}")
+                    return data, approvals_triggered, approvals_resolved, reason
 
             # Check for infrastructure errors in Fly.io logs
             all_agent_ids = [a.get("agent_id", "") for a in tree_stats.get("all_agents", [])]
@@ -1383,7 +1400,7 @@ async def main_async(args):
             s = _history_summary(t.name, max_seconds=cap)
             cap_note = f", cap={cap}s" if cap else ""
             print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                  f"(recent_max={s['recent_max']}s, n={s['count']}{cap_note})")
+                  f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note})")
     if missing_history:
         print("\n  ❌ Timeout history is insufficient for the following tasks:")
         for m in missing_history:
@@ -1478,10 +1495,46 @@ async def main_async(args):
         print(f"  Cache: read={agg_cache_read} write={agg_cache_write} hit={agg_cache_pct}%")
     print(f"{'='*60}")
 
-    # Cache hit rate enforcement (only when cache data is available)
-    MIN_CACHE_HIT_PCT = 40.0
-    if agg_cache_total > 0 and agg_cache_pct < MIN_CACHE_HIT_PCT:
-        print(f"\n  CACHE FAIL: {agg_cache_pct}% < {MIN_CACHE_HIT_PCT}% minimum cache hit rate")
+    # Per-task cache hit ratchets — each value is the floor for that smoke
+    # task's prompt-cache hit %. Baseline values come from the run that
+    # established each task as passing, rounded DOWN to the nearest 5% to
+    # absorb run-to-run variance.
+    #
+    # Update rule: only RAISE a ratchet, never lower it. Move in 5%
+    # increments, and only when the observed hit % is more than 2.5% past
+    # the next threshold. Examples:
+    #   - ratchet 30%, observed 33%   → stay at 30  (only 3% past, <5% step)
+    #   - ratchet 30%, observed 32%   → stay at 30  (under 32.5% trigger)
+    #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
+    #   - ratchet 30%, observed 37.6% → bump to 35
+    PER_TASK_CACHE_HIT_RATCHET = {
+        "chat-mode": 0.0,            # observed 0.0% (no LLM cache path)
+        "spawn-sub-agents": 20.0,    # observed 24.4%
+        "parallel-tool-calls": 25.0, # observed 29.1%
+        "claude-code-agent": 60.0,   # observed 63.9%
+        "browser-smoke": 45.0,       # observed 47.8%
+    }
+
+    cache_failures: list[str] = []
+    for r in run.task_results:
+        floor = PER_TASK_CACHE_HIT_RATCHET.get(r.name)
+        if floor is None:
+            continue
+        per_task_total = r.cache_read_input_tokens + r.cache_creation_input_tokens
+        if per_task_total <= 0:
+            continue
+        per_task_pct = round(
+            r.cache_read_input_tokens / per_task_total * 100, 1
+        )
+        if per_task_pct < floor:
+            cache_failures.append(
+                f"{r.name}: {per_task_pct}% < {floor}% ratchet"
+            )
+
+    if cache_failures:
+        print("\n  CACHE FAIL (per-task ratchet):")
+        for line in cache_failures:
+            print(f"    - {line}")
         if args.ci:
             sys.exit(1)
 

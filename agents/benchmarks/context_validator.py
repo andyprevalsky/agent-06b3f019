@@ -10,8 +10,7 @@ transformMessagesForAnthropic) to catch violations before they hit the API.
 
 import json
 import uuid
-from collections import Counter
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
@@ -82,7 +81,7 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
     alternation checks can see the unmerged sequence.
     """
     # Sort by timestamp
-    sorted_msgs = sorted(messages, key=lambda m: m.get("timestamp", ""))
+    sorted_msgs = sorted(messages, key=lambda m: m.get("timestamp") or m.get("created_at") or "")
 
     # Pre-pass: deduplicate TOOL messages per toolCallId (keep latest terminal message)
     # This matches build_llm_messages behavior in helpers/llm.py
@@ -102,7 +101,7 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
     # Re-insert deduplicated tool messages at their timestamp position
     for msg in tool_by_id.values():
         deduped_msgs.append(msg)
-    sorted_msgs = sorted(deduped_msgs, key=lambda m: m.get("timestamp", ""))
+    sorted_msgs = sorted(deduped_msgs, key=lambda m: m.get("timestamp") or m.get("created_at") or "")
 
     # First pass: collect declared tool IDs from ASSISTANT messages
     declared_tool_ids: Set[str] = set()
@@ -131,6 +130,19 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
             result.append({"role": "user", "content": content})
 
         elif role == "ASSISTANT":
+            # File-output ASSISTANT rows: empty text, no tool_calls, only an
+            # attachment (browser screenshots, sub-agent output files posted
+            # via AssistantEvent). build_llm_messages skips these because
+            # the LLM API discards image blocks on assistant role anyway,
+            # AND emitting a standalone assistant between two TOOL FINISHED
+            # rows splits the resulting tool_result run, leaving the second
+            # tool_use without a "next message" tool_result. Mirror that
+            # skip here so the validator agrees with the real pipeline.
+            file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+            attachments = metadata.get("attachments") if isinstance(metadata, dict) else None
+            has_attachment = bool(file_pointer) or bool(attachments)
+            if not content and not metadata.get("tool_calls") and has_attachment:
+                continue
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
             if metadata.get("tool_calls"):
                 tool_calls = []
@@ -153,14 +165,6 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
             # dual-write bug it's meant to detect.
             if metadata.get("reasoning") or "dagTaskIndex" in metadata:
                 assistant_msg["_reasoning"] = True
-            # Sub-agent output files are posted as standalone ASSISTANT rows
-            # with empty text + file_pointer (see handle_tool_event → AssistantEvent).
-            # The real LLM pipeline merges these into the neighbouring assistant
-            # turn, so they never reach Anthropic as two messages — not a
-            # dual-write bug.
-            file_pointer = msg.get("file_pointer") or msg.get("filePointer")
-            if file_pointer and not content and not metadata.get("tool_calls"):
-                assistant_msg["_file_output"] = True
             result.append(assistant_msg)
 
         elif role == "TOOL":

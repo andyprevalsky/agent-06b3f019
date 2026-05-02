@@ -1425,7 +1425,7 @@ def test_no_all_caps_underlined_section_labels_in_prompts():
     rendered = {
         "main": build_system_prompt("EXECUTE", ["attempt_completion"]),
         "planner": build_planner_system_prompt("desc"),
-        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "verifier": build_verifier_prompt(),
         "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
             network_metadata="", local_data_summary=""
         ),
@@ -1548,7 +1548,7 @@ def test_system_prompt_boundary_marker_present():
         "main_execute": build_system_prompt("EXECUTE", ["attempt_completion"]),
         "main_plan": build_system_prompt("PLAN", ["set_plan"]),
         "planner": build_planner_system_prompt("desc"),
-        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "verifier": build_verifier_prompt(),
         "browser_v3": get_browser_system_prompt(
             "a" * 60, custom_instructions="", available_files=[]
         ),
@@ -1617,7 +1617,7 @@ def test_all_caps_marker_count_under_limit():
         "main_execute": build_system_prompt("EXECUTE", ["attempt_completion"]),
         "main_plan": build_system_prompt("PLAN", ["set_plan"]),
         "planner": build_planner_system_prompt("desc"),
-        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "verifier": build_verifier_prompt(),
         "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
             network_metadata="", local_data_summary=""
         ),
@@ -1709,11 +1709,13 @@ def test_tool_prompts_open_with_declarative_sentence():
 # a higher cap so the inlined rules aren't penalized.
 # spawn_agent carries an empirically-justified BAD/GOOD example pair that
 # teaches the stateful-vs-stateless browser partition (see comment at the top
-# of agents/tools/prompts/spawn_agent.py); the example pushes it ~40 chars
-# above the default cap.
+# of agents/tools/prompts/spawn_agent.py). It also embeds the canonical
+# EPHEMERAL_SESSION_RULE (Session Semantics) inline so the model sees the
+# session-isolation contract on every call without a cross-reference. The
+# combined block sits comfortably under 2700 chars.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
     "attempt_completion": 2000,
-    "spawn_agent": 1700,
+    "spawn_agent": 2700,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100

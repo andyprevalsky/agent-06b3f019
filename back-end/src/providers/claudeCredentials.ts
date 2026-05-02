@@ -184,7 +184,7 @@ export async function fetchPoolCredentials(
 
   try {
     const now = new Date();
-    const poolIntegration = await prisma.integration.findFirst({
+    const poolIntegrations = await prisma.integration.findMany({
       where: {
         name: 'claude_code',
         status: 'CONNECTED',
@@ -195,33 +195,77 @@ export async function fetchPoolCredentials(
       orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }],
     });
 
-    if (!poolIntegration) {
+    if (poolIntegrations.length === 0) {
       log.info('No available pool credentials for Claude Code CLI');
       return null;
     }
 
-    const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
-    if (!decrypted) return null;
+    for (const poolIntegration of poolIntegrations) {
+      const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
+      if (!decrypted) continue;
+      if (!hasUsableClaudeCodeEnvelope(decrypted)) {
+        log.warn(
+          `Pool integration ${poolIntegration.id} (user: ${poolIntegration.userId}) has incomplete OAuth envelope (missing refreshToken or invalid format) — skipping`
+        );
+        continue;
+      }
 
-    await prisma.integration.update({
-      where: { id: poolIntegration.id },
-      data: { lastUsedAt: now },
-    });
+      await prisma.integration.update({
+        where: { id: poolIntegration.id },
+        data: { lastUsedAt: now },
+      });
+
+      log.info(
+        `Serving pool Claude Code credentials from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
+      );
+      return {
+        credentials: decrypted,
+        source: 'pool',
+        userId: poolIntegration.userId,
+        poolTokenId: poolIntegration.id,
+      };
+    }
 
     log.info(
-      `Serving pool Claude Code credentials from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
+      `${poolIntegrations.length} pool integrations matched but none had a usable OAuth envelope — falling back to caller default`
     );
-    return {
-      credentials: decrypted,
-      source: 'pool',
-      userId: poolIntegration.userId,
-      poolTokenId: poolIntegration.id,
-    };
+    return null;
   } catch (error) {
     log.error('Error fetching pool credentials', {
       error: error instanceof Error ? error.message : String(error),
     });
     return null;
+  }
+}
+
+/**
+ * Validate that a decrypted Claude Code credentials JSON contains the fields
+ * the CLI needs to authenticate without prompting for `/login`. The CLI expects
+ * `{ claudeAiOauth: { accessToken, refreshToken, expiresAt, ... } }` — without
+ * `refreshToken` it cannot recover from a rejected access token and emits the
+ * "Please run /login" message that aborts the sandbox activity. This guard
+ * prevents the pool from serving partial envelopes that we know will fail.
+ *
+ * Also rejects obvious test/seed envelopes (e.g. `seed-token-xxx` /
+ * `test-refresh`) — these pass the structural length check but fail
+ * authentication on the very first request. Real Anthropic OAuth tokens
+ * always start with `sk-ant-oat01-`, so rejecting envelopes that lack that
+ * prefix saves an entire E2B sandbox spin-up per dud token.
+ */
+function hasUsableClaudeCodeEnvelope(credentialsJson: string): boolean {
+  try {
+    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
+    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
+    if (!oauth) return false;
+    const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
+    const refreshToken = typeof oauth.refreshToken === 'string' ? oauth.refreshToken : '';
+    if (accessToken.length === 0 || refreshToken.length === 0) return false;
+    // Real Anthropic OAuth access tokens are minted with this prefix; anything
+    // else is a placeholder (seed data, tests) that will 401 immediately.
+    if (!accessToken.startsWith('sk-ant-oat')) return false;
+    return true;
+  } catch {
+    return false;
   }
 }
 

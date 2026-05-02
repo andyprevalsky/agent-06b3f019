@@ -55,7 +55,7 @@ async def fetch_agent_config(agent_id: str) -> Dict:
     Activity: Fetch agent configuration from database.
 
     Returns:
-        dict with: model, status, tool_ids, verifier_prompt
+        dict with: model, status, tool_ids, response_schema, etc.
     """
     try:
         activity.heartbeat("Fetching agent config")
@@ -68,7 +68,6 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "reasoning_max_tokens": agent.get("reasoning_max_tokens", 256),
             "status": agent["status"],
             "tool_ids": [tool["id"] for tool in agent["tools"]],
-            "verifier_prompt": agent["verifier"]["llm_judge_prompt"] if agent.get("verifier") else None,
             "parent_agent_id": agent.get("parentAgentId"),  # None if top-level agent
             "response_schema": agent.get("response_schema"),  # Structured output schema
             "token_in_price_microdollars": agent.get("token_in_price_microdollars"),  # For cost calculation

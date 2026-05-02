@@ -128,7 +128,6 @@ const MessageItem = z.object({
 const VerifierSchema = z
   .object({
     type: z.string(),
-    llm_judge_prompt: z.string(),
   })
   .nullable();
 
@@ -723,32 +722,8 @@ test('POST / — auto-generates verifier', async () => {
     body.agent.verifier!.type === 'FLOAT_LLM_JUDGE',
     `Expected FLOAT_LLM_JUDGE, got ${body.agent.verifier!.type}`
   );
-  assert(body.agent.verifier!.llm_judge_prompt.length > 0, 'Verifier prompt should not be empty');
 
   await deleteTestAgent(agentId, session.user.id);
-});
-
-test('POST / — custom verifier preserved', async () => {
-  const session = await createAnonymousSession('create-custom-verifier');
-  const customPrompt = 'Custom verifier: check if agent wrote tests';
-  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
-    goal: 'Custom verifier test',
-    verifier: { type: 'FLOAT_LLM_JUDGE', llm_judge_prompt: customPrompt },
-  });
-  assertStatus(res.status, 201, res.data);
-  const create = assertSchema(CreateAgentResponse, res.data, 'POST / custom verifier');
-  trackedAgentIds.add(create.agent_id);
-
-  const detail = await request(`${BASE_URL}/api/agents/${create.agent_id}`, {
-    headers: apiKeyHeaders(session.user.id),
-  });
-  const body = assertSchema(GetAgentResponse, detail.data, 'POST / verify custom verifier');
-  assert(
-    body.agent.verifier?.llm_judge_prompt === customPrompt,
-    `Expected custom prompt, got "${body.agent.verifier?.llm_judge_prompt}"`
-  );
-
-  await deleteTestAgent(create.agent_id, session.user.id);
 });
 
 test('POST / — custom model preserved', async () => {
@@ -1421,23 +1396,6 @@ test('PATCH /:id — happy path: update model — schema validated', async () =>
     body.agent.model === 'rose-labs/rose-1-ultra',
     `Expected updated model, got ${body.agent.model}`
   );
-
-  await deleteTestAgent(agentId, session.user.id);
-});
-
-test('PATCH /:id — update verifier prompt', async () => {
-  const session = await createAnonymousSession('upd-verifier');
-  const agentId = await createTestAgent(session.user.id, 'Update verifier test');
-  const newPrompt = 'Updated verifier: check X instead of Y';
-
-  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
-    method: 'PATCH',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ verifier_prompt: newPrompt }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(UpdateAgentResponse, res.data, 'PATCH /:id verifier');
-  assert(body.agent.verifier?.llm_judge_prompt === newPrompt, 'Verifier prompt not updated');
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -2211,7 +2169,7 @@ test('POST /:id/resume — tenant isolation: user B cannot resume user A agent �
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2248,7 +2206,7 @@ test('POST /:id/start-agent — already in agent mode → 400', async () => {
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2367,7 +2325,7 @@ test('PATCH /:id/status — with structuredResponse and all fields', async () =>
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2422,7 +2380,7 @@ test('PATCH /:id — price_limit_cents below cost set via prisma → 400', async
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2465,7 +2423,7 @@ test('POST /:id/messages — user message to completed agent resets status', asy
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2764,7 +2722,7 @@ test('POST /:id/messages — user message to FAILED agent resets status', async 
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2878,7 +2836,7 @@ test('POST /:id/messages — user message to ACTIVE agent with dead workflow', a
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2912,7 +2870,7 @@ test('POST /:id/messages — user message to chat-mode agent (no workflow)', asy
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2946,7 +2904,7 @@ test('DELETE /:id — recursive delete with grandchild (3-level tree)', async ()
       },
     });
     await prisma.verifier.create({
-      data: { agentId: grandparentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId: grandparentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2965,7 +2923,7 @@ test('DELETE /:id — recursive delete with grandchild (3-level tree)', async ()
       },
     });
     await prisma.verifier.create({
-      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId: parentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -2984,7 +2942,7 @@ test('DELETE /:id — recursive delete with grandchild (3-level tree)', async ()
       },
     });
     await prisma.verifier.create({
-      data: { agentId: grandchildId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId: grandchildId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -3022,7 +2980,7 @@ test('PATCH /:id/status — with tool token cost fields', async () => {
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -3128,30 +3086,6 @@ test('POST / — with max_iterations parameter', async () => {
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
-// ========================= PATCH /:id — multiple fields at once =============
-
-test('PATCH /:id — update model and verifier_prompt simultaneously', async () => {
-  const session = await createAnonymousSession('upd-multi');
-  const agentId = await createTestAgent(session.user.id, 'Multi-update test');
-
-  const newModel = 'rose-labs/rose-1-ultra';
-  const newVerifierPrompt = 'Updated verifier: verify that model is set correctly';
-  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
-    method: 'PATCH',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ model: newModel, verifier_prompt: newVerifierPrompt }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(UpdateAgentResponse, res.data, 'PATCH /:id multi');
-  assert(body.agent.model === newModel, `Expected updated model, got "${body.agent.model}"`);
-  assert(
-    body.agent.verifier?.llm_judge_prompt === newVerifierPrompt,
-    `Expected updated verifier prompt, got "${body.agent.verifier?.llm_judge_prompt}"`
-  );
-
-  await deleteTestAgent(agentId, session.user.id);
-});
-
 // ========================= PATCH /:id/status — statusMessage only ==========
 
 test('PATCH /:id/status — update statusMessage without changing status', async () => {
@@ -3170,7 +3104,7 @@ test('PATCH /:id/status — update statusMessage without changing status', async
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -3216,7 +3150,7 @@ test('POST /:id/pause — tenant isolation: user B cannot pause user A agent →
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 
@@ -3250,7 +3184,7 @@ test('GET /:id — soft-deleted agent returns 404', async () => {
       },
     });
     await prisma.verifier.create({
-      data: { agentId, type: 'FLOAT_LLM_JUDGE', llmJudgePrompt: 'test' },
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
     });
   });
 

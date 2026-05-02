@@ -682,6 +682,25 @@ async def build_llm_messages(  # noqa: C901
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
 
+            raw_tool_calls = metadata.get("tool_calls")
+
+            # File-output ASSISTANT rows: empty text, no tool_calls, only an
+            # attachment (e.g. browser screenshots posted as AssistantEvent
+            # between two TOOL FINISHED rows in spawn_browser_agent_v3 /
+            # spawn_claude_code_agent / spawn_sub_agents). The LLM API
+            # discards image blocks on assistant role anyway, so the row
+            # contributes nothing semantically — but emitting it splits an
+            # otherwise contiguous tool_result run, which means the
+            # FOLLOWING tool_result no longer "immediately follows" the
+            # tool_use that declared it. Anthropic rejects that with
+            # "tool_use ids ... have no matching tool_result in the next
+            # message" (see context_validator._check_tool_result_pairing).
+            # Skip these rows entirely so the tool_use/tool_result chain
+            # stays intact.
+            has_attachment = bool(file_pointer) or bool(metadata.get("attachments"))
+            if not text.strip() and not raw_tool_calls and has_attachment:
+                continue
+
             if content:
                 # LLM APIs reject multimodal blocks in assistant messages.
                 # Convert image/PDF blocks to metadata text so content isn't silently lost.
@@ -693,8 +712,6 @@ async def build_llm_messages(  # noqa: C901
                         full_text += f"\n\n[Attached file: {fname}]"
 
             assistant_msg: Dict[str, Any] = {"role": llm_role, "content": full_text}
-
-            raw_tool_calls = metadata.get("tool_calls")
             if raw_tool_calls:
                 if not isinstance(raw_tool_calls, list):
                     raise ValueError(
@@ -857,10 +874,163 @@ async def build_llm_messages(  # noqa: C901
         else:
             i += 1
 
+    # Defensive: pair every assistant tool_call with a tool result before sending
+    # to the LLM. Mirrors claude-code-src's ensureToolResultPairing — when an
+    # activity (set_plan, spawn_agent, spawn_claude_code_agent, …) crashes or
+    # times out before the parent TOOL terminal row is written, the assistant's
+    # tool_use ends up orphaned in DB. Anthropic rejects with 400 (or stalls)
+    # if a tool_use lacks a matching tool_result. We fill the gap with a
+    # synthetic error tool_result so the loop can continue.
+    messages = _ensure_tool_result_pairing(messages)
+
     # Resolve context pointers to <resolved-ref> blocks
     messages = await resolve_pointers_in_messages(messages, local_context=context)
 
     return messages
+
+
+SYNTHETIC_TOOL_RESULT_PLACEHOLDER = "[Tool result missing due to internal error]"
+
+
+def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure every assistant tool_call has a matching tool message.
+
+    OpenAI-format invariants the Anthropic transform relies on:
+    - Every assistant.tool_calls[i].id has a tool message with that tool_call_id
+      somewhere after it (and before the next assistant turn).
+    - No two assistant messages declare the same tool_call_id.
+    - tool messages whose tool_call_id is not declared by any preceding assistant
+      are dropped (build_llm_messages already converts those to user text upstream
+      — this is the belt-and-suspenders pass for any that slipped through).
+
+    Repairs the message list in place by:
+    1. Stripping duplicate tool_call ids that appear in a later assistant.
+    2. Inserting synthetic error tool messages for any tool_call id with no
+       matching tool message before the next assistant.
+    3. Dropping orphaned tool messages whose tool_call_id has no preceding
+       declaration.
+
+    Idempotent — running it twice on its own output is a no-op.
+    """
+    seen_ids: set[str] = set()
+    repaired = False
+
+    # Pass 1: dedupe tool_call ids across assistant messages. Anthropic rejects
+    # duplicate tool_use ids in the same conversation; the in-message merge above
+    # only catches consecutive assistants.
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        tcs = msg.get("tool_calls")
+        if not tcs:
+            continue
+        deduped: list = []
+        for tc in tcs:
+            tc_id = tc.get("id")
+            if tc_id and tc_id in seen_ids:
+                repaired = True
+                continue
+            if tc_id:
+                seen_ids.add(tc_id)
+            deduped.append(tc)
+        if deduped:
+            msg["tool_calls"] = deduped
+        else:
+            msg.pop("tool_calls", None)
+
+    # Pass 2: walk the list, fill in missing tool messages, drop orphan tool
+    # messages. We rebuild a fresh list to keep insertion logic simple.
+    result: List[Dict[str, Any]] = []
+    declared_at_or_before: set[str] = set()
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        role = msg.get("role")
+
+        if role == "assistant":
+            tcs = msg.get("tool_calls") or []
+            for tc in tcs:
+                tc_id = tc.get("id")
+                if tc_id:
+                    declared_at_or_before.add(tc_id)
+            result.append(msg)
+
+            # Collect every tool message that follows this assistant up to the
+            # next assistant, and check coverage.
+            covered: set[str] = set()
+            j = i + 1
+            tool_run: List[Dict[str, Any]] = []
+            non_tool_run: List[Dict[str, Any]] = []
+            while j < len(messages) and messages[j].get("role") != "assistant":
+                m2 = messages[j]
+                if m2.get("role") == "tool":
+                    tcid = m2.get("tool_call_id")
+                    if tcid and tcid in declared_at_or_before:
+                        if tcid in covered:
+                            # Duplicate tool result for the same id — drop second.
+                            repaired = True
+                        else:
+                            covered.add(tcid)
+                            tool_run.append(m2)
+                    else:
+                        # Orphaned tool message — drop.
+                        repaired = True
+                else:
+                    non_tool_run.append(m2)
+                j += 1
+
+            # Synthesize missing tool messages for any declared id not covered.
+            tc_ids = [tc.get("id") for tc in tcs if tc.get("id")]
+            tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
+            for tc_id in tc_ids:
+                if tc_id not in covered:
+                    repaired = True
+                    synthetic: Dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
+                    }
+                    name = tc_names.get(tc_id)
+                    if name:
+                        synthetic["name"] = name
+                    tool_run.append(synthetic)
+
+            # Tool messages first (so tool_use→tool_result pairing is contiguous),
+            # then any non-tool messages (user text, etc.) that lived in this gap.
+            result.extend(tool_run)
+            result.extend(non_tool_run)
+            i = j
+            continue
+
+        if role == "tool":
+            # Tool message at the head of the list (no preceding assistant) or
+            # following a non-assistant — both are orphans.
+            tcid = msg.get("tool_call_id")
+            if tcid and tcid in declared_at_or_before:
+                # Belongs to a prior assistant we already emitted (rare — would
+                # mean an assistant→tool→user→tool sequence). Keep it.
+                result.append(msg)
+            else:
+                repaired = True
+            i += 1
+            continue
+
+        # system, user, etc. — pass through.
+        result.append(msg)
+        i += 1
+
+    if repaired:
+        try:
+            logger.warning(
+                "tool_result_pairing.repaired",
+                original_count=len(messages),
+                repaired_count=len(result),
+            )
+        except Exception:
+            # Logger may be unavailable inside Temporal sandbox during replay.
+            pass
+
+    return result
 
 
 async def call_llm_structured_streaming(  # noqa: C901

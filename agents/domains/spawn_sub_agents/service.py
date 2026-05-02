@@ -182,7 +182,7 @@ async def spawn_sub_agent_activity(
         user_id: User ID (agents will be created for this user)
         sub_agents: List of agent configs, each with:
             - goal (str): The subtask goal
-            - verifier (dict): {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "..."}
+            - verifier (dict): {"type": "FLOAT_LLM_JUDGE"}
             - start_phase (str, optional): "plan" (default) or "execute"
             - attachments (list[str], optional): Filenames to pass to this sub-agent
         parent_agent_id: Parent agent ID (for hierarchy)

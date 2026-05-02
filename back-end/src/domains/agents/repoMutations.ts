@@ -30,7 +30,6 @@ export async function createAgentTransaction(params: {
   proxyCity?: string;
   priceLimitCents?: number;
   verifierType: string;
-  verifierPrompt: string;
   attachments?: Array<Record<string, unknown>>;
 }) {
   return prisma.$transaction(async (tx) => {
@@ -64,7 +63,6 @@ export async function createAgentTransaction(params: {
       data: {
         agentId: newAgent.id,
         type: params.verifierType as VerifierType,
-        llmJudgePrompt: params.verifierPrompt,
       },
     });
 
@@ -161,13 +159,5 @@ export async function replaceAgentTools(agentId: string, toolIds: string[]) {
     await tx.agentTool.createMany({
       data: toolIds.map((toolId) => ({ agentId, toolId })),
     });
-  });
-}
-
-/** Update a verifier's LLM judge prompt. */
-export async function updateVerifierPrompt(verifierId: string, llmJudgePrompt: string) {
-  return prisma.verifier.update({
-    where: { id: verifierId },
-    data: { llmJudgePrompt },
   });
 }

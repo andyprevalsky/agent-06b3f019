@@ -219,44 +219,80 @@ export async function persistOutput(taskId: string, output: string) {
 }
 
 /**
- * Scan the persisted Claude Code terminal output for the "you've hit your limit"
- * banner and, if found, mark the underlying Integration as rate-limited so
- * subsequent spawns rotate to a different pool token.
- *
- * Banner format (Claude Code v2.x): `You've hit your limit · resets 3:50am (UTC)`
- * — the time component is approximate and varies; we conservatively use the
- * configured POOL_RATE_LIMIT_COOLDOWN_MS (5 min) when we cannot parse it.
+ * Long cooldown for credentials the inner Claude Code CLI rejected as
+ * unauthenticated ("Please run /login"). This is structurally different from
+ * a per-window rate limit — the OAuth refresh token is bad/revoked and won't
+ * recover on its own, so we keep it out of rotation for a full day to give
+ * operators time to re-sync. Unlike the rate-limit banner there's no inline
+ * "resets at HH:MM" hint we can lean on.
+ */
+const POOL_AUTH_FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Authentication-failure banners emitted by Claude Code when the cached
+ * credentials envelope is unusable. These are NOT rate-limit signals — they
+ * mean the OAuth tokens themselves were rejected, so the same envelope will
+ * keep failing on every subsequent spawn until it's re-synced. Rotating the
+ * pool token immediately is the only way to make the next agent succeed.
+ */
+const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
+  /Please run \/login/i,
+  /Not logged in/i,
+  /Invalid authentication credentials/i,
+];
+
+/**
+ * Scan the persisted Claude Code terminal output for either the rate-limit
+ * banner ("You've hit your limit · resets X:XX (UTC)") or an authentication-
+ * failure banner ("Please run /login" / "Not logged in") and mark the
+ * underlying Integration as rate-limited so subsequent spawns rotate to a
+ * different pool token. Without this, a single broken OAuth envelope wedges
+ * the entire pool (LRU keeps re-selecting it) and every retry burns an E2B
+ * sandbox before failing to "/login".
  */
 async function detectAndMarkExhaustion(taskId: string, output: string): Promise<void> {
-  if (!/You've hit your limit/i.test(output)) return;
+  const rateLimitMatch = output.match(
+    /You've hit your limit\s*·\s*resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\(UTC\))/i
+  );
+  const isRateLimited = /You've hit your limit/i.test(output);
+  const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
+  if (!isRateLimited && !authFailure) return;
 
   const session = await repo.findSessionById(taskId);
   const tokenSource = session?.claudeTokenSource ?? '';
   if (tokenSource === '') {
     log.warn(
-      `Claude Code exhaustion detected for ${taskId} but no credential source recorded — cannot rotate`
+      `Claude Code credential failure detected for ${taskId} but no credential source recorded — cannot rotate`
     );
     return;
   }
 
-  const resetMatch = output.match(
-    /You've hit your limit\s*·\s*resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\(UTC\))/i
-  );
-  const resetUntil = resetMatch !== null ? parseUtcResetTime(resetMatch[1]) : null;
-  const resetLabel = resetMatch?.[1] ?? 'unknown';
+  const resetUntil = rateLimitMatch !== null ? parseUtcResetTime(rateLimitMatch[1]) : null;
+  const resetLabel = rateLimitMatch?.[1] ?? (authFailure ? 'auth-failure' : 'unknown');
   const integrationId = session?.claudeTokenIntegrationId ?? '';
 
+  // Auth-failure cooldown is longer than rate-limit cooldown because the
+  // underlying problem (revoked/expired refresh token) won't fix itself.
+  const cooldownMs = authFailure ? POOL_AUTH_FAILURE_COOLDOWN_MS : undefined;
+  const failureKind = authFailure ? 'auth failure' : 'exhaustion';
+
   if (tokenSource === 'pool' && integrationId !== '') {
-    log.warn(`Claude Code exhausted on pool integration ${integrationId} (resets ${resetLabel})`);
+    log.warn(
+      `Claude Code ${failureKind} on pool integration ${integrationId} (resets ${resetLabel})`
+    );
     await markPoolTokenRateLimited(integrationId, {
       rateLimitedUntil: resetUntil,
+      cooldownMs,
     });
   } else if (tokenSource === 'user' && session?.agentId !== undefined) {
     const agent = await repo.findAgentById(session.agentId);
     const ownerId = agent?.userId ?? '';
     if (ownerId !== '') {
-      log.warn(`Claude Code exhausted on user ${ownerId} (resets ${resetLabel})`);
-      await markUserTokenRateLimited(ownerId, { rateLimitedUntil: resetUntil });
+      log.warn(`Claude Code ${failureKind} on user ${ownerId} (resets ${resetLabel})`);
+      await markUserTokenRateLimited(ownerId, {
+        rateLimitedUntil: resetUntil,
+        cooldownMs,
+      });
     }
   }
 }

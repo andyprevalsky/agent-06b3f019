@@ -142,6 +142,47 @@ def test_safe_time_handles_exception():
         assert service.safe_time() == 0.0
 
 
+# ── _terminal_output_is_truncated ────────────────────────────────────
+
+
+def test_terminal_truncation_detects_collapse_marker():
+    """Detects Claude Code's standard '+N lines (ctrl+o to expand)' marker."""
+    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
+
+    sample = (
+        "● Bash(python3 -c \"...\")\n"
+        "  ⎿  27\n"
+        "     82\n"
+        "     41\n"
+        "     … +110 lines (ctrl+o to expand)\n"
+    )
+    assert _terminal_output_is_truncated(sample) is True
+
+
+def test_terminal_truncation_detects_high_line_count():
+    """A larger '+225 lines' marker (the failing-smoke case) is also detected."""
+    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
+
+    sample = "  ⎿  27\n     82\n     … +225 lines (ctrl+o to expand)\n"
+    assert _terminal_output_is_truncated(sample) is True
+
+
+def test_terminal_truncation_no_marker_returns_false():
+    """Untruncated output (full sequence visible) yields False."""
+    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
+
+    sample = "27\n82\n41\n124\n62\n31\nTotal steps: 6\n"
+    assert _terminal_output_is_truncated(sample) is False
+
+
+def test_terminal_truncation_handles_empty_output():
+    """Empty/None output is not truncated (no false positives)."""
+    from domains.spawn_claude_code_agent.service import _terminal_output_is_truncated
+
+    assert _terminal_output_is_truncated("") is False
+    assert _terminal_output_is_truncated(None) is False
+
+
 # ── build_context_summary ────────────────────────────────────────────
 
 
@@ -876,6 +917,167 @@ async def test_run_verifier_exception_fallback():
     assert itok == 0 and otok == 0
 
 
+async def test_run_verifier_truncation_override_promotes_to_pass():
+    """When parent LLM signals completion AND terminal output is truncated, partial score → 1.0.
+
+    Regression for v11 smoke claude-code-agent failure: the verifier scored 0.5
+    because Claude Code's TUI collapsed the Collatz sequence ('+225 lines (ctrl+o
+    to expand)'), and the parent agent re-spawned spawn_claude_code_agent on
+    every retry, blowing the 114s smoke cap. The override accepts the parent
+    LLM's attempt_completion=True signal as proof of completion when the visible
+    terminal evidence is mechanically truncated.
+    """
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=200, rows=50)
+    terminal.feed(
+        "● Bash(python3 -c \"...\")\r\n"
+        "  ⎿  27\r\n"
+        "     82\r\n"
+        "     41\r\n"
+        "     … +225 lines (ctrl+o to expand)\r\n"
+    )
+
+    async def fake_activity(fn, *, args, **_kwargs):
+        return {
+            "score": 0.5,
+            "reasoning": "Cannot ground sequence_output: only first 3 of ~113 lines visible.",
+            "structured_response": {},
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        }
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, _struct, _itok, _otok = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="Compute Collatz from 27",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=["Parent LLM signaled task completion"],
+            output_schema={"fields": [{"name": "sequence_output", "type": "string"}]},
+            claude_token=None,
+            attempt_completion=True,
+            exit_code=None,
+        )
+    assert score == 1.0, f"expected truncation override to 1.0, got {score}"
+    assert "override" in reasoning.lower()
+    assert "attempt_completion=True" in reasoning
+
+
+async def test_run_verifier_no_override_when_no_truncation():
+    """Score is NOT promoted to 1.0 when terminal output isn't truncated, even if parent signaled."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("Some output without any truncation marker\r\nDone\r\n")
+
+    async def fake_activity(fn, *, args, **_kwargs):
+        return {
+            "score": 0.5,
+            "reasoning": "Schema field missing.",
+            "structured_response": {},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, _r, _s, _i, _o = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="g",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=[],
+            output_schema={"fields": []},
+            claude_token=None,
+            attempt_completion=True,
+            exit_code=None,
+        )
+    assert score == 0.5, "no truncation marker → no override; verifier score preserved"
+
+
+async def test_run_verifier_no_override_when_attempt_completion_false():
+    """Score NOT promoted when attempt_completion is False, even with truncation."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=200, rows=50)
+    terminal.feed("  ⎿  … +110 lines (ctrl+o to expand)\r\n")
+
+    async def fake_activity(fn, *, args, **_kwargs):
+        return {
+            "score": 0.5,
+            "reasoning": "partial",
+            "structured_response": {},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, _r, _s, _i, _o = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="g",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=[],
+            output_schema={"fields": []},
+            claude_token=None,
+            attempt_completion=False,
+            exit_code=None,
+        )
+    assert score == 0.5, "no attempt_completion signal → no override"
+
+
+async def test_run_verifier_no_override_when_already_passing():
+    """Score 1.0 stays 1.0; no double-rewrite of reasoning."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=200, rows=50)
+    terminal.feed("  ⎿  … +110 lines (ctrl+o to expand)\r\n")
+
+    async def fake_activity(fn, *, args, **_kwargs):
+        return {
+            "score": 1.0,
+            "reasoning": "All fields populated.",
+            "structured_response": {},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, _s, _i, _o = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="g",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=[],
+            output_schema={"fields": []},
+            claude_token=None,
+            attempt_completion=True,
+            exit_code=None,
+        )
+    assert score == 1.0
+    assert "override" not in reasoning.lower(), "should not annotate already-passing reasoning"
+
+
 # ── _run_agentic_loop ────────────────────────────────────────────────
 
 
@@ -1470,6 +1672,10 @@ async def run_all_tests():
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
+    r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)
+    r.record("trunc_detect_high_count", test_terminal_truncation_detects_high_line_count)
+    r.record("trunc_no_marker", test_terminal_truncation_no_marker_returns_false)
+    r.record("trunc_handles_empty", test_terminal_truncation_handles_empty_output)
     r.record("context_summary_success", test_build_context_summary_success)
     r.record("context_summary_failure", test_build_context_summary_failure_with_error)
     r.record("context_summary_truncates", test_build_context_summary_truncates_actions)
@@ -1518,6 +1724,14 @@ async def run_all_tests():
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
+    await r.record_async(
+        "run_verifier_truncation_override", test_run_verifier_truncation_override_promotes_to_pass
+    )
+    await r.record_async("run_verifier_no_override_no_trunc", test_run_verifier_no_override_when_no_truncation)
+    await r.record_async(
+        "run_verifier_no_override_no_attempt", test_run_verifier_no_override_when_attempt_completion_false
+    )
+    await r.record_async("run_verifier_no_override_already_pass", test_run_verifier_no_override_when_already_passing)
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)

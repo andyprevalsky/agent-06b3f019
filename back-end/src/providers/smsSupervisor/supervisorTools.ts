@@ -531,16 +531,6 @@ async function executeStartNewAgent(args: StartNewAgentArgs, userId: string): Pr
     priceLimitCents,
   });
 
-  // Generate verifier prompt
-  const verifierPrompt = `You are judging whether the agent has achieved the following goal: "${goal}"
-
-Scoring Instructions:
-- Return a float between 0.0 and 1.0.
-- 0.0 means no progress or only explanations/plans.
-- 1.0 means the goal is FULLY accomplished with verifiable proof.
-- Do not award 1.0 for partial completion.
-- The agent has access to tools and can solve problems through persistence and creativity.`;
-
   const agent = await prisma.$transaction(async (tx) => {
     const newAgent = await tx.agent.create({
       data: {
@@ -558,7 +548,6 @@ Scoring Instructions:
       data: {
         agentId: newAgent.id,
         type: 'FLOAT_LLM_JUDGE',
-        llmJudgePrompt: verifierPrompt,
       },
     });
 
@@ -584,7 +573,6 @@ Scoring Instructions:
       reasoningMaxTokens: 2048,
       verifier: {
         type: 'FLOAT_LLM_JUDGE',
-        llmJudgePrompt: verifierPrompt,
       },
       priceLimitCents,
     });

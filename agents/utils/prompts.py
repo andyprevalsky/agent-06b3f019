@@ -83,7 +83,6 @@ def build_system_prompt(  # noqa: C901
     disabled_tools: List[Union[str, Dict]] = None,
     user_context_section: str = "",
     response_schema: Optional[Dict[str, Any]] = None,
-    shared_memory_section: str = "",
     tool_prompts: Optional[Dict[str, str]] = None,
 ) -> str:
     """
@@ -281,12 +280,9 @@ You are the executor, not an advisor:
     if user_context_section.strip():
         prompt += f"\n\n{user_context_section.strip()}"
 
-    if shared_memory_section.strip():
-        prompt += f"\n\n# Shared Run Memory\n{shared_memory_section.strip()}"
-
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
-            [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
+            [f"  - {f['name']} ({f['type']}): {f.get('description', '')}" for f in response_schema["fields"]]
         )
         prompt += dedent(f"""
 
@@ -412,7 +408,7 @@ Each example shows: a goal, the tool evidence available, and the correct grade.
 )
 
 
-def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dict = None) -> str:
+def build_verifier_prompt(response_schema: dict = None) -> str:
     """Build the verifier system prompt.
 
     Structure:
@@ -421,62 +417,60 @@ def build_verifier_prompt(phase: str, verifier_prompt: str, response_schema: dic
                                                 domain). Cached as static_system
                                                 via SYSTEM_PROMPT_DYNAMIC_BOUNDARY.
         <SYSTEM_PROMPT_DYNAMIC_BOUNDARY>
-        PER-CALL DIRECTIVES                  ← phase, domain text, schema fields.
-                                                Lands in dynamic_system on the
-                                                claudeAuth path → not cached.
+        SCHEMA-DRIVEN DIRECTIVES             ← only the response_schema's
+                                                required output fields. Lands
+                                                in dynamic_system on the
+                                                claudeAuth path. Stable across
+                                                calls within one agent so the
+                                                dynamic prefix caches cleanly.
 
     The static block is intentionally padded to clear Anthropic's 1024-token
     cache-write threshold so verifier_execute / verifier_plan / verifier_browser
     / verifier_claude_code all share one cached prefix.
+
+    The verifier is intentionally generic — there is no per-agent custom
+    "judge prompt" baked into the dynamic block. The required output schema
+    is the only per-agent variable. This keeps the dynamic prefix stable
+    within an agent and identical across agents that share a schema, both
+    of which are cache-prefix wins.
     """
-    fields_block = ""
-    if response_schema and response_schema.get("fields"):
-        fields_desc = "\n".join(
-            [f"  - {f['name']} ({f['type']}): {f['description']}" for f in response_schema["fields"]]
-        )
-        num_fields = len(response_schema["fields"])
-        fields_block = dedent(
-            f"""
+    if not (response_schema and response_schema.get("fields")):
+        return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-            # Structured Output Required
-
-            This task has {num_fields} total required `output` field(s):
-            {fields_desc}
-
-            Populate `output` FIRST. For each field, find the most precise
-            value in the tool-result evidence and transform it into the
-            required type yourself (round, parse, or extract as needed;
-            the agent doesn't have to format it perfectly).
-
-            Score using the 3-band rubric:
-              - 1.0 if ALL {num_fields} fields can be populated from grounded
-                tool evidence in a single transformation pass.
-              - 0.5 if some fields populatable but at least one is unverifiable
-                from current evidence.
-              - 0.0 if no fields populatable from evidence.
-            Cosmetic mismatch between the agent's reported value and the
-            most precise tool-result value is NOT grounds to drop below
-            1.0; pick the precise one yourself.
-            Empty strings, null, or placeholder text do NOT count as populated.
-
-            Always include the "output" field in your JSON response with your best
-            extraction of these values, even for partial completion.
-            """
-        ).rstrip()
-
-    dynamic_part = dedent(
+    fields_desc = "\n".join(
+        [f"  - {f['name']} ({f['type']}): {f.get('description', '')}" for f in response_schema["fields"]]
+    )
+    num_fields = len(response_schema["fields"])
+    fields_block = dedent(
         f"""
-        # Per-Call Directives
 
-        CURRENT PHASE: {phase}
+        # Structured Output Required
 
-        Domain-specific evaluation criteria:
-        {verifier_prompt}
-        {fields_block}
+        This task has {num_fields} total required `output` field(s):
+        {fields_desc}
+
+        Populate `output` FIRST. For each field, find the most precise
+        value in the tool-result evidence and transform it into the
+        required type yourself (round, parse, or extract as needed;
+        the agent doesn't have to format it perfectly).
+
+        Score using the 3-band rubric:
+          - 1.0 if ALL {num_fields} fields can be populated from grounded
+            tool evidence in a single transformation pass.
+          - 0.5 if some fields populatable but at least one is unverifiable
+            from current evidence.
+          - 0.0 if no fields populatable from evidence.
+        Cosmetic mismatch between the agent's reported value and the
+        most precise tool-result value is NOT grounds to drop below
+        1.0; pick the precise one yourself.
+        Empty strings, null, or placeholder text do NOT count as populated.
+
+        Always include the "output" field in your JSON response with your best
+        extraction of these values, even for partial completion.
         """
     ).rstrip()
 
-    return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_part
+    return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + fields_block
 
 
 def build_planner_system_prompt(
@@ -499,7 +493,7 @@ def build_planner_system_prompt(
     if response_schema and response_schema.get("fields"):
         fields_desc = "\n".join(
             [
-                f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f['description']}"
+                f"  - {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f.get('description', '')}"
                 for f in response_schema["fields"]
             ]
         )
@@ -727,7 +721,23 @@ You have access to:
 - web_search: Search the web for public information
 - web_fetch: Fetch and read full web pages
 - grep: Search the user's local data (message threads, etc.); like grep on a filesystem
-- attempt_completion: Parameterless. Signals you are done; the parent agent receives your conversation handoff.
+- attempt_completion: Parameterless. Signals you are done.
+
+# Final Answer (LOAD-BEARING)
+
+Before calling `attempt_completion`, you MUST emit an assistant text message
+in the SAME response that contains the concrete findings (numbers, names,
+URLs, dates) requested by the goal. That text is the ONLY payload the parent
+agent receives as the spawn_agent tool result; if it is empty the parent has
+no evidence and will hallucinate or re-spawn redundant work.
+
+Required shape of the final assistant turn:
+1. One text block summarizing the answer with specific values and source
+   URLs (treat it as the response itself, not narration about the response).
+2. A single `attempt_completion` tool_use block in the same response.
+
+Do NOT emit `attempt_completion` alone; do NOT defer the answer to a future
+turn - there is no future turn after attempt_completion.
 
 # Approach
 
@@ -775,9 +785,11 @@ Use these to find data that other agents in the network have already gathered, a
 # Sub-Agent Verification
 
 You are a sub-agent; same verification rules as the main agent.
-You are not graded directly. The parent agent receives your conversation
-including TOOL results; those, NOT your narration, are what the parent's
-verifier reads. The canonical rules:
+You are not graded directly. The parent agent receives the final assistant
+text from your last turn (alongside attempt_completion) as the spawn_agent
+tool result. Make that text self-contained: include the requested values and
+source URLs so the parent can act on it without re-running the search. The
+canonical rules:
 """
     + VERIFICATION_RULES.strip()
 )

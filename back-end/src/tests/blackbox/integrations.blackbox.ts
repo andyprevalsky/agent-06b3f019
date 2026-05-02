@@ -3409,7 +3409,11 @@ async function seedClaudeIntegration(
   userId: string,
   opts: { poolingEnabled?: boolean; accessToken?: string } = {}
 ): Promise<SeededIntegration> {
-  const accessToken = opts.accessToken ?? `seed-token-${crypto.randomBytes(8).toString('hex')}`;
+  // The "sk-ant-oat" prefix mirrors real Anthropic OAuth tokens — required so
+  // these seeded envelopes pass `hasUsableClaudeCodeEnvelope` and exercise the
+  // rotation path under test (placeholder prefixes are now rejected upstream).
+  const accessToken =
+    opts.accessToken ?? `sk-ant-oat-seed-${crypto.randomBytes(8).toString('hex')}`;
   const encryptedCredentials = buildCredentialPayload(accessToken);
 
   const integration = await prisma.integration.upsert({
@@ -3805,6 +3809,55 @@ async function testClaudeCodeExhaustion_marksUserToken() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([userInt.id]);
+  }
+}
+
+async function testClaudeCodeAuthFailure_marksPoolTokenLongCooldown() {
+  // Anchors: "Please run /login" / "Not logged in" — emitted by Claude Code CLI
+  // when the cached OAuth envelope is broken. This is structurally different
+  // from the rate-limit banner: the underlying refreshToken is bad/revoked and
+  // won't recover on its own. We mark the pool token broken with a 24h
+  // cooldown so the LRU rotates and operators have time to re-sync it.
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
+
+  try {
+    const banner = 'Not logged in - Run /login to authenticate. Please run /login\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: poolInt.id } });
+    const until = row?.rateLimitedUntil;
+    assert(
+      until instanceof Date,
+      'pool integration must be rate-limited after auth-failure banner'
+    );
+    const msFromNow = until!.getTime() - Date.now();
+    // 24h cooldown allows for some clock skew/test latency — accept anything
+    // strictly above the 5-minute rate-limit cooldown so we know the longer
+    // auth-failure path was taken.
+    assert(
+      msFromNow > 60 * 60 * 1000,
+      `auth-failure cooldown should be > 1h, got ${Math.round(msFromNow / 60000)} min`
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([poolInt.id]);
   }
 }
 
@@ -4619,6 +4672,10 @@ async function runAll() {
     {
       name: 'claude-code exhaustion -- benign output is no-op',
       fn: testClaudeCodeExhaustion_noBannerNoOp,
+    },
+    {
+      name: 'claude-code auth-failure -- pool token marked rate-limited with long cooldown',
+      fn: testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
     },
   ];
 

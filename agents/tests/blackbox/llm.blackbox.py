@@ -1046,6 +1046,106 @@ async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     assert "f.png" in user["content"]
 
 
+async def test_build_llm_messages_skips_empty_file_output_assistant():
+    """Empty ASSISTANT rows with only a file_pointer (browser screenshots /
+    sub-agent output files posted via AssistantEvent) must be skipped, otherwise
+    they split a parallel tool_result run and Anthropic returns 400.
+
+    Repro: parent issues two parallel spawn_agent calls. Each browser tool emits
+    an AssistantEvent(file_pointer=screenshot) between the early '✓ Task
+    Completed' POST_MESSAGE and the late 'Browser automation complete'
+    POST_MESSAGE. After dedup keeps only the latest FINISHED TOOL per
+    toolCallId, the sequence becomes
+    [TOOL_A_finished, ASSISTANT_screenshot_A, ASSISTANT_screenshot_B, TOOL_B_finished].
+    Without skipping, the empty assistants split tool_result_A from tool_result_B,
+    leaving the second tool_use without a matching tool_result in the next
+    message.
+    """
+    from helpers.llm import build_llm_messages
+
+    tc_a = "toolu_browser_A"
+    tc_b = "toolu_browser_B"
+    fp = {
+        "id": "fp-1",
+        "storage_path": "u/screenshot.png",
+        "original_filename": "screenshot.png",
+        "mime_type": "image/png",
+        "size_bytes": 1024,
+        "created_at": "2024-01-01T00:00:00Z",
+    }
+    context = [
+        {"role": "USER", "text": "Find Tokyo and NYC populations.", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "tool_call_id": tc_a, "type": "browser", "goal": "Tokyo"},
+                    {"tool": "spawn_agent", "tool_call_id": tc_b, "type": "browser", "goal": "NYC"},
+                ],
+            },
+        },
+        {
+            "role": "TOOL", "text": "ok A", "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolCallId": tc_a, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
+        },
+        # Empty file-output ASSISTANT row (browser screenshot)
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:03Z", "metadata": {}, "file_pointer": fp},
+        {
+            "role": "TOOL", "text": "ok B", "timestamp": "2024-01-01T00:00:04Z",
+            "metadata": {"toolCallId": tc_b, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
+        },
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:05Z", "metadata": {}, "file_pointer": fp},
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        msgs = await build_llm_messages(context, "sys")
+
+    # Find the assistant with two tool_calls
+    assistants_with_tools = [m for m in msgs if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(assistants_with_tools) == 1, f"Expected 1 tool-calling assistant, got {len(assistants_with_tools)}"
+
+    # Both tool messages should immediately follow (no empty assistant in between).
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2, f"Expected 2 tool messages, got {len(tool_msgs)}"
+
+    # Verify NO empty assistant message ended up in the final list — file-output
+    # rows should be filtered out entirely.
+    empty_assistants = [
+        m for m in msgs
+        if m.get("role") == "assistant"
+        and not m.get("tool_calls")
+        and not (m.get("content") or "").strip()
+    ]
+    assert not empty_assistants, (
+        f"Empty file-output assistant rows must be skipped; got {empty_assistants}"
+    )
+
+    # Verify that in the produced sequence, both tool messages appear before any
+    # assistant-without-tool_calls message — confirming the tool_result run is
+    # contiguous (Anthropic requires `tool_result` to immediately follow the
+    # tool_use that declared it in the next user message).
+    seen_tool_msg = False
+    for m in msgs:
+        if m.get("role") == "tool":
+            seen_tool_msg = True
+        elif m.get("role") == "assistant" and seen_tool_msg and not m.get("tool_calls"):
+            break
+    # If we ever see an assistant-without-tool_calls AFTER tool messages, that's
+    # the post-completion summary turn (fine) — but we should never see one
+    # BETWEEN two tool messages.
+    tool_indices = [i for i, m in enumerate(msgs) if m.get("role") == "tool"]
+    if len(tool_indices) >= 2:
+        # All tool messages should be contiguous (possibly with a single
+        # tool-calling assistant before them, never an empty assistant
+        # between them).
+        for i in range(tool_indices[0], tool_indices[-1] + 1):
+            assert msgs[i].get("role") == "tool", (
+                f"Found non-tool message at index {i} between tool messages: {msgs[i]}"
+            )
+
+
 async def test_build_llm_messages_assistant_tool_call_validation_errors():
     """Invalid metadata.tool_calls on ASSISTANT raises ValueError."""
     from helpers.llm import build_llm_messages
@@ -3197,6 +3297,119 @@ async def test_call_llm_structured_streaming_non_dict_choices_continues():
     assert "ok" in result.response, f"Expected 'ok' substring, got {result.response!r}"
 
 
+def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
+    """Orphan assistant tool_use → synthetic tool_result inserted right after."""
+    from helpers.llm import _ensure_tool_result_pairing, SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "spawn_agent", "arguments": "{}"}}
+            ],
+        },
+        {"role": "user", "content": "next turn"},
+        {"role": "assistant", "content": "continuing"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    # Synthetic tool_result is inserted between the orphan assistant and the next user.
+    tool_msgs = [m for m in fixed if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"Expected 1 synthetic tool message, got {len(tool_msgs)}"
+    assert tool_msgs[0]["tool_call_id"] == "tc1"
+    assert tool_msgs[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert tool_msgs[0]["name"] == "spawn_agent"
+
+
+def test_ensure_tool_result_pairing_strips_orphan_tool_result():
+    """tool message with tool_call_id not declared by any preceding assistant is dropped."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "ghost", "content": "orphaned"},
+        {"role": "assistant", "content": "continuing"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    assert all(m.get("role") != "tool" for m in fixed), f"Orphan tool not stripped: {fixed}"
+
+
+def test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids():
+    """Same tool_call_id appearing in two assistant messages → second is stripped."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "first",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc1", "content": "result"},
+        {
+            "role": "assistant",
+            "content": "second",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    second_assistant = fixed[-1] if fixed[-1].get("role") == "assistant" else None
+    # The second assistant should have its duplicate tc1 stripped.
+    assert second_assistant is not None, f"Last message not assistant: {fixed}"
+    assert not second_assistant.get("tool_calls"), (
+        f"Duplicate tool_call_id should have been stripped: {second_assistant}"
+    )
+
+
+def test_ensure_tool_result_pairing_idempotent():
+    """Running the helper twice on its own output yields identical messages."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "done"},
+    ]
+    once = _ensure_tool_result_pairing(msgs)
+    twice = _ensure_tool_result_pairing(once)
+    assert once == twice, f"Not idempotent:\nfirst={once}\nsecond={twice}"
+
+
+def test_ensure_tool_result_pairing_preserves_well_formed_messages():
+    """A well-formed conversation passes through unchanged."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc1", "name": "foo", "content": "result"},
+        {"role": "assistant", "content": "done"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    assert fixed == msgs, f"Well-formed messages mutated:\nin={msgs}\nout={fixed}"
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -3246,6 +3459,7 @@ async def run_all_tests():
     await r.record_async("build_llm_messages_assistant_merging", test_build_llm_messages_assistant_merging)
     await r.record_async("build_llm_messages_skip_subagent", test_build_llm_messages_skip_subagent)
     await r.record_async("build_llm_messages_attachment_large_falls_back_to_metadata", test_build_llm_messages_attachment_large_falls_back_to_metadata)
+    await r.record_async("build_llm_messages_skips_empty_file_output_assistant", test_build_llm_messages_skips_empty_file_output_assistant)
     await r.record_async("build_llm_messages_assistant_tool_call_validation_errors", test_build_llm_messages_assistant_tool_call_validation_errors)
     await r.record_async("build_llm_messages_filters_inprogress_keeps_latest_finished", test_build_llm_messages_filters_inprogress_keeps_latest_finished)
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
@@ -3313,6 +3527,11 @@ async def run_all_tests():
     await r.record_async("verifier_jsondecode_error_accumulated_reasoning", test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning)
     await r.record_async("verifier_schema_with_list_str_field", test_build_verifier_json_schema_with_list_str_field)
     await r.record_async("stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues)
+    r.record("ensure_tool_result_pairing_inserts_synthetic", test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use)
+    r.record("ensure_tool_result_pairing_strips_orphan_tool_result", test_ensure_tool_result_pairing_strips_orphan_tool_result)
+    r.record("ensure_tool_result_pairing_dedupes_cross_message_ids", test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids)
+    r.record("ensure_tool_result_pairing_idempotent", test_ensure_tool_result_pairing_idempotent)
+    r.record("ensure_tool_result_pairing_preserves_well_formed", test_ensure_tool_result_pairing_preserves_well_formed_messages)
     teardown_mock()
     return r.summary()
 

@@ -363,10 +363,7 @@ class SpawnAgentManager(ToolManager):
         if tool_call.get("verifier"):
             sub_agent_config["verifier"] = tool_call["verifier"]
         else:
-            sub_agent_config["verifier"] = {
-                "type": "FLOAT_LLM_JUDGE",
-                "llm_judge_prompt": f"Evaluate whether the agent successfully completed: {tool_call.get('goal', '')}",
-            }
+            sub_agent_config["verifier"] = {"type": "FLOAT_LLM_JUDGE"}
 
         sub_agent_tool_call = {
             "tool": "spawn_sub_agent",
@@ -402,10 +399,7 @@ class SpawnAgentManager(ToolManager):
 
         base_goal = tool_call.get("goal", "")
         start_phase = resolve_start_phase(tool_call)
-        verifier = tool_call.get("verifier") or {
-            "type": "FLOAT_LLM_JUDGE",
-            "llm_judge_prompt": f"Evaluate whether the agent successfully completed: {base_goal}",
-        }
+        verifier = tool_call.get("verifier") or {"type": "FLOAT_LLM_JUDGE"}
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
         context_gates = tool_call.get("context_gates")

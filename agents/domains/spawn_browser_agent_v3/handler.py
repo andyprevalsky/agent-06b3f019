@@ -1110,7 +1110,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     ]
 
                     verifier_prompt = build_verifier_prompt(
-                        "EXECUTE", f"Goal: {goal}\n\nVerify browser task completion."
+                        response_schema=transform_schema_for_remote_session(response_schema)
                     )
 
                     remote_session_schema = transform_schema_for_remote_session(response_schema)

@@ -289,8 +289,10 @@ def test_spawn_agent_browser_no_schema_raises():
     )
 
 
-def test_spawn_agent_explore_with_schema_raises():
-    """SpawnAgentTool explore must not have output_schema."""
+def test_spawn_agent_explore_with_schema_dropped():
+    """SpawnAgentTool with type='explore' silently drops output_schema rather
+    than raising — explore agents return free-form summary and rejecting the
+    field forces a costly LLM retry loop (see commit 59ba9d47)."""
     from utils.tool_schemas import (
         ResponseSchemaConfig,
         ResponseSchemaFieldConfig,
@@ -300,15 +302,84 @@ def test_spawn_agent_explore_with_schema_raises():
     schema = ResponseSchemaConfig(
         fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
     )
-    _assert_raises(
-        lambda: SpawnAgentTool(
-            tool="spawn_agent",
-            type="explore",
-            goal=LONG_GOAL,
-            output_schema=schema,
-        ),
-        "output_schema",
+    t = SpawnAgentTool(
+        tool="spawn_agent",
+        type="explore",
+        goal=LONG_GOAL,
+        output_schema=schema,
     )
+    assert t.output_schema is None, "output_schema should be silently dropped for type='explore'"
+
+
+def test_response_schema_coerces_json_string():
+    """ResponseSchemaConfig coerces a JSON-encoded string (Claude Sonnet
+    tendency: emits the schema as an escaped string instead of nested JSON)."""
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    raw = '[{"name": "tokyo_population", "type": "int", "required": true, "description": "pop count"}]'
+    cfg = ResponseSchemaConfig.model_validate(raw)
+    assert len(cfg.fields) == 1
+    assert cfg.fields[0].name == "tokyo_population"
+    assert cfg.fields[0].type == "int"
+
+
+def test_response_schema_coerces_bare_list():
+    """ResponseSchemaConfig coerces a bare list-of-fields (model drops the
+    {"fields": ...} wrapper) into the canonical structured form."""
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    raw = [{"name": "x", "type": "str", "required": True, "description": "d"}]
+    cfg = ResponseSchemaConfig.model_validate(raw)
+    assert len(cfg.fields) == 1
+    assert cfg.fields[0].name == "x"
+
+
+def test_response_schema_coerces_flat_dict():
+    """ResponseSchemaConfig coerces a flat {field_name: description} dict
+    (Gemini, GPT-4 tendency) into the canonical structured form."""
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    raw = {"tokyo_population": "the population of Tokyo as a number"}
+    cfg = ResponseSchemaConfig.model_validate(raw)
+    assert len(cfg.fields) == 1
+    assert cfg.fields[0].name == "tokyo_population"
+    assert cfg.fields[0].type == "str"
+    assert cfg.fields[0].required is True
+
+
+def test_response_schema_passthrough_canonical():
+    """ResponseSchemaConfig passes the canonical {"fields": [...]} form unchanged."""
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    raw = {
+        "fields": [
+            {"name": "x", "type": "str", "required": True, "description": "d"}
+        ]
+    }
+    cfg = ResponseSchemaConfig.model_validate(raw)
+    assert len(cfg.fields) == 1
+    assert cfg.fields[0].name == "x"
+
+
+def test_spawn_agent_browser_with_string_output_schema():
+    """SpawnAgentTool accepts JSON-stringified output_schema (the exact failure
+    mode that broke spawn-sub-agents smoke runs — see agent
+    eade933b-fad2-4930-a851-7a9c06c5a162)."""
+    from utils.tool_schemas import SpawnAgentTool
+
+    raw_schema = (
+        '[{"name": "tokyo_population", "type": "int", "required": true, '
+        '"description": "Population of Tokyo as a numeric integer"}]'
+    )
+    t = SpawnAgentTool(
+        tool="spawn_agent",
+        type="browser",
+        goal=LONG_GOAL,
+        output_schema=raw_schema,
+        start_url="https://example.com",
+    )
+    assert t.output_schema is not None
+    assert t.output_schema.fields[0].name == "tokyo_population"
 
 
 def test_spawn_agent_short_goal_raises():
@@ -479,9 +550,15 @@ async def run_all_tests():
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
     r.record("spawn_agent_browser_no_schema", test_spawn_agent_browser_no_schema_raises)
-    r.record("spawn_agent_explore_with_schema", test_spawn_agent_explore_with_schema_raises)
+    r.record("spawn_agent_explore_with_schema", test_spawn_agent_explore_with_schema_dropped)
     r.record("spawn_agent_short_goal", test_spawn_agent_short_goal_raises)
     r.record("spawn_agent_browser_valid", test_spawn_agent_browser_valid)
+    # ResponseSchemaConfig coercion of malformed LLM input
+    r.record("response_schema_coerces_json_string", test_response_schema_coerces_json_string)
+    r.record("response_schema_coerces_bare_list", test_response_schema_coerces_bare_list)
+    r.record("response_schema_coerces_flat_dict", test_response_schema_coerces_flat_dict)
+    r.record("response_schema_passthrough_canonical", test_response_schema_passthrough_canonical)
+    r.record("spawn_agent_string_output_schema", test_spawn_agent_browser_with_string_output_schema)
     # render_tool_list
     r.record("render_tool_list_empty", test_render_tool_list_empty_registry)
     r.record("render_tool_list_sorted", test_render_tool_list_sorted)

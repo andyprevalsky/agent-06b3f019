@@ -16,7 +16,6 @@ export {
   deleteAgentTools,
   createAgentTools,
   replaceAgentTools,
-  updateVerifierPrompt,
 } from './repoMutations';
 
 // ---------------------------------------------------------------------------

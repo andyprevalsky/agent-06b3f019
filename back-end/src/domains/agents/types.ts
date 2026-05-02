@@ -55,11 +55,11 @@ export const createAgentSchema = z.object({
   bus_id: z.string().uuid().optional(), // Optional: shared bus channel for sub-agent tree updates
   max_iterations: z.number().int().min(1).optional(), // Optional: step limit for execute phase (sub-agents use 25)
   price_limit_cents: z.number().int().min(1).optional(), // Price limit in cents (default 100 = $1.00)
-  // Verifier is now optional - auto-generated from goal if not provided
+  // Verifier is now optional and schema-driven only - the only per-agent
+  // signal is the response_schema; type is fixed to FLOAT_LLM_JUDGE.
   verifier: z
     .object({
       type: z.literal('FLOAT_LLM_JUDGE'),
-      llm_judge_prompt: z.string().min(1),
     })
     .optional(),
   // Context gates: control which user context sections the agent receives (default all true)
@@ -110,7 +110,6 @@ export const updateAgentSchema = z.object({
   model: z.string().optional(),
   reasoning_max_tokens: z.number().int().min(0).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
-  verifier_prompt: z.string().min(1).optional(),
   tools_in_use: z.array(z.string()).optional(), // For tree state updates
   progress: z.number().min(0).max(1).optional(), // For tree state updates
   message_count: z.number().int().min(0).optional(), // For tree state updates

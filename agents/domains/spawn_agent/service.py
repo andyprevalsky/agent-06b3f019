@@ -341,9 +341,29 @@ async def spawn_explore_agent_activity(  # noqa: C901
         call_site_override="explore_agent",
     )
 
+    # Defensive fallback: when the explore agent terminates with attempt_completion
+    # but emitted no preceding assistant text (Claude often issues just the tool_use
+    # block), final_response is empty and the parent receives no evidence. Synthesize
+    # a payload from the accumulated tool results so the parent always has grounded
+    # data to act on instead of hallucinating or re-spawning sub-agents.
+    final_response = result.get("final_response", "") or ""
+    if not final_response.strip() and tool_call_results:
+        # Cap the synthesized payload so we don't ship 100 KB+ back through the
+        # parent context. 12 KB matches the explore message truncation tier and
+        # leaves headroom for evidence from up to ~3 web_search results.
+        EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
+        joined = "\n\n".join(tool_call_results)
+        if len(joined) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+            joined = joined[:EXPLORE_FALLBACK_PAYLOAD_BUDGET] + "\n\n[truncated]"
+        final_response = (
+            "Explore sub-agent completed without a final summary. "
+            "Raw tool results below; extract the requested values directly:\n\n"
+            f"{joined}"
+        )
+
     return {
         "status": "completed" if result.get("status") == "completed" else "error",
-        "result": result.get("final_response", ""),
+        "result": final_response,
         "tokens_in": result.get("tokens_in", 0),
         "tokens_out": result.get("tokens_out", 0),
         "accumulated_usage": accumulated_usage,

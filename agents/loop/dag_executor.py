@@ -24,6 +24,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.param_populator.config import SPAWN_PARAM_REQUIREMENTS
+from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
@@ -464,7 +465,36 @@ async def _execute_single_task(
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
             stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
 
-            reasoning_args = [task.goal, context, model, agent_id, stream_id, claude_token]
+            # Emit an IN_PROGRESS DB row so external monitors (and the FE) can see
+            # the reasoning task started. Without this, the parent agent appears
+            # silent for the full reasoning duration — frontend/benchmark stall
+            # detectors interpret that as a hung agent. The reasoning activity
+            # itself only writes a single ASSISTANT row at the end.
+            await handle_tool_event_fn(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Reasoning",
+                    message=task.goal,
+                    status=MessageStatus.IN_PROGRESS,
+                ),
+                tool_call_id,
+                "reasoning",
+            )
+
+            # Trim context to the same window the reasoning activity will use
+            # internally (MAX_CONTEXT_MESSAGES). Without this, the FULL context
+            # (every TOOL result, including bloated explore-agent web search
+            # output) is serialized as the activity payload — which routinely
+            # exceeds Temporal's 2 MiB cap when the parent has spawned several
+            # explore sub-agents (parallel-tool-calls smoke task). The activity
+            # would just truncate this anyway, so trimming at the call site
+            # both keeps the payload under cap AND saves serialization work.
+            trimmed_context = (
+                context[-REASONING_MAX_CONTEXT_MESSAGES:]
+                if len(context) > REASONING_MAX_CONTEXT_MESSAGES
+                else context
+            )
+            reasoning_args = [task.goal, trimmed_context, model, agent_id, stream_id, claude_token]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
             check_activity_payload("execute_reasoning_activity", reasoning_args)
@@ -472,8 +502,22 @@ async def _execute_single_task(
             reasoning_result = await execute_activity(
                 execute_reasoning_activity,
                 args=reasoning_args,
-                start_to_close_timeout=timedelta(seconds=120),
+                # Reasoning streams from a thinking-mode model on synthesis-heavy
+                # contexts (parallel-tool-calls smoke task: 3-city comparison
+                # over ~30 prior messages of explore-agent output). End-to-end
+                # cost is consistently 80-110 s — start-to-close has to clear
+                # 90 s of streaming + post-processing, otherwise Temporal kills
+                # the activity mid-stream and the retry hits the same wall.
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(maximum_attempts=2),
+                # Heartbeat-timeout is the per-chunk safety net. The LLM stream
+                # heartbeats every chunk via _safe_heartbeat; a 90 s gap means
+                # the stream is dead. Setting too-tight a value (e.g. 60 s)
+                # causes premature failures during legitimate model thinking
+                # pauses, which we observed in smoke 15 — the LLM call landed
+                # cleanly at 82 s, but heartbeat_timeout=60s killed the
+                # activity before the result could be returned.
+                heartbeat_timeout=timedelta(seconds=90),
             )
 
             # Unpack result (reasoning activity returns {"content": str, "usage": dict})

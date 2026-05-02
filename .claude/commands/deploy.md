@@ -466,15 +466,80 @@ At each poll, check:
 
 **ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
-**Diagnosis process:**
-1. Read the log files (backend, worker, research — see table below)
-2. Run BOTH diagnostic summaries in parallel on each failed `agent_id`, then fully expand whichever one points at the smoking gun:
-   - `cd agents && python benchmarks/agent_latency.py <agent_id>` — span-based waterfall: executive summary, top 10 slowest paths, slowest LLM calls, slowest backend HTTP, and deduped errors. Best for "why was this slow/stalled."
-   - `cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics` — event-timeline tree across worker/backend/research/messages. Best for raw error context.
-   - `cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>` — tree-wide token + cache breakdown (root + all sub-agents via `/api/tool-usage/tree/:id`). Best for "how much did this cost / cache."
-   - Full detail when the summary points at a layer: `agent_latency.py <agent_id> -v` for the expanded span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`.
-3. Identify which part of the agent lifecycle or LLM request is causing the failure (e.g., slow activity, backend crash under load, edge function error)
-4. Fix the root cause in code, restart services, and re-run
+**Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
+
+Don't try to diagnose smoke failures inline in your own context — the diagnostic
+output for a single failed agent is hundreds of KB across 3 log files, plus
+multiple span-tree dumps, and burns the main context fast. Delegate, and ship a
+fix that the main loop can verify.
+
+**For each failed task, in a single message, spawn ONE `general-purpose` agent
+per failed `agent_id`** (run them concurrently — they're independent). Hand
+each agent the full failure context and tell it to do steps 1–4 end to end:
+
+```
+Agent({
+  description: "Diagnose + fix <task-name> smoke failure",
+  subagent_type: "general-purpose",
+  prompt: """
+Smoke task <task-name> just failed in /deploy. Agent ID: <agent_id>.
+Failure reason from benchmark runner: <reason string from results JSON>.
+
+Repo root: <abs path>. Backend at http://localhost:$CONDUCTOR_PORT.
+
+Steps 1–5 — do them all, do not stop early:
+
+1. Read the relevant log files (truncate aggressively as you go, keep only
+   the windows around the failed agent_id):
+   - back-end/backend-logs.log
+   - agents/navi-worker-log.txt
+   - research/research-logs.log
+
+2. Run BOTH diagnostic summaries IN PARALLEL on the failed agent_id, then
+   fully expand whichever one points at the smoking gun:
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id>`
+     — span-based waterfall: executive summary, top 10 slowest paths,
+     slowest LLM calls, slowest backend HTTP, deduped errors. Best for
+     "why was this slow/stalled."
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics`
+     — event-timeline tree across worker/backend/research/messages. Best
+     for raw error context.
+   - For full detail when the summary points at a layer:
+     `agent_latency.py <agent_id> -v` for the full span tree, or
+     `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`
+     for per-source raw events.
+   - To compare cost/cache against a passing run:
+     `python benchmarks/run_benchmark.py --compare <fail.json> <pass.json>`.
+
+3. Identify the exact root cause: which agent-lifecycle phase, which LLM
+   call site, which activity, or which backend route is failing. State it
+   as a single sentence: "<phase> <component> at <file>:<line> fails
+   because <X>."
+
+4. Implement the fix in code. Real fixes only — no timeout bumps, no test
+   weakening, no skipping. If the fix needs services restarted, note that
+   in your final report.
+
+5. Verify the fix is sane: re-run any structural/blackbox/lint check that
+   covers the modified file(s). You do NOT re-run smoke — the parent loop
+   does that next.
+
+Final report (under 200 words):
+- Root cause (1 sentence)
+- Files modified + line ranges
+- Whether worker/backend needs restart for the fix to take effect
+- Any follow-up risks
+"""
+})
+```
+
+When all spawned agents return, **the main loop** restarts services as
+instructed and re-runs smoke from the top. If the same task fails again with
+a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
+agent's fix was complete.
+
+**Do not** read >5 KB of log content inline before delegating. Grep for the
+exact agent_id, scan the result, then hand the agent_id off.
 
 **NOT allowed when fixing smoke tests:**
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)

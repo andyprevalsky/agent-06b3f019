@@ -369,11 +369,17 @@ def transform_schema_for_anthropic(schema: Any) -> Any:
     for key in _UNSUPPORTED_SCHEMA_KEYS:
         transformed.pop(key, None)
 
-    if (
-        transformed.get("type") == "object"
-        and isinstance(transformed.get("additionalProperties"), dict)
-    ):
-        transformed["additionalProperties"] = False
+    if transformed.get("type") == "object":
+        ap = transformed.get("additionalProperties")
+        if isinstance(ap, dict):
+            transformed["additionalProperties"] = False
+        elif ap is True:
+            # Anthropic's structured-output validator rejects explicit
+            # `additionalProperties: true` ("For 'object' type, ... is not
+            # supported. Please set 'additionalProperties' to false").
+            # Collapsing to False satisfies the validator; the model still
+            # emits whatever fields it produces.
+            transformed["additionalProperties"] = False
 
     if "properties" in transformed and isinstance(transformed["properties"], dict):
         new_props = {}

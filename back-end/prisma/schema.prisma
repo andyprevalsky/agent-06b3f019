@@ -79,13 +79,12 @@ model AgentTool {
 }
 
 model Verifier {
-  id             String       @id @default(uuid())
-  agentId        String       @unique
-  type           VerifierType @default(FLOAT_LLM_JUDGE)
-  llmJudgePrompt String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id        String       @id @default(uuid())
+  agentId   String       @unique
+  type      VerifierType @default(FLOAT_LLM_JUDGE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  agent     Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
 
 model Message {
@@ -628,19 +627,6 @@ model Feedback {
   @@index([userId])
   @@index([createdAt])
 }
-
-model SharedMemory {
-  id          String   @id @default(uuid())
-  busId       String   @unique
-  content     String   @db.Text // JSON array of memory entries
-  contentHash String
-  tokenCount  Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@index([busId])
-}
-
 
 enum AgentStatus {
   STARTING_UP

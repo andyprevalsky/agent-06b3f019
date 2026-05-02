@@ -27,8 +27,6 @@ if not os.getenv("BACKEND_API_KEY"):
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
 
-# Shared memory activities
-from activities.shared_memory import append_shared_memory, get_shared_memory
 from config import load_config
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.grep.repo import fetch_local_data_summary, grep_activity
@@ -578,9 +576,6 @@ async def main():
             # DAG executor activities
             populate_tool_params_activity,
             execute_reasoning_activity,
-            # Shared memory activities
-            get_shared_memory,
-            append_shared_memory,
             # Parent state query (for sub-agent → parent communication)
             query_parent_state_activity,
         ],

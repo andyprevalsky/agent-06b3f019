@@ -1,5 +1,6 @@
 """Tool schemas and dynamic models used by the LLM orchestration layer."""
 
+import json
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
@@ -125,10 +126,11 @@ class PlannerResponse(BaseModel):
 
 
 class VerifierConfig(BaseModel):
-    """Verifier configuration for evaluating agent success. Requires type='FLOAT_LLM_JUDGE' and an llm_judge_prompt."""
+    """Verifier configuration. The verifier is now schema-driven: the agent's
+    response_schema is the only per-agent signal, so VerifierConfig only
+    carries the fixed type literal."""
 
     type: Literal["FLOAT_LLM_JUDGE"] = Field(description="Must be 'FLOAT_LLM_JUDGE'")
-    llm_judge_prompt: str = Field(description="Prompt for the LLM judge to evaluate the agent's performance")
 
 
 class ResponseSchemaFieldConfig(BaseModel):
@@ -152,6 +154,40 @@ class ResponseSchemaConfig(BaseModel):
     fields: List[ResponseSchemaFieldConfig] = Field(
         description="List of output fields that the agent must return when complete."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_malformed_input(cls, value: Any) -> Any:
+        # Models reliably emit output_schema in three malformed shapes that the
+        # canonical {"fields": [...]} form does not match. Coerce each into the
+        # structured form rather than failing validation — failure forces a costly
+        # LLM retry loop (cache_hit_pct ~99% repeats the same shape) and burns the
+        # entire ~50s timeout on smoke tasks like spawn-sub-agents.
+        #
+        # 1. JSON-encoded string of the list (Claude Sonnet 4-6 tendency):
+        #    output_schema: "[{\"name\": ..., \"type\": ...}]"
+        # 2. Bare list of field dicts (no {"fields": ...} wrapper):
+        #    output_schema: [{"name": ..., "type": ...}]
+        # 3. Flat dict {field_name: description} (Gemini, GPT-4 tendency):
+        #    output_schema: {"tokyo_population": "the population of Tokyo"}
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("[", "{")):
+                try:
+                    value = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return value  # let pydantic raise a clearer error
+        if isinstance(value, list):
+            return {"fields": value}
+        if isinstance(value, dict) and "fields" not in value and value:
+            if all(isinstance(v, str) for v in value.values()):
+                return {
+                    "fields": [
+                        {"name": k, "description": v, "type": "str", "required": True}
+                        for k, v in value.items()
+                    ]
+                }
+        return value
 
 
 class WaitForTool(BaseModel):

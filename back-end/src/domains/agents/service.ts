@@ -7,7 +7,6 @@ export {
   deleteAgent,
   deleteAgentRecursive,
   resolvePromptSecrets,
-  generateVerifierPrompt,
 } from './agentLifecycleService';
 
 export {

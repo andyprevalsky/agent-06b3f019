@@ -555,28 +555,56 @@ async def run_agent(  # noqa: C901
             tree_tokens_in = tokens_in + children_tokens_in
             tree_tokens_out = tokens_out + children_tokens_out
 
-            # Persist + broadcast tree tokens after each LLM call
-            # Skip when running as explore agent — its context_size would overwrite the parent's
+            # Persist + broadcast tree tokens after each LLM call.
+            # Fire-and-forget: this is a UI progress broadcast — it doesn't gate
+            # the loop's correctness, and awaiting it adds ~80–120ms to every LLM
+            # iteration (PATCH /status RTT). With 10+ iterations per task that's
+            # ~1s of pure latency tax that can push smoke runs past their cap.
+            # Skip when running as explore agent — its context_size would overwrite the parent's.
             if not skip_status_updates:
                 try:
-                    await execute_activity(
-                        update_agent_status,
-                        args=[
-                            agent_id,
-                            "ACTIVE",
-                            iteration / max_iterations,
-                            "Processing",
-                            token_count,
-                            context_size,
-                            len(context),
-                            tree_tokens_in,
-                            tree_tokens_out,
-                        ],
-                        start_to_close_timeout=timedelta(seconds=15),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
+                    if is_inside_temporal_activity:
+                        # Activity context: use asyncio.create_task so it runs in background
+                        asyncio.create_task(
+                            execute_activity(
+                                update_agent_status,
+                                args=[
+                                    agent_id,
+                                    "ACTIVE",
+                                    iteration / max_iterations,
+                                    "Processing",
+                                    token_count,
+                                    context_size,
+                                    len(context),
+                                    tree_tokens_in,
+                                    tree_tokens_out,
+                                ],
+                                start_to_close_timeout=timedelta(seconds=15),
+                                retry_policy=RetryPolicy(maximum_attempts=2),
+                            )
+                        )
+                    else:
+                        # Workflow context: workflow.start_activity returns a handle without
+                        # blocking the workflow. We intentionally drop the handle — Temporal
+                        # tracks it, and we don't care about the result.
+                        workflow.start_activity(
+                            update_agent_status,
+                            args=[
+                                agent_id,
+                                "ACTIVE",
+                                iteration / max_iterations,
+                                "Processing",
+                                token_count,
+                                context_size,
+                                len(context),
+                                tree_tokens_in,
+                                tree_tokens_out,
+                            ],
+                            start_to_close_timeout=timedelta(seconds=15),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
                 except Exception as e:
-                    logger.warning(f"Failed to update agent status after LLM call: {e}")
+                    logger.warning(f"Failed to schedule agent status update: {e}")
                 # Non-fatal - continue execution
 
         except asyncio.CancelledError:

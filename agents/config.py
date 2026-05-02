@@ -36,8 +36,13 @@ class TemporalConfig:
     max_concurrent_activities: int = 50  # Reduced to prevent DB connection exhaustion
     max_concurrent_workflows: int = 50  # Max concurrent agents (aligned with activities)
     max_cached_workflows: int = 100  # Reduced to match workflow count
-    max_concurrent_activity_task_polls: int = 2
-    max_concurrent_workflow_task_polls: int = 2
+    # Polling concurrency. Was 2/2 — too low when several workflows hit init in
+    # parallel (5+ short serialized activities each), causing queue/poll latency
+    # to stack up and push first-message latency past the smoke stall threshold.
+    # Bumping to 8/8 gives the worker enough poller breadth to keep init within
+    # the 120 s benchmark window even under load.
+    max_concurrent_activity_task_polls: int = 8
+    max_concurrent_workflow_task_polls: int = 8
 
     # Timeout settings (in seconds)
     activity_start_to_close_timeout: int = 300
@@ -212,8 +217,8 @@ def load_config() -> AppConfig:
         max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "50")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
-        max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "2")),
-        max_concurrent_workflow_task_polls=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "2")),
+        max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),
+        max_concurrent_workflow_task_polls=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "8")),
         activity_start_to_close_timeout=int(os.getenv("ACTIVITY_START_TO_CLOSE_TIMEOUT", "300")),
         activity_schedule_to_close_timeout=int(os.getenv("ACTIVITY_SCHEDULE_TO_CLOSE_TIMEOUT", "600")),
         activity_heartbeat_timeout=int(os.getenv("ACTIVITY_HEARTBEAT_TIMEOUT", "30")),

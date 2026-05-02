@@ -335,7 +335,6 @@ async function startTemporalWorkflowForChat(
     reasoningMaxTokens: agent.reasoningMaxTokens,
     verifier: {
       type: agent.verifier.type,
-      llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
     startPhase, // 'plan' or 'execute' - determines whether to skip PLAN phase
     priceLimitCents: agent.priceLimitCents,

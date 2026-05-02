@@ -57,7 +57,6 @@ export async function startAgentWorkflow(params: {
   reasoningMaxTokens: number;
   verifier: {
     type: string;
-    llmJudgePrompt: string;
   };
   taskQueue?: string; // Optional: override task queue (for testing isolation)
   parentWorkflowId?: string; // Optional: parent workflow ID for sub-agents
@@ -104,7 +103,6 @@ export async function startAgentWorkflow(params: {
       params.reasoningMaxTokens,
       {
         type: params.verifier.type,
-        llmJudgePrompt: params.verifier.llmJudgePrompt,
       },
       [], // Start with empty context, workflow will poll for goal message
       params.parentWorkflowId || null, // Parent workflow ID for signaling

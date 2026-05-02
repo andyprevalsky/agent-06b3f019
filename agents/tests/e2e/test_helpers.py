@@ -159,7 +159,6 @@ async def spawn_agent(
                 "source": "WEB",
                 "verifier": {
                     "type": "FLOAT_LLM_JUDGE",
-                    "llm_judge_prompt": f"Evaluate if the agent successfully completed: {goal[:200]}",
                 },
             },
         )

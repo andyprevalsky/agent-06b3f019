@@ -125,16 +125,22 @@ export function transformSchemaForAnthropic(schema: unknown): unknown {
     delete out[key];
   }
 
-  if (
-    out.type === 'object' &&
-    out.additionalProperties &&
-    typeof out.additionalProperties === 'object'
-  ) {
-    // `additionalProperties: { ... }` means "dictionary with typed values".
-    // Keep the map shape but recurse so unsupported nested keywords are
-    // still stripped. Don't flatten to `false`, which would break every
-    // map-typed field on the claudeAuth path.
-    out.additionalProperties = transformSchemaForAnthropic(out.additionalProperties);
+  if (out.type === 'object' && out.additionalProperties !== undefined) {
+    if (typeof out.additionalProperties === 'object') {
+      // `additionalProperties: { ... }` means "dictionary with typed values".
+      // Keep the map shape but recurse so unsupported nested keywords are
+      // still stripped. Don't flatten to `false`, which would break every
+      // map-typed field on the claudeAuth path.
+      out.additionalProperties = transformSchemaForAnthropic(out.additionalProperties);
+    } else if (out.additionalProperties === true) {
+      // Anthropic's structured-output validator rejects explicit
+      // `additionalProperties: true` ("For 'object' type, ... is not
+      // supported. Please set 'additionalProperties' to false"). Setting
+      // it to false satisfies the validator; the model still emits
+      // whatever fields it produces, and downstream consumers don't rely
+      // on Anthropic's strict enforcement here.
+      out.additionalProperties = false;
+    }
   }
 
   if (out.properties && typeof out.properties === 'object') {

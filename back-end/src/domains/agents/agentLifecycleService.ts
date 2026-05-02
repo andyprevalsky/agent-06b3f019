@@ -37,18 +37,6 @@ export function resolvePromptSecrets(text: string): string {
   });
 }
 
-/** Auto-generate verifier prompt from goal. */
-export function generateVerifierPrompt(goal: string): string {
-  return `You are judging whether the agent has achieved the following goal: "${goal}"
-
-Scoring Instructions:
-- Return a float between 0.0 and 1.0.
-- 0.0 means no progress or only explanations/plans.
-- 1.0 means the goal is FULLY accomplished with verifiable proof.
-- Do not award 1.0 for partial completion.
-- The agent has access to tools and can solve problems through persistence and creativity.`;
-}
-
 /** Fetch model pricing and resolve geolocation. */
 async function resolveCreateMetadata(model: string, clientIP: string | null) {
   const pricing = await getModelPricing(model);
@@ -77,7 +65,7 @@ async function startSubAgentWorkflow(
   body: CreateAgentBody,
   agentDbId: string,
   userId: string,
-  verifier: { type: string; llm_judge_prompt: string },
+  verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
   const workflowId = await startAgentWorkflow({
@@ -86,7 +74,7 @@ async function startSubAgentWorkflow(
     goal: body.goal,
     model: body.model,
     reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type, llmJudgePrompt: verifier.llm_judge_prompt },
+    verifier: { type: verifier.type },
     ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
     ...(body.parent_workflow_id !== undefined ? { parentWorkflowId: body.parent_workflow_id } : {}),
     ...(body.parent_agent_id !== undefined ? { parentAgentId: body.parent_agent_id } : {}),
@@ -106,7 +94,7 @@ async function startDirectWorkflow(
   body: CreateAgentBody,
   agentDbId: string,
   userId: string,
-  verifier: { type: string; llm_judge_prompt: string },
+  verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
   const startPhase = body.start_phase!;
@@ -124,7 +112,7 @@ async function startDirectWorkflow(
     goal: body.goal,
     model: body.model,
     reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type, llmJudgePrompt: verifier.llm_judge_prompt },
+    verifier: { type: verifier.type },
     startPhase,
     priceLimitCents,
   });
@@ -198,11 +186,7 @@ export async function createAgent(
   if (isInternal) {
     body.goal = resolvePromptSecrets(body.goal);
   }
-  const verifierPrompt =
-    body.verifier?.llm_judge_prompt !== undefined && body.verifier.llm_judge_prompt !== ''
-      ? body.verifier.llm_judge_prompt
-      : generateVerifierPrompt(body.goal);
-  const verifier = { type: 'FLOAT_LLM_JUDGE' as const, llm_judge_prompt: verifierPrompt };
+  const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP);
   const isSubAgent = body.parent_agent_id !== undefined;
@@ -227,7 +211,6 @@ export async function createAgent(
     proxyCity: proxyGeo.city,
     priceLimitCents: body.price_limit_cents,
     verifierType: verifier.type,
-    verifierPrompt: verifier.llm_judge_prompt,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
   });
 
@@ -256,7 +239,7 @@ async function launchAgentWorkflow(
   userId: string,
   isSubAgent: boolean,
   agentId: string,
-  verifier: { type: 'FLOAT_LLM_JUDGE'; llm_judge_prompt: string }
+  verifier: { type: 'FLOAT_LLM_JUDGE' }
 ): Promise<string | null> {
   if (isSubAgent) {
     try {

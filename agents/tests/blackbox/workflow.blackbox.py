@@ -513,20 +513,6 @@ async def mock_resolve_attachments_activity(file_pointers: list) -> list:
     return []
 
 
-@activity.defn(name="get_shared_memory")
-async def mock_get_shared_memory(
-    bus_id: str, current_hash: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    return None
-
-
-@activity.defn(name="append_shared_memory")
-async def mock_append_shared_memory(
-    bus_id: str, entry_type: str, content: str, source_agent_id: str
-) -> Dict[str, Any]:
-    return {"success": True}
-
-
 @activity.defn(name="execute_reasoning_activity")
 async def mock_execute_reasoning_activity(
     goal: str, context: list, model: str, agent_id: str, stream_id: str
@@ -588,8 +574,6 @@ MOCK_ACTIVITIES = [
     mock_call_planner_llm_activity,
     mock_query_parent_state_activity,
     mock_resolve_attachments_activity,
-    mock_get_shared_memory,
-    mock_append_shared_memory,
     mock_execute_reasoning_activity,
     mock_populate_tool_params_activity,
     mock_save_blueprint_activity,
@@ -627,7 +611,6 @@ DEFAULT_WF_ARGS: list = [
     256,  # reasoning_max_tokens
     {  # verifier
         "type": "FLOAT_LLM_JUDGE",
-        "llmJudgePrompt": "Is the task complete?",
     },
 ]
 
@@ -1671,6 +1654,53 @@ async def test_workflow_update_cost_and_signal_parent_non_root_signals():
         _restore_workflow(original)
 
 
+async def test_workflow_update_cost_after_finished_skips_active_broadcast():
+    """Regression: completion_summary cost (or late child_cost_update from a
+    sub-agent that finished after us) used to call _update_cost_and_signal_parent
+    AFTER mark_finished set status=COMPLETED, broadcasting status=ACTIVE/Processing
+    over the terminal status. The benchmark harness then polled forever until
+    the stall threshold deleted the agent (404/DELETED at 136s, 0 messages in
+    the failure JSON because the harness treats DELETED-during-poll as 0-msg).
+
+    With _is_finished latched True at mark_complete/mark_failed, the
+    broadcast block must be skipped so COMPLETED/FAILED stick.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root"
+    wf.user_id = "u"
+    wf.parent_workflow_id = None
+    wf.own_cost_cents = 1.0
+    wf.children_cost_cents = {}
+    wf.tokens_in = 10
+    wf.tokens_out = 5
+    wf.price_limit_cents = 100
+    wf._is_finished = True  # mark_complete already ran
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._update_cost_and_signal_parent()
+        # Subtree cost is recalculated either way (tree cost persistence is fine).
+        assert wf.subtree_cost_cents == 1.0
+        # CRITICAL: must NOT have invoked update_agent_status with status=ACTIVE
+        # after we are finished. activity_calls is List[(fn_name, args)].
+        # update_agent_status signature: (agent_id, status, progress, msg, ...)
+        for fn_name, args in fake.activity_calls:
+            if (
+                fn_name == "update_agent_status"
+                and isinstance(args, (list, tuple))
+                and len(args) >= 2
+                and args[0] == "root"
+                and args[1] == "ACTIVE"
+            ):
+                raise AssertionError(
+                    "update_agent_status was called with status=ACTIVE after "
+                    "_is_finished was latched — this is the bug that caused the "
+                    "smoke 404/DELETED-at-136s failures."
+                )
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_cost_limit_no_op_when_below():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
@@ -2316,66 +2346,9 @@ async def test_workflow_extract_failure_context_basic():
 
 
 # ===========================================================================
-# W3-A / W3-D additional coverage (fetch_shared_memory, poll_messages,
-# execute_tool, refresh_claude_token, get_model_pricing, on_tokens branches)
+# W3-A / W3-D additional coverage (poll_messages, execute_tool,
+# refresh_claude_token, get_model_pricing, on_tokens branches)
 # ===========================================================================
-
-
-async def test_workflow_fetch_shared_memory_no_bus_returns_empty():
-    wf = _bare_workflow_instance()
-    wf.bus_id = None
-    fake = _FakeWorkflowModule()
-    original = _patch_workflow(fake)
-    try:
-        result = await wf._fetch_shared_memory()
-        assert result == ""
-        # No activity call when bus_id missing
-        activity_names = [c[0] for c in fake.activity_calls]
-        assert "get_shared_memory" not in activity_names
-    finally:
-        _restore_workflow(original)
-
-
-async def test_workflow_fetch_shared_memory_formats_entries():
-    wf = _bare_workflow_instance()
-    wf.bus_id = "bus-1"
-    wf.shared_memory_hash = None
-    wf.context_gates = {}  # Default: all gates open (includes shared_files)
-    fake = _FakeWorkflowModule()
-    fake.activity_returns["get_shared_memory"] = {
-        "content": [
-            {
-                "timestamp": "2025-01-01T12:00:00",
-                "type": "USER_MESSAGE",
-                "content": "hi",
-                "files": [{"original_filename": "a.txt", "mime_type": "text/plain"}],
-            }
-        ],
-        "hash": "h-1",
-    }
-    original = _patch_workflow(fake)
-    try:
-        result = await wf._fetch_shared_memory()
-        assert "USER_MESSAGE" in result, f"Got: {result!r}"
-        assert "hi" in result, f"Got: {result!r}"
-        # files included because shared_files gate defaults to True
-        assert "a.txt" in result, f"Got: {result!r}"
-        assert wf.shared_memory_hash == "h-1"
-    finally:
-        _restore_workflow(original)
-
-
-async def test_workflow_fetch_shared_memory_exception_returns_empty():
-    wf = _bare_workflow_instance()
-    wf.bus_id = "bus-1"
-    fake = _FakeWorkflowModule()
-    fake.activity_fail_for.add("get_shared_memory")
-    original = _patch_workflow(fake)
-    try:
-        result = await wf._fetch_shared_memory()
-        assert result == ""
-    finally:
-        _restore_workflow(original)
 
 
 async def test_workflow_poll_messages_merges_and_sorts():
@@ -2411,22 +2384,50 @@ async def test_workflow_poll_messages_exception_returns_empty():
 
 
 async def test_workflow_execute_tool_unknown_tool_returns_error():
+    """Unknown tool: returns error AND posts a TOOL event so the loop's next
+    iteration sees a paired tool_result for the LLM's tool_use. Without the
+    paired post, role_alternation trips (consecutive ASSISTANTs)."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
+    handle_calls = []
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handle_calls.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
         result = await wf._execute_tool("not_a_tool", {}, "call-1")
         assert result.get("error") is True
         assert "Unknown tool" in result.get("message", "")
+        assert len(handle_calls) == 1, "Expected one TOOL event posted for unknown tool"
+        event, tcid, tname = handle_calls[0]
+        assert tcid == "call-1"
+        assert tname == "not_a_tool"
+        assert getattr(event, "status", None).name == "ERROR"
     finally:
         _restore_workflow(original)
 
 
 async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
+    """PLAN phase + non-explore spawn_agent: returns error AND posts a TOOL event.
+
+    Regression: smoke task `parallel-tool-calls` failed with a context
+    role_alternation violation because this branch returned an error dict
+    without posting a TOOL row, so the next iteration's LLM saw its prior
+    ASSISTANT tool_use without any tool_result and re-emitted tool_calls,
+    leaving two back-to-back ASSISTANTs.
+    """
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.current_phase = "PLAN"
+    handle_calls = []
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handle_calls.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -2435,6 +2436,45 @@ async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
         )
         assert result.get("error") is True
         assert "PLAN" in result.get("message", "") or "explore" in result.get("message", "")
+        assert len(handle_calls) == 1, (
+            "Expected one TOOL event posted for PLAN+non-explore block"
+        )
+        event, tcid, tname = handle_calls[0]
+        assert tcid == "call-1"
+        assert tname == "spawn_agent"
+        assert getattr(event, "status", None).name == "ERROR"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event():
+    """Tools with Pydantic validators: invalid params returns error AND posts TOOL event.
+
+    Same mechanism as the PLAN-phase block — every error return must produce
+    a paired tool_result so the loop's next LLM call sees alternating turns.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.current_phase = "EXECUTE"
+    handle_calls = []
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handle_calls.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        # spawn_agent's Pydantic model requires goal; passing only an empty type
+        # triggers TOOL_MODELS validation failure.
+        result = await wf._execute_tool("spawn_agent", {}, "call-1")
+        assert result.get("error") is True
+        assert "Invalid parameters" in result.get("message", "")
+        assert len(handle_calls) == 1
+        event, tcid, tname = handle_calls[0]
+        assert tcid == "call-1"
+        assert tname == "spawn_agent"
+        assert getattr(event, "status", None).name == "ERROR"
     finally:
         _restore_workflow(original)
 
@@ -2685,6 +2725,10 @@ async def run_all_tests():
     await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
+    await r.record_async(
+        "wf_update_cost_after_finished_no_active",
+        test_workflow_update_cost_after_finished_skips_active_broadcast,
+    )
     await r.record_async("wf_check_cost_limit_below", test_workflow_check_cost_limit_no_op_when_below)
     await r.record_async("wf_check_cost_limit_non_root", test_workflow_check_cost_limit_skips_non_root)
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
@@ -2720,13 +2764,14 @@ async def run_all_tests():
     await r.record_async("wf_extract_failure_context", test_workflow_extract_failure_context_basic)
 
     # W3-A/W3-D additional coverage tests
-    await r.record_async("wf_fetch_shared_memory_no_bus", test_workflow_fetch_shared_memory_no_bus_returns_empty)
-    await r.record_async("wf_fetch_shared_memory_formats", test_workflow_fetch_shared_memory_formats_entries)
-    await r.record_async("wf_fetch_shared_memory_exception", test_workflow_fetch_shared_memory_exception_returns_empty)
     await r.record_async("wf_poll_messages_merges", test_workflow_poll_messages_merges_and_sorts)
     await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_returns_empty)
     await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
     await r.record_async("wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn)
+    await r.record_async(
+        "wf_execute_tool_invalid_params_posts_event",
+        test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event,
+    )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async("wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token)
     await r.record_async("wf_refresh_claude_token_exception", test_workflow_refresh_claude_token_exception_logged_no_raise)

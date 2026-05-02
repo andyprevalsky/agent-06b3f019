@@ -144,7 +144,6 @@ export async function startAgentMode(agentId: string, userId: string) {
     reasoningMaxTokens: agent.reasoningMaxTokens,
     verifier: {
       type: agent.verifier.type,
-      llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
     priceLimitCents: agent.priceLimitCents,
   });
@@ -219,7 +218,6 @@ export async function restartAgent(agentId: string, userId?: string) {
     reasoningMaxTokens: agent.reasoningMaxTokens,
     verifier: {
       type: agent.verifier.type,
-      llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
     ...(agent.parentWorkflowId !== null ? { parentWorkflowId: agent.parentWorkflowId } : {}),
     depth: agent.depth,
