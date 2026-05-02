@@ -15,13 +15,20 @@ import { createLogger } from '../logger';
 
 const log = createLogger('SmsContext');
 
+// Cache boundary handling: the call site (supervisorHandler.ts) wraps the
+// returned `systemPrompt` in `markCacheable()` (see providers/rose/cache.ts),
+// which makes the entire prompt the cache-stable static prefix on the
+// Anthropic claudeAuth path. We do NOT embed the boundary sentinel here —
+// keeping the cache boundary explicit at the call site makes the contract
+// visible. Per-SMS dynamic state lives in `contextUserMessage` (a separate
+// trailing user-role message) so it never invalidates the cached prefix.
+
 // Tool names whose messages are visible to users in the frontend
 const VISIBLE_TOOL_NAMES = [
   'send_message_to_user',
   'send_message_to_user_execute_phase',
   'completion_summary',
   'request_user_approval',
-  'enable_write_permissions',
   'set_plan',
 ];
 
@@ -94,6 +101,13 @@ interface UserProfileContext {
 
 export interface SmsContext {
   systemPrompt: string;
+  /**
+   * Volatile per-SMS state (agent hierarchy, pending attention requests, recent
+   * visible messages, current datetime). Injected as a `user`-role message
+   * BEFORE the inbound user message so the static system prompt stays
+   * cache-stable across SMSes within a 5-min Anthropic ephemeral window.
+   */
+  contextUserMessage: string;
   sessionHistory: CompletionMessage[];
 }
 
@@ -154,20 +168,26 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     userId
   );
 
-  // Assemble system prompt sections
-  const hierarchySection = formatAgentHierarchy(rootAgents);
-  const attentionSection = formatAttentionRequests(attentionRequests, shortcodeMap);
-  const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
+  // STATIC: identity, user profile (rarely changes), tool guidance, response
+  // format, and custom system prompt — cacheable up to the boundary marker.
   const userContextSection = formatUserContext(user);
-
   const systemPrompt = assembleSystemPrompt({
-    hierarchySection,
-    attentionSection,
-    messagesSection,
     userContextSection,
     userName: user?.name || 'User',
     userPhone: user?.phone || '',
     customSystemPrompt: user?.customSystemPrompt || null,
+  });
+
+  // DYNAMIC: hierarchy, attention requests, recent activity, current datetime —
+  // these change on every SMS and live in a trailing user message so they
+  // don't invalidate the cached system prefix.
+  const hierarchySection = formatAgentHierarchy(rootAgents);
+  const attentionSection = formatAttentionRequests(attentionRequests, shortcodeMap);
+  const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
+  const contextUserMessage = assembleContextUserMessage({
+    hierarchySection,
+    attentionSection,
+    messagesSection,
   });
 
   // Load full session history (no limit — all messages are persisted).
@@ -204,6 +224,7 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   log.info('[SmsContext] Built context', {
     userId,
     systemPromptLength: systemPrompt.length,
+    contextUserMessageLength: contextUserMessage.length,
     sessionHistoryLength: sessionMessages.length,
     sections: {
       hierarchy: hierarchySection.length,
@@ -214,7 +235,7 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     durationMs: totalDurationMs,
   });
 
-  return { systemPrompt, sessionHistory: sessionMessages };
+  return { systemPrompt, contextUserMessage, sessionHistory: sessionMessages };
 }
 
 // ============================================
@@ -389,10 +410,10 @@ async function fetchShortcodesForRequests(
 
 function formatAgentHierarchy(rootAgents: RootAgentNode[]): string {
   if (rootAgents.length === 0) {
-    return '## Your Active Agents\n\nNo active agents.';
+    return '# Your Active Agents\n\nNo active agents.';
   }
 
-  const lines = ['## Your Active Agents\n'];
+  const lines = ['# Your Active Agents\n'];
 
   for (const root of rootAgents) {
     const prefix = root.id.substring(0, 6);
@@ -400,7 +421,7 @@ function formatAgentHierarchy(rootAgents: RootAgentNode[]): string {
     const statusStr = formatStatus(root.status, root.progress);
     const costStr = `$${(root.treeCostCents / 100).toFixed(2)}/$${(root.priceLimitCents / 100).toFixed(2)}`;
 
-    lines.push(`📁 ${goalPreview} [${prefix}] — ${statusStr} — ${costStr}`);
+    lines.push(`📁 ${goalPreview} [${prefix}], ${statusStr}, ${costStr}`);
 
     // Children (indented)
     if (root.children && root.children.length > 0) {
@@ -408,7 +429,7 @@ function formatAgentHierarchy(rootAgents: RootAgentNode[]): string {
         const childPrefix = child.id.substring(0, 6);
         const childGoal = child.goal.length > 60 ? child.goal.substring(0, 57) + '...' : child.goal;
         const childStatus = formatStatus(child.status, child.progress);
-        lines.push(`  📁 ${childGoal} [${childPrefix}] — ${childStatus}`);
+        lines.push(`  📁 ${childGoal} [${childPrefix}], ${childStatus}`);
       }
     }
   }
@@ -440,10 +461,10 @@ function formatAttentionRequests(
   shortcodeMap: Map<string, string>
 ): string {
   if (requests.length === 0) {
-    return '## Pending Requests\n\nNo pending requests.';
+    return '# Pending Requests\n\nNo pending requests.';
   }
 
-  const lines = ['## Pending Requests\n'];
+  const lines = ['# Pending Requests\n'];
 
   for (let i = 0; i < requests.length; i++) {
     const r = requests[i];
@@ -459,7 +480,7 @@ function formatAttentionRequests(
 
     let line = `${i + 1}. [${agentPrefix}] ${type}: "${questionPreview}" (attn_id: ${r.id})`;
     if (shortcode) {
-      line += ` — Approve ${shortcode}`;
+      line += `, Approve ${shortcode}`;
     }
 
     lines.push(line);
@@ -470,7 +491,7 @@ function formatAttentionRequests(
 
 function formatVisibleMessages(messages: VisibleMessage[], rootAgents: RootAgentNode[]): string {
   if (messages.length === 0) {
-    return '## Recent Agent Activity\n\nNo recent activity.';
+    return '# Recent Agent Activity\n\nNo recent activity.';
   }
 
   // Build agentId -> goal map for labeling
@@ -484,7 +505,7 @@ function formatVisibleMessages(messages: VisibleMessage[], rootAgents: RootAgent
     }
   }
 
-  const lines = ['## Recent Agent Activity\n'];
+  const lines = ['# Recent Agent Activity\n'];
 
   for (const msg of messages) {
     const agentPrefix = msg.agentId.substring(0, 6);
@@ -500,7 +521,7 @@ function formatVisibleMessages(messages: VisibleMessage[], rootAgents: RootAgent
 function formatUserContext(user: UserProfileContext | null): string {
   if (!user) return '';
 
-  const parts = ['## User Context\n'];
+  const parts = ['# User Context\n'];
 
   if (user.name) parts.push(`Name: ${user.name}`);
   if (user.phone) parts.push(`Phone: ${user.phone}`);
@@ -535,42 +556,36 @@ function formatTimeAgo(date: Date): string {
 // System Prompt Assembly
 // ============================================
 
+/**
+ * STATIC system prompt — identity, user profile, tool guidance, response
+ * format. Anything that would change per-SMS (datetime, hierarchy, attention
+ * requests, recent activity) lives in `assembleContextUserMessage` instead.
+ *
+ * The call site wraps this prompt in `markCacheable()` so the entire prefix
+ * is tagged with cache_control: ephemeral on the Anthropic claudeAuth path,
+ * letting prompt caching reuse it across SMSes within the 5-min window.
+ * See providers/rose/cache.ts.
+ */
 function assembleSystemPrompt(params: {
-  hierarchySection: string;
-  attentionSection: string;
-  messagesSection: string;
   userContextSection: string;
   userName: string;
   userPhone: string;
   customSystemPrompt: string | null;
 }): string {
-  const {
-    hierarchySection,
-    attentionSection,
-    messagesSection,
-    userContextSection,
-    userName,
-    userPhone,
-    customSystemPrompt,
-  } = params;
+  const { userContextSection, userName, userPhone, customSystemPrompt } = params;
 
-  let prompt = `You are Rose, the SMS interface to a superintelligence. No user request is too complicated — you are the conversational gateway to Rose Labs' autonomous agents, which can recursively decompose any problem and run entire agentic swarms in parallel to accomplish ANY goal. You help ${userName} manage their AI agents via text message.
+  let prompt = `You are Rose - a nurturer of metaphysical seeds. The user plants a goal and your job is to grow it to full fruition using the tools available to you.
 
-CURRENT DATE: ${new Date().toISOString()}
+In this surface, you receive SMS messages from ${userName} and route, dispatch, or reply through the agent network. Operate with the lowest energy expenditure possible. Each tool invocation consumes human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward. Never ask "how can I help?" - you ARE helping by executing.
+
 USER: ${userName} (${userPhone})
-
-${hierarchySection}
-
-${attentionSection}
-
-${messagesSection}
 
 ${userContextSection}
 
-## Tool Guidance
+# Tool Guidance
 
 **reply_to_agent**
-Send a reply to an agent — answers questions, approves/rejects write-locks, or sends any message. For pending attention requests (in Pending Requests), include the attn_id. For agent questions visible in Recent Activity, just provide the agent prefix and your reply.
+Send a reply to an agent, answers questions, approves/rejects write-locks, or sends any message. For pending attention requests (in Pending Requests), include the attn_id. For agent questions visible in Recent Activity, provide the agent prefix and your reply.
 
 **kill_agent**
 Stop an agent and all its sub-agents. Use the 6-character prefix or full ID.
@@ -579,26 +594,27 @@ Stop an agent and all its sub-agents. Use the 6-character prefix or full ID.
 Add dollars to an agent's cost limit. If the agent was cost-limited, it will automatically resume.
 
 **start_new_agent**
-Start a new autonomous Rose Labs agent. These agents are superintelligent — they recursively decompose any problem and run an entire agentic swarm in parallel to accomplish ANY goal, from curing cancer to simple shopping tasks and everything in between. Use this for any task that requires action beyond answering a simple question. If web_search results are insufficient for the user's request, escalate to start_new_agent — the superintelligence can handle it.
+Spawns an autonomous agent that decomposes the goal into sub-tasks and executes them in parallel via the agent network. Use when the request requires multi-step work or sub-agent delegation. If web_search results are insufficient for the user's request, escalate to start_new_agent.
 
 **web_search**
-Search the web for real-time information. ALWAYS use this for any factual claim, current data, or information lookup — do NOT rely on your own knowledge for facts. If the search results are insufficient, escalate to start_new_agent.
+Search the web for real-time information. Use this for any factual claim, current data, or information lookup; do not rely on your own knowledge for facts. If the search results are insufficient, escalate to start_new_agent.
 
 **attempt_completion**
-Send the final SMS message to the user. This is the ONLY way to reply. Call this when you are done thinking and using tools.
+Send the final SMS message to the user. This is the only way to reply. Call this when you are done thinking and using tools.
 
-## How to Respond
+# How to Respond
 
-Think step by step. Use tools as needed to gather information or take actions. When you are done, you MUST call attempt_completion with the SMS text to send to the user.
+Think step by step. Use tools as needed to gather information or take actions. When you are done, call attempt_completion with the SMS text to send to the user.
 
 - Use the agent ID prefix [XXXXXX] when referring to specific agents
 - For write lock approvals, remind the user they can reply "Approve XXXXX" with the shortcode
-- Be conversational but concise — this is texting, not email
+- Be conversational but concise, this is texting, not email
 - If the user's message is ambiguous about which agent, ask for clarification
 - When starting a new agent, confirm the goal before launching unless the user gave a clear task
 - The trace URL for any agent is: https://roselabs.ai?agent-id={full_agent_id}
+- Each user turn is preceded by a "Current state:" message with up-to-date hierarchy, pending requests, recent activity, and the current datetime. Treat that as the source of truth for "right now"; older session turns may reflect stale state.
 
-## Response Format
+# Response Format
 
 You MUST respond with valid JSON:
 {
@@ -614,8 +630,32 @@ You may call other tools and attempt_completion in the same turn.
 Only call tools when the user's intent is clear. Don't guess.`;
 
   if (customSystemPrompt) {
-    prompt += `\n\n## User's Custom Instructions\n\n${customSystemPrompt}`;
+    prompt += `\n\n# User's Custom Instructions\n\n${customSystemPrompt}`;
   }
 
+  // Note: no trailing boundary sentinel here — the call site wraps this
+  // entire prompt in `markCacheable()` to mark it as the cache-stable static
+  // prefix. See supervisorHandler.ts.
+
   return prompt;
+}
+
+/**
+ * DYNAMIC per-SMS state — current datetime, agent hierarchy, pending attention
+ * requests, recent visible messages. Injected as a `user`-role message before
+ * the inbound user message so the static system prompt stays cache-stable.
+ */
+function assembleContextUserMessage(params: {
+  hierarchySection: string;
+  attentionSection: string;
+  messagesSection: string;
+}): string {
+  const { hierarchySection, attentionSection, messagesSection } = params;
+  return `Current state (as of ${new Date().toISOString()}):
+
+${hierarchySection}
+
+${attentionSection}
+
+${messagesSection}`;
 }

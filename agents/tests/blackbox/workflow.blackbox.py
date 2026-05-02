@@ -455,13 +455,28 @@ async def mock_check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
     model: str = "anthropic/claude-sonnet-4.5",
-    phase: str = "EXECUTE",
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {"score": 1.0, "reasoning": "Complete", "structured_response": None}
+    return {
+        "score": 1.0,
+        "reasoning": "Complete",
+        "structured_response": None,
+        # C6: usage must always be returned so callers (post-DAG verifier,
+        # main-loop verifier) can route the cost through _on_tokens.
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "actual_model": None,
+            "pool_name": None,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "claude_token_error": None,
+        },
+    }
 
 
 @activity.defn(name="call_planner_llm_activity")
@@ -1084,6 +1099,11 @@ def test_workflow_extract_failure_context_trajectory_dedupe():
 
 
 def test_workflow_extract_failure_context_skips_internal_tools():
+    """Verifier feedback rows (verifierMessage=True) and internal tools must
+    not appear in trajectory. Verifier rows now ride under
+    toolName="attempt_completion" rather than "check_progress" — filtering is
+    done by the verifierMessage flag.
+    """
     wf = _bare_workflow_instance()
     ctx = [
         {
@@ -1091,8 +1111,9 @@ def test_workflow_extract_failure_context_skips_internal_tools():
             "text": "",
             "metadata": {
                 "toolCallId": "tc-1",
-                "toolName": "check_progress",
+                "toolName": "attempt_completion",
                 "toolStatus": "FINISHED",
+                "verifierMessage": True,
             },
         },
         {

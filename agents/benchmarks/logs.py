@@ -602,16 +602,23 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
                 )
 
     # 2. Detect tools stuck IN_PROGRESS without FINISHED
-    # Spawn tools are inherently long-running (sub-agents have their own anomaly detection)
+    # Spawn tools are inherently long-running (sub-agents have their own anomaly detection).
+    # Verifier-feedback rows are tagged metadata.verifierMessage=True (and now
+    # ride under toolName="attempt_completion"); skip those instead of relying
+    # on the old check_progress toolName.
     _LONG_RUNNING_TOOLS = {
         "spawn_agent", "spawn_sub_agent", "spawn_sub_agent_for_each",
         "spawn_claude_code_agent", "spawn_browser_agent",
-        "set_plan", "message_person", "request_user_approval", "check_progress",
+        "set_plan", "message_person", "request_user_approval",
     }
     in_progress = {}  # tool_call_id → metadata
     for m in msgs:
         meta = m.get("metadata", {})
         if not isinstance(meta, dict):
+            continue
+        # Verifier rows post IN_PROGRESS + FINISHED in tight succession; ignore
+        # them entirely so they never get flagged as stuck.
+        if meta.get("verifierMessage"):
             continue
         tcid = meta.get("toolCallId") or meta.get("tool_call_id", "")
         status = meta.get("toolStatus", "")

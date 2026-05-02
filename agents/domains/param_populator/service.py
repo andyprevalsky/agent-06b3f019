@@ -19,7 +19,12 @@ from domains.param_populator.config import (
 )
 from domains.param_populator.repo import fetch_agent_context
 from helpers.llm import build_llm_messages, call_llm_structured_streaming
-from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+from utils.prompts import (
+    CONTEXT_POINTERS_RULE,
+    EPHEMERAL_SESSION_RULE,
+    FILE_HANDLING_RULE,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+)
 from utils.tool_schemas import TOOL_MODELS, create_agent_action_model
 
 if TYPE_CHECKING:
@@ -39,10 +44,10 @@ def build_agent_system_prompt(tool_name: str, goal: str, alias_hint: str = "") -
     Returns:
         System prompt string.
     """
-    # --- Static prefix (shared across all param populator calls → cached) ---
-    prompt = """You are an AI agent executing a specific task from a plan. Your role is to ensure that the Required Tool is called with exactly the parameters necessary in order to complete the Goal below. The Goal below is the objective that the tool you are calling must accomplish — for agent-spawning tools, this means the Goal becomes the spawned agent's mission.
+    # --- Static prefix (shared across all param populator calls, cached) ---
+    prompt = f"""You populate parameters for a specific tool call. Call the Required Tool with exactly the parameters necessary to complete the Goal below. For agent-spawning tools, the Goal becomes the spawned agent's mission.
 
-When calling a tool that creates an agent, the parameters you pass are the ONLY context that agent will have. If you mention a file but don't include that file-pointer in attachments, the agent will NOT have access to that file. You may not assume any context gets transferred over — if there is context from the conversation that the agent will rely on to complete its goal, you MUST reiterate that context in the goal string. This is very important.
+When calling a tool that creates an agent, the parameters you pass are the only context that agent will have. If you mention a file but don't include that file-pointer in attachments, the agent will not have access to that file. Do not assume context transfers over; if context from the conversation is needed to complete the goal, reiterate that context in the goal string.
 
 You will be graded:
 - points are deducted for including context that is not necessary to the goal in the goal string.
@@ -50,30 +55,11 @@ You will be graded:
 - points are deducted for adding new information that was NOT previously mentioned in any context fed to you.
 - points are deducted if the goal string you output does not adhere to the Goal below. Do not change the intention of the goal even if it is against your better judgment.
 
-CONTEXT POINTERS (CRITICAL):
-Messages and tool results in the conversation include "Reference: @ref:message:<id>" pointers.
-When populating tool parameters (especially goal strings for spawn_agent):
-- PREFER including @ref:message: pointers over rewriting/paraphrasing the referenced content
-- The pointer is automatically resolved to the original data when the child agent runs
-- This prevents information loss — phone numbers, names, and details stay exact
-- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a specific substring
-- Example: Instead of rewriting "Call John Smith at 555-1234", pass the pointer:
-  "Call the person mentioned in @ref:message:abc123[start="John Smith"|end="555-1234"]"
+# Context Pointers
+{CONTEXT_POINTERS_RULE.strip()}
 
-CRITICAL - FILE OUTPUT SCHEMA RULES:
-When defining output_schema fields, if the output is a FILE (image, document, PDF, generated artifact, etc.):
-- You MUST use type='file_pointer' for single files
-- You MUST use type='list[file_pointer]' for multiple files
-- NEVER use type='str' for file paths - files will NOT be transferred!
-The file_pointer type enables automatic file transfer from remote environments.
-
-FILE ATTACHMENTS - HOW TO PASS FILES TO SUB-AGENTS:
-When using spawn_sub_agent, spawn_claude_code_agent, or spawn_browser_agent:
-- Sub-agents do NOT automatically inherit files from your context
-- You MUST pass files via the `attachments` parameter
-- Use the EXACT `original_filename` value from file_pointer objects in your context
-- Example: if you see `"original_filename": "rs.jpeg"` in a file_pointer, use `attachments: ["rs.jpeg"]`
-- Do NOT use the file's `id` field, storage_path, or any `file:` prefix format"""
+# File Handling
+{FILE_HANDLING_RULE.strip()}"""
 
     # --- Dynamic suffix (per-call unique: goal, tool, alias-specific rules) ---
     prompt += SYSTEM_PROMPT_DYNAMIC_BOUNDARY
@@ -85,9 +71,9 @@ Required Tool: {tool_name}
 INSTRUCTIONS:
 1. Analyze the Goal and the conversation context
 2. Call the {tool_name} tool with parameters that will accomplish the Goal
-3. You should explain your reasoning
-4. You MUST call exactly one tool: {tool_name}
-5. Do NOT skip the tool call even if the goal appears already accomplished in context"""
+3. Explain your reasoning
+4. Call exactly one tool: {tool_name}
+5. Do not skip the tool call even if the goal appears already accomplished in context"""
 
     if alias_hint in SPAWN_PARAM_REQUIREMENTS:
         prompt += SPAWN_PARAM_REQUIREMENTS[alias_hint]
@@ -97,12 +83,10 @@ INSTRUCTIONS:
 Execute the task now by calling {tool_name} with the correct parameters."""
 
     if tool_name.startswith("spawn_"):
-        prompt += """
+        prompt += f"""
 
-EPHEMERAL SESSION WARNING:
-This tool creates a NEW session that does not persist. Any login state, cookies, or context
-from previous calls will NOT be available. Include ALL necessary steps in a single goal
-(e.g., "Login, add to cart, checkout" - not separate calls for each step)."""
+# Ephemeral Session
+{EPHEMERAL_SESSION_RULE.strip()}"""
 
     return prompt
 

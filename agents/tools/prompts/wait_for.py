@@ -1,14 +1,21 @@
 """Prompt for wait_for tool."""
 
-PROMPT = """Wait until a specific time or until a condition is met.
+# Examples retained because the validator hard-fails when both or neither of
+# until_timestamp/condition are passed, and the two modes carry different
+# parameter shapes (timestamp uses no polling args; condition needs
+# check_interval_seconds and max_checks). Without explicit examples models
+# routinely emit invalid combinations.
+PROMPT = """Pauses execution until a specific timestamp is reached or a natural-language condition is met.
 
-Timestamp mode: provide until_timestamp (ISO 8601) to sleep until that time.
-Condition mode: provide condition (natural language) + check_interval_seconds (60-86400, default 900) + max_checks (1-100, default 20). An explore agent will periodically check if the condition is satisfied using web search and local data.
+Usage:
+- Pass exactly one of until_timestamp (ISO 8601) or condition (natural language); they are mutually exclusive.
+- In condition mode, an explore agent polls every check_interval_seconds up to max_checks times.
+- Use context_gates to trim the polling explore agent's user context for pure web-based checks.
+- Do not spawn recursive sub-agents for "check X every Y minutes" - use condition mode here.
+- Returns the final check result (condition mode) or resumes after the wait (timestamp mode).
 
-WHEN NOT TO USE:
-- Do NOT use both until_timestamp and condition in the same call - they are mutually exclusive.
-- Do NOT use recursive sub-agents for "check X every Y minutes" - use condition mode instead.
-
-RETURNS: For timestamp mode, resumes after the wait. For condition mode, returns whether the condition was met and the final check result.
-
-Examples: wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10), wait_for(until_timestamp="2026-03-12T09:00:00Z")"""
+# Examples
+Timestamp mode:
+  wait_for(until_timestamp="2026-03-12T09:00:00Z")
+Condition mode:
+  wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10)"""

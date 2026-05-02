@@ -44,14 +44,6 @@ def _extract_key_param(tool_name: str, metadata: dict, text: str) -> str:
         return f'"{goal[:GOAL_DISPLAY_MAX_LENGTH]}"' if goal else ""
     if tool_name == "send_message_to_user":
         return ""
-    if tool_name == "find_all":
-        return f'"{data.get("entity_type", "")}"' if data.get("entity_type") else ""
-    if tool_name == "enrich":
-        return f'"{data.get("query", "")}"' if data.get("query") else ""
-    if tool_name == "monitor":
-        return f'"{data.get("description", "")[:40]}"' if data.get("description") else ""
-    if tool_name == "people_search":
-        return f'"{data.get("query", "")}"' if data.get("query") else ""
 
     return ""
 
@@ -121,6 +113,11 @@ def build_trajectory_blueprint(  # noqa: C901
             tool_name = metadata.get("toolName", "")
             tool_status = metadata.get("toolStatus", "")
             tool_call_id = metadata.get("toolCallId", "")
+
+            # Skip verifier-feedback rows (now tagged attempt_completion + verifierMessage=True).
+            # These are scoring messages, not real tool results.
+            if metadata.get("verifierMessage"):
+                continue
 
             # Skip internal tools
             if tool_name in SKIP_TOOLS:

@@ -1,0 +1,1964 @@
+"""Structural-enforcement tests codifying lessons from the prompt audit.
+
+Each test asserts a structural invariant that, if violated, would reintroduce
+a class of bug we just fixed. Failure messages explain WHAT was violated and
+WHY it matters so future contributors don't have to dig for context.
+
+Categories
+----------
+1. Static system prompts must be byte-identical across calls (cache safety).
+2. TOOL_MODELS / phase-list / tools/prompts/ coverage (registry consistency).
+3. attempt_completion is parameterless (no orchestrator reads tool args).
+4. Verifier output schema field order (load-bearing for structured outputs).
+5. Tool-name hygiene (no deleted tool names; verifier feedback uses
+   attempt_completion, not check_progress; verifier path goes through
+   check_progress, not _call_llm_verifier directly).
+6. Browser-use catalog ↔ v3 prompt sync; envelope-only fields.
+7. Render-tool-list is deterministic and well-formed.
+8. Verifier static prefix clears Anthropic's 1024-token cache-write threshold.
+9. TS-side static prompts have no dynamic dates inside cacheable literals.
+10. Spawn-alias prompts document the validator-enforced 50-char minimum.
+11. Style guardrails (em-dashes, banned phrases, marketing adjectives).
+12. No restating-the-schema patterns / broken cross-refs in tool prompts.
+13. ALL-CAPS section labels banned in rendered prompts (use markdown headings).
+14. Canonical rule constants imported, not duplicated across files.
+15. Cacheable-static prompts mark the dynamic boundary.
+16. ALL-CAPS markers (IMPORTANT/CRITICAL/MUST/etc.) capped per prompt.
+17. Tool prompts open with a declarative third-person sentence.
+18. Tool prompt length stays within the per-call budget.
+"""
+
+import ast
+import asyncio
+import re
+from pathlib import Path
+
+from _test_utils import BlackboxResult, teardown_mock
+
+# Resolve once. _test_utils inserts agents root onto sys.path; these paths are
+# only used for filesystem checks (e.g. tools/prompts/<name>.py exists).
+AGENTS_ROOT = Path(__file__).resolve().parent.parent.parent
+PROMPTS_DIR = AGENTS_ROOT / "tools" / "prompts"
+
+
+# ============================================================================
+# 1. Static system prompts are byte-identical across calls
+# ----------------------------------------------------------------------------
+# WHY: Anthropic prompt caching reuses bytes-equal prefixes. A `datetime.now()`
+# or `time.time()` slipping into the static section silently kills cache hits
+# for every downstream LLM call in the workflow. See `prompts.py` —
+# `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` separates static (cacheable) from dynamic
+# (per-call) sections; nothing above the boundary may vary across calls with
+# the same inputs.
+# ============================================================================
+
+
+def test_build_system_prompt_execute_is_static_across_calls():
+    """build_system_prompt('EXECUTE', []) must be byte-identical across calls.
+
+    A non-deterministic value (timestamp, random, env-time) above
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY breaks Anthropic prompt caching for the
+    main loop.
+    """
+    from utils.prompts import build_system_prompt
+
+    a = build_system_prompt("EXECUTE", [])
+    b = build_system_prompt("EXECUTE", [])
+    assert a == b, (
+        "build_system_prompt('EXECUTE', []) is non-deterministic across calls. "
+        "Inspect prompts.py for datetime.now()/time.time()/etc. above "
+        "SYSTEM_PROMPT_DYNAMIC_BOUNDARY. This kills cache hits for every "
+        "main-loop LLM call."
+    )
+
+
+def test_build_system_prompt_plan_is_static_across_calls():
+    """build_system_prompt('PLAN', []) must be byte-identical across calls."""
+    from utils.prompts import build_system_prompt
+
+    a = build_system_prompt("PLAN", [])
+    b = build_system_prompt("PLAN", [])
+    assert a == b, (
+        "build_system_prompt('PLAN', []) is non-deterministic across calls. "
+        "PLAN-phase prompt is non-cacheable — fix the time/random call."
+    )
+
+
+def test_build_system_prompt_static_prefix_shared_across_phases():
+    """Static prefix (above SYSTEM_PROMPT_DYNAMIC_BOUNDARY) must match across PLAN/EXECUTE.
+
+    The whole point of the boundary is that the byte-identical static prefix
+    is shared across phases — that's how the cache prefix is reused.
+    """
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, build_system_prompt
+
+    plan = build_system_prompt("PLAN", [])
+    execute = build_system_prompt("EXECUTE", [])
+
+    plan_static = plan.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0]
+    execute_static = execute.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0]
+    assert plan_static == execute_static, (
+        "Static prefix differs between PLAN and EXECUTE. Anything that varies "
+        "by phase MUST live below SYSTEM_PROMPT_DYNAMIC_BOUNDARY. Diff the "
+        "two strings and move the differing chunk into the dynamic section."
+    )
+
+
+def test_build_planner_system_prompt_is_static_across_calls():
+    """build_planner_system_prompt with same inputs must be byte-identical."""
+    from utils.prompts import build_planner_system_prompt
+
+    a = build_planner_system_prompt("tool descriptions here")
+    b = build_planner_system_prompt("tool descriptions here")
+    assert a == b, (
+        "build_planner_system_prompt is non-deterministic across calls. "
+        "The planner prompt is cached on the static path — fix any "
+        "time/random/env-derived content."
+    )
+
+
+def test_explore_agent_system_prompt_template_is_constant():
+    """EXPLORE_AGENT_SYSTEM_PROMPT must be a constant string with placeholders.
+
+    The placeholders {network_metadata}/{local_data_summary} are filled in by
+    the spawn_agent service. The TEMPLATE itself must keep those placeholders
+    so a fresh value flows through per-call rather than being baked at import
+    time. We also confirm the module-level constant is string-equal across
+    imports — i.e. it's not generated dynamically.
+
+    NOTE: ``{current_timestamp}`` was REMOVED from this template. A timestamp
+    in the system prompt breaks Anthropic prompt caching for every explore
+    sub-agent call. The current time is now injected as a per-call ``[STATE:
+    now=...]`` line on the user message at ``spawn_agent/service.py``, not
+    via this template. If anyone re-introduces the placeholder, the cache
+    will silently break across all explore agents.
+    """
+    from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT as a
+    from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT as b
+
+    assert a == b, "EXPLORE_AGENT_SYSTEM_PROMPT is not stable across imports"
+    assert "{current_timestamp}" not in a, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT must NOT include a {current_timestamp} "
+        "placeholder. A timestamp in the static system prompt kills cache "
+        "hits for every explore sub-agent. Inject the time as a [STATE: ...] "
+        "line on the user message in spawn_agent.service instead."
+    )
+    assert "{network_metadata}" in a, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT lost its {network_metadata} placeholder."
+    )
+    assert "{local_data_summary}" in a, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT lost its {local_data_summary} placeholder."
+    )
+
+
+def test_explore_agent_system_prompt_is_static_across_calls():
+    """EXPLORE_AGENT_SYSTEM_PROMPT.format() must be byte-identical across calls.
+
+    The explore agent system prompt is sent on every iteration of every
+    explore sub-agent. A timestamp slipping in here would kill cache hits
+    across all explore steps. This test calls .format() with the same inputs
+    twice and asserts byte-equality, mirroring the v3 browser-agent invariant.
+    """
+    from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
+
+    a = EXPLORE_AGENT_SYSTEM_PROMPT.format(network_metadata="", local_data_summary="")
+    b = EXPLORE_AGENT_SYSTEM_PROMPT.format(network_metadata="", local_data_summary="")
+    assert a == b, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT.format() is non-deterministic across "
+        "calls. The explore-agent prompt is cached per-spawn — any "
+        "datetime.now()/time.time() call in the template breaks the cache. "
+        "Per-step state must live in a [STATE: ...] line on the user "
+        "message, not in this template."
+    )
+    # Sanity: per-call time must not bleed into the static prefix.
+    assert "Current timestamp:" not in a, (
+        "Current timestamp leaked into EXPLORE_AGENT_SYSTEM_PROMPT static prefix"
+    )
+
+
+def test_get_browser_system_prompt_is_static_across_calls():
+    """get_browser_system_prompt with same inputs must be byte-identical.
+
+    The v3 browser system prompt is sent on every browser-use iteration. A
+    timestamp slipping in here would kill cache hits across all browser steps.
+    """
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
+
+    a = get_browser_system_prompt("buy a book", "be quick", available_files=["x.pdf"])
+    b = get_browser_system_prompt("buy a book", "be quick", available_files=["x.pdf"])
+    assert a == b, (
+        "get_browser_system_prompt is non-deterministic across calls. The "
+        "v3 browser prompt is cached per-spawn — any datetime.now()/time.time() "
+        "call inside this function (vs. inside build_state_line, where it's "
+        "expected) breaks the cache."
+    )
+    # Sanity: per-step state must not bleed into the static prefix.
+    assert "Current time:" not in a, (
+        "Current time leaked into get_browser_system_prompt static prefix"
+    )
+    assert "CURRENT URL:" not in a, (
+        "Current URL leaked into get_browser_system_prompt static prefix"
+    )
+
+
+# ============================================================================
+# 2. TOOL_MODELS ↔ phase-list ↔ tools/prompts/ coverage
+# ----------------------------------------------------------------------------
+# WHY: A registered Pydantic tool model with no usage is dead weight that
+# inflates the union type. A phase-list entry with no model crashes at
+# runtime when `create_agent_action_model` tries to dereference it. A tool
+# with no prompt fragment in tools/prompts/ silently sends an empty
+# description to the LLM. All three are silent footguns.
+# ============================================================================
+
+
+# Planner-only aliases that resolve to spawn_agent (or no tool at all).
+# These deliberately appear in PLANNER_ASSIGNABLE_TOOLS but NOT in TOOL_MODELS.
+_PLANNER_ALIASES = {
+    "spawn_explore_agent",
+    "spawn_browser_agent",
+    "spawn_code_agent",
+    "spawn_sub_agent",
+    "spawn_sub_agent_for_each",
+    "reasoning",  # "no tool call" sentinel — pure thinking step.
+}
+
+
+def test_every_tool_model_appears_in_at_least_one_phase_list():
+    """Every TOOL_MODELS entry must appear in at least one phase list.
+
+    Otherwise the model is dead — registered but never enabled for any agent.
+    """
+    from utils.tool_schemas import (
+        EXECUTE_PHASE_TOOLS,
+        EXPLORE_AGENT_TOOLS,
+        PLAN_PHASE_TOOLS,
+        PLANNER_ASSIGNABLE_TOOLS,
+        TOOL_MODELS,
+    )
+
+    union = (
+        set(PLAN_PHASE_TOOLS)
+        | set(EXECUTE_PHASE_TOOLS)
+        | set(EXPLORE_AGENT_TOOLS)
+        | set(PLANNER_ASSIGNABLE_TOOLS)
+    )
+
+    orphans = set(TOOL_MODELS.keys()) - union
+    assert not orphans, (
+        f"Tool model(s) {sorted(orphans)} are registered in TOOL_MODELS but "
+        f"do not appear in any phase list (PLAN_PHASE_TOOLS, "
+        f"EXECUTE_PHASE_TOOLS, EXPLORE_AGENT_TOOLS, PLANNER_ASSIGNABLE_TOOLS). "
+        f"Either add them to a phase list or delete the model. If you have a "
+        f"deliberate exemption, add the name to the explicit exempt set in "
+        f"this test."
+    )
+
+
+def test_every_phase_list_entry_exists_in_tool_models_or_is_alias():
+    """Every phase-list entry must exist in TOOL_MODELS, or be an explicit alias."""
+    from utils.tool_schemas import (
+        EXECUTE_PHASE_TOOLS,
+        EXPLORE_AGENT_TOOLS,
+        PLAN_PHASE_TOOLS,
+        PLANNER_ASSIGNABLE_TOOLS,
+        TOOL_MODELS,
+    )
+
+    union = (
+        set(PLAN_PHASE_TOOLS)
+        | set(EXECUTE_PHASE_TOOLS)
+        | set(EXPLORE_AGENT_TOOLS)
+        | set(PLANNER_ASSIGNABLE_TOOLS)
+    )
+
+    missing = union - set(TOOL_MODELS.keys()) - _PLANNER_ALIASES
+    assert not missing, (
+        f"Phase list(s) reference tool name(s) {sorted(missing)} that do NOT "
+        f"exist in TOOL_MODELS and are not in the planner-alias exempt set. "
+        f"This will crash at runtime when create_agent_action_model tries to "
+        f"build the union. Either add a Pydantic model to TOOL_MODELS or "
+        f"add the name to _PLANNER_ALIASES if it's a legitimate alias."
+    )
+
+
+def test_every_tool_model_has_prompt_fragment():
+    """Every TOOL_MODELS entry must have a corresponding tools/prompts/<name>.py."""
+    from utils.tool_schemas import TOOL_MODELS
+
+    missing = []
+    for tool_name in TOOL_MODELS.keys():
+        path = PROMPTS_DIR / f"{tool_name}.py"
+        if not path.exists():
+            missing.append(tool_name)
+
+    assert not missing, (
+        f"Tool model(s) {missing} have no prompt fragment file under "
+        f"tools/prompts/. Without a fragment, the LLM sees an empty "
+        f"description for that tool. Create tools/prompts/<name>.py "
+        f"exporting a `PROMPT` string and register it in "
+        f"tools/prompts/__init__.py:TOOL_PROMPTS."
+    )
+
+
+def test_planner_aliases_have_prompt_fragments():
+    """Each planner alias (spawn_browser_agent etc.) must have a prompt fragment.
+
+    These appear in PLANNER_ASSIGNABLE_TOOLS so the planner LLM learns when to
+    pick them; without a prompt fragment the planner sees no description.
+    """
+    missing = []
+    for alias in _PLANNER_ALIASES:
+        path = PROMPTS_DIR / f"{alias}.py"
+        if not path.exists():
+            missing.append(alias)
+
+    assert not missing, (
+        f"Planner alias(es) {missing} have no prompt fragment under "
+        f"tools/prompts/. The planner LLM needs a description to know when "
+        f"to assign this tool to a task."
+    )
+
+
+# ============================================================================
+# 3. attempt_completion is parameterless
+# ----------------------------------------------------------------------------
+# WHY: The verifier reads the agent's prior tool RESULTS, not anything passed
+# to attempt_completion. A `result` arg would (a) confuse the LLM into
+# rewriting findings instead of grounding them in tool evidence, and (b) drift
+# the contract back to a pre-rewrite state where attempt_completion was a
+# Trojan horse for self-reported completion.
+# ============================================================================
+
+
+def test_attempt_completion_has_only_tool_field():
+    """AttemptCompletionTool must have exactly {'tool'} fields."""
+    from utils.tool_schemas import AttemptCompletionTool
+
+    fields = set(AttemptCompletionTool.model_fields.keys())
+    assert fields == {"tool"}, (
+        f"AttemptCompletionTool.model_fields = {fields}, expected {{'tool'}}. "
+        f"attempt_completion is intentionally PARAMETERLESS — the verifier "
+        f"reads prior tool RESULTS, not any arg passed here. Adding a "
+        f"`result`/`summary`/etc. field reintroduces the self-reporting "
+        f"footgun. If you need to surface a final value to the user, use "
+        f"send_message_to_user_execute_phase BEFORE attempt_completion."
+    )
+
+
+def test_no_orchestrator_reads_attempt_completion_result_arg():
+    """No production code should read tool_args['result'] for attempt_completion.
+
+    Search across run_agent.py, agent_workflow.py, and domains/. If anything
+    reads a `result` arg from an attempt_completion tool call, the
+    parameterless contract has been broken.
+    """
+    forbidden_pattern = re.compile(
+        r"""tool_args\s*[\[\.]"""  # tool_args[...] or tool_args.<get>
+        r"""(\.get\(\s*)?"""  # optional .get(
+        r"""['"]result['"]"""  # 'result' or "result"
+    )
+
+    files_to_scan = [
+        AGENTS_ROOT / "loop" / "run_agent.py",
+        AGENTS_ROOT / "workflows" / "agent_workflow.py",
+    ]
+    for domain_dir in (AGENTS_ROOT / "domains").iterdir():
+        if domain_dir.is_dir() and not domain_dir.name.startswith("__"):
+            for py in domain_dir.rglob("*.py"):
+                files_to_scan.append(py)
+
+    offenders = []
+    for path in files_to_scan:
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if forbidden_pattern.search(line):
+                offenders.append(f"{path.relative_to(AGENTS_ROOT)}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "Found code reading `tool_args['result']` / `tool_args.get('result')`. "
+        "attempt_completion is parameterless — there is no result arg. "
+        "Refactor the orchestrator to read the agent's prior tool RESULTS "
+        "instead.\n  " + "\n  ".join(offenders)
+    )
+
+
+# ============================================================================
+# 4. Verifier output schema field order
+# ----------------------------------------------------------------------------
+# WHY: Structured-output models populate fields in declaration order. The
+# verifier MUST commit to `output` and `reasoning` BEFORE `score`, otherwise
+# the score becomes the anchor instead of the conclusion. `score_reasoning`
+# was a legacy field — we now use `reasoning` only.
+# ============================================================================
+
+
+def test_verifier_schema_no_response_schema_field_order():
+    """Without response_schema: keys must be ['reasoning', 'score'] in order."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = _build_verifier_json_schema(None)
+    keys = list(schema["json_schema"]["schema"]["properties"].keys())
+    assert keys == ["reasoning", "score"], (
+        f"Verifier schema (no response_schema) keys are {keys}, expected "
+        f"['reasoning', 'score']. Field ORDER is load-bearing — structured-"
+        f"output models populate fields in declaration order. The score "
+        f"must come LAST so it's the conclusion of the analysis, not the "
+        f"anchor."
+    )
+
+
+def test_verifier_schema_with_response_schema_field_order():
+    """With response_schema: keys must be ['output', 'reasoning', 'score'] in order."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = _build_verifier_json_schema(
+        {"fields": [{"name": "address", "type": "str", "description": "Address"}]}
+    )
+    keys = list(schema["json_schema"]["schema"]["properties"].keys())
+    assert keys == ["output", "reasoning", "score"], (
+        f"Verifier schema (with response_schema) keys are {keys}, expected "
+        f"['output', 'reasoning', 'score']. The verifier MUST populate "
+        f"`output` from tool evidence FIRST, write `reasoning` SECOND, then "
+        f"commit to `score` LAST. Reordering breaks the evidence-first "
+        f"evaluation pattern."
+    )
+
+
+def test_verifier_schema_no_score_reasoning_field():
+    """`score_reasoning` was removed — only `reasoning` is correct now."""
+    import json
+
+    from helpers.llm import _build_verifier_json_schema
+
+    for response_schema in (
+        None,
+        {"fields": [{"name": "x", "type": "str", "description": "x"}]},
+    ):
+        schema = _build_verifier_json_schema(response_schema)
+        serialized = json.dumps(schema)
+        assert "score_reasoning" not in serialized, (
+            "Verifier schema contains the legacy `score_reasoning` field. "
+            "We renamed it to `reasoning`. Update the schema and any code "
+            "reading `score_reasoning` to read `reasoning` instead."
+        )
+
+
+# ============================================================================
+# 5. Tool-name hygiene
+# ----------------------------------------------------------------------------
+# WHY:
+#  - check_progress is the function name AND the legacy toolName for verifier
+#    feedback. Verifier feedback is now tagged toolName="attempt_completion"
+#    instead — see workflow.blackbox.py and the legacy migration in
+#    summarize.blackbox.py. Anywhere that emits a TOOL message with
+#    toolName="check_progress" is wrong.
+#  - Deleted tool names must never reappear; they were removed because of
+#    overlap, security, or rolled into spawn_agent.
+#  - _call_llm_verifier is the implementation; check_progress is the canonical
+#    activity. Bypassing check_progress means missing the rose-1-ultra forcing
+#    + telemetry.
+# ============================================================================
+
+
+# Tools we deleted in the rewrite. Should not appear as a tool-name string in
+# any production code path.
+_DELETED_TOOLS = (
+    "add_memory",
+    "read_memories",
+    "people_search",
+    "deep_research",
+    "find_all",
+    "enrich",
+    "monitor",
+    "check_monitor_events",
+    "x402_bazaar",
+    "enable_write_permissions",
+    "send_sms",
+    "send_email",
+    "send_sms_as_user",
+    "search_user_network_for_people",
+)
+
+
+def _iter_production_py_files():
+    """Yield .py files under agents/ that should be scanned for invariant violations.
+
+    Excludes: tests/, benchmarks/runs/, .venv, __pycache__, scripts/.
+    """
+    skip_dirs = {"tests", "venv", ".venv", "__pycache__", "htmlcov"}
+    skip_path_substrings = ("benchmarks/runs/", "/tests/")
+
+    for path in AGENTS_ROOT.rglob("*.py"):
+        # Reject anything under a skip dir.
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        rel = str(path.relative_to(AGENTS_ROOT))
+        if any(s in rel for s in skip_path_substrings):
+            continue
+        yield path
+
+
+def test_no_deleted_tool_names_in_tool_registries():
+    """No deleted tool name should appear in TOOL_MODELS, phase lists, or TOOL_PROMPTS.
+
+    These are the tool-name registries that drive what the LLM can dispatch.
+    A deleted name appearing in any registry would re-enable the tool.
+    """
+    from tools.prompts import TOOL_PROMPTS
+    from utils.tool_schemas import (
+        EXECUTE_PHASE_TOOLS,
+        EXPLORE_AGENT_TOOLS,
+        PLAN_PHASE_TOOLS,
+        PLANNER_ASSIGNABLE_TOOLS,
+        TOOL_MODELS,
+    )
+
+    registries = {
+        "TOOL_MODELS": set(TOOL_MODELS.keys()),
+        "PLAN_PHASE_TOOLS": set(PLAN_PHASE_TOOLS),
+        "EXECUTE_PHASE_TOOLS": set(EXECUTE_PHASE_TOOLS),
+        "EXPLORE_AGENT_TOOLS": set(EXPLORE_AGENT_TOOLS),
+        "PLANNER_ASSIGNABLE_TOOLS": set(PLANNER_ASSIGNABLE_TOOLS),
+        "TOOL_PROMPTS": set(TOOL_PROMPTS.keys()),
+    }
+    offenders: list[str] = []
+    for registry_name, members in registries.items():
+        for deleted in _DELETED_TOOLS:
+            if deleted in members:
+                offenders.append(f"{registry_name} contains '{deleted}'")
+    assert not offenders, (
+        "Deleted tool name(s) found in tool registries. These tools were "
+        "removed in the prompt audit; re-registering them undoes the audit "
+        "decision. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
+# Some "deleted" tool names are also common English words / generic
+# field names (e.g. "monitor" appears as a Vapi response field, "enrich" /
+# "find_all" might appear in unrelated contexts). For string-literal
+# scanning we restrict to UNAMBIGUOUS deleted names so we catch tool-name
+# string drift without firing on unrelated identifiers.
+_DELETED_TOOLS_UNAMBIGUOUS = (
+    "add_memory",
+    "read_memories",
+    "people_search",
+    "deep_research",
+    "check_monitor_events",
+    "x402_bazaar",
+    "enable_write_permissions",
+    "send_sms_as_user",
+    "search_user_network_for_people",
+)
+
+
+def test_no_deleted_tool_names_as_string_literals_in_production_code():
+    """No unambiguous deleted tool name should appear as a string literal in code.
+
+    This catches cases like:
+        toolName="read_memories", "tool": "deep_research", await call("people_search").
+    Restricted to unambiguous tool names (see _DELETED_TOOLS_UNAMBIGUOUS) to
+    avoid false positives on common English words that overlap with deleted
+    tools (e.g. "monitor", "enrich", "find_all").
+    """
+    patterns = {
+        name: re.compile(rf"""['"`]{re.escape(name)}['"`]""")
+        for name in _DELETED_TOOLS_UNAMBIGUOUS
+    }
+
+    offenders: list[str] = []
+    for path in _iter_production_py_files():
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        rel = str(path.relative_to(AGENTS_ROOT))
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            # Skip pure-comment lines — referencing deleted names in comments
+            # (e.g. "# read_memories was removed") is fine.
+            if stripped.startswith("#"):
+                continue
+            for name, pat in patterns.items():
+                if pat.search(line):
+                    offenders.append(f"{rel}:{lineno}: {name!r} -> {stripped}")
+
+    assert not offenders, (
+        "Found deleted tool name(s) referenced as string literals in "
+        "production code. These tools were intentionally removed (see prompt "
+        "audit plan). If you genuinely need the behaviour, route it through "
+        "spawn_agent or the surviving tool. Offending lines:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_no_check_progress_tool_name_in_production_code():
+    """No production code emits a TOOL message with toolName='check_progress'.
+
+    Verifier feedback is now tagged toolName='attempt_completion'. The string
+    'check_progress' is fine as a function name, span name, or import; only
+    its use as a toolName VALUE is forbidden.
+    """
+    # Look for toolName: 'check_progress', "toolName": "check_progress",
+    # or {"toolName": "check_progress"} variants.
+    pat = re.compile(r"""toolName['"]?\s*[:=]\s*['"]check_progress['"]""")
+
+    offenders: list[str] = []
+    for path in _iter_production_py_files():
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        rel = str(path.relative_to(AGENTS_ROOT))
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if pat.search(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "Found production code emitting toolName='check_progress'. The "
+        "verifier feedback message is now tagged toolName='attempt_completion' "
+        "(see run_agent.py:1267 and workflow.blackbox.py). Replace the value "
+        "with 'attempt_completion'.\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_check_progress_is_canonical_verifier_entrypoint():
+    """No production code calls _call_llm_verifier outside helpers/llm.py.
+
+    `check_progress` is the canonical activity; it forces rose-1-ultra and
+    handles telemetry. Calling `_call_llm_verifier` directly bypasses both.
+    Only `helpers/llm.py` (where it's defined) and tests may reference it.
+    """
+    # Allow only direct attribute references that can't possibly be calls
+    # — but we keep this simple: any reference outside helpers/llm.py and
+    # tests/ is suspect. Comments and docstrings allowed in helpers/.
+    pat = re.compile(r"\b_call_llm_verifier\b")
+
+    offenders: list[str] = []
+    for path in _iter_production_py_files():
+        rel = str(path.relative_to(AGENTS_ROOT))
+        # helpers/llm.py defines it, helpers/observability.py + providers/rose/streaming.py
+        # mention it in module docstrings — allow those.
+        if rel in {"helpers/llm.py", "helpers/observability.py", "providers/rose/streaming.py"}:
+            continue
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if pat.search(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "Found production code referencing `_call_llm_verifier` outside "
+        "helpers/llm.py. The canonical entrypoint is `check_progress` — it "
+        "forces rose-1-ultra + telemetry. Direct `_call_llm_verifier` calls "
+        "bypass both. Migrate to `check_progress` activity calls.\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+# ============================================================================
+# 6. Browser-use catalog ↔ v3 prompt are in sync; envelope is {thinking, action}
+# ----------------------------------------------------------------------------
+# WHY: BROWSER_USE_TOOLS is the source of truth in providers/rose/browser_use.py.
+# The v3 system prompt (domains/spawn_browser_agent_v3/service.py) renders
+# actions from BROWSER_USE_TOOLS filtered by AVAILABLE_ACTIONS. Any action
+# the v3 prompt advertises must exist in BROWSER_USE_TOOLS, or the model will
+# hallucinate a tool the executor can't dispatch. Conversely, the model's
+# JSON envelope is `{thinking, action}` only — the legacy fields
+# (evaluation_previous_goal, memory, next_goal) inflate the response and were
+# dropped.
+# ============================================================================
+
+
+def test_browser_use_v3_actions_in_catalog():
+    """Every action listed in the v3 system prompt must exist in BROWSER_USE_TOOLS."""
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    missing = set(AVAILABLE_ACTIONS) - set(BROWSER_USE_TOOLS.keys())
+    assert not missing, (
+        f"AVAILABLE_ACTIONS contains action(s) {sorted(missing)} that are NOT "
+        f"in BROWSER_USE_TOOLS catalog. The v3 prompt will advertise actions "
+        f"with no description. Add them to BROWSER_USE_TOOLS in "
+        f"providers/rose/browser_use.py."
+    )
+
+
+# Catalog-only actions that the v3 executor intentionally does NOT implement
+# (and that therefore correctly do not appear in AVAILABLE_ACTIONS). Maintain
+# this set explicitly so additions are conscious decisions.
+_BROWSER_CATALOG_ONLY = {
+    # `find_text` is in the rose-1-browser-use prompt for non-v3 callers but
+    # not implemented by the v3 executor. Add it to AVAILABLE_ACTIONS or
+    # remove from BROWSER_USE_TOOLS to drop this exemption.
+    "find_text",
+    # `send_message_to_user` exists in the catalog so the model can ask the
+    # user for help; v3 routes that through a different mechanism.
+    "send_message_to_user",
+}
+
+
+def test_browser_use_catalog_matches_v3_actions_or_is_exempt():
+    """Every BROWSER_USE_TOOLS action must be in AVAILABLE_ACTIONS or explicitly exempt.
+
+    Forces a conscious decision when adding to the catalog: either implement
+    it in the v3 executor (preferred) or add it to the exempt set with a
+    code comment explaining why.
+    """
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    catalog_only = set(BROWSER_USE_TOOLS.keys()) - set(AVAILABLE_ACTIONS) - _BROWSER_CATALOG_ONLY
+    assert not catalog_only, (
+        f"BROWSER_USE_TOOLS contains action(s) {sorted(catalog_only)} that "
+        f"are NOT in AVAILABLE_ACTIONS and NOT in the explicit "
+        f"_BROWSER_CATALOG_ONLY exempt set. Either implement in the v3 "
+        f"executor (browser_tools/schemas.py) and add to AVAILABLE_ACTIONS, "
+        f"or add to _BROWSER_CATALOG_ONLY with a comment explaining why."
+    )
+
+
+def test_browser_use_envelope_is_thinking_and_action_only():
+    """The browser-use system prompt's required JSON envelope is {thinking, action}.
+
+    The legacy fields evaluation_previous_goal/memory/next_goal were dropped
+    from the required envelope. They MAY appear in surrounding prose; what
+    we forbid is them showing up as REQUIRED keys in the JSON template block.
+    """
+    from providers.rose.browser_use import build_browser_use_system_prompt
+
+    prompt = build_browser_use_system_prompt([])
+    output_match = re.search(r"<output>(.*?)</output>", prompt, re.DOTALL)
+    assert output_match is not None, (
+        "build_browser_use_system_prompt no longer contains an <output> "
+        "block. The browser-use envelope contract must be advertised."
+    )
+    envelope_block = output_match.group(1)
+
+    # Required envelope fields.
+    assert '"thinking"' in envelope_block, (
+        "Browser-use envelope is missing required 'thinking' field. "
+        "See build_browser_use_system_prompt — the contract is "
+        "{thinking, action} only."
+    )
+    assert '"action"' in envelope_block, (
+        "Browser-use envelope is missing required 'action' field."
+    )
+
+    # Forbidden legacy required fields. These were dropped from the v3
+    # envelope to reduce response tokens; if any reappears as a required
+    # key, callers will start sending bloated responses again.
+    forbidden = ("evaluation_previous_goal", "memory", "next_goal")
+    for legacy in forbidden:
+        # Match as a JSON key: "<name>": somewhere in the envelope template.
+        # We tolerate the word appearing in the surrounding <browser_rules>
+        # prose by only checking the <output> block.
+        legacy_key_pat = re.compile(rf'"{re.escape(legacy)}"\s*:')
+        assert not legacy_key_pat.search(envelope_block), (
+            f"Browser-use envelope advertises legacy required field "
+            f"'{legacy}'. The v3 envelope is {{thinking, action}} only — "
+            f"'{legacy}' was dropped to reduce response tokens. Remove it "
+            f"from the JSON template in build_browser_use_system_prompt."
+        )
+
+
+# ============================================================================
+# 7. Tool registry render is deterministic (B7)
+# ----------------------------------------------------------------------------
+# WHY: `render_tool_list(registry)` is the canonical way to stringify a tool
+# registry for prompts that want a one-line-per-tool summary. Calling it twice
+# with the same input MUST yield identical output (otherwise any prompt that
+# embeds it becomes non-cacheable). Output is sorted-by-name and every
+# registered tool produces a non-empty line.
+# ============================================================================
+
+
+def test_render_tool_list_is_deterministic():
+    """render_tool_list(TOOL_MODELS) is byte-identical across calls.
+
+    Anthropic prompt caching only reuses bytes-equal prefixes. If
+    render_tool_list ever became non-deterministic (e.g. relying on
+    dict insertion order, datetime, random), every prompt that embeds
+    its output would lose cache hits.
+    """
+    from utils.tool_schemas import TOOL_MODELS, render_tool_list
+
+    a = render_tool_list(TOOL_MODELS)
+    b = render_tool_list(TOOL_MODELS)
+    assert a == b, (
+        "render_tool_list(TOOL_MODELS) is non-deterministic across calls. "
+        "Inspect utils/tool_schemas.py:render_tool_list — its output must "
+        "depend only on the registry contents, not insertion order, time, "
+        "or any external state."
+    )
+
+
+def test_render_tool_list_is_sorted_by_name():
+    """Output lines are alphabetically sorted by tool name.
+
+    Sort order is what makes the renderer order-independent of dict
+    insertion. If a future edit changes the default to insertion order
+    (or reverses the sort), prompts may flip between cache-equivalent
+    forms and bust the cache the first time the registry mutates.
+    """
+    from utils.tool_schemas import TOOL_MODELS, render_tool_list
+
+    rendered = render_tool_list(TOOL_MODELS)
+    names = [line.split(":", 1)[0].removeprefix("- ").strip() for line in rendered.splitlines()]
+    assert names == sorted(names), (
+        f"render_tool_list output is not sorted by tool name: {names}. "
+        "Default behavior must be `sort=True` so the listing is "
+        "registry-insertion-order-independent."
+    )
+
+
+def test_render_tool_list_every_tool_produces_a_nonempty_line():
+    """Every tool in the registry produces a non-empty `- name: description` line.
+
+    A missing/empty description silently shrinks the listing and makes
+    debugging hard. The renderer falls back through TOOL_PROMPTS first
+    line -> Pydantic docstring first line -> "No description"; this
+    test enforces that the chain always yields something for every tool.
+    """
+    from utils.tool_schemas import TOOL_MODELS, render_tool_list
+
+    rendered = render_tool_list(TOOL_MODELS)
+    lines = rendered.splitlines()
+    assert len(lines) == len(TOOL_MODELS), (
+        f"render_tool_list emitted {len(lines)} lines for "
+        f"{len(TOOL_MODELS)} registered tools. Every tool must produce "
+        "exactly one line."
+    )
+    for line in lines:
+        assert line.startswith("- "), (
+            f"render_tool_list line does not start with '- ': {line!r}. "
+            "Format must be '- {tool_name}: {description}'."
+        )
+        # Each line must have a `:` separating name from description and
+        # a non-empty description after it.
+        assert ":" in line, f"render_tool_list line is missing ':': {line!r}"
+        _, description = line.split(":", 1)
+        assert description.strip(), (
+            f"render_tool_list line has empty description: {line!r}. "
+            "The TOOL_PROMPTS / docstring / fallback chain must always "
+            "produce a non-empty description."
+        )
+
+
+# ============================================================================
+# 8. _VERIFIER_STATIC_PROMPT clears Anthropic's 1024-token cache-write threshold
+# ----------------------------------------------------------------------------
+# WHY: Anthropic prompt caching only writes a cache entry for prefixes that
+# meet a minimum token count (1024 tokens for non-extended cache, per their
+# docs). The verifier's static block is INTENTIONALLY padded above this
+# threshold so every check_progress call shares one cached prefix. If a
+# future trim drops the static block below ~4096 chars (a conservative
+# estimate for 1024 tokens — a token averages ~4 characters across English
+# prose), every verifier call regresses from cache-read to cache-write, and
+# the workflow burns an extra cache-creation charge per phase.
+# ============================================================================
+
+
+def test_verifier_static_prompt_clears_anthropic_cache_threshold():
+    """_VERIFIER_STATIC_PROMPT must be ≥ 4096 chars (the 1024-token cache-write floor).
+
+    Anthropic prompt-cache write minimum is 1024 tokens. The verifier static
+    block is intentionally padded above this threshold so every verifier call
+    site shares one cached prefix. If a future edit drops below ~4096 chars
+    (rough conservative estimate for 1024 tokens), every verifier call
+    becomes a cache-write — regressing cost and latency tree-wide.
+    """
+    from utils.prompts import _VERIFIER_STATIC_PROMPT
+
+    chars = len(_VERIFIER_STATIC_PROMPT)
+    assert chars >= 4096, (
+        f"_VERIFIER_STATIC_PROMPT shrunk to {chars} chars; below the ~4096 "
+        f"safe threshold for Anthropic's 1024-token cache write minimum. "
+        f"Add content or accept that every verifier call writes a fresh cache."
+    )
+
+
+# ============================================================================
+# 9. TS-side static system prompts have no dynamic dates inside their template
+#    literal (cache-killer mirror of the Python invariant in section 1).
+# ----------------------------------------------------------------------------
+# WHY: TS prompt builders mark their cacheable prefix with the
+# `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` sentinel. Anything BEFORE the boundary
+# inside a backtick template literal is supposed to be byte-identical across
+# calls — same rule as the Python side. A `${new Date()}` or `${Date.now()}`
+# interpolation before the boundary kills the cache for every call site that
+# uses the prompt. Timing variables outside template literals (e.g.
+# `const startTime = Date.now()`) are fine and ignored.
+# ============================================================================
+
+
+def test_ts_prompt_files_have_no_dynamic_dates_in_system_blocks():
+    """No `${new Date(...)}` or `${Date.now()}` inside a STATIC system-prompt
+    template literal (one that ends in SYSTEM_PROMPT_DYNAMIC_BOUNDARY — the
+    explicit "this is a cacheable prefix" sentinel).
+
+    A timestamp interpolated into a backtick prompt prefix breaks Anthropic
+    prompt caching for every downstream LLM call. Per-call state belongs in
+    a separately-built USER message (e.g. `assembleContextUserMessage` in
+    contextBuilder.ts builds a per-SMS user-role message and is intentionally
+    dynamic — that's NOT a violation), not in the cacheable static prefix.
+
+    We only flag literals that explicitly tag themselves cacheable via the
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY marker, so user-message builders in the
+    same file (like `assembleContextUserMessage`) are correctly skipped.
+    """
+    repo = AGENTS_ROOT.parent
+    suspicious_files = [
+        repo / "back-end/src/providers/smsSupervisor/contextBuilder.ts",
+        repo / "back-end/src/providers/chat/chatPrompts.ts",
+        repo / "back-end/src/providers/chat/routerLlm.ts",
+        repo / "back-end/src/providers/chat/generatorLlm.ts",
+    ]
+    # Match `${...new Date(...)...}` or `${...Date.now()...}` inside a `${...}`
+    # interpolation. We don't fully parse template literals — we look for the
+    # interpolation marker followed by a date construct. Bare timing variables
+    # OUTSIDE template literals (e.g. `const startTime = Date.now()`) are not
+    # cache-killers and are not matched.
+    interp_date_pat = re.compile(r"\$\{[^}]*(?:new Date\(|Date\.now\()")
+    # Sentinel that marks the end of the cacheable static prefix. We only
+    # treat literals that contain this sentinel as cache-relevant.
+    boundary_marker = "SYSTEM_PROMPT_DYNAMIC_BOUNDARY"
+
+    bad: list[str] = []
+    for fp in suspicious_files:
+        if not fp.exists():
+            continue
+        text = fp.read_text()
+        # Walk the file char-by-char, skipping comments, and capture each
+        # backtick template literal with its starting line number. We only
+        # flag interpolations that occur BEFORE the boundary marker inside a
+        # literal that DOES contain the marker (i.e. literals explicitly
+        # marked as cacheable system-prompt prefixes).
+        i = 0
+        line_no = 1
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "\n":
+                line_no += 1
+            # Skip line comments.
+            if ch == "/" and i + 1 < n and text[i + 1] == "/":
+                while i < n and text[i] != "\n":
+                    i += 1
+                continue
+            # Skip block comments.
+            if ch == "/" and i + 1 < n and text[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                    if text[i] == "\n":
+                        line_no += 1
+                    i += 1
+                i += 2
+                continue
+            # Enter a template literal.
+            if ch == "`":
+                start_line = line_no
+                start = i + 1
+                i += 1
+                depth = 0
+                while i < n:
+                    c = text[i]
+                    if c == "\n":
+                        line_no += 1
+                    # Nested expression via ${...} — track to find the matching `.
+                    if c == "$" and i + 1 < n and text[i + 1] == "{":
+                        depth += 1
+                        i += 2
+                        continue
+                    if c == "}" and depth > 0:
+                        depth -= 1
+                        i += 1
+                        continue
+                    if c == "\\" and i + 1 < n:
+                        i += 2
+                        continue
+                    if c == "`" and depth == 0:
+                        break
+                    i += 1
+                literal = text[start:i]
+                # Only enforce on cacheable system-prompt literals (those
+                # marked with SYSTEM_PROMPT_DYNAMIC_BOUNDARY). Other backtick
+                # literals (per-call user messages, log strings, etc.) are
+                # off-topic and should not be flagged.
+                if boundary_marker in literal:
+                    cacheable_prefix = literal.split(boundary_marker)[0]
+                    if interp_date_pat.search(cacheable_prefix):
+                        bad.append(
+                            f"{fp.name}:{start_line} static system-prompt "
+                            f"template literal contains a "
+                            f"`${{... new Date(...) ...}}` or "
+                            f"`${{... Date.now() ...}}` interpolation BEFORE "
+                            f"SYSTEM_PROMPT_DYNAMIC_BOUNDARY. Move the "
+                            f"timestamp into the per-call USER message "
+                            f"(below the boundary) — interpolating it into "
+                            f"the cacheable prefix kills prompt-cache hits."
+                        )
+                i += 1  # consume the closing backtick
+                continue
+            i += 1
+
+    assert not bad, (
+        "Found dynamic dates inside static system-prompt template literals "
+        "in TS prompt files. Same rule as the Python side — timestamps belong "
+        "on per-call USER messages, not in the cacheable system prefix.\n  "
+        + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# 10. Spawn-alias prompts document the 50-char goal minimum (validator-aware)
+# ----------------------------------------------------------------------------
+# WHY: SpawnAgentTool's `check_spawn_agent_constraints` validator rejects
+# browser/code/sub_agent/for_each goals < 50 chars (explore is exempt). Each
+# alias prompt MUST advertise this minimum so the planner LLM doesn't emit
+# tasks the validator will reject — silent rejections on small goals are
+# how this regressed before the audit.
+# ============================================================================
+
+
+def test_spawn_alias_prompts_document_50_char_goal_min():
+    """Each spawn alias prompt subject to the 50-char min must mention "50".
+
+    SpawnAgentTool's `check_spawn_agent_constraints` validator rejects
+    browser/code/sub_agent/for_each goals < 50 chars. Each prompt must
+    document this minimum so the planner LLM doesn't emit an invalid task.
+    The unified `spawn_agent` prompt covers all variants and must document
+    the minimum once for the union.
+    """
+    from tools.prompts.spawn_agent import PROMPT as P_UNIFIED
+    from tools.prompts.spawn_browser_agent import PROMPT as P_BROWSER
+    from tools.prompts.spawn_code_agent import PROMPT as P_CODE
+    from tools.prompts.spawn_sub_agent import PROMPT as P_SUB
+    from tools.prompts.spawn_sub_agent_for_each import PROMPT as P_FOR_EACH
+
+    for name, prompt in [
+        ("spawn_browser_agent", P_BROWSER),
+        ("spawn_code_agent", P_CODE),
+        ("spawn_sub_agent", P_SUB),
+        ("spawn_sub_agent_for_each", P_FOR_EACH),
+        ("spawn_agent (unified)", P_UNIFIED),
+    ]:
+        assert "50" in prompt, (
+            f"{name} prompt missing the '50' character minimum-length doc. "
+            f"SpawnAgentTool's validator rejects browser/code/sub_agent/"
+            f"for_each goals < 50 chars; the planner LLM needs to see this "
+            f"limit advertised or it will emit invalid tasks."
+        )
+
+
+# ============================================================================
+# 11. Style guardrails: em-dashes, banned phrases, marketing adjectives
+# ----------------------------------------------------------------------------
+# WHY: The main agent system prompt explicitly bans em-dashes in agent output
+# ("Do not use em dashes"). Honoring that ban is impossible if the prompt
+# source files themselves use em-dashes. Same for marketing adjectives
+# ("powerful", "advanced", "comprehensive", etc.) which the team tagged as
+# noise-words during the prompt audit, and hedge phrases that bias the
+# planner/agent toward indecision ("Feel free to", "Consider whether",
+# "you may want to"). "superintelligence" framing was dropped during the
+# rebrand so it cannot creep back into prompt copy.
+#
+# These checks are deliberately tolerant: they parse files with `ast` so
+# that docstrings, code comments, and log/exception messages are NOT flagged.
+# Only string literals that are LITERAL prompt content (Field(description=...),
+# top-level prompt constants, dedent() blocks) are inspected. False-negatives
+# are preferred over false-positives — a sensational adjective that slips
+# through is much less harmful than a passing test that fails on a logger
+# string and forces a bypass.
+# ============================================================================
+
+
+# Files in scope for the style guardrails. These are the files the prompt
+# audit listed as containing live prompt content (system prompts, tool
+# prompts, Pydantic Field descriptions that surface in tool schemas).
+def _style_check_paths() -> list[Path]:
+    paths = [
+        AGENTS_ROOT / "utils" / "prompts.py",
+        AGENTS_ROOT / "utils" / "tool_schemas.py",
+        AGENTS_ROOT / "providers" / "rose" / "browser_use.py",
+        AGENTS_ROOT / "domains" / "spawn_browser_agent_v3" / "service.py",
+        AGENTS_ROOT / "domains" / "spawn_claude_code_agent" / "service.py",
+        AGENTS_ROOT / "domains" / "message_person" / "repo.py",
+        AGENTS_ROOT / "domains" / "param_populator" / "service.py",
+        AGENTS_ROOT / "domains" / "param_populator" / "config.py",
+    ]
+    paths += sorted(PROMPTS_DIR.glob("*.py"))
+    return [p for p in paths if p.exists()]
+
+
+def _docstring_line_ranges(tree: ast.AST) -> list[tuple[int, int]]:
+    """Return (start, end) line ranges for every docstring in `tree`.
+
+    A docstring is the first statement in a module/function/class body that
+    is an `ast.Expr` wrapping an `ast.Constant(str)`. Multi-line triple-quoted
+    docstrings span many lines; we use `lineno..end_lineno` so callers can
+    test "is this line inside a docstring."
+    """
+    ranges: list[tuple[int, int]] = []
+
+    def _walk(node: ast.AST) -> None:
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                end = first.end_lineno or first.lineno
+                ranges.append((first.lineno, end))
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+
+    _walk(tree)
+    return ranges
+
+
+# Function names whose string-literal arguments are NOT prompt content
+# (logger calls, error/exception messages, print). When a string lives
+# inside one of these calls, skip it for style checks.
+_NON_PROMPT_CALL_FUNCS = {
+    "error",
+    "info",
+    "warning",
+    "debug",
+    "critical",
+    "exception",
+    "log",
+}
+_NON_PROMPT_CALL_NAMES = {"print"}
+
+
+def _is_non_prompt_call(node: ast.Call) -> bool:
+    """True if a Call's string arguments are log/print/exception messages, not prompts."""
+    func = node.func
+    # logger.error(...), self.logger.info(...), structlog.get_logger().info(...)
+    if isinstance(func, ast.Attribute):
+        if func.attr in _NON_PROMPT_CALL_FUNCS:
+            return True
+        # Common pattern: msg.format(...), str.format() — keep these checked
+    # print(...)
+    if isinstance(func, ast.Name) and func.id in _NON_PROMPT_CALL_NAMES:
+        return True
+    return False
+
+
+def _iter_prompt_string_literals(text: str):
+    """Yield (lineno, value) for every string literal that is plausibly prompt content.
+
+    Skips:
+      - Docstrings (first statement of module/function/class body)
+      - String args inside logger.* / print / exception-raise calls
+      - Strings on lines starting with `#` (whole-line comments, defensive
+        — AST shouldn't produce comment-as-string anyway)
+
+    Yields all other string constants — these are the strings users actually
+    see in LLM prompts (Field descriptions, dedent blocks, top-level
+    PROMPT/_PROMPT/SYSTEM constants).
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return
+    docstring_ranges = _docstring_line_ranges(tree)
+
+    def _in_docstring(line_no: int) -> bool:
+        return any(s <= line_no <= e for s, e in docstring_ranges)
+
+    # Build a set of node ids whose subtree is "non-prompt context"
+    # (logger / print / raise). We track via a NodeVisitor walk that
+    # marks a Call's children with "skip" while recursing.
+    skip_strings: set[int] = set()
+
+    class _ContextWalker(ast.NodeVisitor):
+        def __init__(self):
+            self.skip_depth = 0
+
+        def visit(self, node: ast.AST) -> None:  # type: ignore[override]
+            push = False
+            if isinstance(node, ast.Call) and _is_non_prompt_call(node):
+                push = True
+                self.skip_depth += 1
+            if isinstance(node, ast.Raise):
+                push = True
+                self.skip_depth += 1
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if self.skip_depth > 0:
+                    skip_strings.add(id(node))
+            self.generic_visit(node)
+            if push:
+                self.skip_depth -= 1
+
+    _ContextWalker().visit(tree)
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in skip_strings:
+            continue
+        if _in_docstring(node.lineno):
+            continue
+        yield node.lineno, node.value
+
+
+def test_no_em_dashes_in_prompt_strings():
+    """No em-dash (U+2014) or en-dash (U+2013) in prompt-source string literals.
+
+    The main system prompt instructs the agent: "Do not use em dashes in any
+    output. Use hyphens (-) or commas instead." That instruction can only be
+    enforced if the prompt SOURCE FILES themselves don't use em-dashes —
+    otherwise the agent reads em-dashes in its own system prompt and learns
+    they're acceptable.
+
+    Tolerant by design: docstrings, comments, and log/exception messages are
+    skipped (they never reach the LLM). Only string literals that are
+    plausibly prompt content (Field descriptions, dedent blocks, PROMPT
+    constants) are inspected.
+    """
+    bad: list[str] = []
+    for path in _style_check_paths():
+        text = path.read_text()
+        for lineno, value in _iter_prompt_string_literals(text):
+            if "—" in value or "–" in value:
+                # Find the first offending substring for a tight error message.
+                snippet = value.replace("\n", " ")[:120]
+                rel = path.relative_to(AGENTS_ROOT)
+                bad.append(f"{rel}:{lineno}: {snippet!r}")
+
+    assert not bad, (
+        "Em-dashes (— or –) found in prompt-source string literals. "
+        "The main agent system prompt bans em-dashes in output; the ban only "
+        "holds if the prompt sources themselves use hyphens or commas. "
+        "Replace each em-dash with ' - ' or ', '. Offenders:\n  "
+        + "\n  ".join(bad[:40])
+    )
+
+
+# (phrase, case_sensitive) — full-string match performed case-INSENSITIVELY
+# unless explicitly marked. Marketing adjectives use a strict-word-boundary
+# regex (defined inline in the test) so hyphenated negations like
+# "non-comprehensive" are NOT flagged.
+_BANNED_HEDGE_PHRASES = (
+    "as currently wired",
+    "this is very important",
+    "feel free to",
+    "consider whether",
+    "you may want to",
+)
+_BANNED_BRAND_TERMS = ("superintelligence", "superintelligent")
+# Marketing adjectives. Tolerated only inside docstrings/comments/log strings
+# (filtered out by _iter_prompt_string_literals); flagged in actual prompts.
+_BANNED_MARKETING_ADJECTIVES = (
+    "powerful",
+    "advanced",
+    "comprehensive",
+    "robust",
+    "seamless",
+)
+
+
+def test_no_banned_phrases_in_prompt_strings():
+    """Banned phrases must not appear in prompt-source string literals.
+
+    Three classes of forbidden content:
+
+    1. Hedge phrases ("Feel free to", "Consider whether", "you may want to",
+       "as currently wired", "This is very important") — these bias the
+       agent toward indecision or import private engineering context into
+       its public-facing system prompt.
+    2. "superintelligence" / "superintelligent" — dropped during the rebrand;
+       "agent" / "spawn_agent" are the correct terms.
+    3. Marketing adjectives ("powerful", "advanced", "comprehensive", "robust",
+       "seamless") — agreed-on noise-words during the prompt audit.
+
+    Tolerant by design: docstrings, comments, and log strings are skipped.
+    Marketing adjectives use a strict word-boundary regex so legitimate
+    compounds (e.g. "non-comprehensive") are NOT flagged.
+    """
+    # Hedge / brand: simple substring (case-insensitive) is fine because
+    # they don't have natural compound forms.
+    hedge_pats = [
+        (re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_HEDGE_PHRASES
+    ]
+    brand_pats = [
+        (re.compile(re.escape(p), re.IGNORECASE), p) for p in _BANNED_BRAND_TERMS
+    ]
+    # Marketing adjectives: require word-boundary that EXCLUDES hyphens, so
+    # "non-comprehensive" / "high-performance" doesn't trip the check. The
+    # boundary chars are whitespace, punctuation, or string start/end —
+    # but NOT a hyphen.
+    bdry = r"(?:^|(?<=[\s,.;:!?\"'()/\[\]]))"
+    bdry_end = r"(?=[\s,.;:!?\"'()/\[\]]|$)"
+    marketing_pats = [
+        (
+            re.compile(rf"{bdry}{re.escape(adj)}{bdry_end}", re.IGNORECASE),
+            adj,
+        )
+        for adj in _BANNED_MARKETING_ADJECTIVES
+    ]
+
+    bad: list[str] = []
+    for path in _style_check_paths():
+        text = path.read_text()
+        rel = path.relative_to(AGENTS_ROOT)
+        for lineno, value in _iter_prompt_string_literals(text):
+            for pat, phrase in hedge_pats + brand_pats + marketing_pats:
+                if pat.search(value):
+                    snippet = value.replace("\n", " ")[:120]
+                    bad.append(f"{rel}:{lineno} [{phrase}]: {snippet!r}")
+                    break  # one hit per string is enough to report the file
+
+    assert not bad, (
+        "Banned phrases / marketing adjectives found in prompt-source string "
+        "literals. Hedge phrases bias the agent toward indecision; brand-term "
+        "drift undoes the rebrand; marketing adjectives are noise words. "
+        "Rewrite the offending strings.\n  " + "\n  ".join(bad[:40])
+    )
+
+
+# ============================================================================
+# 12. No restating-the-schema / broken cross-refs in tool prompts
+# ----------------------------------------------------------------------------
+# WHY: Each tool's Pydantic model is the source of truth for its parameter
+# schema. Tool-level prompts that restate the schema ("REQUIRED ARGS: None")
+# duplicate information and create drift opportunities — the planner reads
+# the duplicated copy and can mis-call when the Pydantic schema evolves.
+# Similarly, "DIFFERS FROM spawn_agent IN: ..." sections in alias prompts
+# reference a sibling prompt the planner audience never sees: the audience
+# only loads the alias prompt, not the unified spawn_agent prompt.
+# ============================================================================
+
+
+def test_no_required_args_none_in_tool_prompts():
+    """Tool prompts must not restate the empty-schema phrase 'REQUIRED ARGS: None.'
+
+    `attempt_completion` and similar parameterless tools have their
+    no-args contract documented in the Pydantic model. Restating
+    "REQUIRED ARGS: None." in the prompt fragment duplicates the schema
+    and creates drift surface. Per gold-standard rule 10.
+    """
+    bad: list[str] = []
+    for p in PROMPTS_DIR.glob("*.py"):
+        text = p.read_text()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "REQUIRED ARGS: None" in line or "TAKES NO PARAMETERS" in line:
+                bad.append(f"{p.name}:{lineno}: {stripped[:120]}")
+    assert not bad, (
+        "Tool prompts restate empty-schema phrasings ('REQUIRED ARGS: None' "
+        "/ 'TAKES NO PARAMETERS'). The Pydantic model is the source of truth "
+        "for parameter requirements; restating it in the prompt creates "
+        "drift surface. Remove these phrases — the LLM sees the empty model "
+        "schema directly.\n  " + "\n  ".join(bad)
+    )
+
+
+def test_no_differs_from_spawn_agent_cross_refs():
+    """Planner-alias prompts must not reference the unified spawn_agent prompt.
+
+    Aliases like spawn_browser_agent and spawn_code_agent are loaded for the
+    PLANNER audience, which never sees the unified spawn_agent prompt
+    fragment. A 'DIFFERS FROM spawn_agent IN: ...' section is therefore
+    a broken cross-reference that confuses the planner without adding
+    information.
+    """
+    bad: list[str] = []
+    for p in PROMPTS_DIR.glob("*.py"):
+        text = p.read_text()
+        if "DIFFERS FROM spawn_agent" in text:
+            bad.append(str(p.relative_to(AGENTS_ROOT)))
+    assert not bad, (
+        "Planner-alias prompts reference 'DIFFERS FROM spawn_agent' but the "
+        "planner audience never sees the unified spawn_agent prompt. The "
+        "cross-reference is broken. Either drop the section or move the "
+        "differentiating content into the alias prompt directly.\n  "
+        + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# 13. ALL-CAPS underlined section labels banned in rendered prompts
+# ----------------------------------------------------------------------------
+# WHY: Markdown headings (`# Section Name`) are the canonical layout for
+# every prompt the agent sees. ALL-CAPS labels followed by `----` underlines
+# (RST/asciidoc style) are visually noisy, easier to mistakenly match in
+# logger output, and harder to nest. Per gold-standard rule C1.
+# ============================================================================
+
+
+def test_no_all_caps_underlined_section_labels_in_prompts():
+    """Rendered prompts must not contain ALL-CAPS lines followed by `----` underlines.
+
+    Section headers must use markdown heading syntax (`# H1`, `## H2`).
+    ALL-CAPS labels followed by a `----` (or `====`) underline are an old
+    asciidoc/RST convention that escaped from the historical prompt files;
+    removed during the audit.
+    """
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
+    from providers.rose.browser_use import build_browser_use_system_prompt
+    from utils.prompts import (
+        EXPLORE_AGENT_SYSTEM_PROMPT,
+        build_planner_system_prompt,
+        build_system_prompt,
+        build_verifier_prompt,
+    )
+
+    # Pattern: ALL-CAPS line of >=3 chars, followed by a line of >=4 dashes
+    # or equals signs. The label must be uppercase letters/spaces/slashes/
+    # dashes — disallow lowercase.
+    label_pat = re.compile(r"^[A-Z][A-Z0-9\s/_\-]{2,40}$")
+    underline_pat = re.compile(r"^[-=]{4,}$")
+
+    bad: list[str] = []
+    rendered = {
+        "main": build_system_prompt("EXECUTE", ["attempt_completion"]),
+        "planner": build_planner_system_prompt("desc"),
+        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
+            network_metadata="", local_data_summary=""
+        ),
+        "browser_use": build_browser_use_system_prompt(["click"]),
+        "browser_v3": get_browser_system_prompt(
+            "a" * 60, custom_instructions="", available_files=[]
+        ),
+    }
+    for name, prompt in rendered.items():
+        lines = prompt.splitlines()
+        for i in range(len(lines) - 1):
+            label = lines[i].strip()
+            under = lines[i + 1].strip()
+            if label_pat.match(label) and underline_pat.match(under):
+                bad.append(f"{name}: line {i + 1}: {label!r} / {under!r}")
+
+    assert not bad, (
+        "Rendered prompts contain ALL-CAPS labels followed by `----` / `====` "
+        "underlines. Use markdown headings (`# Section`, `## Subsection`) "
+        "instead. Offenders:\n  " + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# 14. Canonical rule constants are imported, not duplicated
+# ----------------------------------------------------------------------------
+# WHY: SELF_CONTAINED_GOAL_RULE / EPHEMERAL_SESSION_RULE / etc. are defined
+# once in agents/utils/prompts.py and imported by every site that needs
+# them. Reproducing the same prose verbatim in another file is drift surface:
+# editing one copy doesn't fix the other, and the planner / verifier / tool
+# prompts can quietly disagree on the rule. Per gold-standard rule B1.
+# ============================================================================
+
+
+# (constant name, distinctive substring) — the substring is long enough that
+# it can't appear by chance and short enough that it survives minor edits to
+# the surrounding rule body.
+_CANONICAL_RULE_FINGERPRINTS: tuple[tuple[str, str], ...] = (
+    ("SELF_CONTAINED_GOAL_RULE", "Spawned agents have NO access to your conversation"),
+    ("EPHEMERAL_SESSION_RULE", "spawn_agent(type=browser/code) sessions are ephemeral"),
+    ("CONTEXT_POINTERS_RULE", "Reference: @ref:message:"),
+    ("FILE_HANDLING_RULE", "Use type='file_pointer' for file outputs"),
+    ("CRITICAL_CONSTRAINTS_RULE", "PARALLEL EXECUTION: tool calls in one response"),
+)
+
+
+def test_canonical_rules_not_duplicated():
+    """Canonical rule prose must not be reproduced verbatim outside utils/prompts.py.
+
+    Each rule is defined as a module-level constant in agents/utils/prompts.py.
+    Other prompt sites must IMPORT the constant — never copy the prose. If
+    a file contains the distinctive substring of a rule and does NOT import
+    the constant, that's drift waiting to happen.
+    """
+    bad: list[str] = []
+    canonical_file = AGENTS_ROOT / "utils" / "prompts.py"
+    for path in _style_check_paths():
+        if path == canonical_file:
+            continue  # The source of truth is allowed to contain its own rules.
+        text = path.read_text()
+        rel = path.relative_to(AGENTS_ROOT)
+        for const_name, fingerprint in _CANONICAL_RULE_FINGERPRINTS:
+            if fingerprint not in text:
+                continue
+            # Allow if the constant is imported from utils.prompts.
+            import_pat = re.compile(
+                rf"from\s+utils\.prompts\s+import\s+\([^)]*\b{re.escape(const_name)}\b[^)]*\)"
+                rf"|from\s+utils\.prompts\s+import\s+[^()\n]*\b{re.escape(const_name)}\b"
+            )
+            if import_pat.search(text):
+                continue
+            bad.append(f"{rel}: contains {const_name!r} prose without importing it")
+
+    assert not bad, (
+        "Canonical rule prose duplicated outside utils/prompts.py without "
+        "importing the constant. Every site must import the canonical "
+        "constant — copy/paste creates drift surface. Add a "
+        "`from utils.prompts import <CONST>` line and reference it via "
+        "f-string interpolation.\n  " + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# 15. Cacheable-static prompts mark the dynamic boundary
+# ----------------------------------------------------------------------------
+# WHY: Anthropic prompt caching only reuses bytes-equal prefixes. We mark
+# the end of the cacheable prefix with SYSTEM_PROMPT_DYNAMIC_BOUNDARY in
+# every prompt that mixes static (cacheable) and per-call dynamic content.
+# Without the boundary, `transform_messages_for_anthropic` cannot split the
+# system prompt into static_system + dynamic_system, and per-call data
+# poisons the cache.
+# ============================================================================
+
+
+def test_system_prompt_boundary_marker_present():
+    """Prompts that mix static + dynamic data must contain the boundary marker.
+
+    `build_system_prompt`, `build_planner_system_prompt`, `build_verifier_prompt`,
+    and `get_browser_system_prompt` all interpolate per-call data (phase,
+    user context, goal, custom instructions). Each MUST split via
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY so the static prefix is cacheable.
+
+    `EXPLORE_AGENT_SYSTEM_PROMPT` and `build_browser_use_system_prompt` are
+    permitted to be entirely static (no per-call interpolation) — they're
+    only included here so a regression that adds dynamic data without a
+    boundary trips this test.
+    """
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
+    from providers.rose.browser_use import build_browser_use_system_prompt
+    from utils.prompts import (
+        SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+        build_planner_system_prompt,
+        build_system_prompt,
+        build_verifier_prompt,
+    )
+
+    boundary = SYSTEM_PROMPT_DYNAMIC_BOUNDARY.strip()
+
+    must_have_boundary = {
+        "main_execute": build_system_prompt("EXECUTE", ["attempt_completion"]),
+        "main_plan": build_system_prompt("PLAN", ["set_plan"]),
+        "planner": build_planner_system_prompt("desc"),
+        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "browser_v3": get_browser_system_prompt(
+            "a" * 60, custom_instructions="", available_files=[]
+        ),
+    }
+    missing = [name for name, p in must_have_boundary.items() if boundary not in p]
+    assert not missing, (
+        f"System prompts {missing} are missing SYSTEM_PROMPT_DYNAMIC_BOUNDARY. "
+        f"Each prompt that interpolates per-call data must split via the "
+        f"boundary marker so the static prefix can be served from "
+        f"Anthropic's prompt cache. Without the boundary, "
+        f"transform_messages_for_anthropic cannot separate static_system "
+        f"from dynamic_system, and every call writes a fresh cache entry."
+    )
+
+    # Browser-use catalog prompt is allowed to be fully static (it has no
+    # per-call interpolation by design); only assert it doesn't try to mix
+    # dynamic data into a static prompt without marking the boundary.
+    fully_static = {
+        "browser_use_catalog": build_browser_use_system_prompt(["click"]),
+    }
+    for name, p in fully_static.items():
+        if boundary in p:
+            continue
+        # If no boundary, the prompt must be entirely static. Spot-check
+        # that no obvious per-call placeholders survived (e.g. literal
+        # "{goal}" / "{custom_instructions}" tokens).
+        for placeholder in ("{goal}", "{custom_instructions}", "{user_context}"):
+            assert placeholder not in p, (
+                f"{name} appears static (no SYSTEM_PROMPT_DYNAMIC_BOUNDARY) but "
+                f"still contains placeholder {placeholder!r}. Either render "
+                f"the placeholder before returning OR add a boundary marker "
+                f"and split the dynamic section below it."
+            )
+
+
+# ============================================================================
+# 16. ALL-CAPS markers (IMPORTANT/CRITICAL/MUST/etc.) capped per prompt
+# ----------------------------------------------------------------------------
+# WHY: ALL-CAPS markers are a finite resource. The first few catch the
+# reader's eye; sprinkling them across every paragraph dilutes attention
+# and trains the agent to ignore them. Gold-standard policy: reserve them
+# for true correctness gates ("MUST be the only tool in that turn").
+# ============================================================================
+
+
+def test_all_caps_marker_count_under_limit():
+    """Each rendered system prompt has <=10 ALL-CAPS markers.
+
+    We tolerate up to 10 per prompt. The audit averaged ~4 per prompt; the
+    limit is generous to allow legitimate correctness gates without forcing
+    a constant grooming chore.
+    """
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
+    from providers.rose.browser_use import build_browser_use_system_prompt
+    from utils.prompts import (
+        EXPLORE_AGENT_SYSTEM_PROMPT,
+        build_planner_system_prompt,
+        build_system_prompt,
+        build_verifier_prompt,
+    )
+
+    pat = re.compile(r"\b(IMPORTANT|CRITICAL|MUST|NEVER|ALWAYS)\b")
+    LIMIT = 10
+
+    rendered = {
+        "main_execute": build_system_prompt("EXECUTE", ["attempt_completion"]),
+        "main_plan": build_system_prompt("PLAN", ["set_plan"]),
+        "planner": build_planner_system_prompt("desc"),
+        "verifier": build_verifier_prompt("EXECUTE", "judge prompt"),
+        "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
+            network_metadata="", local_data_summary=""
+        ),
+        "browser_use": build_browser_use_system_prompt(["click"]),
+        "browser_v3": get_browser_system_prompt(
+            "a" * 60, custom_instructions="", available_files=[]
+        ),
+    }
+    too_many = []
+    for name, prompt in rendered.items():
+        matches = pat.findall(prompt)
+        if len(matches) > LIMIT:
+            too_many.append(f"{name}: {len(matches)} markers ({sorted(set(matches))})")
+
+    assert not too_many, (
+        f"Rendered prompts have >{LIMIT} ALL-CAPS markers (IMPORTANT, CRITICAL, "
+        f"MUST, NEVER, ALWAYS). Caps are a scarce attention resource — reserve "
+        f"them for true correctness gates. Either rewrite the bullet without "
+        f"a marker, or fold related rules into a single bullet.\n  "
+        + "\n  ".join(too_many)
+    )
+
+
+# ============================================================================
+# 17. Tool prompts open with a declarative third-person sentence
+# ----------------------------------------------------------------------------
+# WHY: Tool prompts get rendered into a `**name**\n<prompt>` block in the
+# main system prompt. The first line is the model's "what does this tool do"
+# anchor. Second-person leads ("You should call this tool when ...") frame
+# the tool as instructions to the agent rather than describing the tool's
+# capability — which makes the LLM more likely to call the tool gratuitously
+# (because it reads as a directive rather than a capability description).
+# ============================================================================
+
+
+def test_tool_prompts_open_with_declarative_sentence():
+    """Each tool prompt's first non-empty line is a declarative third-person sentence.
+
+    Rules per gold standard:
+      - MUST NOT start with 'You ' (second person)
+      - MUST end with '.' (declarative)
+      - MUST be at least 3 words (full sentence, not a fragment)
+    """
+    from tools.prompts import TOOL_PROMPTS
+
+    bad: list[str] = []
+    for name, prompt in TOOL_PROMPTS.items():
+        first_line = prompt.lstrip().split("\n", 1)[0].strip()
+        if not first_line:
+            bad.append(f"{name}: empty first line")
+            continue
+        if first_line.startswith("You "):
+            bad.append(
+                f"{name}: opens with second-person 'You ': {first_line[:80]!r}"
+            )
+            continue
+        if not first_line.endswith("."):
+            bad.append(
+                f"{name}: opening line not declarative (no period): "
+                f"{first_line[:80]!r}"
+            )
+            continue
+        if len(first_line.split()) < 3:
+            bad.append(
+                f"{name}: opening line too short (<3 words): {first_line!r}"
+            )
+
+    assert not bad, (
+        "Tool prompts must open with a declarative third-person sentence. "
+        "Second-person ('You should ...') reframes capability as directive, "
+        "biasing the LLM toward gratuitous calls. Rewrite to lead with the "
+        "verb describing what the tool DOES.\n  " + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# 18. Tool prompt length stays within the per-call budget
+# ----------------------------------------------------------------------------
+# WHY: Tool prompts are concatenated into the main system prompt for every
+# enabled tool every call. A bloated tool prompt steals tokens from
+# verification/conversation and hurts cache density. Gold-standard target
+# is ~80-600 tokens per tool prompt; we use a char-based loose proxy
+# (200-3000 chars) so the test doesn't depend on a tokenizer.
+# ============================================================================
+
+
+# attempt_completion includes the inlined VERIFICATION_RULES block, which is
+# load-bearing (the agent reads the same rules the verifier reads). Allow it
+# a higher cap so the inlined rules aren't penalized.
+# spawn_agent carries an empirically-justified BAD/GOOD example pair that
+# teaches the stateful-vs-stateless browser partition (see comment at the top
+# of agents/tools/prompts/spawn_agent.py); the example pushes it ~40 chars
+# above the default cap.
+_TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
+    "attempt_completion": 2000,
+    "spawn_agent": 1700,
+}
+_TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
+_TOOL_PROMPT_CHAR_FLOOR = 100
+
+
+def test_tool_prompt_length_budget():
+    """Each tool prompt sits within the per-call char budget.
+
+    Target ~80-400 tokens (rough char-based proxy: 100-1500 chars). The
+    audit kept attempt_completion bigger because it inlines the verifier
+    rule block; that's exempt via _TOOL_PROMPT_CHAR_CAP_OVERRIDES.
+
+    A FLOOR is enforced so a tool prompt can't shrink to a one-liner that
+    omits "when to use" / "do not use" guidance.
+    """
+    from tools.prompts import TOOL_PROMPTS
+
+    bad: list[str] = []
+    for name, prompt in TOOL_PROMPTS.items():
+        cap = _TOOL_PROMPT_CHAR_CAP_OVERRIDES.get(name, _TOOL_PROMPT_CHAR_CAP_DEFAULT)
+        n = len(prompt)
+        if n < _TOOL_PROMPT_CHAR_FLOOR:
+            bad.append(
+                f"{name}: {n} chars below floor {_TOOL_PROMPT_CHAR_FLOOR}; "
+                f"add 'when to use' / 'do not use' guidance"
+            )
+        elif n > cap:
+            bad.append(
+                f"{name}: {n} chars above cap {cap}; trim guidance or "
+                f"add an override in _TOOL_PROMPT_CHAR_CAP_OVERRIDES with a comment"
+            )
+
+    assert not bad, (
+        "Tool prompts outside the per-call char budget. Either trim the prose "
+        "or, if the size is intentional (e.g. inlines a load-bearing rule "
+        "block like VERIFICATION_RULES), add an override in "
+        "_TOOL_PROMPT_CHAR_CAP_OVERRIDES with a comment.\n  "
+        + "\n  ".join(bad)
+    )
+
+
+# ============================================================================
+# Test runner registration
+# ============================================================================
+
+
+async def run_all_tests():
+    print("prompt-invariants blackbox tests:")
+    r = BlackboxResult()
+
+    # 1. Static system prompts
+    r.record(
+        "build_system_prompt_execute_static_across_calls",
+        test_build_system_prompt_execute_is_static_across_calls,
+    )
+    r.record(
+        "build_system_prompt_plan_static_across_calls",
+        test_build_system_prompt_plan_is_static_across_calls,
+    )
+    r.record(
+        "build_system_prompt_static_prefix_shared_across_phases",
+        test_build_system_prompt_static_prefix_shared_across_phases,
+    )
+    r.record(
+        "build_planner_system_prompt_static_across_calls",
+        test_build_planner_system_prompt_is_static_across_calls,
+    )
+    r.record(
+        "explore_agent_system_prompt_template_constant",
+        test_explore_agent_system_prompt_template_is_constant,
+    )
+    r.record(
+        "explore_agent_system_prompt_static_across_calls",
+        test_explore_agent_system_prompt_is_static_across_calls,
+    )
+    r.record(
+        "get_browser_system_prompt_static_across_calls",
+        test_get_browser_system_prompt_is_static_across_calls,
+    )
+
+    # 2. TOOL_MODELS / phase / tools/prompts/ coverage
+    r.record(
+        "every_tool_model_in_a_phase_list",
+        test_every_tool_model_appears_in_at_least_one_phase_list,
+    )
+    r.record(
+        "every_phase_entry_in_tool_models_or_alias",
+        test_every_phase_list_entry_exists_in_tool_models_or_is_alias,
+    )
+    r.record(
+        "every_tool_model_has_prompt_fragment",
+        test_every_tool_model_has_prompt_fragment,
+    )
+    r.record(
+        "planner_aliases_have_prompt_fragments",
+        test_planner_aliases_have_prompt_fragments,
+    )
+
+    # 3. attempt_completion is parameterless
+    r.record(
+        "attempt_completion_only_tool_field",
+        test_attempt_completion_has_only_tool_field,
+    )
+    r.record(
+        "no_orchestrator_reads_attempt_completion_result_arg",
+        test_no_orchestrator_reads_attempt_completion_result_arg,
+    )
+
+    # 4. Verifier schema field order
+    r.record(
+        "verifier_schema_no_response_schema_field_order",
+        test_verifier_schema_no_response_schema_field_order,
+    )
+    r.record(
+        "verifier_schema_with_response_schema_field_order",
+        test_verifier_schema_with_response_schema_field_order,
+    )
+    r.record(
+        "verifier_schema_no_score_reasoning_field",
+        test_verifier_schema_no_score_reasoning_field,
+    )
+
+    # 5. Tool-name hygiene
+    r.record(
+        "no_deleted_tool_names_in_tool_registries",
+        test_no_deleted_tool_names_in_tool_registries,
+    )
+    r.record(
+        "no_deleted_tool_names_as_string_literals_in_production_code",
+        test_no_deleted_tool_names_as_string_literals_in_production_code,
+    )
+    r.record(
+        "no_check_progress_tool_name_in_production_code",
+        test_no_check_progress_tool_name_in_production_code,
+    )
+    r.record(
+        "check_progress_is_canonical_verifier_entrypoint",
+        test_check_progress_is_canonical_verifier_entrypoint,
+    )
+
+    # 6. Browser-use catalog ↔ v3 prompt
+    r.record(
+        "browser_use_v3_actions_in_catalog",
+        test_browser_use_v3_actions_in_catalog,
+    )
+    r.record(
+        "browser_use_catalog_matches_v3_actions_or_exempt",
+        test_browser_use_catalog_matches_v3_actions_or_is_exempt,
+    )
+    r.record(
+        "browser_use_envelope_thinking_and_action_only",
+        test_browser_use_envelope_is_thinking_and_action_only,
+    )
+
+    # 7. render_tool_list is the canonical, deterministic, typed renderer (B7)
+    r.record(
+        "render_tool_list_is_deterministic",
+        test_render_tool_list_is_deterministic,
+    )
+    r.record(
+        "render_tool_list_is_sorted_by_name",
+        test_render_tool_list_is_sorted_by_name,
+    )
+    r.record(
+        "render_tool_list_every_tool_produces_a_nonempty_line",
+        test_render_tool_list_every_tool_produces_a_nonempty_line,
+    )
+
+    # 8. Verifier static-prompt cache-write threshold (B19)
+    r.record(
+        "verifier_static_prompt_clears_anthropic_cache_threshold",
+        test_verifier_static_prompt_clears_anthropic_cache_threshold,
+    )
+
+    # 9. TS-side static prompts have no dynamic dates (E1)
+    r.record(
+        "ts_prompt_files_have_no_dynamic_dates_in_system_blocks",
+        test_ts_prompt_files_have_no_dynamic_dates_in_system_blocks,
+    )
+
+    # 10. Spawn alias prompts document the 50-char goal minimum (E5)
+    r.record(
+        "spawn_alias_prompts_document_50_char_goal_min",
+        test_spawn_alias_prompts_document_50_char_goal_min,
+    )
+
+    # 11. Style guardrails (B6 + banned phrases + marketing adjectives)
+    r.record(
+        "no_em_dashes_in_prompt_strings",
+        test_no_em_dashes_in_prompt_strings,
+    )
+    r.record(
+        "no_banned_phrases_in_prompt_strings",
+        test_no_banned_phrases_in_prompt_strings,
+    )
+
+    # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)
+    r.record(
+        "no_required_args_none_in_tool_prompts",
+        test_no_required_args_none_in_tool_prompts,
+    )
+    r.record(
+        "no_differs_from_spawn_agent_cross_refs",
+        test_no_differs_from_spawn_agent_cross_refs,
+    )
+
+    # 13. ALL-CAPS underlined section labels banned (C1)
+    r.record(
+        "no_all_caps_underlined_section_labels_in_prompts",
+        test_no_all_caps_underlined_section_labels_in_prompts,
+    )
+
+    # 14. Canonical rule constants imported, not duplicated (B1)
+    r.record(
+        "canonical_rules_not_duplicated",
+        test_canonical_rules_not_duplicated,
+    )
+
+    # 15. Cacheable-static prompts mark the dynamic boundary
+    r.record(
+        "system_prompt_boundary_marker_present",
+        test_system_prompt_boundary_marker_present,
+    )
+
+    # 16. ALL-CAPS markers capped per prompt
+    r.record(
+        "all_caps_marker_count_under_limit",
+        test_all_caps_marker_count_under_limit,
+    )
+
+    # 17. Tool prompts open with declarative third-person sentence
+    r.record(
+        "tool_prompts_open_with_declarative_sentence",
+        test_tool_prompts_open_with_declarative_sentence,
+    )
+
+    # 18. Tool prompt length stays within budget
+    r.record(
+        "tool_prompt_length_budget",
+        test_tool_prompt_length_budget,
+    )
+
+    teardown_mock()
+    return r.all_passed
+
+
+if __name__ == "__main__":
+    asyncio.run(run_all_tests())

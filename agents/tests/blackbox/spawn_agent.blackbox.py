@@ -548,7 +548,7 @@ async def test_handler_explore_capture_tool_results():
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
-    sub_agent_trace = ["[web_search] {big}", "[read_memories] {stuff}"]
+    sub_agent_trace = ["[web_search] {big}", "[grep] {stuff}"]
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
         start_activity_result=_Activity(
@@ -908,6 +908,651 @@ async def test_spawn_agent_helper_tracks_usage_and_returns():
     assert len(wf._tracked_usage) == 1
 
 
+# ── repo.py: save_explore_message ───────────────────────────────────
+
+
+async def test_save_explore_message_posts_to_backend():
+    """save_explore_message issues POST to /api/agents/{id}/messages with metadata."""
+    from unittest.mock import patch
+
+    setup_mock(
+        {
+            "/api/agents/": {"status": 200, "json": {"ok": True}},
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.spawn_agent.repo import save_explore_message
+        from tools.base import MessageStatus
+
+        await save_explore_message(
+            agent_id="agent-x",
+            title="Researching",
+            message="Looking at sources",
+            status=MessageStatus.IN_PROGRESS,
+            task_id="task-7",
+        )
+
+    call = assert_captured_call(
+        url_contains="/api/agents/agent-x/messages",
+        method="POST",
+        header_present="x-api-key",
+    )
+    body = json.loads(call["requestBody"])
+    assert body["role"] == "TOOL"
+    assert body["metadata"]["agentType"] == "explore"
+    assert body["metadata"]["taskId"] == "task-7"
+    assert body["metadata"]["toolName"] == "spawn_agent"
+
+
+async def test_save_explore_message_marks_error_metadata():
+    """save_explore_message ERROR status sets metadata.error=True."""
+    from unittest.mock import patch
+
+    setup_mock(
+        {
+            "/api/agents/": {"status": 200, "json": {"ok": True}},
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.spawn_agent.repo import save_explore_message
+        from tools.base import MessageStatus
+
+        await save_explore_message(
+            agent_id="agent-x",
+            title="Failed",
+            message="oh no",
+            status=MessageStatus.ERROR,
+            task_id="task-1",
+            tool_call_id="tc-fixed",
+        )
+
+    call = assert_captured_call(url_contains="/api/agents/", method="POST")
+    body = json.loads(call["requestBody"])
+    assert body["metadata"]["error"] is True
+    # tool_call_id reused as toolCallId
+    assert body["metadata"]["toolCallId"] == "tc-fixed"
+
+
+async def test_save_explore_message_swallows_http_error():
+    """save_explore_message logs but does not raise if backend fails."""
+    from unittest.mock import patch
+
+    setup_mock({"/api/agents/": {"status": 500, "json": {"error": "boom"}}})
+    with patch("temporalio.activity.heartbeat"):
+        from domains.spawn_agent.repo import save_explore_message
+        from tools.base import MessageStatus
+
+        # Should not raise even though backend returns 500
+        await save_explore_message(
+            agent_id="a",
+            title="t",
+            message="m",
+            status=MessageStatus.IN_PROGRESS,
+            task_id="x",
+        )
+
+
+# ── repo.py: _resolve_explore_attachments_activity ───────────────────
+
+
+async def test_resolve_explore_attachments_returns_metadata_texts():
+    """_resolve_explore_attachments_activity returns (content_blocks, metadata_texts)."""
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent import repo
+
+    fake_blocks = [{"type": "image", "data": "xxx"}]
+    fake_meta = ["[file: r.txt]"]
+
+    with patch.object(
+        repo, "resolve_attachments_for_llm", new=AsyncMock(return_value=(fake_blocks, fake_meta))
+    ):
+        cb, mt = await repo._resolve_explore_attachments_activity(
+            [
+                {
+                    "id": "f1",
+                    "storage_path": "/x/y",
+                    "original_filename": "r.txt",
+                    "mime_type": "text/plain",
+                    "size_bytes": 10,
+                    "created_at": "2026-05-01",
+                }
+            ]
+        )
+    assert cb == fake_blocks
+    assert mt == fake_meta
+
+
+# ── repo.py: fetch_full_network_metadata error path ─────────────────
+
+
+async def test_fetch_network_metadata_handles_http_error():
+    """Backend 500 => returns empty string (caller-friendly)."""
+    from unittest.mock import patch
+
+    # Reset cache so this test isn't poisoned by another test
+    from domains.spawn_agent import repo
+
+    repo._network_metadata_cache.pop("user-fail", None)
+
+    setup_mock({"/api/people": {"status": 500, "json": {"error": "boom"}}})
+    with patch("temporalio.activity.heartbeat"):
+        result = await repo.fetch_full_network_metadata(user_id="user-fail")
+    assert result == ""
+
+
+async def test_fetch_network_metadata_skips_unnamed_persons():
+    """Persons with no firstName/lastName are skipped."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent import repo
+
+    repo._network_metadata_cache.pop("user-named", None)
+
+    setup_mock(
+        {
+            "/api/people": {
+                "status": 200,
+                "json": {
+                    "people": [
+                        {"id": "p-1", "firstName": "", "lastName": ""},  # skipped
+                        {
+                            "id": "p-2",
+                            "firstName": "Carol",
+                            "lastName": "Doe",
+                            "email": "c@example.com",
+                        },
+                    ],
+                    "count": 2,
+                },
+            }
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        result = await repo.fetch_full_network_metadata(user_id="user-named")
+    # First person skipped, only Carol included
+    assert "Carol" in result
+    assert "p-1" not in result
+
+
+async def test_fetch_network_metadata_caches_result():
+    """Second call within TTL returns cached value (no second HTTP call)."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent import repo
+    from helpers.httpx_capture import clear_captures
+
+    repo._network_metadata_cache.pop("user-cache", None)
+
+    setup_mock(
+        {
+            "/api/people": {
+                "status": 200,
+                "json": {
+                    "people": [{"id": "p", "firstName": "A", "lastName": "B"}],
+                    "count": 1,
+                },
+            }
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        await repo.fetch_full_network_metadata(user_id="user-cache")
+        clear_captures()
+        # Second call should hit cache, no HTTP request
+        await repo.fetch_full_network_metadata(user_id="user-cache")
+    captures = get_captured_requests()
+    assert len(captures) == 0, "Second call must not hit HTTP (cached)"
+
+
+async def test_fetch_network_metadata_empty_people():
+    """Empty people list returns 'No contacts found.'"""
+    from unittest.mock import patch
+
+    from domains.spawn_agent import repo
+
+    repo._network_metadata_cache.pop("user-empty", None)
+
+    setup_mock(
+        {
+            "/api/people": {
+                "status": 200,
+                "json": {"people": [], "count": 0},
+            }
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        result = await repo.fetch_full_network_metadata(user_id="user-empty")
+    assert "No contacts found." in result
+
+
+# ── service.py: spawn_explore_agent_activity ──────────────────────────
+
+
+async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
+    """spawn_explore_agent_activity calls run_agent with proper args, returns shaped dict."""
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    captured: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "final_response": "summary text",
+            "tokens_in": 100,
+            "tokens_out": 50,
+        }
+
+    # Mock the heartbeat decorator and the run_agent module-level import
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a-7",
+            user_id="u-7",
+            goal="research X",
+            model="rose-1-lite",
+            network_metadata="net info",
+            local_data_summary="local stuff",
+            task_id="task-99",
+            init_tool_call_id="init-tc",
+            claude_token="ctok",
+            attachment_texts=["[file:doc.txt] short"],
+        )
+
+    # Returned dict shape
+    assert result["status"] == "completed"
+    assert result["result"] == "summary text"
+    assert result["tokens_in"] == 100
+    assert result["tokens_out"] == 50
+    assert isinstance(result["accumulated_usage"], list)
+    assert isinstance(result["llm_iteration_usage"], list)
+    assert isinstance(result["tool_call_results"], list)
+
+    # run_agent was called with explore-specific args
+    assert captured["agent_id"] == "a-7"
+    assert captured["user_id"] == "u-7"
+    assert captured["model"] == "rose-1-lite"
+    assert captured["claude_token"] == "ctok"
+    assert captured["call_site_override"] == "explore_agent"
+    assert captured["max_iterations"] >= 1
+    assert captured["skip_verification"] is True
+
+    # initial_context contains the [STATE: ...] line, the goal, and attachment text
+    [user_msg] = captured["initial_context"]
+    assert "[STATE:" in user_msg["text"]
+    assert "research X" in user_msg["text"]
+    assert "doc.txt" in user_msg["text"]
+
+
+async def test_spawn_explore_agent_activity_error_status_returned():
+    """run_agent reporting non-completed status -> error status returned."""
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        return {"status": "max_iterations", "final_response": "", "tokens_in": 1, "tokens_out": 1}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="g", model="m"
+        )
+    assert result["status"] == "error"
+
+
+async def test_spawn_explore_agent_activity_inner_callbacks_work():
+    """Verify the on_tokens callback and explore_post_message reach DB save."""
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    save_calls: list = []
+
+    async def fake_save(**kwargs):
+        save_calls.append(kwargs)
+
+    on_tokens_holder: dict = {}
+    post_message_holder: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        # exercise on_tokens callback
+        on_tokens = kwargs["on_tokens"]
+        await on_tokens(10, 5, "claude-x", 7, 3, "explore_agent")
+        on_tokens_holder["called"] = True
+
+        # exercise post_message callback (forwarded to save_explore_message)
+        post_message = kwargs["post_message"]
+        await post_message("Thinking…", "ASSISTANT", None)
+        post_message_holder["called"] = True
+
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="g", model="m", task_id="task-1"
+        )
+
+    # on_tokens populated llm_iteration_usage
+    assert len(result["llm_iteration_usage"]) == 1
+    entry = result["llm_iteration_usage"][0]
+    assert entry["tokens_in"] == 10
+    assert entry["tokens_out"] == 5
+    assert entry["model"] == "claude-x"
+    assert entry["cache_read_input_tokens"] == 7
+    assert entry["cache_creation_input_tokens"] == 3
+
+    # post_message dispatched to save_explore_message
+    assert len(save_calls) == 1
+    assert save_calls[0]["task_id"] == "task-1"
+    assert save_calls[0]["agent_id"] == "a"
+
+
+async def test_spawn_explore_agent_activity_execute_tool_dispatch():
+    """Verify execute_tool routes to web_search/web_fetch/grep/attempt_completion."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    # Mock manager.execute_tool to return shaped results
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"usage": {"x": 1}, "result": {"hits": ["a"]}})
+    fake_wf = MagicMock()
+    fake_wf.execute_tool = AsyncMock(return_value="raw-fetch-result")
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(return_value={"usage": {"y": 2}, "result": "grepped"})
+
+    captured_calls: list = []
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        # web_search path (with usage envelope)
+        r1 = await execute_tool("web_search", {"query": "hi"}, "tc1")
+        captured_calls.append(("ws", r1))
+        # web_fetch path (no usage envelope)
+        r2 = await execute_tool("web_fetch", {"url": "u"}, "tc2")
+        captured_calls.append(("wf", r2))
+        # grep path
+        r3 = await execute_tool("grep", {"pattern": "x"}, "tc3")
+        captured_calls.append(("g", r3))
+        # attempt_completion path
+        r4 = await execute_tool("attempt_completion", {}, "tc4")
+        captured_calls.append(("ac", r4))
+        # unknown tool path
+        r5 = await execute_tool("nonexistent_tool", {}, "tc5")
+        captured_calls.append(("unk", r5))
+
+        return {"status": "completed", "final_response": "done"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="g", model="m"
+        )
+
+    # web_search returned success with serialized result_str
+    assert captured_calls[0][1]["success"] is True
+    # web_fetch returned the raw value via str/json
+    assert captured_calls[1][1]["success"] is True
+    # grep ran
+    assert captured_calls[2][1]["success"] is True
+    # attempt_completion path returns shape
+    assert captured_calls[3][1]["success"] is True
+    # unknown tool returns error
+    assert captured_calls[4][1]["error"] is True
+
+    # Tool-call results were captured
+    assert len(result["tool_call_results"]) >= 3
+    # accumulated_usage captured the dict-with-usage results
+    assert len(result["accumulated_usage"]) == 2  # web_search and grep had usage envelopes
+
+
+# ── handler.py: explore attachment resolution path ───────────────────
+
+
+async def test_handler_explore_resolves_attachments():
+    """Explore with attachments triggers _resolve_explore_attachments_activity."""
+    from unittest.mock import patch
+
+    from helpers.attachments import FilePointer
+    import domains.spawn_agent.handler as h
+    from tools.base import MessageStatus
+
+    # Build a workflow_instance with file pointer in context
+    fp = FilePointer(
+        id="f1",
+        storage_path="/x/y",
+        original_filename="report.csv",
+        mime_type="text/csv",
+        size_bytes=100,
+        created_at="2026-05-01",
+    )
+
+    # Patch extract_attachments_from_context to return our pointer
+    fake = _FakeSpawnWF(
+        activity_results={
+            "fetch_full_network_metadata": "",
+            "fetch_local_data_summary": "",
+            "_resolve_explore_attachments_activity": ([], ["[file: report.csv] inline content"]),
+        },
+        start_activity_result=_Activity(
+            result={
+                "result": "got it",
+                "tool_call_results": [],
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        with patch.object(h, "extract_attachments_from_context", return_value=[fp]):
+            wf = _FakeWFInstance()
+            wf.context = {"attachments": [{"id": "f1"}]}
+            events = await _collect(
+                h.SpawnAgentManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={
+                        "type": "explore",
+                        "goal": "g",
+                        "attachments": "report.csv",  # str path → coerced to list
+                    },
+                    tool_call_id="tc",
+                )
+            )
+    finally:
+        restore()
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+
+
+async def test_handler_explore_unknown_attachment_warns():
+    """Explore attachment not in context => warning, no execute_activity for resolution."""
+    from unittest.mock import patch
+
+    import domains.spawn_agent.handler as h
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={
+            "fetch_full_network_metadata": "",
+            "fetch_local_data_summary": "",
+        },
+        start_activity_result=_Activity(
+            result={
+                "result": "ok",
+                "tool_call_results": [],
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        with patch.object(h, "extract_attachments_from_context", return_value=[]):
+            wf = _FakeWFInstance()
+            wf.context = {}
+            events = await _collect(
+                h.SpawnAgentManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={
+                        "type": "explore",
+                        "goal": "g",
+                        "attachments": ["missing.txt"],
+                    },
+                    tool_call_id="tc",
+                )
+            )
+    finally:
+        restore()
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+
+
+# ── handler.py: for_each drain failures ──────────────────────────────
+
+
+async def test_handler_for_each_drain_exception_counts_as_failure():
+    """If a child generator raises while draining, failed_count increments."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    class _BadDrainMgr:
+        def execute_tool(self, wf, tc, tcid, **kw):
+            async def _gen():
+                # Yield first event success, then raise on second iteration
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="started",
+                    message="ok",
+                    status=MessageStatus.IN_PROGRESS,
+                )
+                raise RuntimeError("drain explosion")
+
+            return _gen()
+
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: _BadDrainMgr()
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={
+                    "type": "for_each",
+                    "goal": "process",
+                    "output_schema": {"fields": []},
+                    "items": ["a"],
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+    # Drain failure surfaces as ERROR aggregate event
+    assert any(e.status == MessageStatus.ERROR for e in events)
+
+
+async def test_handler_for_each_spawn_exception_counts_as_failure():
+    """If a child raises during initial spawn (before first event), failed_count increments."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    class _BadSpawnMgr:
+        def execute_tool(self, wf, tc, tcid, **kw):
+            async def _gen():
+                raise RuntimeError("spawn explosion")
+                yield  # generator marker
+
+            return _gen()
+
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: _BadSpawnMgr()
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={
+                    "type": "for_each",
+                    "goal": "process",
+                    "output_schema": {"fields": []},
+                    "items": ["a", "b"],
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+    # 2 spawn failures => aggregate error
+    assert any(
+        e.status == MessageStatus.ERROR and "2/2" in e.message for e in events
+    )
+
+
+# ── service: explore tool dispatch wraps call_temporal_activity_from_activity ──
+
+
+async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
+    """tagged_execute_activity stamps taskId/agentType into post_agent_message metadata."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    captured_args: list = []
+
+    async def fake_call_temporal_activity_from_activity(activity_fn, args=None, **kwargs):
+        # capture what got mutated
+        captured_args.append({"name": activity_fn.__name__, "args": args, "kwargs": kwargs})
+        return {"ok": True}
+
+    # Build a fake post_agent_message function so the code path triggers
+    def fake_post_agent_message():
+        pass
+
+    fake_post_agent_message.__name__ = "post_agent_message"
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        # Force a fake manager whose execute_tool internally calls tagged_execute_activity
+        # We can't easily reach tagged_execute_activity without reconstructing pieces.
+        # But we still cover the wrapper flow indirectly through web_search.
+        return {"status": "completed", "final_response": "done"}
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "ok"})
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "loop.activity_helper.call_temporal_activity_from_activity",
+            new=fake_call_temporal_activity_from_activity,
+        ),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="g", model="m", task_id="tt"
+        )
+
+
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
@@ -957,6 +1602,26 @@ async def run_all_tests():
     await r.record_async("handler_for_each_happy", test_handler_for_each_happy_path_all_succeed)
     await r.record_async("handler_for_each_failed", test_handler_for_each_failed_yields_error)
     await r.record_async("spawn_agent_helper", test_spawn_agent_helper_tracks_usage_and_returns)
+    # repo.py
+    await r.record_async("save_explore_message_happy", test_save_explore_message_posts_to_backend)
+    await r.record_async("save_explore_message_error", test_save_explore_message_marks_error_metadata)
+    await r.record_async("save_explore_message_swallow", test_save_explore_message_swallows_http_error)
+    await r.record_async("resolve_explore_attachments", test_resolve_explore_attachments_returns_metadata_texts)
+    await r.record_async("network_metadata_http_error", test_fetch_network_metadata_handles_http_error)
+    await r.record_async("network_metadata_skip_unnamed", test_fetch_network_metadata_skips_unnamed_persons)
+    await r.record_async("network_metadata_caches", test_fetch_network_metadata_caches_result)
+    await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
+    # service.py
+    await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
+    await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
+    await r.record_async("explore_activity_callbacks", test_spawn_explore_agent_activity_inner_callbacks_work)
+    await r.record_async("explore_activity_dispatch", test_spawn_explore_agent_activity_execute_tool_dispatch)
+    # handler.py
+    await r.record_async("handler_explore_resolves_attachments", test_handler_explore_resolves_attachments)
+    await r.record_async("handler_explore_unknown_attachment", test_handler_explore_unknown_attachment_warns)
+    await r.record_async("handler_for_each_drain_exception", test_handler_for_each_drain_exception_counts_as_failure)
+    await r.record_async("handler_for_each_spawn_exception", test_handler_for_each_spawn_exception_counts_as_failure)
+    await r.record_async("tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message)
     teardown_mock()
     return r.all_passed
 

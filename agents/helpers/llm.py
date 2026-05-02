@@ -180,7 +180,7 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
-def build_verifier_context_messages(
+def build_verifier_context_messages(  # noqa: C901
     context: List[Dict[str, Any]],
     system_prompt: str,
 ) -> List[Dict[str, Any]]:
@@ -193,6 +193,12 @@ def build_verifier_context_messages(
     Sequential verifier calls share a growing cached prefix:
       call N reads [sys, user_batch1, asst_v1, ..., user_batchN-1, asst_vN-1]
       and writes only user_batchN (the new tool results).
+
+    Multimodal: when a TOOL message carries `metadata.screenshot_b64`, the
+    current text batch is flushed and a separate multimodal user message is
+    emitted containing a text description plus an Anthropic-shaped image
+    content block. Anthropic + OpenAI both accept content arrays mixed with
+    plain-string messages, so the rest of the conversation remains text-only.
     """
     sorted_context = sorted(
         context,
@@ -201,6 +207,13 @@ def build_verifier_context_messages(
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     current_batch: List[str] = []
+
+    def _flush_batch() -> None:
+        """Emit current_batch as a single user-role message and reset it."""
+        nonlocal current_batch
+        if current_batch:
+            messages.append({"role": "user", "content": "\n\n".join(current_batch)})
+            current_batch = []
 
     for msg in sorted_context:
         role = msg.get("role", "")
@@ -221,9 +234,7 @@ def build_verifier_context_messages(
                 continue
 
             if metadata.get("verifierMessage"):
-                if current_batch:
-                    messages.append({"role": "user", "content": "\n\n".join(current_batch)})
-                    current_batch = []
+                _flush_batch()
                 verifier_text = text
                 if metadata.get("title"):
                     verifier_text = f"{metadata['title']}: {text}"
@@ -236,10 +247,45 @@ def build_verifier_context_messages(
             tool_text = f"{prefix} {text}"
             if metadata.get("structured_response"):
                 tool_text += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+
+            screenshot_b64 = metadata.get("screenshot_b64")
+            if screenshot_b64:
+                # Multimodal path. The text body must NOT include the b64 blob —
+                # we already emit it as an image block. spawn_browser_agent_v3
+                # currently sets `text` to a description ("Final-state screenshot
+                # available …"); guard here regardless in case future callers
+                # mistakenly inline the b64 into text.
+                if tool_text.find(screenshot_b64) != -1:
+                    tool_text = tool_text.replace(
+                        screenshot_b64,
+                        "<screenshot moved to image content block>",
+                    )
+
+                # Flush any pending text first so the image is its own user turn,
+                # keeping the alternation clean and the cache prefix stable for
+                # text-only batches.
+                _flush_batch()
+                media_type = metadata.get("screenshot_media_type", "image/png")
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": tool_text},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": screenshot_b64,
+                            },
+                        },
+                    ],
+                })
+                continue
+
             current_batch.append(tool_text)
 
     current_batch.append("Evaluate the agent's progress as JSON.")
-    messages.append({"role": "user", "content": "\n\n".join(current_batch)})
+    _flush_batch()
 
     return messages
 
@@ -826,7 +872,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     on_chunk: Callable[[str, int], Awaitable[None]],
     reasoning_max_tokens: Optional[int] = None,
     model_preference: Optional[str] = None,
-    model_seed: Optional[int] = None,  # Index into Rose model pool (bypasses racing)
+    model_seed: Optional[int] = None,  # Index into Rose model pool (pins to one waterfall step)
     agent_id: Optional[str] = None,  # For cancellation checking
     on_tool_detected: Optional[
         Callable[[str, str], Awaitable[None]]
@@ -994,25 +1040,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 if kind == "usage":
                     stream_usage = dict(chunk.data)
                     final_finish_reason = stream_usage.get("finish_reason", "") or final_finish_reason
-                    cache_read = stream_usage.get("cache_read_input_tokens", 0) or 0
-                    cache_write = stream_usage.get("cache_creation_input_tokens", 0) or 0
-                    prompt_tokens = stream_usage.get("prompt_tokens", 0) or 0
-                    completion_tokens = stream_usage.get("completion_tokens", 0) or 0
-                    total_input = prompt_tokens + cache_read + cache_write
-                    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
-                    logger.info(
-                        "llm.cache",
-                        call_site=call_site,
-                        agent_id=agent_id,
-                        actual_model=actual_model,
-                        is_claude=using_claude_auth,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        cache_read=cache_read,
-                        cache_write=cache_write,
-                        cache_hit_pct=cache_pct,
-                        finish=final_finish_reason,
-                    )
+                    # llm.cache event is emitted from RoseClient.complete (single source).
                     continue
 
                 if kind == "done":
@@ -1535,9 +1563,6 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
                 "cancelled": False,
-                # Include racing-adjusted values if present
-                "winner_prompt_tokens": stream_usage.get("winner_prompt_tokens"),
-                "winner_completion_tokens": stream_usage.get("winner_completion_tokens"),
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": stream_usage.get("cache_read_input_tokens", 0),
@@ -2021,24 +2046,33 @@ async def _call_llm_verifier(  # noqa: C901
     agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Simple LLM call for verifier - no streaming UI, no tool detection.
+    Sole LLM helper for the verifier — no streaming UI, no tool detection.
+
+    All verifier code paths route through this helper via the ``check_progress``
+    activity. The activity forces ``model="rose-labs/rose-1-ultra"`` so the
+    pool resolution below is guaranteed to succeed; the assertion guards against
+    misuse if a future caller skips ``check_progress``.
 
     Args:
         messages: Chat messages for the LLM
-        model: Model to use
+        model: Model to use (must resolve to a Rose pool)
         config: Application config
         response_schema: Optional response schema to include output extraction
         claude_token: Optional Claude OAuth token for direct Anthropic calls
+        call_site: Cache-logging tag (e.g. "verifier_plan", "verifier_execute",
+            "verifier_post_dag", "verifier_browser", "verifier_claude_code").
+        agent_id: Optional agent ID for tracing.
 
     Returns:
         Tuple of (parsed JSON dict with reasoning, score, and optionally output), usage dict)
     """
     pool = pool_for_model(model)
-    if pool is None:
-        raise ValueError(
-            f"_call_llm_verifier requires a Rose model (got {model!r}); "
-            f"non-Rose verifier path is not supported."
-        )
+    # The check_progress activity always forces a Rose model. Assertion guards
+    # against direct misuse — there is no non-Rose verifier fallback.
+    assert pool is not None, (
+        f"_call_llm_verifier requires a Rose model (got {model!r}); "
+        f"all verifier paths must go through check_progress, which forces rose-1-ultra."
+    )
 
     response_format = _build_verifier_json_schema(response_schema)
 
@@ -2060,7 +2094,6 @@ async def _call_llm_verifier(  # noqa: C901
     chunk_count = 0
     stream_usage: Optional[Dict[str, Any]] = None
 
-    stream_interrupted = False
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     rose_client = RoseClient()
     try:
@@ -2109,7 +2142,6 @@ async def _call_llm_verifier(  # noqa: C901
             elif kind == "done":
                 pass
     except RoseError as e:
-        stream_interrupted = True
         logger.warning(
             f"Verifier RoseClient error after {chunk_count} chunks, "
             f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
@@ -2130,25 +2162,11 @@ async def _call_llm_verifier(  # noqa: C901
             )
         accumulated_json = json.dumps(first_input)
 
+    # llm.cache event is emitted from RoseClient.complete (single source).
+    # Still need these locally for the returned usage dict consumed by callers.
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
-    completion_toks = stream_usage.get("completion_tokens", 0) if stream_usage else 0
-    total_input = prompt_toks + cache_read + cache_write
-    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
-    logger.info(
-        "llm.cache",
-        call_site=call_site,
-        agent_id=agent_id,
-        actual_model=actual_model,
-        is_claude=actual_model.endswith("-claude") if actual_model else False,
-        prompt_tokens=prompt_toks,
-        completion_tokens=completion_toks,
-        cache_read=cache_read,
-        cache_write=cache_write,
-        cache_hit_pct=cache_pct,
-        finish="verifier",
-    )
 
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
@@ -2183,8 +2201,21 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     """
     Build a JSON schema for the verifier response.
 
-    If response_schema is provided, includes an 'output' field with the schema fields.
-    The output is always included in the response, but should only be used when score >= 1.0.
+    Field order is load-bearing — structured-output models populate fields in the
+    order they appear in the schema. We force commitment in this sequence:
+
+      With response_schema:
+        1. ``output``     — extract the schema fields from tool results FIRST.
+        2. ``reasoning``  — detailed feedback to the agent, anchored in tool evidence.
+        3. ``score``      — final numeric commitment (0.0–1.0).
+
+      Without response_schema:
+        1. ``reasoning`` — analysis of whether the goal is accomplished.
+        2. ``score``     — final numeric commitment (0.0–1.0).
+
+    The rubric: score = 1.0 iff every field in ``output`` can be accurately
+    populated from real, extracted tool-result evidence. Without a response
+    schema, score = 1.0 iff the goal is accomplished by visible tool results.
 
     Args:
         response_schema: Optional response schema with fields definition
@@ -2192,11 +2223,18 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     Returns:
         JSON schema dict for use with OpenAI structured outputs
     """
-    # Base schema always has reasoning and score
-    properties = {"reasoning": {"type": "string"}, "score": {"type": "number", "minimum": 0, "maximum": 1}}
-    required = ["reasoning", "score"]
+    # Build properties in the canonical commitment order.
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
 
-    # If response_schema provided, add output field
+    # When the schema contains an open-object field ("object" / "list[object]"),
+    # we MUST relax the OpenAI strict-mode flag — strict mode forbids
+    # `additionalProperties: true` (open shapes). Anthropic + claudeAuth paths
+    # accept open shapes regardless. Tracked here so the JSON-schema envelope
+    # at the bottom can flip `strict` accordingly.
+    has_open_object = False
+
+    # If response_schema provided, the verifier extracts schema fields FIRST.
     if response_schema and response_schema.get("fields"):
         output_properties = {}
         output_required = []
@@ -2218,6 +2256,29 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                 json_type = {"type": "array", "items": {"type": "string"}}
             elif field_type == "list[int]":
                 json_type = {"type": "array", "items": {"type": "integer"}}
+            elif field_type == "object":
+                # Open-shape object — sub-fields are described in `description`
+                # rather than declared in JSON schema. The verifier is expected
+                # to populate per the description text. additionalProperties=True
+                # is incompatible with OpenAI strict mode, so we disable strict
+                # at the envelope level when this branch is taken.
+                has_open_object = True
+                json_type = {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": field.get("description", ""),
+                }
+            elif field_type == "list[object]":
+                # Open-shape list of objects. See note on `object` above.
+                has_open_object = True
+                json_type = {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                    "description": field.get("description", ""),
+                }
             elif field_type == "file_pointer":
                 # Full FilePointer schema - used by main agent and spawn_sub_agent verifiers
                 # Expects context to contain full FilePointer with all fields populated
@@ -2336,45 +2397,128 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
         }
         required.append("output")
 
+    # Reasoning before score — text first, numeric commit last so the score is
+    # the conclusion of the analysis rather than its anchor.
+    properties["reasoning"] = {
+        "type": "string",
+        "description": (
+            "Detailed walk-through anchored in tool messages. When score < 1.0, "
+            "this is shown to the agent as feedback — name the missing fields "
+            "(or missing goal evidence) and what would unblock them."
+        ),
+    }
+    required.append("reasoning")
+
+    properties["score"] = {"type": "number", "minimum": 0, "maximum": 1}
+    required.append("score")
+
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "ProgressScoreWithOutput" if response_schema else "ProgressScore",
             "schema": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
-            "strict": True,
+            # OpenAI strict mode forbids `additionalProperties: true`. When the
+            # schema contains an open-object field (`object` / `list[object]`),
+            # we drop strict so the open shape is accepted. Anthropic +
+            # claudeAuth paths are unaffected (they always accept open shapes).
+            "strict": not has_open_object,
         },
     }
 
 
+# The verifier always uses Rose Ultra. Every code path — main loop, post-DAG,
+# browser, claude_code — routes through the check_progress activity below, so
+# this constant is the single source of truth for the verifier model.
+VERIFIER_MODEL = "rose-labs/rose-1-ultra"
+
+
 @activity.defn
 @traced("check_progress")
-async def check_progress(
+async def check_progress(  # noqa: C901
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
-    model: str = "rose-labs/rose-1-lite",
-    phase: str = "EXECUTE",  # Kept for backward compat but no longer used
+    model: str = VERIFIER_MODEL,  # IGNORED — verifier always forces rose-1-ultra. Kept for backward compat.
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Use LLM judge to check progress toward goal.
+    Use LLM judge to check progress toward goal. Canonical entry point — all
+    verifier paths (main loop, post-DAG, browser, claude_code) MUST call this
+    activity rather than `_call_llm_verifier` directly.
+
+    Verifier model is **mandatory** — the ``model`` arg is accepted for
+    backward compatibility with positional callers but always overridden to
+    ``rose-labs/rose-1-ultra``. ``claude_token`` is passed through verbatim
+    (the workflow owns rotation; rotation is not done here).
+
+    Context scoping (C14): the verifier judges only the calling agent's own
+    context. There is no in-function filter because scoping is enforced at
+    every call site by the message-fetch boundary, not here:
+
+    - Main loop / post-DAG / sub-agent verifier: ``poll_new_messages`` queries
+      the backend by ``agent_id``, so ``context`` only contains rows the DB
+      already filtered to this agent. Sub-agents run in a separate workflow
+      with their own ``agent_id``, so a parent's messages can never appear.
+    - Browser sub-agent verifier: ``verifier_context`` is built locally from
+      the browser session's action history, DOM, and final-state screenshot —
+      nothing from the parent reaches it.
+    - Claude-code sub-agent verifier: ``verifier_context`` is built locally
+      from the sandbox terminal output and the run's action summary —
+      nothing from the parent reaches it.
+    - Explore sub-agent: runs with ``skip_verification=True`` — no verifier
+      executes at all.
+
+    Do NOT add a "drop messages whose agent_id != this agent" filter here —
+    that would mask a real leak rather than fix it. If a leak shows up, fix
+    the upstream call site so it builds an agent-scoped context, and add an
+    invariant test instead.
 
     Args:
-        context: Message history (first USER message is the goal)
-        verifier_system_prompt: Pre-built verifier system prompt (from build_verifier_prompt)
-        model: LLM model to use
-        phase: Deprecated - no longer used (prompt is pre-built by caller)
-        response_schema: Response schema for structured output extraction
-        claude_token: Optional Claude OAuth token for direct Anthropic calls
+        context: Message history (first USER message is the goal). MUST be
+            agent-scoped by the caller — see scoping notes above.
+        verifier_system_prompt: Pre-built verifier system prompt
+            (from ``utils.prompts.build_verifier_prompt``).
+        model: IGNORED. Always forced to ``rose-labs/rose-1-ultra`` (B2).
+        response_schema: Optional response schema for structured output
+            extraction. Pass ``None`` (or omit) to score the goal without an
+            output-extraction rubric — the prompt-builder is expected to
+            simplify accordingly.
+        claude_token: Optional Claude OAuth token for direct Anthropic calls.
+        call_site: Cache-logging tag. Use the appropriate variant:
+            ``verifier_plan``, ``verifier_execute``, ``verifier_post_dag``,
+            ``verifier_browser``, ``verifier_claude_code``.
+        agent_id: Optional agent ID for tracing.
 
     Returns:
-        Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
+        Dict with:
+        - ``score`` (float 0.0-1.0)
+        - ``reasoning`` (str)
+        - ``message`` (str, formatted "{reasoning}\\n\\nScore: {score}")
+        - ``usage`` (dict): contains ``prompt_tokens``, ``completion_tokens``,
+            ``total_tokens``, ``actual_model``, ``pool_name``,
+            ``cache_creation_input_tokens``, ``cache_read_input_tokens``,
+            ``claude_token_error``. Callers (e.g. post-DAG verifier) can use
+            these for token-cost tracking.
+        - ``structured_response`` (dict | None): always returned as
+            ``result["output"]`` regardless of score — callers decide what
+            to do with partial output (C2).
     """
-    # If no schema provided, use empty schema for output extraction
-    if not response_schema:
-        response_schema = {"fields": []}
+    # B2: Force verifier model and ignore the caller-passed model arg.
+    forced_model = VERIFIER_MODEL
+    if model != forced_model:
+        logger.debug(
+            "check_progress overriding caller model",
+            requested_model=model,
+            forced_model=forced_model,
+        )
+
+    # C7: Pass response_schema=None through unchanged when not provided. Do NOT
+    # default to an empty {"fields": []} dict — the prompt-side simplification
+    # (utils/prompts.py:build_verifier_prompt) decides how to handle missing
+    # schema. _build_verifier_json_schema also branches on this directly.
+    schema_for_call = response_schema if response_schema else None
 
     try:
         # DEBUG: Log what we received
@@ -2391,6 +2535,9 @@ async def check_progress(
                 elif not isinstance(m, dict):
                     logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
 
+        # C14: scoping is enforced at the message-fetch boundary by every
+        # caller (poll_new_messages by agent_id, or locally-built browser /
+        # claude-code verifier_context). No filtering here — see docstring.
         _safe_heartbeat("Checking progress with LLM judge")
 
         config = load_config()
@@ -2426,9 +2573,9 @@ async def check_progress(
             try:
                 result, usage = await _call_llm_verifier(
                     messages,
-                    model,
+                    forced_model,
                     config,
-                    response_schema,
+                    schema_for_call,
                     claude_token=claude_token,
                     call_site=call_site,
                     agent_id=agent_id,
@@ -2451,7 +2598,8 @@ async def check_progress(
                     raise last_error from last_error
 
         score = result["score"]
-        reasoning = result["reasoning"]
+        # C3: score_reasoning is gone. Read only `reasoning` now.
+        reasoning = result.get("reasoning", "")
 
         logger.info(
             "Progress checked",
@@ -2463,8 +2611,11 @@ async def check_progress(
             has_output="output" in result,
         )
 
-        # Only use output when score >= 1.0 (schema enforcement is handled by strict JSON schema)
-        structured_response = result.get("output") if score >= 1.0 else None
+        # C2: Always return whatever `output` the verifier produced — let
+        # downstream callers decide what to do with partial output. Even at
+        # score < 1.0 the partial extraction is useful for the agent's next
+        # iteration (it sees what fields are already grounded).
+        structured_response = result.get("output")
 
         return {
             "score": score,
@@ -2481,7 +2632,16 @@ async def check_progress(
             "score": 0.5,
             "reasoning": error_message,
             "message": f"{error_message}\n\nScore: 0.5",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "actual_model": None,
+                "pool_name": None,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "claude_token_error": None,
+            },
             "structured_response": None,
         }
 
@@ -2581,7 +2741,7 @@ async def call_llm_activity(  # noqa: C901
         _is_claude = [False]  # Mutable list so closures can update it
 
         def on_model_detected(actual_model: str):
-            # "-claude" suffix = user's own Claude token ($0, skipped racing)
+            # "-claude" suffix = user's own Claude token ($0, skipped the waterfall)
             # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
             _is_claude[0] = is_user_claude
@@ -2940,7 +3100,7 @@ async def call_planner_llm_activity(
 
     When claude_max_token is provided, it's passed to the Rose completions endpoint
     which calls Anthropic directly ($0 cost via user's Claude subscription).
-    If that fails, the endpoint falls back to racing automatically.
+    If that fails, the endpoint falls through to the waterfall automatically.
 
     Args:
         messages: Conversation history (user/assistant messages)

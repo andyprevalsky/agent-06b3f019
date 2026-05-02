@@ -19,7 +19,7 @@ async def save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_ite
     Args:
         agent_id: Agent ID
         user_id: User ID
-        tool_name: Tool name (e.g., "deep_research", "web_search")
+        tool_name: Tool name (e.g., "web_search", "web_fetch")
         usage_items: List of UsageItem dicts with cost breakdown
 
     Note:

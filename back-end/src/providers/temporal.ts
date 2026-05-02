@@ -82,7 +82,9 @@ export async function startAgentWorkflow(params: {
   // Use provided task queue or default to environment-specific queue
   const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
   if (!taskQueue) {
-    throw new Error('TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME');
+    throw new Error(
+      'TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME'
+    );
   }
   const workflowId = params.agentId;
 

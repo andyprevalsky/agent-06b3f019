@@ -17,7 +17,7 @@
  */
 
 import { prisma } from '../database';
-import { createStreamingCompletion, CompletionMessage } from '../rose';
+import { createStreamingCompletion, CompletionMessage, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
 import { executeToolCall, ToolCall, ToolResult } from './supervisorTools';
@@ -109,11 +109,12 @@ export async function handleSmsSupervisorMessage(config: {
 
   // 2. Build context (system prompt + session history)
   const contextStart = Date.now();
-  const { systemPrompt, sessionHistory } = await buildSmsContext(userId);
+  const { systemPrompt, contextUserMessage, sessionHistory } = await buildSmsContext(userId);
 
   log.info('[SmsSupervisor] Context built', {
     userId,
     systemPromptLength: systemPrompt.length,
+    contextUserMessageLength: contextUserMessage.length,
     sessionHistoryLength: sessionHistory.length,
     durationMs: Date.now() - contextStart,
   });
@@ -121,10 +122,17 @@ export async function handleSmsSupervisorMessage(config: {
   // 3. Fetch Claude token for direct Anthropic passthrough
   const claudeToken = await getClaudeToken(userId);
 
-  // 4. Build messages array for LLM
+  // 4. Build messages array for LLM. The volatile per-SMS state is injected as
+  // a `user`-role message right before the inbound user message — keeping it
+  // out of the system prompt is what lets Anthropic prompt-caching reuse the
+  // static system prefix across SMSes within the 5-min ephemeral window.
+  //
+  // `markCacheable` makes the cache boundary explicit: the entire system
+  // prompt is the cacheable static prefix. See providers/rose/cache.ts.
   const messages: CompletionMessage[] = [
-    { role: 'system', content: systemPrompt },
+    markCacheable(systemPrompt),
     ...sessionHistory,
+    { role: 'user', content: contextUserMessage },
     { role: 'user', content: inboundMessage },
   ];
 
@@ -313,10 +321,10 @@ async function getClaudeToken(userId: string): Promise<string | null> {
       return poolResult.accessToken;
     }
 
-    log.info('[SmsSupervisor] No Claude token available, will use racing', { userId });
+    log.info('[SmsSupervisor] No Claude token available, will use waterfall', { userId });
     return null;
   } catch (error) {
-    log.warn('[SmsSupervisor] Failed to fetch Claude token, falling back to racing', {
+    log.warn('[SmsSupervisor] Failed to fetch Claude token, falling back to waterfall', {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });

@@ -137,14 +137,6 @@ def test_format_result_images_and_links():
     assert "link1" in result
 
 
-def test_format_result_ids():
-    """format_result shows findall_id and monitor_id."""
-    from tools.base import format_result
-
-    assert "Find All ID: abc" in format_result({"findall_id": "abc"})
-    assert "Monitor ID: xyz" in format_result({"monitor_id": "xyz"})
-
-
 def test_format_result_output_content_dict():
     """format_result renders output.content as key/value pairs."""
     from tools.base import format_result
@@ -410,7 +402,6 @@ async def run_all_tests():
     r.record("format_result_candidates", test_format_result_candidates)
     r.record("format_result_sources", test_format_result_sources)
     r.record("format_result_images_and_links", test_format_result_images_and_links)
-    r.record("format_result_ids", test_format_result_ids)
     r.record("format_result_output_content_dict", test_format_result_output_content_dict)
     r.record("format_result_message_history", test_format_result_message_history)
     r.record("format_result_services", test_format_result_services)

@@ -166,27 +166,43 @@ def build_anthropic_body(
     # Extraction happens once here so the body is self-contained and
     # deterministic across retries/rotations.
     native_tools = tools
+    came_from_response_format = False
     if native_tools is None and response_format is not None:
         extracted = _extract_tools_from_response_format(response_format)
         if extracted is not None:
             native_tools = extracted["tools"]
+            came_from_response_format = True
+
+    # When tools were synthesized from response_format, the caller didn't pass
+    # an explicit tool_choice — but structured output REQUIRES the tool to be
+    # called or the streaming JSON parser blows up on assistant prose.
+    # apply_anthropic_tool_config defaults to "auto" on this path, so override.
+    effective_tool_choice = tool_choice
+    if came_from_response_format and tool_choice is None:
+        effective_tool_choice = "any"
 
     native_tool_mode = apply_anthropic_tool_config(
         body,
         response_format,
         True,  # always native tools on claudeAuth
         native_tools,
-        tool_choice,
+        effective_tool_choice,
     )
 
     _add_tool_cache_breakpoint(body)
 
-    # Anthropic rejects thinking when tool_choice forces tool use (type=any
-    # or type=tool). Downgrade to auto so thinking stays enabled — the model
-    # will still call the tools, it just isn't forced to.
+    # Anthropic rejects thinking with forced tool_choice (type=any/tool).
+    # Two resolutions, depending on which constraint is load-bearing:
+    #   - Structured output (tools synthesized from response_format): the model
+    #     MUST call the tool. Drop thinking, keep tool_choice forced.
+    #   - Real tool list with forced tool_choice: keeping thinking matters
+    #     more than forcing the call; downgrade to auto.
     tc = body.get("tool_choice", {})
     if isinstance(tc, dict) and tc.get("type") in ("any", "tool") and "thinking" in body:
-        body["tool_choice"] = {"type": "auto"}
+        if came_from_response_format:
+            body.pop("thinking", None)
+        else:
+            body["tool_choice"] = {"type": "auto"}
 
     # Set effort AFTER apply_anthropic_tool_config (which may pop output_config
     # for json_schema reasons) — effort is always valid regardless of tool mode.

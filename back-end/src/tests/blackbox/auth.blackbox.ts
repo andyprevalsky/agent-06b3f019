@@ -45,12 +45,29 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { createHash, randomUUID } from 'node:crypto';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { retryWithBackoff } from '../../providers/retry';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
+const TWILIO_VERIFY_SERVICE_SID = process.env.TWILIO_VERIFY_SERVICE_SID || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+
+// Fast-forward cache directory used by fetchCapture.ts at runtime. Seeding
+// entries here lets us drive Twilio Verify and Supabase Admin responses
+// deterministically without making real outbound calls. The path mirrors
+// fetchCapture.ts: `<repo-root>/.context/fast-forward-cache/outbound-fetch`.
+//
+// The blackbox runner spawns each test with cwd=<repo-root> (see run.ts), but
+// when this file is executed directly the cwd is back-end/. We resolve from
+// __dirname (this file's directory) to handle both cases — `__dirname` is
+// .../back-end/src/tests/blackbox so `../../../../.context/...` lands at the
+// repo root regardless of cwd.
+const FF_CACHE_DIR = resolvePath(__dirname, '../../../../.context/fast-forward-cache/outbound-fetch');
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -328,6 +345,179 @@ async function createAgentWithRetry(
     if (err instanceof RetryableAgentError) return err.res;
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fast-forward cache seeding
+// ---------------------------------------------------------------------------
+// The fetchCapture middleware wraps every outbound fetch with a fast-forward
+// cache (FileSystemCache, namespace="outbound-fetch"). The cache key is
+// `call:<JSON.stringify([url, method, body])>` and the file name is
+// sha256(key).hex.json. Seeding a file with a crafted response lets us drive
+// the verify-otp/Supabase paths deterministically — first request hits the
+// seeded cache instead of dialing Twilio/Supabase.
+//
+// We only seed for fake phone numbers that are NOT in the real cache, so
+// existing tests (which rely on the recorded test-phone responses) keep
+// working untouched.
+
+interface SerializedFFResponse {
+  status: number;
+  statusText: string;
+  body: string;
+  headers: Record<string, string>;
+}
+
+function ffCacheKey(url: string, method: string, body: string | null): string {
+  return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function ffCacheFilePath(key: string): string {
+  const hash = createHash('sha256').update(key).digest('hex');
+  return resolvePath(FF_CACHE_DIR, `${hash}.json`);
+}
+
+function seedFastForward(
+  url: string,
+  method: string,
+  body: string | null,
+  response: SerializedFFResponse
+): void {
+  if (!existsSync(FF_CACHE_DIR)) {
+    mkdirSync(FF_CACHE_DIR, { recursive: true });
+  }
+  const key = ffCacheKey(url, method, body);
+  const entry = {
+    key,
+    value: { __ff_promise_result: true, value: response },
+    timestamp: Date.now(),
+  };
+  writeFileSync(ffCacheFilePath(key), JSON.stringify(entry, null, 2), 'utf8');
+}
+
+/**
+ * Seed a Twilio Verify VerificationCheck response for (phone, code).
+ * Returns whether seeding succeeded (false if TWILIO_VERIFY_SERVICE_SID is unset).
+ */
+function seedTwilioVerifyCheck(
+  phone: string,
+  code: string,
+  approved: boolean,
+  options: { httpStatus?: number; twilioCode?: number; twilioMessage?: string } = {}
+): boolean {
+  if (TWILIO_VERIFY_SERVICE_SID === '') return false;
+  const url = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`;
+  const body = new URLSearchParams({ To: phone, Code: code }).toString();
+  const httpStatus = options.httpStatus ?? 200;
+  const responseBody =
+    httpStatus === 200
+      ? JSON.stringify({
+          account_sid: 'ACseed',
+          channel: 'sms',
+          service_sid: TWILIO_VERIFY_SERVICE_SID,
+          sid: `VE${randomUUID().replace(/-/g, '')}`.slice(0, 34),
+          status: approved ? 'approved' : 'pending',
+          to: phone,
+          valid: approved,
+        })
+      : JSON.stringify({
+          code: options.twilioCode ?? 20404,
+          message: options.twilioMessage ?? 'Seeded error',
+          status: httpStatus,
+        });
+  seedFastForward(url, 'POST', body, {
+    status: httpStatus,
+    statusText: httpStatus === 200 ? 'OK' : 'Error',
+    body: responseBody,
+    headers: { 'content-type': 'application/json' },
+  });
+  return true;
+}
+
+/**
+ * Seed a Twilio Verify Verifications (send) response for a phone.
+ */
+function seedTwilioVerifySend(
+  phone: string,
+  options: { httpStatus?: number; twilioCode?: number; twilioMessage?: string } = {}
+): boolean {
+  if (TWILIO_VERIFY_SERVICE_SID === '') return false;
+  const url = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/Verifications`;
+  const body = new URLSearchParams({ To: phone, Channel: 'sms' }).toString();
+  const httpStatus = options.httpStatus ?? 201;
+  const responseBody =
+    httpStatus >= 400
+      ? JSON.stringify({
+          code: options.twilioCode ?? 60200,
+          message: options.twilioMessage ?? 'Seeded error',
+          status: httpStatus,
+        })
+      : JSON.stringify({
+          account_sid: 'ACseed',
+          channel: 'sms',
+          service_sid: TWILIO_VERIFY_SERVICE_SID,
+          sid: `VE${randomUUID().replace(/-/g, '')}`.slice(0, 34),
+          status: 'pending',
+          to: phone,
+          valid: false,
+        });
+  seedFastForward(url, 'POST', body, {
+    status: httpStatus,
+    statusText: httpStatus < 400 ? 'OK' : 'Error',
+    body: responseBody,
+    headers: { 'content-type': 'application/json' },
+  });
+  return true;
+}
+
+/**
+ * Seed a Supabase Admin POST /auth/v1/admin/users response for a phone.
+ */
+function seedSupabaseAdminCreate(
+  phone: string,
+  options: { httpStatus?: number; userId?: string; errorCode?: string; msg?: string } = {}
+): boolean {
+  if (SUPABASE_URL === '') return false;
+  const url = `${SUPABASE_URL}/auth/v1/admin/users`;
+  const body = JSON.stringify({ phone, phone_confirm: true });
+  const httpStatus = options.httpStatus ?? 200;
+  const responseBody =
+    httpStatus < 400
+      ? JSON.stringify({ id: options.userId ?? randomUUID(), phone })
+      : JSON.stringify({
+          error_code: options.errorCode ?? 'unknown',
+          msg: options.msg ?? 'Seeded error',
+        });
+  seedFastForward(url, 'POST', body, {
+    status: httpStatus,
+    statusText: httpStatus < 400 ? 'OK' : 'Error',
+    body: responseBody,
+    headers: { 'content-type': 'application/json' },
+  });
+  return true;
+}
+
+/**
+ * Generate a unique fake phone number for a test, in E.164 format.
+ * Uses an unused-but-syntactically-valid number block so seeded cache entries
+ * never collide with real Twilio responses recorded for legitimate test phones.
+ *
+ * Format: `+1 555 XXX YYYY` (NANP-shaped) where XXX is a per-suite-run random
+ * 3-digit prefix and YYYY is a 4-digit monotonic counter. Distinct across
+ * concurrent tests in the same suite (counter) and across suite runs (prefix).
+ */
+let fakePhoneCounter = 0;
+const fakePhonePrefix = String(100 + Math.floor(Math.random() * 800)); // 100-899
+function uniqueFakePhone(): string {
+  fakePhoneCounter++;
+  const counterPart = String(fakePhoneCounter).padStart(4, '0').slice(-4);
+  // E.164 layout: +1 (country) 555 (area) XXX (prefix) YYYY (counter) = 10 NANP digits
+  return `+1555${fakePhonePrefix}${counterPart}`;
+}
+
+/** True if both Twilio and Supabase config are available for seeding. */
+function canSeedAuthFlow(): boolean {
+  return TWILIO_VERIFY_SERVICE_SID !== '' && SUPABASE_URL !== '';
 }
 
 // ==================== SETUP ====================
@@ -1529,6 +1719,430 @@ async function testAnonymous_sessionTimingConsistency() {
   assert(diff < 30, `expires_at and expires_in are inconsistent. diff=${diff}s`);
 }
 
+// ==================== SEEDED-CACHE COVERAGE TESTS ====================
+// These tests exercise the verify-otp + onboarding paths that depend on a
+// successful Twilio + Supabase response. The recorded cache for the test
+// phone returns "pending" (Twilio's actual response), so the user-init
+// branches in service.ts/service.twilio.ts never run. To cover them we
+// pre-seed the fast-forward cache with crafted responses for unique fake
+// phones that don't collide with the recorded fixtures.
+
+const SEED_OTP = '888888';
+
+/**
+ * Successful verify-otp flow for a brand-new user, no firstName/lastName.
+ * Exercises:
+ *   - service.twilio.ts: checkTwilioVerifyOTP success branch + findOrCreateSupabaseUser create branch
+ *   - service.ts:        verifyOtpAndInitUser happy path + handleNewUser with fullName=null
+ */
+async function testVerifyOtp_seededHappyPath_newUser() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    success?: boolean;
+    user?: { id?: string; phone?: string; is_anonymous?: boolean };
+    session?: { access_token?: string };
+  };
+  assert(body.success === true, 'Expected success=true on seeded verify-otp');
+  assert(body.user?.id === userId, `Expected user.id=${userId}, got ${body.user?.id}`);
+  assert(body.user?.phone === phone, `Expected user.phone=${phone}, got ${body.user?.phone}`);
+  assert(body.user?.is_anonymous === false, 'Expected is_anonymous=false');
+  assert(typeof body.session?.access_token === 'string', 'Expected session.access_token');
+}
+
+/**
+ * verify-otp for a brand-new user WITH firstName + lastName.
+ * Exercises handleNewUser with fullName built from both name parts.
+ */
+async function testVerifyOtp_seededHappyPath_newUserBothNames() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({
+      phone,
+      token: SEED_OTP,
+      firstName: 'Seed',
+      lastName: 'User',
+    }),
+  });
+
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { user?: { id?: string } };
+  assert(body.user?.id === userId, `Expected user.id=${userId}`);
+}
+
+/**
+ * verify-otp twice with the same phone — exercises handleExistingUser path.
+ * After the first call, the user exists in DB; the second call hits findUserById,
+ * goes through handleExistingUser, and (since the user is non-anonymous and has
+ * no name to update) takes the "already exists" no-op branch.
+ */
+async function testVerifyOtp_seededExistingUser_noUpdates() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  // First verify creates the user
+  const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP, firstName: 'Original', lastName: 'Name' }),
+  });
+  assertStatus(r1.status, 200, r1.data);
+
+  // Second verify: user exists, has name, isAnonymous=false → "already exists" branch
+  const r2 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(r2.status, 200, r2.data);
+  const body2 = r2.data as { user?: { id?: string } };
+  assert(body2.user?.id === userId, 'Second verify should return same userId');
+}
+
+/**
+ * verify-otp on existing user that is missing a name, with new firstName provided.
+ * Exercises the handleExistingUser branch where the user already has phone but
+ * no name → updates.name is set → repo.updateUser runs.
+ */
+async function testVerifyOtp_seededExistingUser_nameUpdate() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  // First call: creates user with NO name
+  const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(r1.status, 200, r1.data);
+
+  // Second call: existing user, no name yet, supply firstName → name update branch
+  const r2 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP, firstName: 'Updated', lastName: 'Person' }),
+  });
+  assertStatus(r2.status, 200, r2.data);
+}
+
+/**
+ * verify-otp with an anonymousUserId that owns agents → triggers the merge path
+ * AND drives handleNewUser for the authenticated user.
+ */
+async function testVerifyOtp_seededMergeAnonymousResources() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  // Set up an anonymous user with an agent so transferAgents has work to do
+  const { userId: anonUserId } = await createAnonSession();
+  const agentRes = await createAgentWithRetry(anonUserId, 'Seeded merge agent');
+  if (agentRes.status !== 200 && agentRes.status !== 201) {
+    throw new Error(
+      `Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`
+    );
+  }
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({
+      phone,
+      token: SEED_OTP,
+      anonymousUserId: anonUserId,
+      firstName: 'Merge',
+    }),
+  });
+
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { user?: { id?: string } };
+  assert(body.user?.id === userId, 'Expected merged-into userId');
+}
+
+/**
+ * verify-otp with seeded approved Twilio + complete-onboarding → triggers
+ * the SMS-sending branch in completeOnboarding (because user.phone is set).
+ *
+ * The SMS is fire-and-forget via sendSms().then(sendMms). We must wait for
+ * BOTH to complete before this test returns; otherwise the surge.app HTTP
+ * call leaks into a later boundary test's capture window and fails its
+ * "no SMS calls for anonymous user" assertion. To make this deterministic,
+ * the test runs SEQUENTIALLY (before the boundary tests) and explicitly
+ * waits for the SMS captures to land.
+ */
+async function testCompleteOnboarding_seededPhoneVerifySendsSms() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  const verifyRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP, firstName: 'Welcome' }),
+  });
+  assertStatus(verifyRes.status, 200, verifyRes.data);
+  const verifyBody = verifyRes.data as { session?: { access_token?: string } };
+  const token = verifyBody.session?.access_token;
+  assert(typeof token === 'string', 'Expected access_token after seeded verify-otp');
+
+  // Snapshot capture cursor so we can wait for THIS test's SMS to complete.
+  const captureCursor = ctx.captureAvailable ? await getCaptureCursor() : null;
+
+  const res = await request(`${BASE_URL}/api/auth/complete-onboarding`, {
+    method: 'POST',
+    headers: authHeaders(token!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { success?: boolean; alreadyCompleted?: boolean };
+  assert(body.success === true, 'Expected complete-onboarding success=true');
+  assert(body.alreadyCompleted === false, 'Expected first onboarding not already completed');
+
+  // Drain the fire-and-forget SMS chain. completeOnboarding does:
+  //   sendSms(phone, welcome).then(() => sendMms(phone, '', vcardUrl)).catch(...)
+  // Both make POST https://api.surge.app/accounts/{id}/messages and the body
+  // contains `"to":"<phone>"`. Poll the capture log until we see TWO surge.app
+  // calls for our phone (sendSms + sendMms), or timeout. After both land, no
+  // further surge.app call fires for this user — so a subsequent boundary
+  // test won't see leaked captures.
+  if (captureCursor !== null) {
+    // Poll-until-predicate (not a retry of a failing op): wait for both Surge
+    // calls (sendSms + sendMms) to land in the capture log.
+    const deadline = Date.now() + 8000;
+    let surgeOk = false;
+    // eslint-disable-next-line no-restricted-syntax -- poll loop, not a retry
+    while (Date.now() < deadline) {
+      const calls = await readCapturesAfter(captureCursor);
+      const ours = calls.filter(
+        (c) => c.url.includes('surge.app') && c.requestBody?.includes(phone)
+      );
+      if (ours.length >= 2) {
+        surgeOk = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (surgeOk) {
+      return;
+    }
+    // Surge not reachable / Surge creds missing — fall through. We've still
+    // exercised the SMS branch (the catch handler runs on rejection). To
+    // protect downstream boundary tests, give one more grace period so any
+    // pending HTTP error capture lands before we return.
+    await new Promise((r) => setTimeout(r, 500));
+  } else {
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+/**
+ * Twilio VerificationCheck returns 400 with code 60202 → "Too many attempts".
+ * Exercises the rate-limit error branch in checkTwilioVerifyOTP.
+ */
+async function testVerifyOtp_seededTooManyAttempts() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+    httpStatus: 400,
+    twilioCode: 60202,
+    twilioMessage: 'Max check attempts reached',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'too-many-attempts');
+  assert(
+    /too many|attempts/i.test(body.error),
+    `Expected too-many-attempts message, got: ${body.error}`
+  );
+}
+
+/**
+ * Twilio VerificationCheck returns 404 with code 20404 → "Code expired".
+ * Exercises the expired-code error branch.
+ */
+async function testVerifyOtp_seededCodeExpired() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+    httpStatus: 404,
+    twilioCode: 20404,
+    twilioMessage: 'Verification not found',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'expired-code');
+  assert(/expired|new one/i.test(body.error), `Expected expired-code message, got: ${body.error}`);
+}
+
+/**
+ * Twilio VerificationCheck returns 400 with a generic Twilio code (not 20404,
+ * not 60202) → falls through to the default "Invalid code" message.
+ */
+async function testVerifyOtp_seededGenericTwilioError() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+    httpStatus: 400,
+    twilioCode: 60100, // some unrelated Twilio code
+    twilioMessage: 'Generic Twilio error',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'generic-twilio-error');
+  assert(/invalid code/i.test(body.error), `Expected default message, got: ${body.error}`);
+}
+
+/**
+ * Twilio approved but Supabase admin returns 422 phone_exists → service.twilio.ts
+ * findOrCreateSupabaseUser returns null → verify-otp returns 500 with
+ * "Failed to create user session".
+ */
+async function testVerifyOtp_seededSupabasePhoneExists() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, {
+    httpStatus: 422,
+    errorCode: 'phone_exists',
+    msg: 'Phone already in use',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(res.status, 500, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'supabase-phone-exists');
+  assert(/create user session/i.test(body.error), `Got error: ${body.error}`);
+}
+
+/**
+ * Twilio approved but Supabase admin returns generic 500 → falls through the
+ * non-422 error branch.
+ */
+async function testVerifyOtp_seededSupabaseGenericError() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, {
+    httpStatus: 500,
+    errorCode: 'server_error',
+    msg: 'Supabase down',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(res.status, 500, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'supabase-generic-error');
+  assert(/create user session/i.test(body.error), `Got error: ${body.error}`);
+}
+
+/**
+ * send-otp: Twilio Verify returns non-2xx → service.twilio.ts sendTwilioVerifyOTP
+ * surfaces the Twilio message via the 400 response.
+ */
+async function testSendOtp_seededTwilioError() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifySend(phone, {
+    httpStatus: 400,
+    twilioCode: 60200,
+    twilioMessage: 'Invalid To parameter',
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'send-otp-twilio-error');
+  assert(/invalid|to/i.test(body.error), `Expected Twilio error message, got: ${body.error}`);
+}
+
+/**
+ * send-otp happy path with seeded 201 from Twilio Verify Verifications.
+ * Exercises the success log branch in sendTwilioVerifyOTP.
+ */
+async function testSendOtp_seededHappyPath() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  seedTwilioVerifySend(phone, { httpStatus: 201 });
+
+  const res = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { success?: boolean; message?: string };
+  assert(body.success === true, 'Expected success=true');
+  assert(body.message === 'OTP sent', `Expected message='OTP sent', got: ${body.message}`);
+}
+
+/**
+ * Verify-otp where the user already exists in our DB (findUserByPhone hits) and
+ * is NOT anonymous, so findOrCreateSupabaseUser returns the existing userId
+ * without calling Supabase. Then handleExistingUser runs with no updates.
+ */
+async function testVerifyOtp_seededExistingDbUser() {
+  if (!canSeedAuthFlow()) return;
+  const phone = uniqueFakePhone();
+  const userId = randomUUID();
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+
+  // First verify creates the user
+  const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP, firstName: 'First', lastName: 'Last' }),
+  });
+  assertStatus(r1.status, 200, r1.data);
+
+  // Re-seed Supabase create to error so we can prove the second call doesn't
+  // reach Supabase (it should hit findUserByPhone in our DB and short-circuit).
+  seedSupabaseAdminCreate(phone, { httpStatus: 500, errorCode: 'should_not_be_called' });
+
+  const r2 = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone, token: SEED_OTP }),
+  });
+  assertStatus(r2.status, 200, r2.data);
+  const b2 = r2.data as { user?: { id?: string } };
+  assert(b2.user?.id === userId, 'Second verify should return same userId from DB');
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -1669,6 +2283,55 @@ async function runAll() {
       name: 'POST /anonymous -- session timing consistency',
       fn: testAnonymous_sessionTimingConsistency,
     },
+    // Seeded-cache coverage tests — exercise verify-otp + onboarding paths
+    // that depend on Twilio/Supabase responses our recorded fixtures don't
+    // produce (the test phone returns "pending", never "approved").
+    {
+      name: 'POST /verify-otp -- seeded happy path, new user (no name)',
+      fn: testVerifyOtp_seededHappyPath_newUser,
+    },
+    {
+      name: 'POST /verify-otp -- seeded happy path, new user with both names',
+      fn: testVerifyOtp_seededHappyPath_newUserBothNames,
+    },
+    {
+      name: 'POST /verify-otp -- seeded existing user no updates',
+      fn: testVerifyOtp_seededExistingUser_noUpdates,
+    },
+    {
+      name: 'POST /verify-otp -- seeded existing user name update',
+      fn: testVerifyOtp_seededExistingUser_nameUpdate,
+    },
+    {
+      name: 'POST /verify-otp -- seeded merge anonymous resources',
+      fn: testVerifyOtp_seededMergeAnonymousResources,
+    },
+    {
+      name: 'POST /verify-otp -- seeded too-many-attempts (60202)',
+      fn: testVerifyOtp_seededTooManyAttempts,
+    },
+    {
+      name: 'POST /verify-otp -- seeded code expired (404/20404)',
+      fn: testVerifyOtp_seededCodeExpired,
+    },
+    {
+      name: 'POST /verify-otp -- seeded generic Twilio error',
+      fn: testVerifyOtp_seededGenericTwilioError,
+    },
+    {
+      name: 'POST /verify-otp -- seeded Supabase phone_exists 422',
+      fn: testVerifyOtp_seededSupabasePhoneExists,
+    },
+    {
+      name: 'POST /verify-otp -- seeded Supabase generic 5xx',
+      fn: testVerifyOtp_seededSupabaseGenericError,
+    },
+    { name: 'POST /send-otp -- seeded Twilio error', fn: testSendOtp_seededTwilioError },
+    { name: 'POST /send-otp -- seeded happy path', fn: testSendOtp_seededHappyPath },
+    {
+      name: 'POST /verify-otp -- seeded existing DB user (no Supabase)',
+      fn: testVerifyOtp_seededExistingDbUser,
+    },
   ];
 
   console.log(
@@ -1681,11 +2344,20 @@ async function runAll() {
     console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
   }
 
-  // Phase 3: Sequential state-dependent tests + boundary capture tests
+  // Phase 3: Sequential state-dependent tests + boundary capture tests.
+  //
+  // The seeded SMS-onboarding test runs sequentially BEFORE the boundary tests
+  // because completeOnboarding fires SMS via Surge in a fire-and-forget chain;
+  // running it in parallel let the SMS HTTP call leak into a later boundary
+  // test's capture window and break its no-outbound assertion.
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
     {
       name: 'POST /complete-onboarding -- happy then idempotent',
       fn: testCompleteOnboarding_happyThenIdempotent,
+    },
+    {
+      name: 'POST /complete-onboarding -- seeded phone-verified sends SMS',
+      fn: testCompleteOnboarding_seededPhoneVerifySendsSms,
     },
   ];
 

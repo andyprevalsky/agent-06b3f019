@@ -70,7 +70,11 @@ function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>)
 }
 
 export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unknown> {
-  const { staticSystem, dynamicSystem, messages: anthropicMessages } = transformMessagesForAnthropic(opts.messages);
+  const {
+    staticSystem,
+    dynamicSystem,
+    messages: anthropicMessages,
+  } = transformMessagesForAnthropic(opts.messages);
 
   const systemBlocks: Record<string, unknown>[] = [IDENTITY_BLOCK, DISCLAIMER_BLOCK];
   if (staticSystem) {

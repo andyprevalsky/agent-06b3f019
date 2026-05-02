@@ -298,12 +298,6 @@ def format_result(result: Dict[str, Any]) -> str:  # noqa: C901
             for link in links:
                 lines.append(f"- {link}")
 
-    if "findall_id" in result:
-        lines.append(f"\nFind All ID: {result['findall_id']}")
-
-    if "monitor_id" in result:
-        lines.append(f"\nMonitor ID: {result['monitor_id']}")
-
     if "output" in result:
         output = result["output"]
         if isinstance(output, dict) and "content" in output:

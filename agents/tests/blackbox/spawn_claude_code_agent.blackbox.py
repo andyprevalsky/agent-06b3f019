@@ -1016,8 +1016,9 @@ async def test_spawn_activity_happy_path_end_to_end():
             "github_repo_url": "https://github.com/o/r",
         }
 
+    # B2/C12: success requires score >= 1.0 (matching unified verifier semantics).
     async def fake_verifier(**kwargs):
-        return (0.95, "great", {"out": {"path": "/home/user/output/a.txt"}}, 10, 4)
+        return (1.0, "great", {"out": {"path": "/home/user/output/a.txt"}}, 10, 4)
 
     async def fake_loop(**kwargs):
         return (0, False, [], 5, 3)

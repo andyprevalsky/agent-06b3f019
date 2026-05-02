@@ -162,24 +162,26 @@ async function startChatMode(
       });
     });
 
-  const claudeToken = await fetchClaudeTokenForUser(userId) ?? undefined;
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model, claudeToken }).catch((err: unknown) => {
-    log.error('Chat handler error', {
-      agent_id: agentDbId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    repo
-      .failAgentIfStillActive(
-        agentDbId,
-        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
-      )
-      .catch((updateErr: unknown) =>
-        log.error('Failed to update agent status', {
-          agent_id: agentDbId,
-          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-        })
-      );
-  });
+  const claudeToken = (await fetchClaudeTokenForUser(userId)) ?? undefined;
+  handleChatMessage({ agentId: agentDbId, userId, model: body.model, claudeToken }).catch(
+    (err: unknown) => {
+      log.error('Chat handler error', {
+        agent_id: agentDbId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      repo
+        .failAgentIfStillActive(
+          agentDbId,
+          'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+        )
+        .catch((updateErr: unknown) =>
+          log.error('Failed to update agent status', {
+            agent_id: agentDbId,
+            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+          })
+        );
+    }
+  );
 }
 /* c8 ignore stop */
 
@@ -282,7 +284,7 @@ async function launchAgentWorkflow(
     return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
-  startChatMode(body, agent.agent.id, agentId, userId);
+  void startChatMode(body, agent.agent.id, agentId, userId);
   return null;
 }
 /* c8 ignore stop */

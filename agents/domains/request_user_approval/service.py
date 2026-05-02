@@ -161,7 +161,7 @@ async def request_user_approval_direct(
 ) -> ApprovalResult:
     """Direct call helper for tools that need to request user approval.
 
-    Used by tools that make direct calls (message_person, send_sms_as_user, etc).
+    Used by tools that make direct calls (e.g. message_person).
 
     Args:
         workflow_instance: The workflow instance (self).

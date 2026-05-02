@@ -1,7 +1,10 @@
 """Constants and configuration for the knowledge-base domain."""
 
-# Internal tools to skip when building trajectory blueprints
-SKIP_TOOLS: frozenset[str] = frozenset({"check_progress", "completion_summary"})
+# Internal tools to skip when building trajectory blueprints.
+# Note: verifier feedback is now tagged toolName="attempt_completion" with
+# metadata.verifierMessage=True; service.py filters those rows by checking the
+# `verifierMessage` flag before consulting this set.
+SKIP_TOOLS: frozenset[str] = frozenset({"completion_summary"})
 
 # Maximum character length before truncating user messages in blueprints
 USER_MESSAGE_TRUNCATE_LENGTH = 500

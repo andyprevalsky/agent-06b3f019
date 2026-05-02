@@ -5,7 +5,7 @@
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
-import { createStreamingCompletion } from '../rose';
+import { createStreamingCompletion, markCacheable } from '../rose';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { downloadFromStorage } from '../storage';
@@ -304,11 +304,14 @@ export async function callGeneratorLlm(params: {
 }): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
-  // Convert messages to OpenAI format (with multimodal support)
+  // Convert messages to OpenAI format (with multimodal support).
+  // The system prompt is wrapped in `markCacheable` so the static prefix is
+  // explicitly tagged for Anthropic prompt caching at the call-site level.
+  // See back-end/src/providers/rose/cache.ts for the helper contract.
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [{ role: 'system', content: GENERATOR_SYSTEM_PROMPT }];
+  }> = [markCacheable(GENERATOR_SYSTEM_PROMPT)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -403,17 +406,22 @@ export async function callGeneratorLlm(params: {
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
   const usage: ChatLlmUsage = {
-    prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
-    cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
   };
   let actualModel = '';
-  let usageData: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-    finish_reason?: string;
-  } | undefined;
+  let usageData:
+    | {
+        prompt_tokens: number;
+        completion_tokens: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        finish_reason?: string;
+      }
+    | undefined;
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
@@ -421,7 +429,8 @@ export async function callGeneratorLlm(params: {
 
     // Detect user's Claude token usage from "-claude" suffix in actual_model
     if (chunk.actual_model) actualModel = chunk.actual_model;
-    if (chunk.usage) usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
+    if (chunk.usage)
+      usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
     if (!isClaude && actualModel?.endsWith('-claude')) {
       isClaude = true;
     }

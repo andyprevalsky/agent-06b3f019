@@ -68,7 +68,7 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
       });
     }
   } else if (agentForChat !== null && agentForChat !== undefined) {
-    const claudeToken = await fetchClaudeTokenForUser(agentForChat.userId) ?? undefined;
+    const claudeToken = (await fetchClaudeTokenForUser(agentForChat.userId)) ?? undefined;
     handleChatMessage({
       agentId,
       userId: agentForChat.userId,

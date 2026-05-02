@@ -119,10 +119,10 @@ export async function getToolUsageForAgent(
         if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
           totalTokens += item.number_of_tokens;
         }
-        if (item.cache_read_input_tokens) {
+        if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
           cacheReadInputTokens += item.cache_read_input_tokens;
         }
-        if (item.cache_creation_input_tokens) {
+        if (item.cache_creation_input_tokens !== undefined && item.cache_creation_input_tokens !== 0) {
           cacheCreationInputTokens += item.cache_creation_input_tokens;
         }
       }
@@ -195,10 +195,10 @@ export async function getToolUsageForTree(
         if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
           totalTokens += item.number_of_tokens;
         }
-        if (item.cache_read_input_tokens) {
+        if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
           cacheReadInputTokens += item.cache_read_input_tokens;
         }
-        if (item.cache_creation_input_tokens) {
+        if (item.cache_creation_input_tokens !== undefined && item.cache_creation_input_tokens !== 0) {
           cacheCreationInputTokens += item.cache_creation_input_tokens;
         }
       }

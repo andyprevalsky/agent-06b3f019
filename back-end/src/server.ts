@@ -42,29 +42,30 @@ import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
 
-// System tools available to all Rose agents (mirrors SYSTEM_TOOLS in agent_workflow.py)
+// System tools available to all Rose agents (mirrors the live tool registry in
+// agents/tools/). Drives the public Bazaar listing description below.
 const SYSTEM_TOOLS = [
   { name: 'web_search', description: 'Search the web for information using Perplexity AI' },
-  { name: 'deep_research', description: 'Conduct deep, comprehensive research on a topic' },
-  { name: 'spawn_sub_agent', description: 'Spawn a sub-agent for delegating complex subtasks' },
+  { name: 'web_fetch', description: 'Fetch and extract content from a specific URL' },
+  { name: 'spawn_sub_agents', description: 'Spawn sub-agents for delegating complex subtasks' },
   { name: 'spawn_browser_agent', description: 'Spawn autonomous browser agent for web tasks' },
   {
     name: 'spawn_claude_code_agent',
     description: 'Spawn Claude Code agent in E2B sandbox for coding tasks',
   },
-  { name: 'find_all', description: 'Discover entities matching criteria using natural language' },
-  { name: 'enrich', description: 'Enrich entity data from the web' },
-  { name: 'monitor', description: 'Monitor the web for changes on a schedule' },
-  { name: 'check_monitor_events', description: 'Check for events from monitors' },
-  { name: 'search_user_network_for_people', description: "Search user's network for people" },
+  { name: 'call_phone_number', description: 'Place an automated phone call to a target number' },
+  { name: 'knowledge_base', description: 'Search and retrieve from the user knowledge base' },
+  { name: 'read_message_history', description: "Read the user's recent message history" },
   {
     name: 'message_person',
     description: 'Send messages via iMessage or email with AI-generated content',
   },
   {
     name: 'send_message_to_user',
-    description: 'Message the user from PLAN phase (optionally blocking for a reply)',
+    description: 'Message the user (optionally blocking for a reply)',
   },
+  { name: 'request_user_approval', description: "Request explicit user approval before continuing" },
+  { name: 'wait_for', description: 'Wait for a specific event or condition' },
   { name: 'wait_seconds', description: 'Pause execution for a specified duration' },
 ];
 

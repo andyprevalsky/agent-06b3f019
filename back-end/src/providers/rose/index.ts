@@ -7,6 +7,7 @@
  */
 
 export { createStreamingCompletion } from './client';
+export { markCacheable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 export type {
   CompletionChunk,
   CompletionMessage,

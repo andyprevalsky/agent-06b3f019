@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/* eslint-disable no-console, max-lines */
 /**
  * Black-box tests for /api/data — additional coverage: person_id, limits, source routing
  *
@@ -511,6 +511,196 @@ async function testGrep_longPatternString() {
   assertSchema(GrepResponse, res.data, 'POST /grep (long pattern)');
 }
 
+// --- grep: pattern as boolean / array / object — invalid types ---
+
+async function testGrep_booleanPattern() {
+  // pattern type validation should reject booleans
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: true }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'INVALID_PATTERN') {
+    throw new Error(`Expected INVALID_PATTERN, got: ${body.error}`);
+  }
+}
+
+async function testGrep_arrayPattern() {
+  // pattern type validation should reject arrays
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: ['hello'] }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'INVALID_PATTERN') {
+    throw new Error(`Expected INVALID_PATTERN, got: ${body.error}`);
+  }
+}
+
+async function testGrep_objectPattern() {
+  // pattern type validation should reject objects
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: { foo: 'bar' } }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'INVALID_PATTERN') {
+    throw new Error(`Expected INVALID_PATTERN, got: ${body.error}`);
+  }
+}
+
+// --- grep: agent_network with multi-level parent chain ---
+// Exercises repo.findRootAgentId multi-iteration loop (line 307 — while continues
+// past the first iteration, walking up from grandchild through child to root).
+
+async function testGrep_agentNetworkMultiLevelTree() {
+  // Build a chain: root → child → grandchild
+  const rootId = await createAgentWithRetry(
+    { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    { goal: 'multi-level tree root' }
+  );
+
+  try {
+    const childId = await createAgentWithRetry(
+      { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      { goal: 'multi-level tree child', parent_agent_id: rootId }
+    );
+
+    const grandchildId = await createAgentWithRetry(
+      { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      { goal: 'multi-level tree grandchild', parent_agent_id: childId }
+    );
+
+    try {
+      // Search starting from grandchild — repo.findRootAgentId walks up 2 levels
+      const res = await request(`${BASE_URL}/api/data/grep`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+        body: JSON.stringify({
+          pattern: '',
+          source: 'agent_network_user_messages',
+          agent_id: grandchildId,
+        }),
+      });
+      assertStatus(res.status, 200, res.data);
+      assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network multi-level tree');
+    } finally {
+      await request(`${BASE_URL}/api/agents/${grandchildId}`, {
+        method: 'DELETE',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      });
+      await request(`${BASE_URL}/api/agents/${childId}`, {
+        method: 'DELETE',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      });
+    }
+  } finally {
+    await request(`${BASE_URL}/api/agents/${rootId}`, {
+      method: 'DELETE',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    });
+  }
+}
+
+// Exercises agentNetworkService.ts line 98 — long-text truncation
+// (msg.text > MAX_AGENT_NETWORK_TEXT (500) chars → substring + '...').
+async function testGrep_agentNetworkLongTextTruncation() {
+  // Use a goal > 500 chars; goal becomes a USER message, returned by grep
+  const longGoal = 'Long goal: ' + 'x'.repeat(600) + ' END';
+  const agentId = await createAgentWithRetry(
+    { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    { goal: longGoal }
+  );
+
+  try {
+    const res = await request(`${BASE_URL}/api/data/grep`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      body: JSON.stringify({
+        pattern: 'Long goal',
+        source: 'agent_network_user_messages',
+        agent_id: agentId,
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const body = assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network long-text');
+    if (body.matches.length === 0) {
+      throw new Error('Expected to find the long-goal user message');
+    }
+    // Verify text was truncated (ends with '...' and length close to 500)
+    const match = body.matches.find((m) => m.text.includes('Long goal'));
+    if (!match) {
+      throw new Error('Expected to find match containing the long goal text');
+    }
+    if (!match.text.endsWith('...')) {
+      throw new Error(`Expected truncated text to end with '...', got: ${match.text.slice(-20)}`);
+    }
+    if (match.text.length > 510) {
+      throw new Error(`Expected truncated text length <= 503, got ${match.text.length}`);
+    }
+  } finally {
+    await request(`${BASE_URL}/api/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    });
+  }
+}
+
+async function testGrep_agentNetworkStartFromMidTree() {
+  // Search starting from a child (not the root) — exercises walking up to find root
+  // before BFS-ing back down to find siblings.
+  const rootId = await createAgentWithRetry(
+    { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    { goal: 'mid-tree root' }
+  );
+
+  try {
+    const childA = await createAgentWithRetry(
+      { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      { goal: 'mid-tree child A', parent_agent_id: rootId }
+    );
+    const childB = await createAgentWithRetry(
+      { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      { goal: 'mid-tree child B', parent_agent_id: rootId }
+    );
+
+    try {
+      // Search starting from childA — should walk up to root, then BFS to find childB
+      const res = await request(`${BASE_URL}/api/data/grep`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+        body: JSON.stringify({
+          pattern: '',
+          source: 'agent_network_tool_results',
+          agent_id: childA,
+        }),
+      });
+      assertStatus(res.status, 200, res.data);
+      assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network mid-tree start');
+    } finally {
+      await request(`${BASE_URL}/api/agents/${childA}`, {
+        method: 'DELETE',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      });
+      await request(`${BASE_URL}/api/agents/${childB}`, {
+        method: 'DELETE',
+        headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+      });
+    }
+  } finally {
+    await request(`${BASE_URL}/api/agents/${rootId}`, {
+      method: 'DELETE',
+      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    });
+  }
+}
+
 // ==================== RUN ====================
 
 async function runAll() {
@@ -565,6 +755,23 @@ async function runAll() {
       fn: testGrep_noMatchesPath,
     },
     { name: 'POST /data/grep -- long pattern string (600 chars)', fn: testGrep_longPatternString },
+    // additional coverage — invalid pattern types
+    { name: 'POST /data/grep -- boolean pattern -> 400', fn: testGrep_booleanPattern },
+    { name: 'POST /data/grep -- array pattern -> 400', fn: testGrep_arrayPattern },
+    { name: 'POST /data/grep -- object pattern -> 400', fn: testGrep_objectPattern },
+    // additional coverage — agent network tree walking (multi-level parent chain)
+    {
+      name: 'POST /data/grep -- agent_network 3-level tree walks parent chain',
+      fn: testGrep_agentNetworkMultiLevelTree,
+    },
+    {
+      name: 'POST /data/grep -- agent_network from mid-tree finds siblings',
+      fn: testGrep_agentNetworkStartFromMidTree,
+    },
+    {
+      name: 'POST /data/grep -- agent_network long text gets truncated to 500 chars',
+      fn: testGrep_agentNetworkLongTextTruncation,
+    },
   ];
 
   console.log(`Running ${parallelTests.length} tests (concurrency=${CASE_CONCURRENCY})...`);

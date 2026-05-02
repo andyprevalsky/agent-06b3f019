@@ -57,7 +57,8 @@ def test_build_prompt_spawn_suffix_tool_adds_ephemeral_warning():
     from domains.param_populator.service import build_agent_system_prompt
 
     result = build_agent_system_prompt("spawn_agent", "Do thing")
-    assert "EPHEMERAL SESSION" in result
+    assert "Ephemeral Session" in result
+    assert "sessions are ephemeral" in result
 
 
 def test_build_prompt_non_spawn_tool_no_ephemeral_warning():
@@ -65,7 +66,7 @@ def test_build_prompt_non_spawn_tool_no_ephemeral_warning():
     from domains.param_populator.service import build_agent_system_prompt
 
     result = build_agent_system_prompt("web_search", "Find things")
-    assert "EPHEMERAL SESSION" not in result
+    assert "Ephemeral Session" not in result
     assert "web_search" in result
 
 

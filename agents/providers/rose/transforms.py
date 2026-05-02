@@ -154,7 +154,20 @@ def transform_messages_for_anthropic(
             content = msg.get("content")
             if isinstance(content, str):
                 system_parts.append(content)
-            else:
+            elif isinstance(content, list):
+                # Multi-block system content (e.g. message_person stacks a
+                # static-rules block + a per-user voice block, each with its
+                # own cache_control). Concatenate the text of each block —
+                # the boundary marker / global cache_control on the assembled
+                # static_system block in claude_auth.py covers caching here.
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        t = b.get("text") or ""
+                        if t:
+                            system_parts.append(t)
+                    elif isinstance(b, str):
+                        system_parts.append(b)
+            elif content is not None:
                 system_parts.append(json.dumps(content))
             continue
 
@@ -713,12 +726,26 @@ def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
-    Kimi-via-OR).
+    Kimi-via-OR, Anthropic-via-OR).
 
-    Adds cache_control breakpoints so OpenRouter can leverage provider-native
-    caching (Gemini context cache, Anthropic-via-OR, Moonshot automatic).
-    Breakpoints on: first system message (stable prefix) and last message
-    (growing conversation edge).
+    cache_control placement contract (waterfall path, OpenRouter-targeted):
+
+    - We mark the trailing block of the FIRST system message as a cache
+      breakpoint (idempotent — preserves any caller-supplied breakpoints).
+    - We do NOT mark the last user message. Different OR providers interpret
+      the last cache_control marker differently:
+        * Anthropic accepts multiple breakpoints and picks the longest
+          matching prefix.
+        * Gemini-via-OR treats the LAST cache_control as the cache key —
+          marking a per-call dynamic user message there makes every call's
+          cache key unique, defeating the cache.
+      Marking only the stable system prefix gives both providers a usable
+      cache key without trading one off against the other.
+
+    Callers that want additional breakpoints (e.g. message_person stacks a
+    static-rules block + a per-user voice block in one system message)
+    should set cache_control explicitly on the relevant content blocks
+    before calling — those markers are preserved here.
     """
     out = [dict(m) for m in messages]
     if not out:
@@ -729,5 +756,4 @@ def transform_messages_for_openai(
             _add_openrouter_cache_breakpoint(m)
             break
 
-    _add_openrouter_cache_breakpoint(out[-1])
     return out

@@ -166,6 +166,41 @@ class RoseClient:
         # tell *why* we ended up on a non-claude model.
         claude_token_error: Optional[str] = None
 
+        # Per-call state for cache-event emission. We emit one `llm.cache`
+        # event per RoseClient.complete invocation so every caller (structured
+        # streaming, browser_use, message_person, verifier, …) is visible to
+        # agent_cache.py. Tracked lazily because actual_model arrives on the
+        # metadata chunk and the token counts on the usage chunk.
+        _seen_actual_model: str = "unknown"
+        _llm_cache_emitted: bool = False
+
+        def _emit_llm_cache(usage_data: Dict[str, Any]) -> None:
+            nonlocal _llm_cache_emitted
+            if _llm_cache_emitted:
+                return
+            _llm_cache_emitted = True
+            cache_read = usage_data.get("cache_read_input_tokens", 0) or 0
+            cache_write = usage_data.get("cache_creation_input_tokens", 0) or 0
+            prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
+            completion_tokens = usage_data.get("completion_tokens", 0) or 0
+            total_input = prompt_tokens + cache_read + cache_write
+            cache_pct = (
+                round(cache_read / total_input * 100) if total_input > 0 else 0
+            )
+            logger.info(
+                "llm.cache",
+                call_site=call_site,
+                agent_id=agent_id,
+                actual_model=_seen_actual_model,
+                is_claude=_seen_actual_model.endswith("-claude"),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cache_read=cache_read,
+                cache_write=cache_write,
+                cache_hit_pct=cache_pct,
+                finish=usage_data.get("finish_reason", ""),
+            )
+
         try:
             if claude_auth is not None:
                 try:
@@ -184,6 +219,10 @@ class RoseClient:
                         thinking=thinking,
                         effort=effort,
                     )):
+                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                            _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
                         yield chunk
                     logger.info(
                         "rose.complete.claude_auth.done",
@@ -227,6 +266,10 @@ class RoseClient:
                         kind="metadata",
                         data={**chunk.data, "claude_token_error": claude_token_error},
                     )
+                if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                    _seen_actual_model = chunk.data["actual_model"]
+                elif chunk.kind == "usage":
+                    _emit_llm_cache(chunk.data)
                 yield chunk
             logger.info(
                 "rose.complete.waterfall.done",
@@ -280,7 +323,7 @@ class RoseClient:
                     "cache_read_input_tokens"?: int,
                 },
                 "claude_token_error": Optional[str],
-                "mode": "claude" | "racing",
+                "mode": "claude" | "waterfall",
             }
 
         Raises `RoseError` on transport / pool failure and `ValueError` if
@@ -308,8 +351,8 @@ class RoseClient:
         action = normalize_browser_use_response(response.content)
         actual_model = response.actual_model or ""
         # Only the `-claude` suffix indicates direct Anthropic via claudeAuth
-        # (set in claude_auth.py). Plain "anthropic/claude-*" model names from
-        # the waterfall route through OpenRouter and count as racing mode.
+        # (set in claude_auth.py). Plain "anthropic/claude-*" model names came
+        # through the waterfall (sequential pool tries via OpenRouter).
         is_claude = actual_model.endswith("-claude")
 
         return {
@@ -319,7 +362,7 @@ class RoseClient:
             "request_id": response.request_id,
             "usage": response.usage,
             "claude_token_error": response.claude_token_error,
-            "mode": "claude" if is_claude else "racing",
+            "mode": "claude" if is_claude else "waterfall",
         }
 
     async def collect(

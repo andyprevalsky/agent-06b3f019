@@ -586,6 +586,11 @@ def test_reconstruct_agent_response_handles_non_dict_input():
 
 
 def test_transform_messages_for_openai_adds_cache_breakpoints():
+    """Cache-control contract for the OR waterfall path: only the first system
+    message's trailing block gets marked. The last user message must NOT be
+    marked because Gemini-via-OR uses the LAST cache_control as the cache key,
+    which would defeat caching when that block is per-call dynamic.
+    """
     msgs = [
         {"role": "system", "content": "you are helpful"},
         {"role": "user", "content": "hello"},
@@ -597,10 +602,8 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert out[0]["content"] == [
         {"type": "text", "text": "you are helpful", "cache_control": {"type": "ephemeral"}}
     ]
-    # Last message gets cache_control breakpoint
-    assert out[-1]["content"] == [
-        {"type": "text", "text": "bye", "cache_control": {"type": "ephemeral"}}
-    ]
+    # Last user message must remain UNMARKED (cross-provider safe).
+    assert out[-1] == {"role": "user", "content": "bye"}
     # Middle messages are untouched
     assert out[1] == {"role": "user", "content": "hello"}
     assert out[2] == {"role": "assistant", "content": "hi"}

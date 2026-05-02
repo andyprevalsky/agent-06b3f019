@@ -54,11 +54,170 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { PrismaClient } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
+
+// Direct Prisma client for seeding MessageRecord rows that no public API
+// can produce. Reuses the same DATABASE_URL the test backend uses, so
+// writes are immediately visible to the API under test.
+const prisma = new PrismaClient();
+
+// Fast-forward cache directory for seeding deterministic OpenAI embedding
+// responses (mirrors auth.blackbox.ts's seeding pattern). Resolved from this
+// file's location so it works whether the test runs via the runner or directly.
+const FF_CACHE_DIR = resolvePath(
+  __dirname,
+  '../../../../.context/fast-forward-cache/outbound-fetch'
+);
+
+// ---- OpenAI embedding cache seeding -----------------------------------------
+// providers/embeddings.ts now routes through globalThis.fetch (so fetchCapture
+// can intercept), and the OpenAI SDK serializes embedding requests as
+// JSON.stringify(body, null, 2) with encoding_format=base64. We pre-seed the
+// FF cache with a fixed embedding for a known input so create/search paths
+// don't make real OpenAI calls (which return 429 quota-exceeded in CI).
+
+interface SerializedFFResponse {
+  status: number;
+  statusText: string;
+  body: string;
+  headers: Record<string, string>;
+}
+
+function ffCacheKey(url: string, method: string, body: string | null): string {
+  return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function ffCacheFilePath(key: string): string {
+  const hash = createHash('sha256').update(key).digest('hex');
+  return resolvePath(FF_CACHE_DIR, `${hash}.json`);
+}
+
+function seedFastForward(
+  url: string,
+  method: string,
+  body: string | null,
+  response: SerializedFFResponse
+): void {
+  if (!existsSync(FF_CACHE_DIR)) {
+    mkdirSync(FF_CACHE_DIR, { recursive: true });
+  }
+  const key = ffCacheKey(url, method, body);
+  const entry = {
+    key,
+    value: { __ff_promise_result: true, value: response },
+    timestamp: Date.now(),
+  };
+  writeFileSync(ffCacheFilePath(key), JSON.stringify(entry, null, 2), 'utf8');
+}
+
+/**
+ * Mirror of providers/embeddings.ts:buildPersonEmbeddingText so we can compute
+ * the exact input text the SDK will send for a given signal set, then seed
+ * the cache for that text. Keep these two in sync — divergence breaks tests.
+ */
+function buildPersonEmbeddingTextLocal(signals: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (signals.first_name || signals.last_name) {
+    const name = [signals.first_name, signals.last_name].filter(Boolean).join(' ');
+    parts.push(`Name: ${name}`);
+  }
+  if (signals.age) parts.push(`Age: ${signals.age}`);
+  if (signals.location) parts.push(`Location: ${signals.location}`);
+  if (signals.profession) parts.push(`Profession: ${signals.profession}`);
+  if (signals.company) parts.push(`Company: ${signals.company}`);
+  if (signals.title) parts.push(`Title: ${signals.title}`);
+  if (signals.industry) parts.push(`Industry: ${signals.industry}`);
+  if (signals.relation) parts.push(`Relationship: ${signals.relation}`);
+  if (signals.communication_frequency)
+    parts.push(`Communication frequency: ${signals.communication_frequency}`);
+  if (signals.relationship_quality)
+    parts.push(`Relationship quality: ${signals.relationship_quality}`);
+  if (Array.isArray(signals.skills) && signals.skills.length > 0) {
+    parts.push(`Skills: ${(signals.skills as string[]).join(', ')}`);
+  }
+  if (Array.isArray(signals.interests) && signals.interests.length > 0) {
+    parts.push(`Interests: ${(signals.interests as string[]).join(', ')}`);
+  }
+  if (signals.total_online_reach) {
+    parts.push(`Online reach: ${(signals.total_online_reach as number).toLocaleString()} followers`);
+  }
+  if (signals.estimated_net_worth_usd) {
+    const netWorthFormatted = `$${((signals.estimated_net_worth_usd as number) / 1000000).toFixed(1)}M`;
+    parts.push(`Estimated net worth: ${netWorthFormatted}`);
+  }
+  if (signals.estimated_world_power_ranking) {
+    parts.push(`World power ranking: ${signals.estimated_world_power_ranking}/10`);
+  }
+  if (signals.current_bandwidth) parts.push(`Current bandwidth: ${signals.current_bandwidth}`);
+  if (signals.contact_status) parts.push(`Contact status: ${signals.contact_status}`);
+  if (signals.network_orientation)
+    parts.push(`Network orientation: ${signals.network_orientation}`);
+  if (signals.notes) parts.push(`Notes: ${signals.notes}`);
+  return parts.join('. ');
+}
+
+/**
+ * Encode a float32 vector as base64 — the format the OpenAI SDK expects when
+ * encoding_format=base64 (default since v4 for performance, see openai-node#1312).
+ */
+function float32ToBase64(vec: number[]): string {
+  const buf = Buffer.alloc(vec.length * 4);
+  for (let i = 0; i < vec.length; i++) {
+    buf.writeFloatLE(vec[i], i * 4);
+  }
+  return buf.toString('base64');
+}
+
+/**
+ * Seed an OpenAI embedding response for a given input text. Returns the
+ * embedding the SDK will receive (after base64 → float32 round-trip).
+ *
+ * The cache key includes the exact request body the SDK sends:
+ *   {model, input, encoding_format}, JSON.stringify(_, null, 2)
+ */
+function seedOpenAIEmbedding(input: string, embedding: number[]): void {
+  const body = JSON.stringify(
+    {
+      model: 'text-embedding-3-small',
+      input,
+      encoding_format: 'base64',
+    },
+    null,
+    2
+  );
+  const responseBody = JSON.stringify({
+    object: 'list',
+    model: 'text-embedding-3-small',
+    data: [{ object: 'embedding', index: 0, embedding: float32ToBase64(embedding) }],
+    usage: { prompt_tokens: 8, total_tokens: 8 },
+  });
+  seedFastForward('https://api.openai.com/v1/embeddings', 'POST', body, {
+    status: 200,
+    statusText: 'OK',
+    body: responseBody,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+/**
+ * Seed an embedding for a person-shaped signals object — convenience wrapper
+ * around seedOpenAIEmbedding that derives the input text from the signals.
+ */
+function seedEmbeddingForSignals(
+  signals: Record<string, unknown>,
+  embedding: number[]
+): void {
+  const input = buildPersonEmbeddingTextLocal(signals);
+  seedOpenAIEmbedding(input, embedding);
+}
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -350,6 +509,36 @@ async function createPerson(
     person: { id: string; firstName: string; lastName: string };
   };
   return data.person;
+}
+
+/**
+ * Seed a MessageRecord row directly via Prisma. No public API exists for this
+ * (messages enter the system via integration parsers like Gmail/iMessage that
+ * can't be exercised in a blackbox test). Writes hit the same Postgres the
+ * test backend reads from, so they're visible to subsequent API calls.
+ */
+async function seedMessage(
+  personId: string,
+  overrides: Partial<{
+    channel: string;
+    from: string;
+    to: string;
+    timestamp: Date;
+    message: string;
+    externalId: string | null;
+  }> = {}
+): Promise<void> {
+  await prisma.messageRecord.create({
+    data: {
+      personId,
+      channel: (overrides.channel as 'IMESSAGE' | 'EMAIL') ?? 'IMESSAGE',
+      from: overrides.from ?? '+15555550100',
+      to: overrides.to ?? '+15555550101',
+      timestamp: overrides.timestamp ?? new Date(),
+      message: overrides.message ?? 'Test message body',
+      externalId: overrides.externalId ?? `test-${uid()}`,
+    },
+  });
 }
 
 // ==================== SETUP ====================
@@ -952,6 +1141,784 @@ async function testSequential_collisionMerge() {
   assert(second.reason !== undefined, 'Merged response should include reason');
 }
 
+// Covers service.messages.ts:103-107 (formatMessages records map),
+// 181-186 (return path with messages), and the messageRecords destructure
+// path in getPersonMessages. Seeds rows directly via Prisma since no public
+// API can produce MessageRecord rows.
+async function testSequential_messagesReturnRecords() {
+  const suffix = uid();
+  const phone = `+1888${Date.now().toString().slice(-7)}`;
+  const person = await createPerson(ctx.accessToken1!, {
+    first_name: 'WithMsgs',
+    last_name: `Person${suffix}`,
+    phoneNumber: phone,
+  });
+
+  // Seed three messages on different timestamps to verify ordering and limit.
+  const baseTime = Date.now();
+  await seedMessage(person.id, {
+    channel: 'IMESSAGE',
+    from: phone,
+    to: '+15555550101',
+    timestamp: new Date(baseTime - 30_000),
+    message: 'Older message',
+  });
+  await seedMessage(person.id, {
+    channel: 'IMESSAGE',
+    from: '+15555550101',
+    to: phone,
+    timestamp: new Date(baseTime - 15_000),
+    message: 'Middle message',
+  });
+  await seedMessage(person.id, {
+    channel: 'EMAIL',
+    from: phone,
+    to: '+15555550101',
+    timestamp: new Date(baseTime),
+    message: 'Newest message',
+  });
+
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(PersonMessagesResponse, res.data, 'messages with records');
+  assert(parsed.person !== null, 'Expected person to be returned');
+  assert(parsed.messages.length === 3, `Expected 3 messages, got ${parsed.messages.length}`);
+  assert(parsed.count === 3, `Expected count=3, got ${parsed.count}`);
+  // Newest first (DESC order from repo.findPersonWithMessages)
+  assert(
+    parsed.messages[0].message === 'Newest message',
+    `Expected newest first, got "${parsed.messages[0].message}"`
+  );
+  assert(
+    parsed.messages[2].message === 'Older message',
+    `Expected oldest last, got "${parsed.messages[2].message}"`
+  );
+  // ISO timestamps round-trip through formatMessages (line 106 — record.timestamp.toISOString())
+  assert(
+    typeof parsed.messages[0].timestamp === 'string' &&
+      parsed.messages[0].timestamp.includes('T'),
+    `Expected ISO timestamp, got "${parsed.messages[0].timestamp}"`
+  );
+  // Channel preserved through formatMessages map (line 103)
+  assert(
+    parsed.messages[0].channel === 'EMAIL',
+    `Expected EMAIL channel, got "${parsed.messages[0].channel}"`
+  );
+}
+
+// Covers service.messages.ts:154-155 (message_limit path with valid number)
+async function testSequential_messagesRespectsLimit() {
+  const suffix = uid();
+  const phone = `+1887${Date.now().toString().slice(-7)}`;
+  const person = await createPerson(ctx.accessToken1!, {
+    first_name: 'LimitMsgs',
+    last_name: `Person${suffix}`,
+    phoneNumber: phone,
+  });
+
+  for (let i = 0; i < 5; i++) {
+    await seedMessage(person.id, {
+      from: phone,
+      to: '+15555550101',
+      timestamp: new Date(Date.now() - (5 - i) * 1000),
+      message: `Message ${i}`,
+    });
+  }
+
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ phone, message_limit: 2 }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(PersonMessagesResponse, res.data, 'messages with limit');
+  assert(parsed.messages.length === 2, `Expected 2 messages, got ${parsed.messages.length}`);
+}
+
+// Covers service.messages.ts:135-152 (multiple_matches path) — two people
+// with the same first/last name causes findMatchingPeople to return >1.
+async function testSequential_messagesMultipleMatches() {
+  const sharedFirst = `Multi${uid()}`;
+  const sharedLast = 'Match';
+  const personA = await createPerson(ctx.accessToken1!, {
+    first_name: sharedFirst,
+    last_name: sharedLast,
+    phoneNumber: `+1700${Date.now().toString().slice(-7)}`,
+  });
+  // Wait a moment so the second create avoids the collision merge path.
+  const personB = await createPerson(ctx.accessToken1!, {
+    first_name: sharedFirst,
+    last_name: sharedLast,
+    phoneNumber: `+1701${Date.now().toString().slice(-7)}`,
+  });
+  assert(personA.id !== personB.id, 'Expected two distinct people for multi-match');
+
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ firstName: sharedFirst, lastName: sharedLast }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const data = res.data as {
+    person: unknown;
+    messages: unknown[];
+    multiple_matches?: boolean;
+    matches?: Array<{ id: string }>;
+    message?: string;
+  };
+  assert(data.person === null, 'Expected person=null on multi-match');
+  assert(data.multiple_matches === true, 'Expected multiple_matches=true');
+  assert(Array.isArray(data.matches), 'Expected matches array');
+  const matchIds = data.matches!.map((m) => m.id);
+  assert(matchIds.includes(personA.id), 'Expected personA in matches');
+  assert(matchIds.includes(personB.id), 'Expected personB in matches');
+  assert(
+    typeof data.message === 'string' && data.message.includes('name'),
+    `Expected idType=name in message, got "${data.message}"`
+  );
+}
+
+// Covers service.messages.ts:136 idType branch — multiple matches resolved via
+// email (vs name). Two separate people sharing the same email.
+async function testSequential_messagesMultipleMatchesByEmail() {
+  const sharedEmail = `multi-${uid()}@bbtest.example`;
+  const personA = await createPerson(ctx.accessToken1!, {
+    first_name: `EmailMatchA${uid()}`,
+    last_name: 'Test',
+    email: sharedEmail,
+  });
+  // Force a second person with the same email by writing directly through Prisma
+  // (the public API would merge via collision detection on email).
+  const personB = await prisma.person.create({
+    data: {
+      userId: ctx.userId1!,
+      firstName: `EmailMatchB${uid()}`,
+      lastName: 'Test',
+      email: sharedEmail,
+      skills: [],
+      interests: [],
+      emailAddresses: [],
+    },
+  });
+  assert(personA.id !== personB.id, 'Expected two distinct people');
+
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ email: sharedEmail }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const data = res.data as { multiple_matches?: boolean; message?: string };
+  assert(data.multiple_matches === true, 'Expected multiple_matches=true');
+  assert(
+    typeof data.message === 'string' && data.message.includes('email'),
+    `Expected idType=email in message, got "${data.message}"`
+  );
+}
+
+// Covers service.messages.ts:175-178 — person found but has zero messages
+// (the "No messages present" branch, distinct from the no-match branch above).
+async function testSequential_messagesPersonWithoutRecords() {
+  const suffix = uid();
+  const phone = `+1801${Date.now().toString().slice(-7)}`;
+  const person = await createPerson(ctx.accessToken1!, {
+    first_name: 'NoMsgs',
+    last_name: `Person${suffix}`,
+    phoneNumber: phone,
+  });
+
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const data = res.data as {
+    person: { id: string } | null;
+    messages: unknown[];
+    message?: string;
+  };
+  assert(data.person !== null, 'Expected person to be returned');
+  assert(data.person!.id === person.id, 'Person ID mismatch');
+  assert(data.messages.length === 0, 'Expected 0 messages');
+  assert(
+    typeof data.message === 'string' && data.message.includes('No messages present'),
+    `Expected "No messages present" branch, got "${data.message}"`
+  );
+}
+
+// Covers service.messages.ts:201-208 — recent messages with actual rows
+// (formats them, returns count + days, exercises formatMessages from this entry too).
+async function testSequential_recentMessagesReturnsRecords() {
+  const suffix = uid();
+  const phone = `+1802${Date.now().toString().slice(-7)}`;
+  const person = await createPerson(ctx.accessToken1!, {
+    first_name: 'RecentMsgs',
+    last_name: `Person${suffix}`,
+    phoneNumber: phone,
+  });
+  await seedMessage(person.id, {
+    from: phone,
+    to: '+15555550101',
+    timestamp: new Date(),
+    message: 'Recent test message body',
+  });
+
+  const res = await request(`${BASE_URL}/api/people/messages/recent?days=7`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(RecentMessagesResponse, res.data, 'recent w/ records');
+  assert(parsed.count >= 1, `Expected at least 1 recent message, got ${parsed.count}`);
+  assert(parsed.days === 7, `Expected days=7, got ${parsed.days}`);
+  const found = parsed.messages.some((m) => m.message === 'Recent test message body');
+  assert(found, 'Expected to find seeded recent message');
+}
+
+// Covers service.messages.ts:198-200 — old timestamp is filtered out by the
+// days cutoff.
+async function testSequential_recentMessagesRespectsCutoff() {
+  const suffix = uid();
+  const phone = `+1803${Date.now().toString().slice(-7)}`;
+  const person = await createPerson(ctx.accessToken1!, {
+    first_name: 'OldMsgs',
+    last_name: `Person${suffix}`,
+    phoneNumber: phone,
+  });
+  // 100 days old — far outside the 1-day default cutoff.
+  await seedMessage(person.id, {
+    from: phone,
+    to: '+15555550101',
+    timestamp: new Date(Date.now() - 100 * 24 * 60 * 60 * 1000),
+    message: `Stale message ${suffix}`,
+  });
+
+  const res = await request(`${BASE_URL}/api/people/messages/recent?days=1`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(RecentMessagesResponse, res.data, 'recent cutoff');
+  const found = parsed.messages.some((m) => m.message === `Stale message ${suffix}`);
+  assert(!found, 'Old message should be excluded by cutoff');
+}
+
+// Covers routes.ts NaN-limit branches (search ?limit=abc, list ?limit=abc,
+// recent ?limit=abc & ?days=abc) — the parseInt → NaN → undefined fallback.
+async function testRoute_searchNaNLimit() {
+  const res = await request(`${BASE_URL}/api/people/search?limit=abc`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ first_name: 'BBTest' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(SearchPeopleResponse, res.data, 'search NaN limit');
+}
+
+async function testRoute_listNaNLimitAndPage() {
+  const res = await request(`${BASE_URL}/api/people?limit=abc&page=xyz`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(ListPeopleResponse, res.data, 'list NaN limit/page');
+  // Defaults applied: page=1, limit=DEFAULT_PEOPLE_LIMIT (2000).
+  assert(parsed.pagination.page === 1, `Expected page=1, got ${parsed.pagination.page}`);
+  assert(parsed.pagination.limit === 2000, `Expected limit=2000, got ${parsed.pagination.limit}`);
+}
+
+async function testRoute_recentNaNParams() {
+  const res = await request(`${BASE_URL}/api/people/messages/recent?limit=abc&days=xyz`, {
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(RecentMessagesResponse, res.data, 'recent NaN params');
+  // days NaN → undefined → DEFAULT_RECENT_DAYS=1
+  assert(parsed.days === 1, `Expected days=1 default, got ${parsed.days}`);
+}
+
+// Covers routes.ts internal POST /messages — internal caller (API key) without
+// a user_id in body should hit the auth-resolver fall-through and 401.
+async function testRoute_messagesInternalMissingUserId() {
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ firstName: 'Whoever' }),
+  });
+  assertStatus(res.status, 401, res.data);
+  assertSchema(ErrorResponse, res.data, 'POST /messages internal-no-user 401');
+}
+
+// Covers routes.ts internal POST /messages — empty-string user_id from internal
+// caller is rejected as unauthorized (resolveUserId trims to '').
+async function testRoute_messagesInternalEmptyUserId() {
+  const res = await request(`${BASE_URL}/api/people/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ user_id: '   ', firstName: 'Whoever' }),
+  });
+  assertStatus(res.status, 401, res.data);
+  assertSchema(ErrorResponse, res.data, 'POST /messages internal-empty-user 401');
+}
+
+// Covers GET /api/people search-clause path with the "(firstName ' ' lastName)
+// ILIKE" combined-name search clause via a multi-word search term.
+async function testRoute_listSearchByFullName() {
+  const suffix = uid();
+  await createPerson(ctx.accessToken1!, {
+    first_name: `Combined${suffix}`,
+    last_name: `Search${suffix}`,
+  });
+  const res = await request(
+    `${BASE_URL}/api/people?search=${encodeURIComponent(`Combined${suffix} Search`)}`,
+    { headers: authHeaders(ctx.accessToken1!) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(ListPeopleResponse, res.data, 'list full-name search');
+  assert(
+    parsed.pagination.total >= 1,
+    `Expected at least one match for full name, got ${parsed.pagination.total}`
+  );
+}
+
+// Covers list sort=communicationFrequency CASE branch with actual rows that
+// exercise the daily/weekly/monthly ordering.
+async function testRoute_listSortCommFreqOrder() {
+  const suffix = uid();
+  await createPerson(ctx.accessToken1!, {
+    first_name: `Daily${suffix}`,
+    last_name: 'Freq',
+    communication_frequency: 'daily',
+  });
+  await createPerson(ctx.accessToken1!, {
+    first_name: `Yearly${suffix}`,
+    last_name: 'Freq',
+    communication_frequency: 'yearly',
+  });
+  const res = await request(
+    `${BASE_URL}/api/people?sort=communicationFrequency&sortDirection=asc&search=Freq&limit=50`,
+    { headers: authHeaders(ctx.accessToken1!) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(ListPeopleResponse, res.data, 'list comm-freq sort');
+  // Daily (rank 0) should come before yearly (rank 3) when ASC.
+  const daily = parsed.people.findIndex((p) => p.firstName === `Daily${suffix}`);
+  const yearly = parsed.people.findIndex((p) => p.firstName === `Yearly${suffix}`);
+  assert(daily >= 0 && yearly >= 0, 'Both seeded people should appear in list');
+  assert(daily < yearly, `Expected daily before yearly, got daily=${daily}, yearly=${yearly}`);
+}
+
+// Covers list sort=communicationFrequency DESC direction (rank order reversed).
+async function testRoute_listSortCommFreqDesc() {
+  const suffix = uid();
+  await createPerson(ctx.accessToken1!, {
+    first_name: `DescDaily${suffix}`,
+    last_name: 'FreqDesc',
+    communication_frequency: 'daily',
+  });
+  await createPerson(ctx.accessToken1!, {
+    first_name: `DescYearly${suffix}`,
+    last_name: 'FreqDesc',
+    communication_frequency: 'yearly',
+  });
+  const res = await request(
+    `${BASE_URL}/api/people?sort=communicationFrequency&sortDirection=desc&search=FreqDesc&limit=50`,
+    { headers: authHeaders(ctx.accessToken1!) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(ListPeopleResponse, res.data, 'list comm-freq sort desc');
+  const daily = parsed.people.findIndex((p) => p.firstName === `DescDaily${suffix}`);
+  const yearly = parsed.people.findIndex((p) => p.firstName === `DescYearly${suffix}`);
+  assert(daily >= 0 && yearly >= 0, 'Both seeded people should appear');
+  // DESC: yearly (rank 3) should come before daily (rank 0).
+  assert(
+    yearly < daily,
+    `Expected yearly before daily on DESC, got daily=${daily}, yearly=${yearly}`
+  );
+}
+
+// ==================== EMBEDDINGS / COLLISION COVERAGE TESTS ====================
+// These tests pre-seed the OpenAI embedding cache with deterministic responses
+// so we exercise providers/embeddings.ts and providers/personCollision.ts paths
+// without depending on a live OpenAI quota.
+
+/**
+ * Create a person via POST /api/people, pre-seeding the OpenAI embedding for
+ * the exact signal text the SDK will request. Uses unique names per call so
+ * the input text (and thus cache key) is unique and tests don't collide.
+ */
+async function createPersonWithSeededEmbedding(
+  token: string,
+  signals: Record<string, unknown>,
+  embedding: number[]
+): Promise<{ id: string; embedding: unknown }> {
+  seedEmbeddingForSignals(signals, embedding);
+  const res = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify(signals),
+  });
+  if (res.status !== 201) {
+    throw new Error(
+      `Seeded create failed (status ${res.status}): ${JSON.stringify(res.data).slice(0, 300)}`
+    );
+  }
+  const parsed = assertSchema(CreatePersonResponse, res.data, 'seeded create');
+  return { id: parsed.person.id, embedding: parsed.person.embedding };
+}
+
+// Covers providers/embeddings.ts:buildPersonEmbeddingText all-fields branch
+// (lines for age, location, profession, company, title, industry, relation,
+// communication_frequency, relationship_quality, skills, interests, reach,
+// net_worth, power_ranking, bandwidth, contact_status, network_orientation,
+// notes) AND providers/embeddings.ts:getEmbedding userId-tracking branch
+// (the toolUsage.create call, lines 179-194). Without seeding the OpenAI
+// quota errors with 429 and the toolUsage path never executes.
+async function testCoverage_createWithAllSignalsExercisesBuildText() {
+  const suffix = uid();
+  const signals: Record<string, unknown> = {
+    first_name: `CovAll${suffix}`,
+    last_name: 'Tester',
+    age: 42,
+    location: 'San Francisco, CA',
+    profession: 'CEO',
+    company: 'CovCo',
+    title: 'Chief Coverage Officer',
+    industry: 'Software',
+    relation: 'colleague',
+    communication_frequency: 'daily',
+    relationship_quality: 'strong',
+    skills: ['typescript', 'testing'],
+    interests: ['coverage', 'quality'],
+    total_online_reach: 250000,
+    estimated_net_worth_usd: 12_500_000,
+    estimated_world_power_ranking: 6,
+    current_bandwidth: 'available',
+    contact_status: 'active',
+    network_orientation: 'connector',
+    notes: 'Synthetic person for coverage testing',
+  };
+  const embedding = Array.from({ length: 1536 }, (_, i) => Math.sin(i / 100));
+  const created = await createPersonWithSeededEmbedding(ctx.accessToken1!, signals, embedding);
+  assert(created.embedding !== null, 'Expected embedding stored on created person');
+  assert(Array.isArray(created.embedding), 'Expected embedding to be an array');
+  assert(
+    (created.embedding as unknown[]).length === 1536,
+    `Expected 1536-dim embedding, got ${(created.embedding as unknown[]).length}`
+  );
+
+  // Verify a toolUsage row was tracked (covers getEmbedding lines 179-194).
+  const usage = await prisma.toolUsage.findFirst({
+    where: { userId: ctx.userId1!, toolName: 'generate_person_embedding' },
+    orderBy: { createdAt: 'desc' },
+  });
+  assert(
+    usage !== null,
+    'Expected a toolUsage row tracking the embedding cost (getEmbedding tracking branch)'
+  );
+}
+
+// Covers providers/embeddings.ts:searchPeopleBySignals (211-248) AND
+// providers/embeddings.ts:cosineSimilarity (178-201). Pre-seeds the query
+// embedding so the search path runs end-to-end on a fresh user with two
+// directly-inserted people that have known embeddings.
+async function testCoverage_searchExercisesCosineSimilarityAndScan() {
+  // Use a fresh user so we own the entire person set deterministically.
+  const session = await createAnonSession();
+
+  // Two people with known embeddings, inserted directly via Prisma so we don't
+  // depend on the create path's getEmbedding seeding.
+  const closeVec = Array.from({ length: 1536 }, () => 0.5);
+  const farVec = Array.from({ length: 1536 }, (_, i) => (i % 2 === 0 ? -0.5 : 0.5));
+  const closePerson = await prisma.person.create({
+    data: {
+      userId: session.userId,
+      firstName: `SearchClose${uid()}`,
+      lastName: 'Tester',
+      profession: 'Engineer',
+      embedding: closeVec,
+      skills: [],
+      interests: [],
+      emailAddresses: [],
+    },
+  });
+  await prisma.person.create({
+    data: {
+      userId: session.userId,
+      firstName: `SearchFar${uid()}`,
+      lastName: 'Tester',
+      profession: 'Engineer',
+      embedding: farVec,
+      skills: [],
+      interests: [],
+      emailAddresses: [],
+    },
+  });
+
+  // Seed the search query's embedding so getEmbedding inside
+  // searchPeopleBySignals returns a deterministic vector close to closeVec.
+  const querySignals = { profession: `CovSearchTarget${uid()}` };
+  seedEmbeddingForSignals(querySignals, closeVec);
+
+  const res = await request(`${BASE_URL}/api/people/search?limit=5`, {
+    method: 'POST',
+    headers: authHeaders(session.accessToken),
+    body: JSON.stringify(querySignals),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(SearchPeopleResponse, res.data, 'cov search');
+  assert(parsed.results.length >= 2, `Expected at least 2 results, got ${parsed.results.length}`);
+  // Because we generated the query vector identical to closeVec, that person's
+  // similarity should be 1.0 and the highest among results — proves
+  // cosineSimilarity actually ran and ranked correctly.
+  assert(parsed.results[0].id === closePerson.id, 'Expected close-vec person as top match');
+  assert(
+    Math.abs(parsed.results[0].similarity - 1) < 1e-3,
+    `Expected closeVec similarity ~= 1, got ${parsed.results[0].similarity}`
+  );
+  for (const r of parsed.results) {
+    assert(typeof r.similarity === 'number', 'Expected numeric similarity');
+    // Allow tiny floating-point overshoot beyond ±1 (identical vectors yield
+    // a cosine of ~1.0000000000000002 due to fp64 sum-of-squares rounding).
+    assert(
+      r.similarity >= -1 - 1e-9 && r.similarity <= 1 + 1e-9,
+      `Similarity out of range: ${r.similarity}`
+    );
+  }
+}
+
+// Covers providers/embeddings.ts:cosineSimilarity zero-magnitude branch
+// (lines 196-198 — when one of the vectors has magnitude 0, return 0).
+async function testCoverage_searchHandlesZeroMagnitudeEmbedding() {
+  const session = await createAnonSession();
+
+  // Person with all-zeros embedding triggers the magnitudeA===0 branch.
+  await prisma.person.create({
+    data: {
+      userId: session.userId,
+      firstName: `Zero${uid()}`,
+      lastName: 'Vec',
+      embedding: Array.from({ length: 1536 }, () => 0),
+      skills: [],
+      interests: [],
+      emailAddresses: [],
+    },
+  });
+
+  const querySignals = { profession: `ZeroQuery${uid()}` };
+  // Non-zero query vector
+  seedEmbeddingForSignals(
+    querySignals,
+    Array.from({ length: 1536 }, (_, i) => Math.cos(i / 50))
+  );
+
+  const res = await request(`${BASE_URL}/api/people/search`, {
+    method: 'POST',
+    headers: authHeaders(session.accessToken),
+    body: JSON.stringify(querySignals),
+  });
+  assertStatus(res.status, 200, res.data);
+  const parsed = assertSchema(SearchPeopleResponse, res.data, 'cov zero-mag');
+  assert(parsed.results.length === 1, `Expected 1 result, got ${parsed.results.length}`);
+  // Zero-magnitude vector → cosineSimilarity returns 0 (early-out branch).
+  assert(
+    parsed.results[0].similarity === 0,
+    `Expected similarity=0 for zero-vec person, got ${parsed.results[0].similarity}`
+  );
+}
+
+// Covers providers/personCollision.ts:findCollision email-matching branch
+// (lines 60-90 — primary email lookup) AND mergePersonRecords' field-merging
+// logic for non-overlapping fields (lines 138-218). Two creates with the
+// same email merge into one.
+async function testCoverage_collisionByPrimaryEmailMerges() {
+  const suffix = uid();
+  const sharedEmail = `cov-collide-${suffix}@bbtest.example`;
+
+  // Seed embeddings for both creates.
+  const v1 = Array.from({ length: 1536 }, (_, i) => i / 1536);
+  const v2 = Array.from({ length: 1536 }, (_, i) => 1 - i / 1536);
+  const signals1 = {
+    first_name: `EmailCollideA${suffix}`,
+    last_name: 'First',
+    email: sharedEmail,
+    profession: 'Initial',
+  };
+  const signals2 = {
+    first_name: `EmailCollideA${suffix}`,
+    last_name: 'First',
+    email: sharedEmail,
+    profession: 'Updated',
+    company: 'New Company',
+    skills: ['merged-skill'],
+  };
+  seedEmbeddingForSignals(signals1, v1);
+
+  // First create
+  const r1 = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(signals1),
+  });
+  assertStatus(r1.status, 201, r1.data);
+  const first = assertSchema(CreatePersonResponse, r1.data, 'collision-email first');
+  assert(first.merged === false, 'First create should not be a merge');
+
+  // Now seed the merge-time embedding (uses post-merge fields, so we must
+  // compute that text). The merged signal set is the union: prefer new
+  // values when present; existing values otherwise.
+  const mergedSignalsForEmbedding = {
+    first_name: signals2.first_name,
+    last_name: signals2.last_name,
+    profession: signals2.profession,
+    company: signals2.company,
+    skills: signals2.skills,
+  };
+  seedEmbeddingForSignals(mergedSignalsForEmbedding, v2);
+  // Also seed for raw signals2 (pre-merge), just in case the create path
+  // computes the embedding from the new data alone (it doesn't, but safe).
+  seedEmbeddingForSignals(signals2, v2);
+
+  const r2 = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(signals2),
+  });
+  assertStatus(r2.status, 200, r2.data);
+  const second = assertSchema(CreatePersonResponse, r2.data, 'collision-email merge');
+  assert(second.merged === true, 'Second create should merge on shared email');
+  assert(second.person.id === first.person.id, 'Merged person should retain ID');
+  assert(
+    second.reason !== undefined && /email/i.test(second.reason),
+    `Expected reason mentioning email, got: ${second.reason}`
+  );
+  assert(
+    second.person.profession === 'Updated',
+    `Expected merged profession=Updated, got ${second.person.profession}`
+  );
+  assert(
+    second.person.company === 'New Company',
+    `Expected merged company=New Company, got ${second.person.company}`
+  );
+}
+
+// Covers providers/personCollision.ts:findCollision emailAddresses-array
+// branch (lines 73-78 — looking up by additional emails on the array
+// field). Inserts a person with email in emailAddresses[], then creates a
+// new person whose primary email matches one of those.
+async function testCoverage_collisionByEmailAddressesArrayMerges() {
+  const suffix = uid();
+  const altEmail = `cov-alt-${suffix}@bbtest.example`;
+
+  // Person with altEmail only in emailAddresses[] (not in primary email field).
+  // Insert directly via Prisma to bypass the upsert's primary-email assignment.
+  const existing = await prisma.person.create({
+    data: {
+      userId: ctx.userId1!,
+      firstName: `AltEmailA${suffix}`,
+      lastName: 'First',
+      email: `cov-primary-${suffix}@bbtest.example`,
+      emailAddresses: [altEmail],
+      skills: [],
+      interests: [],
+    },
+  });
+
+  // New create with altEmail as primary should collide via emailAddresses array.
+  const v = Array.from({ length: 1536 }, (_, i) => 0.1 * i);
+  const signals = {
+    first_name: `AltEmailB${suffix}`,
+    last_name: 'Second',
+    email: altEmail,
+    profession: 'Resolved',
+  };
+  seedEmbeddingForSignals(signals, v);
+  // Also seed merge-time embedding (post-merge will include first_name/last_name
+  // from existing because we provided new ones — actually new override existing).
+  seedEmbeddingForSignals(
+    { first_name: signals.first_name, last_name: signals.last_name, profession: signals.profession },
+    v
+  );
+
+  const res = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(signals),
+  });
+  assertStatus(res.status, 200, res.data);
+  const merged = assertSchema(CreatePersonResponse, res.data, 'cov alt-email merge');
+  assert(merged.merged === true, 'Expected merge via emailAddresses array');
+  assert(merged.person.id === existing.id, 'Merged person should retain existing ID');
+}
+
+// Covers providers/personCollision.ts:mergePersonRecords array-dedupe branch
+// (lines 154-166 — mergeArrays helper combines + dedupes existing and new).
+// Two creates with overlapping skills/interests should produce a deduped union.
+async function testCoverage_collisionMergesSkillsAndInterestsDedup() {
+  const suffix = uid();
+  const phone = `+1985${Date.now().toString().slice(-7)}`;
+
+  const v = Array.from({ length: 1536 }, (_, i) => Math.tan(i / 200));
+  const signals1 = {
+    first_name: `MergeArr${suffix}`,
+    last_name: 'First',
+    phoneNumber: phone,
+    skills: ['typescript', 'react'],
+    interests: ['music', 'art'],
+  };
+  seedEmbeddingForSignals(signals1, v);
+  const r1 = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(signals1),
+  });
+  assertStatus(r1.status, 201, r1.data);
+  const first = assertSchema(CreatePersonResponse, r1.data, 'merge-arr first');
+
+  const signals2 = {
+    first_name: `MergeArr${suffix}`,
+    last_name: 'Second',
+    phoneNumber: phone,
+    skills: ['typescript', 'go'], // typescript overlaps; go is new
+    interests: ['art', 'travel'], // art overlaps; travel is new
+  };
+  // The merge embedding text is computed from the merged signals (union).
+  // Seed both possible inputs so we cover whichever path runs.
+  seedEmbeddingForSignals(signals2, v);
+  seedEmbeddingForSignals(
+    {
+      first_name: signals2.first_name,
+      last_name: signals2.last_name,
+      skills: ['typescript', 'react', 'go'],
+      interests: ['music', 'art', 'travel'],
+    },
+    v
+  );
+
+  const r2 = await request(`${BASE_URL}/api/people`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify(signals2),
+  });
+  assertStatus(r2.status, 200, r2.data);
+  const second = assertSchema(CreatePersonResponse, r2.data, 'merge-arr merge');
+  assert(second.merged === true, 'Expected phone-based merge');
+  assert(second.person.id === first.person.id, 'Same ID after merge');
+
+  const skills = (second.person.skills as string[]) ?? [];
+  const interests = (second.person.interests as string[]) ?? [];
+  assert(skills.includes('typescript'), 'Expected typescript in merged skills');
+  assert(skills.includes('react'), 'Expected react in merged skills');
+  assert(skills.includes('go'), 'Expected go in merged skills');
+  assert(skills.filter((s) => s === 'typescript').length === 1, 'Expected dedup of typescript');
+  assert(interests.includes('music'), 'Expected music in merged interests');
+  assert(interests.includes('art'), 'Expected art in merged interests');
+  assert(interests.includes('travel'), 'Expected travel in merged interests');
+  assert(interests.filter((i) => i === 'art').length === 1, 'Expected dedup of art');
+}
+
 // ==================== BOUNDARY CAPTURE TESTS ====================
 
 async function testBoundary_createEmbeddingGenerated() {
@@ -991,7 +1958,7 @@ async function testBoundary_searchEmbeddingUsed() {
   for (const result of parsed.results) {
     assert(typeof result.similarity === 'number', 'Expected numeric similarity');
     assert(
-      result.similarity >= -1 && result.similarity <= 1,
+      result.similarity >= -1 - 1e-9 && result.similarity <= 1 + 1e-9,
       `Similarity out of range: ${result.similarity}`
     );
   }
@@ -1104,6 +2071,17 @@ async function runAll() {
     { name: 'invariant -- tenant isolation (list)', fn: testInvariant_tenantIsolationList },
     { name: 'invariant -- read-after-write (GET)', fn: testInvariant_readAfterWrite },
     { name: 'invariant -- read-after-write (list)', fn: testInvariant_readAfterWriteInList },
+    { name: 'POST /search -- NaN limit param', fn: testRoute_searchNaNLimit },
+    { name: 'GET / -- NaN limit/page params', fn: testRoute_listNaNLimitAndPage },
+    { name: 'GET /messages/recent -- NaN params', fn: testRoute_recentNaNParams },
+    {
+      name: 'POST /messages -- internal missing user_id -> 401',
+      fn: testRoute_messagesInternalMissingUserId,
+    },
+    {
+      name: 'POST /messages -- internal empty user_id -> 401',
+      fn: testRoute_messagesInternalEmptyUserId,
+    },
   ];
 
   console.log(
@@ -1125,12 +2103,77 @@ async function runAll() {
     },
     { name: 'sequential -- collision merge', fn: testSequential_collisionMerge },
     {
+      name: 'sequential -- messages return seeded records',
+      fn: testSequential_messagesReturnRecords,
+    },
+    {
+      name: 'sequential -- messages respects message_limit',
+      fn: testSequential_messagesRespectsLimit,
+    },
+    {
+      name: 'sequential -- messages multiple matches by name',
+      fn: testSequential_messagesMultipleMatches,
+    },
+    {
+      name: 'sequential -- messages multiple matches by email',
+      fn: testSequential_messagesMultipleMatchesByEmail,
+    },
+    {
+      name: 'sequential -- person found but no messages',
+      fn: testSequential_messagesPersonWithoutRecords,
+    },
+    {
+      name: 'sequential -- recent messages returns seeded records',
+      fn: testSequential_recentMessagesReturnsRecords,
+    },
+    {
+      name: 'sequential -- recent messages respects days cutoff',
+      fn: testSequential_recentMessagesRespectsCutoff,
+    },
+    {
+      name: 'sequential -- list search by full name (combined ILIKE)',
+      fn: testRoute_listSearchByFullName,
+    },
+    {
+      name: 'sequential -- list sort communicationFrequency ASC ordering',
+      fn: testRoute_listSortCommFreqOrder,
+    },
+    {
+      name: 'sequential -- list sort communicationFrequency DESC ordering',
+      fn: testRoute_listSortCommFreqDesc,
+    },
+    {
       name: 'boundary -- create generates embedding',
       fn: testBoundary_createEmbeddingGenerated,
     },
     {
       name: 'boundary -- search uses embeddings',
       fn: testBoundary_searchEmbeddingUsed,
+    },
+    // ---- embeddings.ts + personCollision.ts coverage ----
+    {
+      name: 'coverage -- create with all signals exercises buildPersonEmbeddingText',
+      fn: testCoverage_createWithAllSignalsExercisesBuildText,
+    },
+    {
+      name: 'coverage -- search exercises cosineSimilarity + searchPeopleBySignals',
+      fn: testCoverage_searchExercisesCosineSimilarityAndScan,
+    },
+    {
+      name: 'coverage -- search handles zero-magnitude embedding (cosineSimilarity early-out)',
+      fn: testCoverage_searchHandlesZeroMagnitudeEmbedding,
+    },
+    {
+      name: 'coverage -- collision by primary email merges (findCollision email branch)',
+      fn: testCoverage_collisionByPrimaryEmailMerges,
+    },
+    {
+      name: 'coverage -- collision by emailAddresses array merges',
+      fn: testCoverage_collisionByEmailAddressesArrayMerges,
+    },
+    {
+      name: 'coverage -- collision merges skills/interests with dedup',
+      fn: testCoverage_collisionMergesSkillsAndInterestsDedup,
     },
   ];
 
@@ -1173,6 +2216,9 @@ async function runAll() {
 
   console.log('\n' + '='.repeat(50));
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
+
+  // Disconnect Prisma so the test process exits cleanly.
+  await prisma.$disconnect();
 
   if (failed > 0) {
     console.log('\nFAILURES:');

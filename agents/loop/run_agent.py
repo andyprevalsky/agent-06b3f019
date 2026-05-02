@@ -117,6 +117,11 @@ async def run_agent(  # noqa: C901
     # Dynamic token getter - called before each LLM call to get latest token
     # (workflow invalidates cached token on fallback, so getter returns None after that)
     get_claude_token: Optional[Callable[[], Optional[str]]] = None,
+    # Override the call_site label used when emitting llm.cache. Defaults to
+    # "plan_loop"/"execute_loop" based on is_plan_loop. Sub-agents that share
+    # this loop (e.g. explore_agent) set this to surface as their own row in
+    # cache reports instead of merging with the parent's execute_loop.
+    call_site_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -132,6 +137,10 @@ async def run_agent(  # noqa: C901
     context: List[Dict] = initial_context.copy() if initial_context else []
     for msg in context:
         annotate_with_pointer(msg)
+    # Resolve the cache call_site once. Override wins when set, otherwise
+    # the standard PLAN/EXECUTE loop labels.
+    cache_call_site = call_site_override or ("plan_loop" if is_plan_loop else "execute_loop")
+
     tokens_in = 0
     tokens_out = 0
     token_count = 0
@@ -389,7 +398,7 @@ async def run_agent(  # noqa: C901
                             reasoning_max_tokens=reasoning_max_tokens,
                             agent_id=agent_id,
                             claude_token=current_claude_token,
-                            call_site="plan_loop" if is_plan_loop else "execute_loop",
+                            call_site=cache_call_site,
                         )
                         break  # Success
                     except (ValueError, Exception) as e:
@@ -446,7 +455,7 @@ async def run_agent(  # noqa: C901
                 except Exception:
                     pass
             else:
-                call_site_label = "plan_loop" if is_plan_loop else "execute_loop"
+                call_site_label = cache_call_site
                 llm_result = await workflow.execute_activity(
                     call_llm_activity,
                     args=[
@@ -518,7 +527,7 @@ async def run_agent(  # noqa: C901
                         usage.get("actual_model"),
                         cache_read_input_tokens=iter_cache_read,
                         cache_creation_input_tokens=iter_cache_write,
-                        call_site="plan_loop" if is_plan_loop else "execute_loop",
+                        call_site=cache_call_site,
                         claude_token_error=usage.get("claude_token_error"),
                     )
                 except Exception as e:
@@ -891,11 +900,14 @@ async def run_agent(  # noqa: C901
                 # result so the verifier sees the current iteration's artifact.
                 # Uses "text"/"timestamp" — build_llm_messages and check_progress
                 # both read "text" and depend on "timestamp" for ordering.
+                # AttemptCompletionTool takes no args (the verifier reads prior
+                # tool results, not anything passed here), so the agent's
+                # narration in `response_text` is what we surface.
                 if not poll_messages:
                     context.append(
                         {
                             "role": "TOOL",
-                            "text": tool_args.get("result", "") or response_text or "",
+                            "text": response_text or "",
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
@@ -925,9 +937,10 @@ async def run_agent(  # noqa: C901
                 # Skip LLM verification if requested
                 if skip_verification:
                     logger.info("⏭️ Skipping LLM verification")
-                    # Prefer the explicit result from attempt_completion tool args,
-                    # fall back to the model's text response
-                    completion_result = tool_args.get("result", "") or response_text or ""
+                    # Sub-agent → parent handoff: AttemptCompletionTool takes
+                    # no args, so the agent's narration in `response_text` is
+                    # the spawn_agent return payload.
+                    completion_result = response_text or ""
                     _log_cache_summary("completed-no-verify")
                     return {
                         "status": "completed",
@@ -1242,13 +1255,16 @@ async def _run_verifier(
     verifier_call_id = str(uuid.uuid4())
 
     # Post IN_PROGRESS
+    # C5: Tag the verifier message as the TOOL result of `attempt_completion`
+    # so the agent reads the verifier feedback as the natural result of its
+    # own tool call. The `verifierMessage` flag is the canonical filter.
     if post_message:
         await post_message(
             "",
             "TOOL",
             {
                 "toolCallId": verifier_call_id,
-                "toolName": "check_progress",
+                "toolName": "attempt_completion",
                 "toolStatus": "IN_PROGRESS",
                 "title": "⚖️ Verifying completion",
                 "verifierMessage": True,
@@ -1264,13 +1280,20 @@ async def _run_verifier(
     if get_response_schema:
         current_response_schema = await get_response_schema()
 
+    # C7: dead `phase` positional arg has been removed from check_progress;
+    # callers no longer pass it. `model` is kept as a positional but ignored
+    # internally (verifier always forces rose-1-ultra). All other args are
+    # passed positionally because Temporal activities only accept `args=`.
+    # C14: context is already agent-scoped — `context` here is the calling
+    # agent's own conversation, accumulated from `poll_messages` (filtered
+    # by agent_id) and locally-appended tool results. Sub-agents run in
+    # separate workflows and never share this list.
     result = await execute_activity(
         check_progress,
         args=[
             context,
             verifier_prompt,
             model,
-            "EXECUTE",
             current_response_schema,
             claude_token,
             "verifier_plan" if is_plan_loop else "verifier_execute",
@@ -1299,14 +1322,15 @@ async def _run_verifier(
             output_lines.append(f"- **{formatted_key}:** {formatted_value}")
         message_text = reasoning + "\n".join(output_lines)
 
-    # Post FINISHED
+    # Post FINISHED — same C5 reasoning: surface as the TOOL result of
+    # attempt_completion, identified by the verifierMessage flag.
     if post_message:
         await post_message(
             message_text,
             "TOOL",
             {
                 "toolCallId": verifier_call_id,
-                "toolName": "check_progress",
+                "toolName": "attempt_completion",
                 "toolStatus": "FINISHED",
                 "title": f"⚖️ Progress: {score * 100:.0f}%",
                 "verifierMessage": True,

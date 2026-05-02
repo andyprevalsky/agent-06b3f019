@@ -136,12 +136,20 @@ async def save_browser_action_message(
     output_schema: Optional[dict] = None,
     steps_taken: Optional[int] = None,
     total_steps: Optional[int] = None,
+    tool_name_override: Optional[str] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Save browser sub-action message directly to DB.
 
     Args:
         is_init_message: If True, don't set subAgentId (shows in main chat as init)
         is_completion_message: If True, don't set subAgentId (shows in main chat as completion/error)
+        tool_name_override: Override the default `toolName` ("spawn_browser_agent")
+            with a different tool — e.g. set to "attempt_completion" so verifier
+            feedback appears as the natural TOOL result of the agent's
+            attempt_completion call.
+        extra_metadata: Additional metadata fields to merge into the message
+            metadata (e.g. verifierMessage flag for verifier-feedback messages).
     """
     from config import load_config
 
@@ -151,7 +159,7 @@ async def save_browser_action_message(
 
         metadata: Dict[str, Any] = {
             "toolCallId": unique_tool_call_id,
-            "toolName": "spawn_browser_agent",
+            "toolName": tool_name_override or "spawn_browser_agent",
             "toolStatus": status.value,
             "title": title,
             "task_id": task_id,
@@ -159,6 +167,8 @@ async def save_browser_action_message(
             "action_type": action_type,
             "auxiliary": auxiliary or {},
         }
+        if extra_metadata:
+            metadata.update(extra_metadata)
 
         # Include step progress for FE display
         if steps_taken is not None:

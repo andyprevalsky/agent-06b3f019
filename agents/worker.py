@@ -30,34 +30,13 @@ from activities.param_populator import populate_tool_params_activity
 # Shared memory activities
 from activities.shared_memory import append_shared_memory, get_shared_memory
 from config import load_config
-from domains.add_memory.service import add_memory_activity
 from domains.call_phone_number.handler import call_phone_number_activity
-from domains.check_monitor_events.repo import check_monitor_events_activity
-from domains.deep_research.repo import deep_research_activity
-from domains.enrich.repo import (
-    enrich_create_task_activity,
-    enrich_get_task_results_activity,
-    enrich_poll_status_once_activity,
-)
-from domains.find_all.repo import (
-    find_all_create_run_activity,
-    find_all_get_results_activity,
-    find_all_ingest_activity,
-    find_all_poll_status_once_activity,
-)
 from domains.grep.repo import fetch_local_data_summary, grep_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
 from domains.message_person.repo import fetch_recent_messages_activity, generate_message_activity
-from domains.monitor.handler import monitor_activity
-from domains.people_search.handler import people_search_activity
-from domains.read_memories.handler import read_memories_activity
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
 from domains.request_user_approval.repo import create_approval_request_activity
-from domains.search_user_network import search_user_network_activity
-from domains.send_email.repo import send_email_activity
-from domains.send_sms.repo import send_sms_activity
-from domains.send_sms_as_user.handler import queue_imessage_activity
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
@@ -69,7 +48,6 @@ from domains.spawn_sub_agents.service import spawn_sub_agent_activity
 from helpers.attachments import fetch_parent_attachments_activity
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity
-from domains.x402_bazaar.repo import pay_for_x402_service_activity, search_x402_bazaar_activity
 from health_server import run_health_server, set_queue_metrics, set_worker_status
 
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -548,41 +526,17 @@ async def main():
             spawn_sub_agent_activity,
             fetch_parent_attachments_activity,
             create_approval_request_activity,
-            send_sms_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API
             spawn_claude_code_activity,  # Claude Code in E2B sandbox
-            send_email_activity,
             # New event-driven tool activities
-            deep_research_activity,
             web_search_activity,
             web_fetch_activity,
-            people_search_activity,
-            # Memory tools (SuperMemory)
-            add_memory_activity,
-            read_memories_activity,
-            # Find All activities (split into sub-activities)
-            find_all_ingest_activity,
-            find_all_create_run_activity,
-            find_all_poll_status_once_activity,
-            find_all_get_results_activity,
-            # Enrich activities (split into sub-activities)
-            enrich_create_task_activity,
-            enrich_poll_status_once_activity,
-            enrich_get_task_results_activity,
-            monitor_activity,
-            check_monitor_events_activity,
             save_tool_usage,
-            search_user_network_activity,
             read_message_history_activity,
             generate_message_activity,
             fetch_recent_messages_activity,
-            # x402 Bazaar activities
-            search_x402_bazaar_activity,
-            pay_for_x402_service_activity,
             # Phone call activity
             call_phone_number_activity,
-            # iMessage queue activity
-            queue_imessage_activity,
             # Helper activities
             poll_new_messages,
             post_agent_message,

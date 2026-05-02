@@ -226,11 +226,13 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 metadata["subAgentId"] = task_id
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
 
-    # Build system prompt with network metadata and local data summary
-    current_ts = datetime.now(timezone.utc).isoformat()
-
+    # Build system prompt with network metadata and local data summary.
+    # The system prompt is byte-identical across explore-agent calls — this
+    # is the cache window. Per-call dynamic state (current time) is prepended
+    # to the user goal as a [STATE: ...] line so it does not contaminate the
+    # cacheable prefix. Mirrors the v3 browser-agent pattern (see
+    # domains/spawn_browser_agent_v3/handler.py — build_state_line).
     system_prompt = EXPLORE_AGENT_SYSTEM_PROMPT.format(
-        current_timestamp=current_ts,
         network_metadata=f"\nUSER NETWORK:\n{network_metadata}" if network_metadata else "",
         local_data_summary=f"\n{local_data_summary}" if local_data_summary else "",
     )
@@ -274,17 +276,6 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 agent_id=agent_id,
                 user_id=user_id,
             )
-        elif tool_name == "read_memories":
-            from tools.read_memories import ReadMemoriesManager
-
-            manager = ReadMemoriesManager()
-            result = await manager.execute_tool(
-                execute_activity=tagged_execute_activity,
-                tool_call=tool_call_dict,
-                tool_call_id=tool_call_id,
-                agent_id=agent_id,
-                user_id=user_id,
-            )
         elif tool_name == "attempt_completion":
             return {"success": True, "message": "Completion accepted"}
         else:
@@ -318,10 +309,15 @@ async def spawn_explore_agent_activity(  # noqa: C901
             task_id=task_id,
         )
 
-    # Build initial context with goal + any resolved attachment content
-    initial_user_text = goal
+    # Build initial context with goal + any resolved attachment content.
+    # Prepend a [STATE: time=...] line so the explore agent can compute
+    # relative time ranges (e.g. for grep `since` filtering) without baking
+    # the timestamp into the cacheable system prompt.
+    current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state_line = f"[STATE: now={current_ts}]"
+    initial_user_text = f"{state_line}\n\n{goal}"
     if attachment_texts:
-        initial_user_text = goal + "\n\n" + "\n\n".join(attachment_texts)
+        initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
 
     # Run the agent loop
     result = await run_agent(
@@ -330,7 +326,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         system_prompt=explore_system_prompt,
         verifier_prompt_generator=explore_verifier_prompt,
         model=model,
-        tools=["web_search", "web_fetch", "grep", "read_memories", "attempt_completion"],
+        tools=["web_search", "web_fetch", "grep", "attempt_completion"],
         initial_context=[{"role": "USER", "text": initial_user_text}],
         task_id=task_id,
         is_inside_temporal_activity=True,
@@ -342,6 +338,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         skip_status_updates=True,
         claude_token=claude_token,
         on_tokens=on_tokens,
+        call_site_override="explore_agent",
     )
 
     return {

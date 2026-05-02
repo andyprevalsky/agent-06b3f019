@@ -717,6 +717,30 @@ async def test_save_browser_action_message_swallows_exception():
         )
 
 
+async def test_save_browser_action_message_tool_name_override():
+    """Verifier feedback flows back as `attempt_completion` TOOL result (C5)."""
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+
+    with patch("config.load_config", return_value=_fake_config()):
+        await save_browser_action_message(
+            agent_id="ag1",
+            title="rejected",
+            message="reasoning",
+            status=MessageStatus.FINISHED,
+            task_id="t1",
+            tool_call_id="tc-verifier",
+            tool_name_override="attempt_completion",
+            extra_metadata={"verifierMessage": True},
+        )
+
+    body = json.loads(get_captured_requests()[0]["requestBody"])
+    assert body["metadata"]["toolName"] == "attempt_completion"
+    assert body["metadata"]["verifierMessage"] is True
+
+
 async def test_save_browser_assistant_message():
     from domains.spawn_browser_agent_v3.repo import save_browser_assistant_message
 
@@ -1258,12 +1282,10 @@ def test_get_browser_system_prompt_with_files():
 
     out = get_browser_system_prompt(
         goal="buy a book",
-        current_url="https://amazon.com",
         custom_instructions="be quick",
         available_files=["a.pdf", "b.txt"],
     )
     assert "buy a book" in out
-    assert "https://amazon.com" in out
     assert "be quick" in out
     assert "a.pdf" in out and "b.txt" in out
 
@@ -1271,8 +1293,51 @@ def test_get_browser_system_prompt_with_files():
 def test_get_browser_system_prompt_without_files():
     from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
 
-    out = get_browser_system_prompt("g", "https://x", custom_instructions="")
+    out = get_browser_system_prompt("g", custom_instructions="")
     assert "AVAILABLE FILES FOR UPLOAD" not in out
+
+
+def test_get_browser_system_prompt_is_static_across_calls():
+    """The static prompt must be byte-identical across calls within a workspace.
+
+    No `current_time`, no `current_url`, no per-step interpolation. This is
+    the property that lets Anthropic prompt caching reuse the prefix.
+    """
+    from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
+
+    out_a = get_browser_system_prompt("buy a book", "be quick", available_files=["x.pdf"])
+    out_b = get_browser_system_prompt("buy a book", "be quick", available_files=["x.pdf"])
+    assert out_a == out_b, "prompt must be byte-identical across calls with same inputs"
+    assert "Current time:" not in out_a, "current time leaks into static prompt"
+    assert "CURRENT URL:" not in out_a, "current url leaks into static prompt"
+
+
+def test_build_state_line_format():
+    """The state line must be terse, parseable, and contain ISO 8601 UTC time."""
+    import re
+    from datetime import datetime, timezone
+
+    from domains.spawn_browser_agent_v3.service import build_state_line
+
+    fixed = datetime(2026, 4, 30, 23, 14, 0, tzinfo=timezone.utc)
+    line = build_state_line(current_url="https://example.com/checkout", now=fixed)
+    assert line == "[STATE: time=2026-04-30T23:14:00Z url=https://example.com/checkout]"
+    assert re.match(
+        r"^\[STATE: time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z url=[^\]]*\]$",
+        line,
+    ), "state line must match strict format"
+    assert len(line) <= 120, "state line must stay terse"
+
+
+def test_build_state_line_empty_url():
+    """Empty URL must not crash the state line."""
+    from datetime import datetime, timezone
+
+    from domains.spawn_browser_agent_v3.service import build_state_line
+
+    fixed = datetime(2026, 4, 30, 23, 14, 0, tzinfo=timezone.utc)
+    line = build_state_line(current_url="", now=fixed)
+    assert line == "[STATE: time=2026-04-30T23:14:00Z url=]"
 
 
 # ========================================
@@ -2972,7 +3037,7 @@ def test_claude_token_state_defaults():
     assert s.source is None
     assert s.pool_token_id is None
     assert s.excluded_pool_ids == []
-    assert s.fallen_back_to_racing is False
+    assert s.fallen_back_to_waterfall is False
 
 
 def test_claude_token_state_mutation():
@@ -2983,7 +3048,7 @@ def test_claude_token_state_mutation():
     s.source = "pool"
     s.pool_token_id = "p1"
     s.excluded_pool_ids.append("p0")
-    s.fallen_back_to_racing = True
+    s.fallen_back_to_waterfall = True
     assert s.access_token == "t"
     assert s.excluded_pool_ids == ["p0"]
 
@@ -3067,6 +3132,10 @@ async def run_all_tests():
     await r.record_async("report_token_rl_swallows_error", test_report_claude_token_rate_limited_swallows_network_error)
 
     await r.record_async("save_browser_action_message_metadata", test_save_browser_action_message_posts_metadata)
+    await r.record_async(
+        "save_browser_action_message_tool_name_override",
+        test_save_browser_action_message_tool_name_override,
+    )
     await r.record_async("save_browser_action_message_init", test_save_browser_action_message_init_no_subagent)
     await r.record_async("save_browser_action_message_error_flag", test_save_browser_action_message_error_sets_flag)
     await r.record_async("save_browser_action_message_swallows", test_save_browser_action_message_swallows_exception)
@@ -3116,6 +3185,9 @@ async def run_all_tests():
     r.record("build_usage_items", test_build_usage_items)
     r.record("get_browser_system_prompt_with_files", test_get_browser_system_prompt_with_files)
     r.record("get_browser_system_prompt_no_files", test_get_browser_system_prompt_without_files)
+    r.record("get_browser_system_prompt_is_static", test_get_browser_system_prompt_is_static_across_calls)
+    r.record("build_state_line_format", test_build_state_line_format)
+    r.record("build_state_line_empty_url", test_build_state_line_empty_url)
 
     r.record("build_action_titles_click_element", test_build_action_titles_click_with_element)
     r.record("build_action_titles_click_coords", test_build_action_titles_click_with_coords)

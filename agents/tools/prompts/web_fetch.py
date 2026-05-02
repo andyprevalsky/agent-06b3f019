@@ -1,11 +1,11 @@
 """Prompt for web_fetch tool."""
 
-PROMPT = """Fetch and extract content from a URL with JavaScript rendering support. Use when you need to read page content, find specific information, or analyze web pages.
+PROMPT = """Fetches a specific URL with JavaScript rendering and extracts content focused on an objective.
 
-Set download_files to a list of extensions (e.g. ["pdf", "csv"]) to automatically download files of those types found on the page.
-
-WHEN NOT TO USE:
-- Do NOT use for general research - use spawn_agent(type="explore") which combines search + fetch intelligently.
-- Do NOT use to re-download files already in context as file_pointers.
-
-RETURNS: Extracted content (excerpts aligned to objective, or full page content). If download_files specified, also returns file_pointer objects for downloaded files."""
+Usage:
+- Use when you already know the URL and need its content (article, doc page, listing).
+- Use when web_search snippets are insufficient and you need full or focused page text.
+- Use download_files to auto-pull file artifacts (PDF/CSV/XLSX) discovered on the page.
+- excerpts and full_content are mutually exclusive; full_content overrides excerpts when both true.
+- Do not use this when you have no URL yet - use web_search first.
+- Do not use this for stateful page interaction (login, forms, click flows) - use spawn_browser_agent."""

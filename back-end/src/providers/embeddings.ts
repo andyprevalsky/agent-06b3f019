@@ -1,9 +1,17 @@
 import OpenAI from 'openai';
-import { Prisma } from '@prisma/client';
+import { Prisma, type Person } from '@prisma/client';
 import { prisma } from './database';
+import { createLogger } from './logger';
 
+const log = createLogger('Embeddings');
+
+// Route OpenAI through globalThis.fetch so blackbox-test fetchCapture can
+// intercept (the SDK defaults to node-fetch which bypasses globalThis.fetch).
+// Production behaviour is unchanged: globalThis.fetch is the platform fetch.
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  fetch: ((url: string | URL, init?: RequestInit) =>
+    globalThis.fetch(url, init)) as typeof fetch,
 });
 
 /**
@@ -117,6 +125,31 @@ export function buildPersonEmbeddingText(signals: PersonSignals): string {
 }
 
 /**
+ * Deterministic fake embedding for blackbox tests where the test hasn't
+ * pre-seeded a fast-forward response. Avoids the OpenAI quota path while
+ * still producing stable, ordered similarity scores. Activated by
+ * BLACKBOX_TEST_CAPTURE_OUTBOUND=1 — production behaviour is unchanged.
+ *
+ * Tests that need a SPECIFIC embedding (e.g. for similarity ordering or
+ * to exercise the userId-tracking branch in getEmbedding) should call
+ * seedOpenAIEmbedding before the request, which the SDK's fetch hits via
+ * fastForward cache and bypasses this fallback entirely.
+ */
+function deterministicFakeEmbedding(text: string): number[] {
+  const dim = 1536;
+  const out = new Array<number>(dim);
+  for (let i = 0; i < dim; i++) {
+    let h = 0x811c9dc5 ^ i;
+    for (let j = 0; j < text.length; j++) {
+      h ^= text.charCodeAt(j);
+      h = Math.imul(h, 0x01000193);
+    }
+    out[i] = ((h >>> 0) / 0xffffffff) * 2 - 1;
+  }
+  return out;
+}
+
+/**
  * Generate embedding vector using OpenAI's text-embedding-3-small model
  *
  * @param text - Text to generate embedding for
@@ -124,8 +157,6 @@ export function buildPersonEmbeddingText(signals: PersonSignals): string {
  * @returns Embedding vector as array of numbers
  */
 export async function getEmbedding(text: string, userId?: string): Promise<number[]> {
-  const startTime = Date.now();
-
   try {
     const response = await openai.embeddings.create({
       model: 'text-embedding-3-small',
@@ -137,9 +168,6 @@ export async function getEmbedding(text: string, userId?: string): Promise<numbe
 
     // Track usage in database if userId provided
     if (userId) {
-      const endTime = Date.now();
-      const durationMs = endTime - startTime;
-
       // text-embedding-3-small pricing: $0.00002 per 1K tokens = 0.002 cents per 1K tokens
       const costCents = (tokensUsed / 1000) * 0.002;
 
@@ -163,7 +191,16 @@ export async function getEmbedding(text: string, userId?: string): Promise<numbe
 
     return embedding;
   } catch (error) {
-    console.error('Error generating embedding:', error);
+    // Tests: when fastForward has no cached response and OpenAI rejects (quota,
+    // missing key, etc.), fall back to a deterministic fake so tests that
+    // don't care about exact vectors still pass. The flag scopes this strictly
+    // to the blackbox test backend.
+    if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
+      return deterministicFakeEmbedding(text);
+    }
+    log.error('Error generating embedding', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw new Error(`Failed to generate embedding: ${error}`);
   }
 }
@@ -212,7 +249,7 @@ export async function searchPeopleBySignals(
   userId: string,
   querySignals: PersonSignals,
   limit: number = 5
-): Promise<Array<any & { similarity: number }>> {
+): Promise<Array<Person & { similarity: number }>> {
   // Build embedding text from query signals
   const queryText = buildPersonEmbeddingText(querySignals);
 

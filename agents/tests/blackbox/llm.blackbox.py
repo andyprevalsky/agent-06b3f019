@@ -406,6 +406,85 @@ def test_build_verifier_json_schema_all_types():
     assert props["unknown"] == {"type": "string"}
     # All output props are required
     assert set(output["required"]) == set(props.keys())
+    # No open-object types here, so strict mode stays on.
+    assert result["json_schema"]["strict"] is True
+
+
+def test_build_verifier_json_schema_object_type():
+    """_build_verifier_json_schema accepts `object` and disables strict mode.
+
+    Open-object fields (additionalProperties: True) are incompatible with
+    OpenAI strict mode. The schema builder must emit a sensible JSON Schema
+    for `object` AND drop the `strict` flag at the envelope level so the
+    payload is accepted by structured-output models.
+    """
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "meta", "type": "object", "description": "Generic object meta"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    output = result["json_schema"]["schema"]["properties"]["output"]
+    props = output["properties"]
+
+    assert props["meta"]["type"] == "object"
+    assert props["meta"]["additionalProperties"] is True, (
+        "object fields must be open-shape (additionalProperties=True) — sub-fields are "
+        "described in the description text, not declared in the schema."
+    )
+    assert props["meta"]["description"] == "Generic object meta"
+    # Open-object types force strict=False at the envelope level.
+    assert result["json_schema"]["strict"] is False, (
+        "An `object` field requires additionalProperties=True, which is forbidden "
+        "by OpenAI strict mode. The envelope MUST flip strict to False."
+    )
+
+
+def test_build_verifier_json_schema_list_object_type():
+    """_build_verifier_json_schema accepts `list[object]` and disables strict mode."""
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "items", "type": "list[object]", "description": "List of items"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    output = result["json_schema"]["schema"]["properties"]["output"]
+    props = output["properties"]
+
+    assert props["items"]["type"] == "array"
+    assert props["items"]["items"]["type"] == "object"
+    assert props["items"]["items"]["additionalProperties"] is True, (
+        "list[object] items must be open-shape — same reasoning as `object`."
+    )
+    assert props["items"]["description"] == "List of items"
+    # Open-object types force strict=False at the envelope level.
+    assert result["json_schema"]["strict"] is False, (
+        "A `list[object]` field requires items.additionalProperties=True, which "
+        "is forbidden by OpenAI strict mode. The envelope MUST flip strict to False."
+    )
+
+
+def test_build_verifier_json_schema_mixed_open_and_closed():
+    """A schema mixing closed types and an open-object type must still drop strict.
+
+    The strict flag is a single envelope-level boolean — even one open-object
+    field anywhere in the schema must flip it to False.
+    """
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "name", "type": "str"},
+            {"name": "count", "type": "int"},
+            {"name": "meta", "type": "object", "description": "metadata blob"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    assert result["json_schema"]["strict"] is False
 
 
 async def test_fetch_claude_max_token_activity():
@@ -1375,8 +1454,9 @@ async def test_check_progress_happy_path():
     assert "Score: 1.0" in result["message"]
 
 
-async def test_check_progress_below_threshold_no_structured_response():
-    """score < 1.0 means structured_response is None."""
+async def test_check_progress_below_threshold_returns_partial_structured_response():
+    """C2: structured_response is always returned (even on score < 1.0) so the
+    agent can see partial extraction in its next iteration."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import check_progress
@@ -1406,7 +1486,8 @@ async def test_check_progress_below_threshold_no_structured_response():
         )
 
     assert result["score"] == 0.4
-    assert result["structured_response"] is None
+    # C2: partial structured_response must come through, not be dropped.
+    assert result["structured_response"] == {"summary": "x"}
 
 
 async def test_call_planner_llm_activity_happy_path():
@@ -1765,6 +1846,133 @@ async def test_build_verifier_json_schema_unknown_type_fallback():
     result = _build_verifier_json_schema(schema)
     weird_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["weird"]
     assert weird_prop == {"type": "string"}
+
+
+async def test_build_verifier_json_schema_object_type_open_shape():
+    """`object` field emits an open-shape object (additionalProperties: True) and disables strict."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "meta", "type": "object", "description": "metadata blob"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    meta_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["meta"]
+    assert meta_prop["type"] == "object"
+    assert meta_prop["additionalProperties"] is True
+    assert meta_prop["description"] == "metadata blob"
+    # OpenAI strict mode forbids additionalProperties: True. Verifier must drop strict.
+    assert result["json_schema"]["strict"] is False
+
+
+async def test_build_verifier_json_schema_list_object_type_open_shape():
+    """`list[object]` field emits array-of-open-objects and disables strict."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "rows", "type": "list[object]", "description": "rows of data"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    rows_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["rows"]
+    assert rows_prop["type"] == "array"
+    assert rows_prop["items"]["type"] == "object"
+    assert rows_prop["items"]["additionalProperties"] is True
+    assert rows_prop["description"] == "rows of data"
+    assert result["json_schema"]["strict"] is False
+
+
+async def test_build_verifier_json_schema_strict_true_when_no_open_objects():
+    """Schema with only closed-shape fields keeps strict=True."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "name", "type": "str"},
+            {"name": "count", "type": "int"},
+            {"name": "tags", "type": "list[str]"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    assert result["json_schema"]["strict"] is True
+
+
+def test_build_verifier_context_messages_screenshot_emits_multimodal():
+    """TOOL message with `metadata.screenshot_b64` becomes a multimodal user message."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Goal: take a screenshot"},
+        {
+            "role": "TOOL",
+            "text": "Final state screenshot attached",
+            "metadata": {
+                "screenshot_b64": "iVBORw0KGgoAAAA...",
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "You are a verifier.")
+
+    # Look for any user message with content as a list (multimodal)
+    multimodal_msgs = [m for m in msgs if isinstance(m.get("content"), list)]
+    assert len(multimodal_msgs) == 1, f"expected exactly 1 multimodal message, got {len(multimodal_msgs)}"
+
+    blocks = multimodal_msgs[0]["content"]
+    text_blocks = [b for b in blocks if b.get("type") == "text"]
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(text_blocks) == 1
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"]["type"] == "base64"
+    assert image_blocks[0]["source"]["media_type"] == "image/png"
+    assert image_blocks[0]["source"]["data"] == "iVBORw0KGgoAAAA..."
+    # Body text should describe, not include the b64
+    assert "iVBORw0KGgoAAAA..." not in text_blocks[0]["text"]
+
+
+def test_build_verifier_context_messages_screenshot_strips_b64_from_text():
+    """When TOOL.text accidentally contains the b64 string, it's stripped from the text block."""
+    from helpers.llm import build_verifier_context_messages
+
+    b64 = "ABCDEFGH=="
+    ctx = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "text": f"Screenshot: {b64}",  # b64 inlined into text
+            "metadata": {
+                "screenshot_b64": b64,
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "system")
+
+    multimodal_msgs = [m for m in msgs if isinstance(m.get("content"), list)]
+    text = next(b["text"] for b in multimodal_msgs[0]["content"] if b.get("type") == "text")
+    # b64 must not survive in the text block
+    assert b64 not in text
+
+
+def test_build_verifier_context_messages_no_screenshot_stays_text():
+    """TOOL message without screenshot_b64 keeps current text-only batching behavior."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "text": "tool result",
+            "metadata": {"toolName": "search", "toolStatus": "FINISHED"},
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "system")
+    # No multimodal messages
+    assert all(isinstance(m["content"], str) for m in msgs)
 
 
 async def test_extract_response_from_partial_json_raw_json_object():
@@ -3014,6 +3222,9 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
+    r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
+    r.record("build_verifier_json_schema_list_object_type", test_build_verifier_json_schema_list_object_type)
+    r.record("build_verifier_json_schema_mixed_open_and_closed", test_build_verifier_json_schema_mixed_open_and_closed)
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
     await r.record_async("fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error)
@@ -3042,7 +3253,7 @@ async def run_all_tests():
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
-    await r.record_async("check_progress_below_threshold_no_structured_response", test_check_progress_below_threshold_no_structured_response)
+    await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
@@ -3055,6 +3266,12 @@ async def run_all_tests():
     await r.record_async("verifier_schema_session_file_pointer", test_build_verifier_json_schema_session_file_pointer_type)
     await r.record_async("verifier_schema_list_session_file_pointer", test_build_verifier_json_schema_list_session_file_pointer_type)
     await r.record_async("verifier_schema_unknown_fallback", test_build_verifier_json_schema_unknown_type_fallback)
+    await r.record_async("verifier_schema_object_type", test_build_verifier_json_schema_object_type_open_shape)
+    await r.record_async("verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_open_shape)
+    await r.record_async("verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects)
+    r.record("verifier_ctx_screenshot_multimodal", test_build_verifier_context_messages_screenshot_emits_multimodal)
+    r.record("verifier_ctx_screenshot_strips_b64", test_build_verifier_context_messages_screenshot_strips_b64_from_text)
+    r.record("verifier_ctx_no_screenshot_text_only", test_build_verifier_context_messages_no_screenshot_stays_text)
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)
