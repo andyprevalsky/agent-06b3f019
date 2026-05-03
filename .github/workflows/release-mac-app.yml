@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*' # Triggers on version tags like v1.0.0, v1.2.3
 
+permissions:
+  contents: write # softprops/action-gh-release creates the GitHub Release entry
+
 jobs:
   build-and-release:
     runs-on: macos-latest
