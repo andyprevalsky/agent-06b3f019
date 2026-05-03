@@ -803,7 +803,49 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → **STOP and escalate to the user.** Do NOT proceed to merge. Tell the user CodeRabbit skipped the review, explain why (file count, etc.), and ask how they want to proceed (e.g., filter paths, split PR, or merge without review).
+- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then escalate only if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
+  ```yaml
+  # Tests (gated by Step 5a / Step 6 / Step 6b locally)
+  - "!**/tests/**"
+  - "!**/*.blackbox.ts"
+  - "!**/*.blackbox.tsx"
+  - "!**/*.blackbox.py"
+  - "!**/*.test.ts"
+  - "!**/*.test.tsx"
+  - "!**/*.test.py"
+  - "!**/*.spec.ts"
+  - "!**/test_*.py"
+  - "!front-end/tests-e2e/**"
+  # Benchmark harness (gated by Step 6 smoke run)
+  - "!agents/benchmarks/**"
+  # Prompt strings (no logic — text-only changes)
+  - "!agents/tools/prompts/**"
+  # Docs, markdown, harness config
+  - "!docs/**"
+  - "!**/*.md"
+  - "!.claude/**"
+  - "!.coderabbit.yaml"
+  - "!.gitignore"
+  - "!.editorconfig"
+  - "!**/eslint.config.*"
+  # Python scaffolding (re-exports + dataclass configs/types + thin HTTP repo wrappers)
+  - "!**/__init__.py"
+  - "!agents/**/config.py"
+  - "!agents/**/types.py"
+  - "!agents/**/repo.py"
+  ```
+  Verify the file count drops below 150 before pushing:
+  ```bash
+  python3 -c "
+  import subprocess, re
+  base = subprocess.check_output(['git','merge-base','origin/main','HEAD']).decode().strip()
+  files = subprocess.check_output(['git','diff','--name-only', base + '...HEAD']).decode().splitlines()
+  pats = [r'^.+/tests/', r'.+\.(blackbox|test|spec)\.(ts|tsx|py)$', r'^agents/benchmarks/', r'^agents/tools/prompts/', r'^docs/', r'.+\.md$', r'^\.claude/', r'^\.coderabbit\.yaml$', r'.+/__init__\.py$', r'^agents/.+/(config|types|repo)\.py$', r'.+/eslint\.config\.']
+  remaining = [f for f in files if not any(re.search(p, f) for p in pats)]
+  print(f'{len(files)} -> {len(remaining)}')
+  "
+  ```
+  If the projected count is still ≥150 after applying the canonical set, escalate to the user — splitting the PR or upgrading CodeRabbit is the only remaining option.
 - **No issues found** → proceed to Phase 3.
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
