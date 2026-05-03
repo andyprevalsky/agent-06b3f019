@@ -544,15 +544,19 @@ def _first_nonempty_line(text: str) -> str:
     return ""
 
 
-def render_tool_list(registry: ToolRegistry, *, sort: bool = True) -> str:
+def render_tool_list(
+    registry: ToolRegistry,
+    *,
+    tool_prompts: Optional[Dict[str, str]] = None,
+    sort: bool = True,
+) -> str:
     """Render a deterministic, single-line-per-tool listing of `registry`.
 
     Output format: ``- {tool_name}: {description}`` per tool, joined by
-    newlines. The description is the first non-empty line of the tool's
-    PROMPT fragment (``tools/prompts/<name>.py``); if the tool has no
-    fragment, it falls back to the first line of the Pydantic class
-    docstring. Empty fallbacks render as ``"No description"`` so every
-    listed tool produces a non-empty line.
+    newlines. The description is the first non-empty line of the matching
+    entry in ``tool_prompts`` (when supplied); if absent, it falls back to
+    the first line of the Pydantic class docstring. Empty fallbacks render
+    as ``"No description"`` so every listed tool produces a non-empty line.
 
     Determinism guarantee: with the same registry, two calls return the
     exact same string. Tools are sorted by name (when ``sort=True``, the
@@ -561,6 +565,9 @@ def render_tool_list(registry: ToolRegistry, *, sort: bool = True) -> str:
     Args:
         registry: ``{name: Pydantic model}`` map. Use ``TOOL_MODELS`` for
             the canonical agent-tool registry, or pass a subset.
+        tool_prompts: Optional ``{name: PROMPT}`` map injected by the caller
+            (typically ``tools.prompts.TOOL_PROMPTS``). Pass it from any
+            non-utils caller so this utility stays free of ``tools/`` deps.
         sort: When True (default), output lines are alphabetically sorted by
             tool name. Set to False to preserve registry iteration order
             (callers that pass an already-ordered subset).
@@ -569,17 +576,11 @@ def render_tool_list(registry: ToolRegistry, *, sort: bool = True) -> str:
         A multiline string with one ``- name: description`` line per tool,
         joined by ``\\n``. Returns an empty string if the registry is empty.
     """
-    # Imported lazily so utils/tool_schemas.py stays free of tools/* deps.
-    # Caller's first import wins; subsequent calls hit Python's module cache.
-    try:
-        from tools.prompts import TOOL_PROMPTS as _TOOL_PROMPTS
-    except Exception:
-        _TOOL_PROMPTS = {}
-
+    prompts = tool_prompts or {}
     names = sorted(registry.keys()) if sort else list(registry.keys())
     lines = []
     for name in names:
-        description = _first_nonempty_line(_TOOL_PROMPTS.get(name, ""))
+        description = _first_nonempty_line(prompts.get(name, ""))
         if not description:
             model = registry[name]
             description = _first_nonempty_line(model.__doc__ or "")
