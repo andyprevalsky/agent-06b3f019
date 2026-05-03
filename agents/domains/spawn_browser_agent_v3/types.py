@@ -14,4 +14,4 @@ class ClaudeTokenState:
         self.source: Optional[str] = None  # 'user' | 'pool'
         self.pool_token_id: Optional[str] = None
         self.excluded_pool_ids: List[str] = []
-        self.fallen_back_to_racing: bool = False
+        self.fallen_back_to_waterfall: bool = False

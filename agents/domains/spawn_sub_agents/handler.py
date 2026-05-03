@@ -17,9 +17,9 @@ from temporalio.common import RetryPolicy
 from domains.spawn_sub_agents.config import MAX_DEPTH
 from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
-    fetch_parent_attachments_activity,
     spawn_sub_agent_activity,
 )
+from helpers.attachments import fetch_parent_attachments_activity
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 

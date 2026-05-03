@@ -8,6 +8,7 @@ import type {
   SaveToolUsageInput,
   ToolUsageCreated,
   ToolUsageSummary,
+  TreeToolUsageSummary,
   UsageItem,
 } from './types';
 import { createLogger } from '../../providers/logger';
@@ -108,16 +109,25 @@ export async function getToolUsageForAgent(
 
   // Aggregate token counts (only from LLM-type usage items)
   let totalTokens = 0;
+  let cacheReadInputTokens = 0;
+  let cacheCreationInputTokens = 0;
   for (const usage of toolUsages) {
     if (!Array.isArray(usage.usageItems)) continue;
     const items = usage.usageItems as UsageItem[];
     for (const item of items) {
-      if (
-        item.type === 'llm' &&
-        item.number_of_tokens !== undefined &&
-        item.number_of_tokens !== 0
-      ) {
-        totalTokens += item.number_of_tokens;
+      if (item.type === 'llm') {
+        if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
+          totalTokens += item.number_of_tokens;
+        }
+        if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
+          cacheReadInputTokens += item.cache_read_input_tokens;
+        }
+        if (
+          item.cache_creation_input_tokens !== undefined &&
+          item.cache_creation_input_tokens !== 0
+        ) {
+          cacheCreationInputTokens += item.cache_creation_input_tokens;
+        }
       }
     }
   }
@@ -128,6 +138,8 @@ export async function getToolUsageForAgent(
     total_cost_cents: totalCostCents,
     total_cost_dollars: totalCostCents / 100,
     total_tokens_from_tools: totalTokens,
+    cache_read_input_tokens: cacheReadInputTokens,
+    cache_creation_input_tokens: cacheCreationInputTokens,
     usages: toolUsages.map((usage) => ({
       id: usage.id,
       tool_name: usage.toolName,
@@ -135,5 +147,78 @@ export async function getToolUsageForAgent(
       usage_items: usage.usageItems,
       created_at: usage.createdAt,
     })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Get aggregated tool usage for an entire agent tree (root + sub-agents)
+// ---------------------------------------------------------------------------
+
+export async function getToolUsageForTree(
+  agentId: string,
+  requestUserId: string | undefined,
+  isInternal: boolean
+): Promise<TreeToolUsageSummary> {
+  // Verify root agent exists and check access
+  const agent = await repo.findAgentWithBusId(agentId);
+  if (agent === null) {
+    throw new AgentNotFoundError();
+  }
+
+  if (!isInternal) {
+    if (agent.userId !== requestUserId) {
+      throw new AccessDeniedError();
+    }
+  }
+
+  // Collect all agent IDs in the tree
+  let agentIds: string[];
+  if (agent.busId !== null) {
+    agentIds = await repo.findAgentIdsByBusId(agent.busId);
+  } else {
+    // No busId means root-only (no sub-agents spawned)
+    agentIds = [agentId];
+  }
+
+  // Fetch all tool usages for the entire tree in one query
+  const toolUsages = await repo.findToolUsagesByAgentIds(agentIds);
+
+  // Aggregate totals
+  let totalCostCents = 0;
+  let totalTokens = 0;
+  let cacheReadInputTokens = 0;
+  let cacheCreationInputTokens = 0;
+
+  for (const usage of toolUsages) {
+    totalCostCents += usage.totalCostCents;
+    if (!Array.isArray(usage.usageItems)) continue;
+    const items = usage.usageItems as UsageItem[];
+    for (const item of items) {
+      if (item.type === 'llm') {
+        if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
+          totalTokens += item.number_of_tokens;
+        }
+        if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
+          cacheReadInputTokens += item.cache_read_input_tokens;
+        }
+        if (
+          item.cache_creation_input_tokens !== undefined &&
+          item.cache_creation_input_tokens !== 0
+        ) {
+          cacheCreationInputTokens += item.cache_creation_input_tokens;
+        }
+      }
+    }
+  }
+
+  return {
+    root_agent_id: agentId,
+    agent_count: agentIds.length,
+    tool_usage_count: toolUsages.length,
+    total_cost_cents: totalCostCents,
+    total_cost_dollars: totalCostCents / 100,
+    total_tokens_from_tools: totalTokens,
+    cache_read_input_tokens: cacheReadInputTokens,
+    cache_creation_input_tokens: cacheCreationInputTokens,
   };
 }

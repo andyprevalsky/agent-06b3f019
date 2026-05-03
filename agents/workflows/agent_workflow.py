@@ -23,8 +23,6 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from activities.shared_memory import append_shared_memory, get_shared_memory
-    from domains.search_user_network import search_user_network_for_people
     from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/sub_agent/explore
     from helpers import (
         check_user_usage,
@@ -41,7 +39,12 @@ with workflow.unsafe.imports_passed_through():
         update_agent_status,
     )
     from helpers.handle_tool_event import handle_tool_event
-    from helpers.llm import fetch_claude_max_token_activity, mark_claude_token_rate_limited_activity
+    from helpers.llm import (
+        check_progress,
+        fetch_claude_max_token_activity,
+        mark_claude_token_rate_limited_activity,
+        set_response_schema_activity,
+    )
     from helpers.messages import update_agent_tree_state
     from helpers.model_pricing import get_anthropic_pricing
     from helpers.query_parent_state import query_parent_state_activity
@@ -49,23 +52,15 @@ with workflow.unsafe.imports_passed_through():
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import run_agent
-    from tools.add_memory import add_memory
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
     from tools.call_phone_number import get_manager as get_call_phone_manager
-    from tools.check_monitor_events import check_monitor_events
 
     # Tool executors (map tool name → workflow helper)
-    from tools.deep_research import deep_research
-    from tools.enable_write_permissions import enable_write_permissions
-    from tools.enrich import enrich
-    from tools.find_all import find_all
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
-    from tools.monitor import monitor
-    from tools.people_search import people_search
     from tools.request_user_approval import UserRejectedError, request_user_approval_direct
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
@@ -73,11 +68,11 @@ with workflow.unsafe.imports_passed_through():
     from tools.wait_for import wait_for
     from tools.web_fetch import web_fetch
     from tools.web_search import web_search
-    from tools.x402_bazaar import pay_for_x402_bazaar_service, search_x402_bazaar
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
+    from tools.prompts import TOOL_PROMPTS
     from utils.prompts import build_system_prompt, build_verifier_prompt
-    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.tool_schemas import ALL_PHASE_TOOLS, EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
 
@@ -88,28 +83,17 @@ logger = structlog.get_logger()
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
     "spawn_agent": spawn_agent,  # Unified: browser/code/sub_agent/explore
-    "deep_research": deep_research,
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
-    "enable_write_permissions": enable_write_permissions,
     "web_search": web_search,
     "web_fetch": web_fetch,
-    "search_user_network_for_people": search_user_network_for_people,
-    "find_all": find_all,
-    "enrich": enrich,
-    "monitor": monitor,
-    "check_monitor_events": check_monitor_events,
     "message_person": message_person,
     "set_plan": set_plan,
     "attempt_completion": attempt_completion,
-    "search_x402_bazaar": search_x402_bazaar,
-    "pay_for_x402_bazaar_service": pay_for_x402_bazaar_service,
     "request_user_signup": request_user_signup,
     "call_phone_number": call_phone_number,
-    "people_search": people_search,
     "grep": grep,
-    "add_memory": add_memory,
 }
 
 # Tools requiring user approval before execution
@@ -186,6 +170,7 @@ class AgentWorkflow:
         self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
+        self._is_finished: bool = False  # Latched True after _mark_complete/_mark_failed runs
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -214,11 +199,6 @@ class AgentWorkflow:
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
-
-        # Shared memory state (for cross-agent memory sharing within a run)
-        self.shared_memory_hash: Optional[str] = None  # Current hash for cache invalidation
-        self.shared_memory_content: List[Dict] = []  # Current shared memory entries
-        self.appended_message_ids: Set[str] = set()  # Track message IDs we've already appended
 
     # =========================================================================
     # SIGNALS
@@ -492,6 +472,33 @@ class AgentWorkflow:
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
+        # Post an early heartbeat so external monitors (FE tree, benchmark
+        # stall detector) see the agent is alive while init activities run.
+        # Init is several short serialized activities and under parallel
+        # benchmark load the round trips can stack to >60 s before the first
+        # ASSISTANT/TOOL row lands. Without this row the agent looks silent
+        # from message-creation time onward and the benchmark fires
+        # `tree stalled` before any LLM call has happened. The row is purely
+        # a liveness signal — UI renders it as a thin "Initializing" chip
+        # and the row becomes irrelevant once a real tool message arrives.
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                post_agent_message,
+                args=[
+                    agent_id,
+                    "Agent initializing — fetching context, system prompt, and tool config.",
+                    "TOOL",
+                    {
+                        "toolName": "agent_init",
+                        "toolStatus": "IN_PROGRESS",
+                        "title": "Initializing",
+                    },
+                    None,
+                ],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
         # Fetch model context window
         if self.max_context_tokens is None:
             try:
@@ -625,6 +632,31 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
+        # If no schema was provided at create time, generate one synchronously NOW.
+        # The schema appears in both the main system prompt (`# Required Output`)
+        # and the verifier system prompt (`# Structured Output Required`); if it
+        # arrives lazily mid-run, every LLM call before generation has a different
+        # dynamic_sys_hash than every call after, busting the prompt cache. By
+        # awaiting it before any LLM call, the dynamic prefix stays stable across
+        # the entire agent.
+        if response_schema is None and self.goal:
+            try:
+                generated = await workflow.execute_activity(
+                    set_response_schema_activity,
+                    args=[agent_id, [self.goal]],
+                    start_to_close_timeout=timedelta(seconds=90),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                if isinstance(generated, dict) and generated.get("schema"):
+                    self.output_schema = generated["schema"]
+                    response_schema = self.output_schema
+                    workflow.logger.info(
+                        f"Generated output_schema synchronously with "
+                        f"{len(self.output_schema.get('fields', []))} field(s)"
+                    )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
+
         # Fetch model pricing for cost calculation
         try:
             pricing = await workflow.execute_activity(
@@ -665,6 +697,10 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
+        # Unified tool list for LLM schema generation — makes the Anthropic
+        # tools array identical across phases so system+tools cache prefix
+        # is shared between PLAN and EXECUTE calls.
+        all_tools = ALL_PHASE_TOOLS
 
         # Determine whether to skip PLAN phase and/or DAG
         skip_plan = start_phase in ("execute", "execute_continued")
@@ -683,11 +719,9 @@ class AgentWorkflow:
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=self.build_system_prompt,
-                verifier_prompt_generator=self._make_verifier_prompt_generator(
-                    "PLAN", self.verifier.get("llmJudgePrompt", "")
-                ),
+                verifier_prompt_generator=self._make_verifier_prompt_generator(),
                 model=model,
-                tools=plan_tools,
+                tools=all_tools,
                 is_inside_temporal_activity=False,
                 check_paused=self._check_paused,
                 wait_for_messages=self._wait_for_messages,
@@ -763,13 +797,37 @@ class AgentWorkflow:
                     claude_token=self.claude_max_token,
                     on_tokens=self._on_tokens,
                     system_prompt_text=execute_system_prompt,
-                    tool_names=execute_tools,
+                    tool_names=all_tools,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
                 # run_agent polls from DB (DAG already posted results there)
                 if dag_result["status"] == "completed":
-                    workflow.logger.info("[DAG] Tasks completed, handing off to LLM for attempt_completion")
+                    workflow.logger.info("[DAG] Tasks completed, running verifier directly (skip LLM detour)")
+                    # Force-attempt completion: run the verifier on the post-DAG
+                    # context. If it scores 1.0, mark the agent complete and
+                    # skip run_agent entirely — saves the LLM detour where
+                    # agents otherwise spawn redundant claude_code/explore
+                    # agents to "double-check" the DAG result.
+                    post_dag_result = await self._run_post_dag_verifier(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        model=model,
+                    )
+                    if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
+                        workflow.logger.info(
+                            f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                        )
+                        await self._mark_complete(
+                            execute_context,
+                            post_dag_result.get("structured_response"),
+                        )
+                        return {"status": "completed", "goal": goal}
+                    workflow.logger.info(
+                        f"[DAG] Post-DAG verifier did not pass "
+                        f"(score={post_dag_result.get('score', 0.0) if post_dag_result else 'n/a'}) "
+                        "— falling through to run_agent for recovery"
+                    )
                 else:
                     workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
             else:
@@ -786,11 +844,9 @@ class AgentWorkflow:
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=self.build_system_prompt,
-            verifier_prompt_generator=self._make_verifier_prompt_generator(
-                "EXECUTE", self.verifier.get("llmJudgePrompt", "")
-            ),
+            verifier_prompt_generator=self._make_verifier_prompt_generator(),
             model=model,
-            tools=execute_tools,
+            tools=all_tools,
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=self._check_paused,
@@ -825,35 +881,97 @@ class AgentWorkflow:
     # CALLBACKS FOR run_agent
     # =========================================================================
 
-    def _make_verifier_prompt_generator(self, phase: str, llm_judge_prompt: str):
+    async def _run_post_dag_verifier(
+        self,
+        agent_id: str,
+        user_id: str,
+        model: str,
+    ) -> Optional[Dict]:
+        """Run the verifier directly after a successful DAG to short-circuit
+        the LLM detour.
+
+        After the DAG finishes, the agent's TOOL messages already contain
+        every tool result needed to populate the goal's output schema. The
+        verifier can transform those results into the schema in a single
+        reasoning call. Letting the LLM iterate again invites it to spawn
+        redundant claude_code/explore sub-agents to "double-check" the DAG
+        result, burning the bench budget.
+
+        Returns the verifier result dict (with `score`, `reasoning`,
+        `structured_response`) or None if the call failed.
+        """
+        try:
+            # Poll fresh context — DAG has been posting tool results to the DB.
+            context = await workflow.execute_activity(
+                poll_new_messages,
+                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            # Build verifier prompt (schema-driven only).
+            prompt_gen = self._make_verifier_prompt_generator()
+            verifier_prompt = await prompt_gen()
+
+            # Refresh claude token in case it expired during DAG.
+            await self._refresh_claude_token(user_id)
+
+            # C7: dead `phase` positional arg has been removed from
+            # check_progress; callers no longer pass it.
+            # C14: `context` is already agent-scoped — poll_new_messages
+            # queries the backend by `agent_id`, so sub-agent rows never
+            # appear here.
+            result = await workflow.execute_activity(
+                check_progress,
+                args=[
+                    context,
+                    verifier_prompt,
+                    model,
+                    self.output_schema,
+                    self.claude_max_token,
+                    "verifier_post_dag",
+                    agent_id,
+                ],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            # C6: route post-DAG verifier cost through _on_tokens so this LLM
+            # call doesn't drop off the cost ledger. _on_tokens is the canonical
+            # entry-point for any LLM usage outside run_agent's own loop.
+            v_usage = result.get("usage", {}) if result else {}
+            v_tokens_in = v_usage.get("prompt_tokens", 0)
+            v_tokens_out = v_usage.get("completion_tokens", 0)
+            if v_tokens_in > 0 or v_tokens_out > 0:
+                try:
+                    await self._on_tokens(
+                        v_tokens_in,
+                        v_tokens_out,
+                        v_usage.get("actual_model"),
+                        cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
+                        cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
+                        call_site="verifier_post_dag",
+                        claude_token_error=v_usage.get("claude_token_error"),
+                    )
+                except Exception as e:
+                    workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
+
+            return result
+        except Exception as e:
+            workflow.logger.warning(f"[DAG] Post-DAG verifier failed: {e}")
+            return None
+
+    def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
 
-        This allows schema to be polled/fetched when actually needed, avoiding race conditions
-        where the schema isn't ready at phase start.
+        The verifier prompt is now schema-driven only — no per-agent custom
+        judge prompt. Schema is set synchronously during workflow setup
+        (no lazy population, no schema polling), so this just returns the
+        already-resolved schema-bound prompt.
         """
 
         async def generate() -> str:
-            # Poll for schema if not available (handles async schema generation race condition)
-            if self.output_schema is None:
-                max_attempts = 5
-                for attempt in range(max_attempts):
-                    try:
-                        agent_config = await workflow.execute_activity(
-                            fetch_agent_config,
-                            args=[self.agent_id],
-                            start_to_close_timeout=timedelta(seconds=30),
-                            retry_policy=RetryPolicy(maximum_attempts=2),
-                        )
-                        self.output_schema = agent_config.get("response_schema")
-                        if self.output_schema:
-                            workflow.logger.info(f"Fetched output_schema on attempt {attempt + 1}")
-                            break
-                        elif attempt < max_attempts - 1:
-                            await asyncio.sleep(1)  # Wait before retry
-                    except Exception as e:
-                        workflow.logger.warning(f"Failed to fetch schema (attempt {attempt + 1}): {e}")
-
-            return build_verifier_prompt(phase, llm_judge_prompt, response_schema=self.output_schema)
+            return build_verifier_prompt(response_schema=self.output_schema)
 
         return generate
 
@@ -870,22 +988,17 @@ class AgentWorkflow:
         return get_schema
 
     async def build_system_prompt(self) -> str:
-        """Build system prompt with fresh shared memory.
+        """Build system prompt for the current phase.
 
-        Called by run_agent before each LLM call to ensure agents see
-        the latest shared memory updates.
+        Called by run_agent before each LLM call.
         """
-        # Fetch latest shared memory from API
-        shared_memory_section = await self._fetch_shared_memory()
-
-        # Build prompt using helper
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
             user_context_section=self.user_context_section,
             response_schema=self.output_schema,
-            shared_memory_section=shared_memory_section,
+            tool_prompts=TOOL_PROMPTS,
         )
 
     async def _wait_for_messages(self) -> bool:
@@ -1041,124 +1154,51 @@ class AgentWorkflow:
                         self.context.append(msg)
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
 
-                # Append new USER messages to shared memory (with deduplication)
-                await self._append_user_messages_to_shared_memory(messages)
-
             return messages
         except Exception:
             return []
 
-    async def _append_user_messages_to_shared_memory(self, messages: List[Dict]) -> None:
-        """Append new USER messages to shared memory for cross-agent visibility.
-
-        TEMPORARILY DISABLED: Broadcasting all USER messages (including agent goals)
-        to shared memory causes sub-agents to see parent instructions, leading to
-        re-delegation instead of focused execution (low CX scores).
-        Context is now passed explicitly via spawn_sub_agent goal fields instead.
-        """
-        return  # Disabled — explicit context passing via goal field replaces this
-
-        if not self.bus_id:
-            return  # No bus_id means no shared memory scope
-
-        for msg in messages:
-            if msg.get("role") != "USER":
-                continue
-
-            msg_id = msg.get("id")
-            if not msg_id or msg_id in self.appended_message_ids:
-                continue  # Skip if no ID or already appended
-
-            # Extract file pointers if present
-            files = []
-            file_pointer = msg.get("file_pointer") or msg.get("filePointer")
-            if file_pointer:
-                files.append(
-                    {
-                        "original_filename": file_pointer.get("original_filename", ""),
-                        "mime_type": file_pointer.get("mime_type", ""),
-                    }
-                )
-
-            try:
-                result = await workflow.execute_activity(
-                    append_shared_memory,
-                    args=[
-                        self.bus_id,
-                        "USER_MESSAGE",
-                        msg.get("text", ""),
-                        msg_id,
-                        files if files else None,
-                    ],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-
-                if result:
-                    self.shared_memory_hash = result.get("hash")
-                    self.appended_message_ids.add(msg_id)
-                    workflow.logger.debug(f"📝 Appended user message {msg_id[:8]} to shared memory")
-            except Exception as e:
-                workflow.logger.warning(f"Failed to append user message to shared memory: {e}")
-
-    async def _fetch_shared_memory(self) -> str:
-        """Fetch shared memory and format it for inclusion in system prompt."""
-        if not self.bus_id:
-            return ""  # No bus_id means no shared memory scope
-
-        try:
-            result = await workflow.execute_activity(
-                get_shared_memory,
-                args=[self.bus_id, self.shared_memory_hash],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-            if result is None:
-                # Hash matched, content unchanged - use cached
-                pass
-            elif result:
-                # New content received
-                self.shared_memory_content = result.get("content", [])
-                self.shared_memory_hash = result.get("hash")
-
-            # Format shared memory for system prompt
-            if not self.shared_memory_content:
-                return ""
-
-            # shared_files gate: when False, strip file references from shared memory entries
-            include_shared_files = self.context_gates.get("shared_files", True)
-
-            lines = []
-            for entry in self.shared_memory_content:
-                timestamp = entry.get("timestamp", "")[:19]  # Truncate to datetime
-                entry_type = entry.get("type", "")
-                content = entry.get("content", "")
-                files = entry.get("files", [])
-
-                line = f"[{timestamp}] {entry_type}: {content}"
-                if files and include_shared_files:
-                    file_names = ", ".join(f.get("original_filename", "") for f in files)
-                    line += f" (files: {file_names})"
-                lines.append(line)
-
-            return "\n".join(lines)
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch shared memory: {e}")
-            return ""
-
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:  # noqa: C901
-        """Execute a tool - supports both new and legacy signatures during migration."""
+        """Execute a tool - supports both new and legacy signatures during migration.
+
+        Every error return path MUST first emit a paired TOOL event via
+        _handle_tool_event so the next iteration's LLM call sees alternating
+        USER/ASSISTANT/TOOL turns. Returning an error dict without posting a
+        tool_result leaves the prior ASSISTANT tool_use unpaired, which trips
+        role_alternation and causes the LLM to re-emit the same tool_calls
+        (regression: smoke task `parallel-tool-calls`).
+        """
         if tool_name not in TOOL_EXECUTORS:
-            return {"error": True, "message": f"Unknown tool: {tool_name}"}
+            error_msg = f"Unknown tool: {tool_name}"
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"❌ {tool_name.replace('_', ' ').title()} failed",
+                    message=error_msg,
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                tool_name,
+            )
+            return {"error": True, "message": error_msg}
 
         # Enforce: during PLAN phase, spawn_agent only allows type="explore"
         if tool_name == "spawn_agent" and self.current_phase == "PLAN" and tool_args.get("type") != "explore":
-            return {
-                "error": True,
-                "message": "During PLAN phase, spawn_agent only supports type='explore'. "
-                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents.",
-            }
+            error_msg = (
+                "During PLAN phase, spawn_agent only supports type='explore'. "
+                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents."
+            )
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Spawn Agent failed",
+                    message=error_msg,
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                tool_name,
+            )
+            return {"error": True, "message": error_msg}
 
         # Semantic validation: validate tool args against Pydantic model_validators
         from utils.tool_schemas import TOOL_MODELS
@@ -1167,7 +1207,18 @@ class AgentWorkflow:
             try:
                 TOOL_MODELS[tool_name](**{"tool": tool_name, **tool_args})
             except Exception as e:
-                return {"error": True, "message": f"Invalid parameters for {tool_name}: {e}"}
+                error_msg = f"Invalid parameters for {tool_name}: {e}"
+                await self._handle_tool_event(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"❌ {tool_name.replace('_', ' ').title()} failed",
+                        message=error_msg,
+                        status=MessageStatus.ERROR,
+                    ),
+                    tool_call_id,
+                    tool_name,
+                )
+                return {"error": True, "message": error_msg}
 
         # Track tool as in-use with human-readable display string
         tool_display = format_tool_display(tool_name, tool_args)
@@ -1194,19 +1245,9 @@ class AgentWorkflow:
             NEW_SIGNATURE_TOOLS = {
                 "web_search",
                 "web_fetch",
-                "send_email",
-                "send_sms",
-                "search_user_network_for_people",
-                "monitor",
-                "check_monitor_events",
-                "deep_research",
                 "attempt_completion",
-                "search_x402_bazaar",
-                "pay_for_x402_bazaar_service",
                 "call_phone_number",
-                "people_search",
                 "grep",
-                "add_memory",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
@@ -1648,7 +1689,7 @@ class AgentWorkflow:
         if actual_model:
             self.actual_model = actual_model
 
-            # Detect Claude token fallback: we had a token but Rose used racing instead
+            # Detect Claude token fallback: we had a token but Rose fell through to the waterfall
             # Only invalidate the token for permanent failures (auth errors, rate limits).
             # Transient failures (stalls, server errors) keep the token for retry on next call.
             if self.claude_max_token and actual_model != "unknown" and not actual_model.endswith("-claude"):
@@ -1683,8 +1724,8 @@ class AgentWorkflow:
                     self.claude_max_token_source = None
                     self.claude_max_token_pool_id = None
                     # Proactively refetch so subsequent LLM calls in this phase use the
-                    # rotated token (otherwise they'd fall back to racing until the next
-                    # phase boundary calls _refresh_claude_token).
+                    # rotated token (otherwise they'd fall through to the waterfall until
+                    # the next phase boundary calls _refresh_claude_token).
                     if self.user_id:
                         try:
                             await self._refresh_claude_token(self.user_id)
@@ -1759,6 +1800,8 @@ class AgentWorkflow:
                             "tokens_in": tokens_in_delta,
                             "tokens_out": tokens_out_delta,
                             "model": model_for_usage,
+                            "cache_read_input_tokens": cache_read_input_tokens,
+                            "cache_creation_input_tokens": cache_creation_input_tokens,
                         }
                     ],
                 ],
@@ -1801,8 +1844,13 @@ class AgentWorkflow:
 
         # Broadcast updated tree tokens to this agent's channel (for frontend display)
         # This applies to all agents (root and non-root) when receiving child updates
-        # Skip if paused or cost-limited (don't overwrite PAUSED/COST_LIMIT_REACHED DB status with ACTIVE)
-        if not self._cost_limit_reached and not self.is_paused:
+        # Skip if paused, cost-limited, or already finished — don't overwrite
+        # PAUSED/COST_LIMIT_REACHED/COMPLETED/FAILED DB status with ACTIVE.
+        # Regression: a late child_cost_update signal arriving after _mark_complete
+        # would broadcast status=ACTIVE/Processing over the terminal status,
+        # making the benchmark harness poll forever until the stall threshold
+        # deleted the agent (404/DELETED at 136s).
+        if not self._cost_limit_reached and not self.is_paused and not self._is_finished:
             try:
                 await workflow.execute_activity(
                     update_agent_status,
@@ -2065,8 +2113,13 @@ class AgentWorkflow:
                                 plan_goals.append(str(task)[:100])
                         last_plan = plan_goals
 
-                # Build trajectory (skip internal tools)
-                if not tool_name or tool_name in {"check_progress", "completion_summary", "set_plan"}:
+                # Build trajectory (skip internal tools).
+                # Verifier feedback is now tagged toolName="attempt_completion" with
+                # metadata.verifierMessage=True; skip those rows so the trajectory
+                # only contains real tool calls, not scoring messages.
+                if metadata.get("verifierMessage"):
+                    continue
+                if not tool_name or tool_name in {"completion_summary", "set_plan"}:
                     continue
 
                 tool_call_id = metadata.get("toolCallId")
@@ -2127,6 +2180,9 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        # Latch the terminal flag FIRST — see _mark_complete for the regression
+        # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
+        self._is_finished = True
 
         tool_call_id = str(workflow.uuid4())
 
@@ -2247,6 +2303,10 @@ class AgentWorkflow:
         7. Save blueprint (fire-and-forget, no UI)
         """
         workflow.logger.info("✓ Marking task complete")
+        # Latch the terminal flag FIRST so any late child_cost_update signal
+        # (which calls _update_cost_and_signal_parent → broadcast) cannot
+        # overwrite the COMPLETED status with ACTIVE/Processing.
+        self._is_finished = True
 
         # Poll for output_schema if missing (handles race condition with async schema generation)
         max_schema_attempts = 5

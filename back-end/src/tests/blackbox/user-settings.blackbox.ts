@@ -493,14 +493,14 @@ async function testUserIsolation() {
 // ==================== RUNNER ====================
 
 async function runAll() {
-  console.log('🧪 User Settings Contract Tests\n');
-  console.log(`📡 Testing against: ${BASE_URL}\n`);
+  process.stdout.write('🧪 User Settings Contract Tests\n\n');
+  process.stdout.write(`📡 Testing against: ${BASE_URL}\n\n`);
 
   // Setup
-  console.log('🔐 Setting up auth...');
+  process.stdout.write('🔐 Setting up auth...\n');
   await setupAuth();
-  console.log(`   User 1: ${ctx.userId}`);
-  console.log(`   User 2: ${ctx.userId2}\n`);
+  process.stdout.write(`   User 1: ${ctx.userId}\n`);
+  process.stdout.write(`   User 2: ${ctx.userId2}\n\n`);
 
   const groups: { name: string; tests: { name: string; fn: () => Promise<void> }[] }[] = [
     {
@@ -519,8 +519,14 @@ async function runAll() {
         { name: 'no auth → 401', fn: testPut_noAuth },
         { name: 'empty body (all optional)', fn: testPut_emptyBody },
         { name: 'bad input — systemName too long → 400', fn: testPut_badInput_systemNameTooLong },
-        { name: 'bad input — profilePicture too long → 400', fn: testPut_badInput_profilePictureTooLong },
-        { name: 'bad input — customSystemPrompt too long → 400', fn: testPut_badInput_customSystemPromptTooLong },
+        {
+          name: 'bad input — profilePicture too long → 400',
+          fn: testPut_badInput_profilePictureTooLong,
+        },
+        {
+          name: 'bad input — customSystemPrompt too long → 400',
+          fn: testPut_badInput_customSystemPromptTooLong,
+        },
         { name: 'bad input — invalid field type → 400', fn: testPut_badInput_invalidFieldType },
         { name: 'nullable fields set to null', fn: testPut_nullableFields },
         { name: 'upsert creates record for new user', fn: testPut_verifyUpsertCreatesRecord },
@@ -531,7 +537,10 @@ async function runAll() {
       tests: [
         { name: 'happy path', fn: testPatch_happy },
         { name: 'no auth → 401', fn: testPatch_noAuth },
-        { name: 'partial update preserves other fields', fn: testPatch_partialUpdatePreservesOtherFields },
+        {
+          name: 'partial update preserves other fields',
+          fn: testPatch_partialUpdatePreservesOtherFields,
+        },
         { name: 'bad input — systemName too long → 400', fn: testPatch_badInput_systemNameTooLong },
         { name: 'bad input — invalid field type → 400', fn: testPatch_badInput_invalidFieldType },
         { name: 'empty body (no-op update)', fn: testPatch_emptyBody },
@@ -551,12 +560,14 @@ async function runAll() {
   const allResults: TestResult[] = [];
 
   for (const group of groups) {
-    console.log(`\n📋 ${group.name}`);
+    process.stdout.write(`\n📋 ${group.name}\n`);
     for (const test of group.tests) {
       const result = await runTest(`${group.name} — ${test.name}`, test.fn);
       allResults.push(result);
       const icon = result.passed ? '  ✅' : '  ❌';
-      console.log(`${icon} ${test.name}${result.passed ? '' : ` — ${result.error}`} (${result.duration}ms)`);
+      process.stdout.write(
+        `${icon} ${test.name}${result.passed ? '' : ` — ${result.error}`} (${result.duration}ms)\n`
+      );
     }
   }
 
@@ -564,22 +575,26 @@ async function runAll() {
   const passed = allResults.filter((r) => r.passed).length;
   const failed = allResults.filter((r) => !r.passed).length;
 
-  console.log('\n' + '='.repeat(50));
-  console.log(`\n📊 Results: ${passed} passed, ${failed} failed, ${allResults.length} total`);
+  process.stdout.write('\n' + '='.repeat(50) + '\n');
+  process.stdout.write(
+    `\n📊 Results: ${passed} passed, ${failed} failed, ${allResults.length} total\n`
+  );
 
   if (failed > 0) {
-    console.log('\n❌ FAILURES:');
+    process.stdout.write('\n❌ FAILURES:\n');
     allResults
       .filter((r) => !r.passed)
-      .forEach((r) => console.log(`   • ${r.name}: ${r.error}`));
+      .forEach((r) => process.stdout.write(`   • ${r.name}: ${r.error}\n`));
     process.exit(1);
   }
 
-  console.log('\n✅ ALL CONTRACT TESTS PASSED\n');
+  process.stdout.write('\n✅ ALL CONTRACT TESTS PASSED\n\n');
   process.exit(0);
 }
 
 runAll().catch((error) => {
-  console.error('\n💥 Black-box test suite crashed:', error);
+  process.stderr.write(
+    `\n💥 Black-box test suite crashed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exit(1);
 });

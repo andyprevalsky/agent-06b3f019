@@ -18,3 +18,7 @@ export const DEFAULT_SEARCH_LIMIT = 3;
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+/** True when blackbox-test capture mode is active (deterministic embedding fallback). */
+export const BLACKBOX_CAPTURE_MODE =
+  process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1' || process.env.NODE_ENV === 'test';

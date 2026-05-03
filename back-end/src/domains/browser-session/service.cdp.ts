@@ -3,6 +3,7 @@
  */
 
 import { createLogger } from '../../providers/logger';
+import type { Browser } from 'playwright';
 import { CdpInjectionError } from './types';
 
 const log = createLogger('BrowserSessionCdp');
@@ -12,10 +13,7 @@ export async function injectLocalStorageViaCdp(
   entries: { key: string; value: string }[],
   origin: string
 ): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/consistent-type-imports -- dynamic import type
-  let browser: Awaited<
-    ReturnType<(typeof import('playwright'))['chromium']['connectOverCDP']>
-  > | null = null;
+  let browser: Browser | null = null;
   try {
     const { chromium } = await import('playwright');
     browser = await chromium.connectOverCDP(wsUrl);
@@ -30,16 +28,21 @@ export async function injectLocalStorageViaCdp(
     }
     const page = pages[0];
 
-    await page.evaluate((items: { key: string; value: string }[]) => {
+    const failedKeys = await page.evaluate((items: { key: string; value: string }[]) => {
+      const failures: string[] = [];
       for (const { key, value } of items) {
         try {
           localStorage.setItem(key, value);
-        } catch (e) {
-          // eslint-disable-next-line no-console -- runs in browser context via CDP
-          console.warn(`Failed to set localStorage key ${key}:`, e);
+        } catch {
+          failures.push(key);
         }
       }
+      return failures;
     }, entries);
+
+    if (failedKeys.length > 0) {
+      log.warn('Failed to set localStorage keys', { origin, failedKeys });
+    }
 
     log.info('Injected localStorage entries', { origin, count: entries.length });
   } catch (cdpError) {

@@ -466,14 +466,80 @@ At each poll, check:
 
 **ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
-**Diagnosis process:**
-1. Read the log files (backend, worker, research — see table below)
-2. Run BOTH diagnostic summaries in parallel on each failed `agent_id`, then fully expand whichever one points at the smoking gun:
-   - `cd agents && python benchmarks/agent_latency.py <agent_id>` — span-based waterfall: executive summary, top 10 slowest paths, slowest LLM calls, slowest backend HTTP, and deduped errors. Best for "why was this slow/stalled."
-   - `cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics` — event-timeline tree across worker/backend/research/messages. Best for raw error context.
-   - Full detail when the summary points at a layer: `agent_latency.py <agent_id> -v` for the expanded span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`.
-3. Identify which part of the agent lifecycle or LLM request is causing the failure (e.g., slow activity, backend crash under load, edge function error)
-4. Fix the root cause in code, restart services, and re-run
+**Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
+
+Don't try to diagnose smoke failures inline in your own context — the diagnostic
+output for a single failed agent is hundreds of KB across 3 log files, plus
+multiple span-tree dumps, and burns the main context fast. Delegate, and ship a
+fix that the main loop can verify.
+
+**For each failed task, in a single message, spawn ONE `general-purpose` agent
+per failed `agent_id`** (run them concurrently — they're independent). Hand
+each agent the full failure context and tell it to do steps 1–4 end to end:
+
+```
+Agent({
+  description: "Diagnose + fix <task-name> smoke failure",
+  subagent_type: "general-purpose",
+  prompt: """
+Smoke task <task-name> just failed in /deploy. Agent ID: <agent_id>.
+Failure reason from benchmark runner: <reason string from results JSON>.
+
+Repo root: <abs path>. Backend at http://localhost:$CONDUCTOR_PORT.
+
+Steps 1–5 — do them all, do not stop early:
+
+1. Read the relevant log files (truncate aggressively as you go, keep only
+   the windows around the failed agent_id):
+   - back-end/backend-logs.log
+   - agents/navi-worker-log.txt
+   - research/research-logs.log
+
+2. Run BOTH diagnostic summaries IN PARALLEL on the failed agent_id, then
+   fully expand whichever one points at the smoking gun:
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id>`
+     — span-based waterfall: executive summary, top 10 slowest paths,
+     slowest LLM calls, slowest backend HTTP, deduped errors. Best for
+     "why was this slow/stalled."
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics`
+     — event-timeline tree across worker/backend/research/messages. Best
+     for raw error context.
+   - For full detail when the summary points at a layer:
+     `agent_latency.py <agent_id> -v` for the full span tree, or
+     `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`
+     for per-source raw events.
+   - To compare cost/cache against a passing run:
+     `python benchmarks/run_benchmark.py --compare <fail.json> <pass.json>`.
+
+3. Identify the exact root cause: which agent-lifecycle phase, which LLM
+   call site, which activity, or which backend route is failing. State it
+   as a single sentence: "<phase> <component> at <file>:<line> fails
+   because <X>."
+
+4. Implement the fix in code. Real fixes only — no timeout bumps, no test
+   weakening, no skipping. If the fix needs services restarted, note that
+   in your final report.
+
+5. Verify the fix is sane: re-run any structural/blackbox/lint check that
+   covers the modified file(s). You do NOT re-run smoke — the parent loop
+   does that next.
+
+Final report (under 200 words):
+- Root cause (1 sentence)
+- Files modified + line ranges
+- Whether worker/backend needs restart for the fix to take effect
+- Any follow-up risks
+"""
+})
+```
+
+When all spawned agents return, **the main loop** restarts services as
+instructed and re-runs smoke from the top. If the same task fails again with
+a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
+agent's fix was complete.
+
+**Do not** read >5 KB of log content inline before delegating. Grep for the
+exact agent_id, scan the result, then hand the agent_id off.
 
 **NOT allowed when fixing smoke tests:**
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
@@ -527,13 +593,16 @@ When any test or benchmark fails, check these local log files before making code
 | Worker | `agents/navi-worker-log.txt` | Workflow tracebacks, activity failures, LLM call errors |
 | Research | `research/research-logs.log` | Edge function errors, rate limits, auth failures |
 
-For benchmark-specific diagnostics, run BOTH summaries in parallel — they answer different questions:
+For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions:
 ```bash
 # "Why was this slow/stalled?" — span waterfall + top-10 bad paths
 cd agents && python benchmarks/agent_latency.py <agent_id>
 
 # "What errors happened where?" — event-timeline tree
 cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+
+# "How much did this cost / cache?" — tree-wide token + cache breakdown
+cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
 ```
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
@@ -734,7 +803,49 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → **STOP and escalate to the user.** Do NOT proceed to merge. Tell the user CodeRabbit skipped the review, explain why (file count, etc.), and ask how they want to proceed (e.g., filter paths, split PR, or merge without review).
+- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then escalate only if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
+  ```yaml
+  # Tests (gated by Step 5a / Step 6 / Step 6b locally)
+  - "!**/tests/**"
+  - "!**/*.blackbox.ts"
+  - "!**/*.blackbox.tsx"
+  - "!**/*.blackbox.py"
+  - "!**/*.test.ts"
+  - "!**/*.test.tsx"
+  - "!**/*.test.py"
+  - "!**/*.spec.ts"
+  - "!**/test_*.py"
+  - "!front-end/tests-e2e/**"
+  # Benchmark harness (gated by Step 6 smoke run)
+  - "!agents/benchmarks/**"
+  # Prompt strings (no logic — text-only changes)
+  - "!agents/tools/prompts/**"
+  # Docs, markdown, harness config
+  - "!docs/**"
+  - "!**/*.md"
+  - "!.claude/**"
+  - "!.coderabbit.yaml"
+  - "!.gitignore"
+  - "!.editorconfig"
+  - "!**/eslint.config.*"
+  # Python scaffolding (re-exports + dataclass configs/types + thin HTTP repo wrappers)
+  - "!**/__init__.py"
+  - "!agents/**/config.py"
+  - "!agents/**/types.py"
+  - "!agents/**/repo.py"
+  ```
+  Verify the file count drops below 150 before pushing:
+  ```bash
+  python3 -c "
+  import subprocess, re
+  base = subprocess.check_output(['git','merge-base','origin/main','HEAD']).decode().strip()
+  files = subprocess.check_output(['git','diff','--name-only', base + '...HEAD']).decode().splitlines()
+  pats = [r'^.+/tests/', r'.+\.(blackbox|test|spec)\.(ts|tsx|py)$', r'^agents/benchmarks/', r'^agents/tools/prompts/', r'^docs/', r'.+\.md$', r'^\.claude/', r'^\.coderabbit\.yaml$', r'.+/__init__\.py$', r'^agents/.+/(config|types|repo)\.py$', r'.+/eslint\.config\.']
+  remaining = [f for f in files if not any(re.search(p, f) for p in pats)]
+  print(f'{len(files)} -> {len(remaining)}')
+  "
+  ```
+  If the projected count is still ≥150 after applying the canonical set, escalate to the user — splitting the PR or upgrading CodeRabbit is the only remaining option.
 - **No issues found** → proceed to Phase 3.
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.

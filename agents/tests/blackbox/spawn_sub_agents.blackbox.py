@@ -38,7 +38,7 @@ async def test_spawn_sub_agent_happy_path():
             user_id="user-42",
             sub_agents=[{
                 "goal": "Research competitors",
-                "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Did they research?"},
+                "verifier": {"type": "FLOAT_LLM_JUDGE"},
             }],
             parent_agent_id="agent-parent",
             parent_workflow_id="wf-parent",
@@ -61,7 +61,7 @@ async def test_spawn_sub_agent_boundary():
             user_id="user-99",
             sub_agents=[{
                 "goal": "Find leads",
-                "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Were leads found?"},
+                "verifier": {"type": "FLOAT_LLM_JUDGE"},
             }],
             parent_agent_id="agent-parent-2",
             parent_workflow_id="wf-parent-2",
@@ -705,7 +705,7 @@ async def test_spawn_with_prefetched_attachments():
             user_id="user-42",
             sub_agents=[{
                 "goal": "Research competitors",
-                "verifier": {"type": "FLOAT_LLM_JUDGE", "llm_judge_prompt": "Did they research?"},
+                "verifier": {"type": "FLOAT_LLM_JUDGE"},
             }],
             parent_agent_id="agent-parent",
             parent_workflow_id="wf-parent",
@@ -735,7 +735,7 @@ async def test_fetch_parent_attachments_activity():
         },
     })
     with patch("temporalio.activity.heartbeat"):
-        from domains.spawn_sub_agents.service import fetch_parent_attachments_activity
+        from helpers.attachments import fetch_parent_attachments_activity
 
         result = await fetch_parent_attachments_activity("parent-99")
 

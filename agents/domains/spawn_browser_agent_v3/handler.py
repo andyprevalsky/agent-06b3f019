@@ -43,8 +43,6 @@ from .config import (
     MAX_ITERATIONS,
     SESSION_MAX_WAIT_SECONDS,
     SESSION_RETRY_INTERVAL_SECONDS,
-    VERIFIER_LITE_MODEL,
-    VERIFIER_LITE_TIMEOUT_SECONDS,
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
@@ -63,6 +61,7 @@ from .repo import (
 from .service import (
     build_action_titles,
     build_context_summary,
+    build_state_line,
     build_usage_items,
     extract_session_files,
     get_browser_system_prompt,
@@ -104,7 +103,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     loop (no per-iteration workflow boundary), so the activity drives rotation
     here. On `auth_error` / `rate_limit`, mark the offending token, fetch a
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
-    exhaust (or there's no token to start), fall through to racing.
+    exhaust (or there's no token to start), fall through to the waterfall.
     """
     rose_kwargs = dict(
         task=task,
@@ -267,7 +266,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             token_state.pool_token_id = token_data.get("poolTokenId")
             logger.info(f"[ClaudeAuth] Got token (source={token_state.source})", user_id=user_id)
         else:
-            logger.info("[ClaudeAuth] No token available, falling back to racing", user_id=user_id)
+            logger.info("[ClaudeAuth] No token available, falling back to waterfall", user_id=user_id)
             browser_use_mode = None
 
     total_input_tokens = 0
@@ -862,12 +861,18 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 custom_instructions += f"\n\n{otp_section}"
 
             # 3. Build enriched task
-            enriched_task = get_browser_system_prompt(
+            #    The static prompt body (goal/instructions/files/safety rules)
+            #    is byte-identical across iterations from the same spawn — this
+            #    is the cache window. The dynamic per-step state (time + URL)
+            #    is emitted as a separate trailing [STATE: ...] line so it does
+            #    not contaminate the cacheable prefix.
+            static_prompt = get_browser_system_prompt(
                 goal,
-                current_url,
                 custom_instructions,
                 available_files=list(available_file_paths.keys()) if available_file_paths else None,
             )
+            state_line = build_state_line(current_url=current_url)
+            enriched_task = f"{static_prompt}\n\n{state_line}"
 
             # 4. Call Rose API
             try:
@@ -895,10 +900,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     token_state=token_state,
                     browser_use_mode=browser_use_mode,
                 )
-                # Track racing fall-back so subsequent iterations skip claudeAuth.
+                # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
                     browser_use_mode = None
-                    token_state.fallen_back_to_racing = True
+                    token_state.fallen_back_to_waterfall = True
 
                 usage = llm_result.get("usage", {})
                 response_mode = llm_result.get("mode", "")
@@ -1025,11 +1030,21 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     pages_above = scroll_pos.get("pages_above", 0)
                     total_pages = scroll_pos.get("total_pages", 1)
 
-                    page_state = f"""Current Page State:
-- URL: {current_url}
-- Title: {browser_state.get("title", "Unknown")}
-- Interactive Elements: {page_stats.get("interactive", 0)}
-- Scroll Position: Page {pages_above + 1} of {total_pages}"""
+                    # C10: Browser verifier infers from action_history + final-state
+                    # ground truth. Multi-step browser tasks would balloon if we
+                    # stuffed every step's DOM into the verifier prompt; instead
+                    # we pass the action history (which logs URL transitions and
+                    # tool inputs/outputs), the final-state DOM, and the final-state
+                    # screenshot reference. The verifier reconstructs the journey
+                    # from action_history and grounds the answer in the FINAL state.
+                    #
+                    # Browser-sourced ground truth lives in the user prompt, not
+                    # a TOOL message. LLM-generated tool results (e.g. `extract`)
+                    # are reward-hackable; the DOM tree comes straight from
+                    # DOMService and is the only safe substrate for verifying a
+                    # claimed answer.
+                    dom_tree = browser_state.get("dom_tree", "") or ""
+                    final_screenshot_b64 = browser_state.get("screenshot")
 
                     session_files = await list_session_files(session_id)
                     files_text = "Downloaded Files in Session:\n"
@@ -1039,16 +1054,33 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     else:
                         files_text += "  (no files downloaded)\n"
 
+                    user_prompt = (
+                        f"Goal: {goal}\n\n"
+                        "## Browser Ground Truth (FINAL STATE)\n"
+                        "Read the DOM independently and decide whether the goal is satisfied. "
+                        "Do NOT rely on what the agent reported — only on what the page actually shows. "
+                        "The action_history below shows the URL transitions taken to reach this final state.\n\n"
+                        f"URL: {current_url}\n"
+                        f"Title: {browser_state.get('title', 'Unknown')}\n"
+                        f"Interactive Elements: {page_stats.get('interactive', 0)}\n"
+                        f"Scroll Position: Page {pages_above + 1} of {total_pages}\n\n"
+                        "### DOM Tree (browser-extracted final-state page content)\n"
+                        f"{dom_tree}"
+                    )
+
+                    # C11: the final-state screenshot rides through to the
+                    # verifier as a multimodal image content block. The DOM
+                    # tree (in user_prompt above) remains the source of truth;
+                    # the image is supplementary. Wiring lives in
+                    # helpers/llm.py:build_verifier_context_messages — when
+                    # `metadata.screenshot_b64` is present on a TOOL message,
+                    # it's flushed as `{type: image, source: {type: base64,
+                    # media_type, data}}` instead of being inlined as text.
                     verifier_context = [
-                        {"role": "USER", "text": f"Goal: {goal}"},
+                        {"role": "USER", "text": user_prompt},
                         {
                             "role": "TOOL",
-                            "text": page_state,
-                            "metadata": {"toolName": "browser_state", "toolStatus": "FINISHED"},
-                        },
-                        {
-                            "role": "TOOL",
-                            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown):\n\n{actions_text}",
+                            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown — URL transitions, tool inputs/outputs):\n\n{actions_text}",
                             "metadata": {"toolName": "action_history", "toolStatus": "FINISHED"},
                         },
                         {
@@ -1056,40 +1088,55 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             "text": files_text,
                             "metadata": {"toolName": "session_files", "toolStatus": "FINISHED"},
                         },
+                        # Final-state screenshot — emitted as a multimodal
+                        # image block by build_verifier_context_messages when
+                        # screenshot_b64 is set in metadata. Body text stays
+                        # short (no b64 inlining).
+                        {
+                            "role": "TOOL",
+                            "text": (
+                                "Final-state screenshot attached (b64-encoded PNG of "
+                                "the entire scrollable page). Treat the DOM tree above as "
+                                "ground truth; the screenshot is supplementary."
+                                if final_screenshot_b64
+                                else "No final-state screenshot available."
+                            ),
+                            "metadata": {
+                                "toolName": "final_screenshot",
+                                "toolStatus": "FINISHED",
+                                "screenshot_b64": final_screenshot_b64 or "",
+                            },
+                        },
                     ]
 
                     verifier_prompt = build_verifier_prompt(
-                        "EXECUTE", f"Goal: {goal}\n\nVerify browser task completion."
+                        response_schema=transform_schema_for_remote_session(response_schema)
                     )
 
                     remote_session_schema = transform_schema_for_remote_session(response_schema)
 
-                    try:
-                        progress_result = await call_temporal_activity_from_activity(
-                            check_progress,
-                            args=[
-                                verifier_context,
-                                verifier_prompt,
-                                VERIFIER_ULTRA_MODEL,
-                                "EXECUTE",
-                                remote_session_schema,
-                                token_state.access_token,
-                            ],
-                            start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
-                        )
-                    except TimeoutError:
-                        logger.warning("Verifier ultra timeout, falling back to lite")
-                        progress_result = await call_temporal_activity_from_activity(
-                            check_progress,
-                            args=[
-                                verifier_context,
-                                verifier_prompt,
-                                VERIFIER_LITE_MODEL,
-                                "EXECUTE",
-                                remote_session_schema,
-                            ],
-                            start_to_close_timeout=timedelta(seconds=VERIFIER_LITE_TIMEOUT_SECONDS),
-                        )
+                    # B2: `check_progress` now forces rose-1-ultra + claude_token
+                    # internally. One call site, no LITE fallback — the model arg
+                    # is forced inside the activity, but we still pass it so the
+                    # call signature stays explicit at the call site.
+                    # C7: dead `phase` positional arg has been removed from
+                    # check_progress; callers no longer pass it. C14:
+                    # `verifier_context` is built locally from this browser
+                    # session's action history + DOM + final-state screenshot —
+                    # nothing from parent agents reaches it.
+                    progress_result = await call_temporal_activity_from_activity(
+                        check_progress,
+                        args=[
+                            verifier_context,
+                            verifier_prompt,
+                            VERIFIER_ULTRA_MODEL,
+                            remote_session_schema,
+                            token_state.access_token,
+                            "verifier_browser",
+                            agent_id,
+                        ],
+                        start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
+                    )
 
                     v_usage = progress_result.get("usage", {})
                     total_input_tokens += v_usage.get("prompt_tokens", 0)
@@ -1201,16 +1248,28 @@ Based on this feedback, I need to continue working on the task and address the i
 
                     await save_browser_assistant_message(agent_id, verifier_feedback_thinking, task_id)
 
+                    # C5: When the verifier rejects (score < 1.0), surface the
+                    # feedback as the natural TOOL result of the agent's
+                    # `attempt_completion` call — that way the agent sees the
+                    # rejection where it expects to (the result of the tool it
+                    # just called), not as a stray system message.
                     continuing_tool_call_id = str(uuid_module.uuid4())
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        title="Continuing task...",
+                        title=f"⚖️ Verifier rejected ({score:.0%}) — continue task",
                         task_id=task_id,
-                        message=f"Verifier score: {score:.0%} - continuing to work on task",
+                        message=(
+                            f"Verifier score: {score:.0%}\n\n"
+                            f"Reasoning: {v_reasoning}\n\n"
+                            "Take a NEW action that produces fresh tool evidence "
+                            "matching the goal, then call attempt_completion again."
+                        ),
                         status=MessageStatus.FINISHED,
                         browser_url=browser_url,
                         action_type="system",
                         tool_call_id=continuing_tool_call_id,
+                        tool_name_override="attempt_completion",
+                        extra_metadata={"verifierMessage": True},
                     )
 
                     current_state = await dom_service.get_browser_state(include_screenshot=True)

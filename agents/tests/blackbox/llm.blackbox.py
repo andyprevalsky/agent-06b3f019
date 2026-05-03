@@ -406,6 +406,85 @@ def test_build_verifier_json_schema_all_types():
     assert props["unknown"] == {"type": "string"}
     # All output props are required
     assert set(output["required"]) == set(props.keys())
+    # No open-object types here, so strict mode stays on.
+    assert result["json_schema"]["strict"] is True
+
+
+def test_build_verifier_json_schema_object_type():
+    """_build_verifier_json_schema accepts `object` and disables strict mode.
+
+    Open-object fields (additionalProperties: True) are incompatible with
+    OpenAI strict mode. The schema builder must emit a sensible JSON Schema
+    for `object` AND drop the `strict` flag at the envelope level so the
+    payload is accepted by structured-output models.
+    """
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "meta", "type": "object", "description": "Generic object meta"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    output = result["json_schema"]["schema"]["properties"]["output"]
+    props = output["properties"]
+
+    assert props["meta"]["type"] == "object"
+    assert props["meta"]["additionalProperties"] is True, (
+        "object fields must be open-shape (additionalProperties=True) — sub-fields are "
+        "described in the description text, not declared in the schema."
+    )
+    assert props["meta"]["description"] == "Generic object meta"
+    # Open-object types force strict=False at the envelope level.
+    assert result["json_schema"]["strict"] is False, (
+        "An `object` field requires additionalProperties=True, which is forbidden "
+        "by OpenAI strict mode. The envelope MUST flip strict to False."
+    )
+
+
+def test_build_verifier_json_schema_list_object_type():
+    """_build_verifier_json_schema accepts `list[object]` and disables strict mode."""
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "items", "type": "list[object]", "description": "List of items"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    output = result["json_schema"]["schema"]["properties"]["output"]
+    props = output["properties"]
+
+    assert props["items"]["type"] == "array"
+    assert props["items"]["items"]["type"] == "object"
+    assert props["items"]["items"]["additionalProperties"] is True, (
+        "list[object] items must be open-shape — same reasoning as `object`."
+    )
+    assert props["items"]["description"] == "List of items"
+    # Open-object types force strict=False at the envelope level.
+    assert result["json_schema"]["strict"] is False, (
+        "A `list[object]` field requires items.additionalProperties=True, which "
+        "is forbidden by OpenAI strict mode. The envelope MUST flip strict to False."
+    )
+
+
+def test_build_verifier_json_schema_mixed_open_and_closed():
+    """A schema mixing closed types and an open-object type must still drop strict.
+
+    The strict flag is a single envelope-level boolean — even one open-object
+    field anywhere in the schema must flip it to False.
+    """
+    from helpers.llm import _build_verifier_json_schema
+
+    response_schema = {
+        "fields": [
+            {"name": "name", "type": "str"},
+            {"name": "count", "type": "int"},
+            {"name": "meta", "type": "object", "description": "metadata blob"},
+        ]
+    }
+    result = _build_verifier_json_schema(response_schema)
+    assert result["json_schema"]["strict"] is False
 
 
 async def test_fetch_claude_max_token_activity():
@@ -672,8 +751,8 @@ async def test_call_llm_rose_path():
     assert result["usage"]["total_tokens"] == 30
 
 
-async def test_call_llm_rose_with_claude_token_and_skip_cache():
-    """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache disables prompt caching."""
+async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
+    """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache_write keeps system markers."""
     sse = _anthropic_sse_body(text="ok")
     setup_mock({
         "api.anthropic.com/v1/messages": {
@@ -687,29 +766,34 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache():
         from helpers.llm import call_llm
 
         await call_llm(
-            messages=[{"role": "user", "content": "q"}],
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "q"},
+            ],
             model="rose",
             response_format={"type": "json_object"},
             claude_token="ct-123",
-            skip_cache=True,
+            skip_cache_write=True,
             call_site="tester",
         )
 
-    # Verify the claudeAuth path was taken: Anthropic was called with the
-    # OAuth Bearer token and the request body shape matches Anthropic's API.
     captures = get_captured_requests()
     anthropic_calls = [c for c in captures if "api.anthropic.com" in c["url"]]
     assert anthropic_calls, f"Expected an Anthropic call, got {[c['url'] for c in captures]}"
     call = anthropic_calls[0]
-    # Authorization header is redacted in capture; just assert it was present.
     assert any(k.lower() == "authorization" for k in call["requestHeaders"])
     body = json.loads(call["requestBody"])
     assert body["model"] == "claude-sonnet-4-6"
     assert body["stream"] is True
-    assert isinstance(body["system"], list)  # identity + disclaimer + system blocks
-    # skip_cache=True means the system text block should NOT carry cache_control.
+    assert isinstance(body["system"], list)
+    # skip_cache_write=True keeps system cache_control for reads but strips message breakpoint
     user_system_blocks = [b for b in body["system"] if "cache_control" in b]
-    assert user_system_blocks == [], f"skip_cache=True should disable cache_control, got {user_system_blocks}"
+    assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
+    last_msg = body["messages"][-1]
+    content = last_msg.get("content", "")
+    if isinstance(content, list):
+        for block in content:
+            assert "cache_control" not in block, "message breakpoint should be stripped"
 
 
 async def test_call_llm_rose_http_error_raises():
@@ -960,6 +1044,106 @@ async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     # Should be plain text with metadata appended (no multimodal array)
     assert isinstance(user["content"], str)
     assert "f.png" in user["content"]
+
+
+async def test_build_llm_messages_skips_empty_file_output_assistant():
+    """Empty ASSISTANT rows with only a file_pointer (browser screenshots /
+    sub-agent output files posted via AssistantEvent) must be skipped, otherwise
+    they split a parallel tool_result run and Anthropic returns 400.
+
+    Repro: parent issues two parallel spawn_agent calls. Each browser tool emits
+    an AssistantEvent(file_pointer=screenshot) between the early '✓ Task
+    Completed' POST_MESSAGE and the late 'Browser automation complete'
+    POST_MESSAGE. After dedup keeps only the latest FINISHED TOOL per
+    toolCallId, the sequence becomes
+    [TOOL_A_finished, ASSISTANT_screenshot_A, ASSISTANT_screenshot_B, TOOL_B_finished].
+    Without skipping, the empty assistants split tool_result_A from tool_result_B,
+    leaving the second tool_use without a matching tool_result in the next
+    message.
+    """
+    from helpers.llm import build_llm_messages
+
+    tc_a = "toolu_browser_A"
+    tc_b = "toolu_browser_B"
+    fp = {
+        "id": "fp-1",
+        "storage_path": "u/screenshot.png",
+        "original_filename": "screenshot.png",
+        "mime_type": "image/png",
+        "size_bytes": 1024,
+        "created_at": "2024-01-01T00:00:00Z",
+    }
+    context = [
+        {"role": "USER", "text": "Find Tokyo and NYC populations.", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "tool_call_id": tc_a, "type": "browser", "goal": "Tokyo"},
+                    {"tool": "spawn_agent", "tool_call_id": tc_b, "type": "browser", "goal": "NYC"},
+                ],
+            },
+        },
+        {
+            "role": "TOOL", "text": "ok A", "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolCallId": tc_a, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
+        },
+        # Empty file-output ASSISTANT row (browser screenshot)
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:03Z", "metadata": {}, "file_pointer": fp},
+        {
+            "role": "TOOL", "text": "ok B", "timestamp": "2024-01-01T00:00:04Z",
+            "metadata": {"toolCallId": tc_b, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
+        },
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:05Z", "metadata": {}, "file_pointer": fp},
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        msgs = await build_llm_messages(context, "sys")
+
+    # Find the assistant with two tool_calls
+    assistants_with_tools = [m for m in msgs if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(assistants_with_tools) == 1, f"Expected 1 tool-calling assistant, got {len(assistants_with_tools)}"
+
+    # Both tool messages should immediately follow (no empty assistant in between).
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2, f"Expected 2 tool messages, got {len(tool_msgs)}"
+
+    # Verify NO empty assistant message ended up in the final list — file-output
+    # rows should be filtered out entirely.
+    empty_assistants = [
+        m for m in msgs
+        if m.get("role") == "assistant"
+        and not m.get("tool_calls")
+        and not (m.get("content") or "").strip()
+    ]
+    assert not empty_assistants, (
+        f"Empty file-output assistant rows must be skipped; got {empty_assistants}"
+    )
+
+    # Verify that in the produced sequence, both tool messages appear before any
+    # assistant-without-tool_calls message — confirming the tool_result run is
+    # contiguous (Anthropic requires `tool_result` to immediately follow the
+    # tool_use that declared it in the next user message).
+    seen_tool_msg = False
+    for m in msgs:
+        if m.get("role") == "tool":
+            seen_tool_msg = True
+        elif m.get("role") == "assistant" and seen_tool_msg and not m.get("tool_calls"):
+            break
+    # If we ever see an assistant-without-tool_calls AFTER tool messages, that's
+    # the post-completion summary turn (fine) — but we should never see one
+    # BETWEEN two tool messages.
+    tool_indices = [i for i, m in enumerate(msgs) if m.get("role") == "tool"]
+    if len(tool_indices) >= 2:
+        # All tool messages should be contiguous (possibly with a single
+        # tool-calling assistant before them, never an empty assistant
+        # between them).
+        for i in range(tool_indices[0], tool_indices[-1] + 1):
+            assert msgs[i].get("role") == "tool", (
+                f"Found non-tool message at index {i} between tool messages: {msgs[i]}"
+            )
 
 
 async def test_build_llm_messages_assistant_tool_call_validation_errors():
@@ -1370,8 +1554,9 @@ async def test_check_progress_happy_path():
     assert "Score: 1.0" in result["message"]
 
 
-async def test_check_progress_below_threshold_no_structured_response():
-    """score < 1.0 means structured_response is None."""
+async def test_check_progress_below_threshold_returns_partial_structured_response():
+    """C2: structured_response is always returned (even on score < 1.0) so the
+    agent can see partial extraction in its next iteration."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import check_progress
@@ -1401,7 +1586,8 @@ async def test_check_progress_below_threshold_no_structured_response():
         )
 
     assert result["score"] == 0.4
-    assert result["structured_response"] is None
+    # C2: partial structured_response must come through, not be dropped.
+    assert result["structured_response"] == {"summary": "x"}
 
 
 async def test_call_planner_llm_activity_happy_path():
@@ -1461,11 +1647,11 @@ async def test_call_planner_llm_activity_happy_path():
         f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
     )
     planner_body = anthropic_calls[0]["body"]
-    # Planner skips cache → no cache_control on user system blocks.
+    # Planner uses skip_cache_write → system blocks KEEP cache_control for reads.
     user_system_blocks = [
         b for b in planner_body.get("system", []) if "cache_control" in b
     ]
-    assert user_system_blocks == [], "skip_cache=True should disable cache_control"
+    assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
     # claude_token is forwarded as the Anthropic Bearer token, not in the body.
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
@@ -1760,6 +1946,133 @@ async def test_build_verifier_json_schema_unknown_type_fallback():
     result = _build_verifier_json_schema(schema)
     weird_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["weird"]
     assert weird_prop == {"type": "string"}
+
+
+async def test_build_verifier_json_schema_object_type_open_shape():
+    """`object` field emits an open-shape object (additionalProperties: True) and disables strict."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "meta", "type": "object", "description": "metadata blob"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    meta_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["meta"]
+    assert meta_prop["type"] == "object"
+    assert meta_prop["additionalProperties"] is True
+    assert meta_prop["description"] == "metadata blob"
+    # OpenAI strict mode forbids additionalProperties: True. Verifier must drop strict.
+    assert result["json_schema"]["strict"] is False
+
+
+async def test_build_verifier_json_schema_list_object_type_open_shape():
+    """`list[object]` field emits array-of-open-objects and disables strict."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "rows", "type": "list[object]", "description": "rows of data"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    rows_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["rows"]
+    assert rows_prop["type"] == "array"
+    assert rows_prop["items"]["type"] == "object"
+    assert rows_prop["items"]["additionalProperties"] is True
+    assert rows_prop["description"] == "rows of data"
+    assert result["json_schema"]["strict"] is False
+
+
+async def test_build_verifier_json_schema_strict_true_when_no_open_objects():
+    """Schema with only closed-shape fields keeps strict=True."""
+    from helpers.llm import _build_verifier_json_schema
+
+    schema = {
+        "fields": [
+            {"name": "name", "type": "str"},
+            {"name": "count", "type": "int"},
+            {"name": "tags", "type": "list[str]"},
+        ]
+    }
+    result = _build_verifier_json_schema(schema)
+    assert result["json_schema"]["strict"] is True
+
+
+def test_build_verifier_context_messages_screenshot_emits_multimodal():
+    """TOOL message with `metadata.screenshot_b64` becomes a multimodal user message."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Goal: take a screenshot"},
+        {
+            "role": "TOOL",
+            "text": "Final state screenshot attached",
+            "metadata": {
+                "screenshot_b64": "iVBORw0KGgoAAAA...",
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "You are a verifier.")
+
+    # Look for any user message with content as a list (multimodal)
+    multimodal_msgs = [m for m in msgs if isinstance(m.get("content"), list)]
+    assert len(multimodal_msgs) == 1, f"expected exactly 1 multimodal message, got {len(multimodal_msgs)}"
+
+    blocks = multimodal_msgs[0]["content"]
+    text_blocks = [b for b in blocks if b.get("type") == "text"]
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(text_blocks) == 1
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"]["type"] == "base64"
+    assert image_blocks[0]["source"]["media_type"] == "image/png"
+    assert image_blocks[0]["source"]["data"] == "iVBORw0KGgoAAAA..."
+    # Body text should describe, not include the b64
+    assert "iVBORw0KGgoAAAA..." not in text_blocks[0]["text"]
+
+
+def test_build_verifier_context_messages_screenshot_strips_b64_from_text():
+    """When TOOL.text accidentally contains the b64 string, it's stripped from the text block."""
+    from helpers.llm import build_verifier_context_messages
+
+    b64 = "ABCDEFGH=="
+    ctx = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "text": f"Screenshot: {b64}",  # b64 inlined into text
+            "metadata": {
+                "screenshot_b64": b64,
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "system")
+
+    multimodal_msgs = [m for m in msgs if isinstance(m.get("content"), list)]
+    text = next(b["text"] for b in multimodal_msgs[0]["content"] if b.get("type") == "text")
+    # b64 must not survive in the text block
+    assert b64 not in text
+
+
+def test_build_verifier_context_messages_no_screenshot_stays_text():
+    """TOOL message without screenshot_b64 keeps current text-only batching behavior."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "text": "tool result",
+            "metadata": {"toolName": "search", "toolStatus": "FINISHED"},
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "system")
+    # No multimodal messages
+    assert all(isinstance(m["content"], str) for m in msgs)
 
 
 async def test_extract_response_from_partial_json_raw_json_object():
@@ -2688,7 +3001,7 @@ async def test_build_llm_messages_system_role_gets_prefix():
     # First is system, then user + system-as-user
     assert messages[0]["role"] == "system"
     assert any(
-        m["role"] == "user" and isinstance(m.get("content"), str) and m["content"].startswith("[SYSTEM]:")
+        m["role"] == "user" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"]
         for m in messages
     ), f"Expected a [SYSTEM]: user message, got: {messages}"
 
@@ -2709,7 +3022,7 @@ async def test_build_llm_messages_non_terminal_tool_becomes_user_text():
     ]
     with _patch("helpers.llm.activity.in_activity", return_value=False):
         messages = await build_llm_messages(context, "sys")
-    tool_as_user = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("[TOOL]:")]
+    tool_as_user = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str) and "[TOOL]:" in m["content"]]
     assert tool_as_user, f"Expected a [TOOL]:-prefixed user message, got: {messages}"
 
 
@@ -2984,6 +3297,119 @@ async def test_call_llm_structured_streaming_non_dict_choices_continues():
     assert "ok" in result.response, f"Expected 'ok' substring, got {result.response!r}"
 
 
+def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
+    """Orphan assistant tool_use → synthetic tool_result inserted right after."""
+    from helpers.llm import _ensure_tool_result_pairing, SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "spawn_agent", "arguments": "{}"}}
+            ],
+        },
+        {"role": "user", "content": "next turn"},
+        {"role": "assistant", "content": "continuing"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    # Synthetic tool_result is inserted between the orphan assistant and the next user.
+    tool_msgs = [m for m in fixed if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"Expected 1 synthetic tool message, got {len(tool_msgs)}"
+    assert tool_msgs[0]["tool_call_id"] == "tc1"
+    assert tool_msgs[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert tool_msgs[0]["name"] == "spawn_agent"
+
+
+def test_ensure_tool_result_pairing_strips_orphan_tool_result():
+    """tool message with tool_call_id not declared by any preceding assistant is dropped."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "ghost", "content": "orphaned"},
+        {"role": "assistant", "content": "continuing"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    assert all(m.get("role") != "tool" for m in fixed), f"Orphan tool not stripped: {fixed}"
+
+
+def test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids():
+    """Same tool_call_id appearing in two assistant messages → second is stripped."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "first",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc1", "content": "result"},
+        {
+            "role": "assistant",
+            "content": "second",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    second_assistant = fixed[-1] if fixed[-1].get("role") == "assistant" else None
+    # The second assistant should have its duplicate tc1 stripped.
+    assert second_assistant is not None, f"Last message not assistant: {fixed}"
+    assert not second_assistant.get("tool_calls"), (
+        f"Duplicate tool_call_id should have been stripped: {second_assistant}"
+    )
+
+
+def test_ensure_tool_result_pairing_idempotent():
+    """Running the helper twice on its own output yields identical messages."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": "done"},
+    ]
+    once = _ensure_tool_result_pairing(msgs)
+    twice = _ensure_tool_result_pairing(once)
+    assert once == twice, f"Not idempotent:\nfirst={once}\nsecond={twice}"
+
+
+def test_ensure_tool_result_pairing_preserves_well_formed_messages():
+    """A well-formed conversation passes through unchanged."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tc1", "name": "foo", "content": "result"},
+        {"role": "assistant", "content": "done"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
+    assert fixed == msgs, f"Well-formed messages mutated:\nin={msgs}\nout={fixed}"
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
@@ -3009,6 +3435,9 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
+    r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
+    r.record("build_verifier_json_schema_list_object_type", test_build_verifier_json_schema_list_object_type)
+    r.record("build_verifier_json_schema_mixed_open_and_closed", test_build_verifier_json_schema_mixed_open_and_closed)
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
     await r.record_async("fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error)
@@ -3021,7 +3450,7 @@ async def run_all_tests():
     await r.record_async("set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned)
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
-    await r.record_async("call_llm_rose_with_claude_token_and_skip_cache", test_call_llm_rose_with_claude_token_and_skip_cache)
+    await r.record_async("call_llm_rose_with_claude_token_and_skip_cache_write", test_call_llm_rose_with_claude_token_and_skip_cache_write)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
     await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)
@@ -3030,6 +3459,7 @@ async def run_all_tests():
     await r.record_async("build_llm_messages_assistant_merging", test_build_llm_messages_assistant_merging)
     await r.record_async("build_llm_messages_skip_subagent", test_build_llm_messages_skip_subagent)
     await r.record_async("build_llm_messages_attachment_large_falls_back_to_metadata", test_build_llm_messages_attachment_large_falls_back_to_metadata)
+    await r.record_async("build_llm_messages_skips_empty_file_output_assistant", test_build_llm_messages_skips_empty_file_output_assistant)
     await r.record_async("build_llm_messages_assistant_tool_call_validation_errors", test_build_llm_messages_assistant_tool_call_validation_errors)
     await r.record_async("build_llm_messages_filters_inprogress_keeps_latest_finished", test_build_llm_messages_filters_inprogress_keeps_latest_finished)
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
@@ -3037,7 +3467,7 @@ async def run_all_tests():
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
-    await r.record_async("check_progress_below_threshold_no_structured_response", test_check_progress_below_threshold_no_structured_response)
+    await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
@@ -3050,6 +3480,12 @@ async def run_all_tests():
     await r.record_async("verifier_schema_session_file_pointer", test_build_verifier_json_schema_session_file_pointer_type)
     await r.record_async("verifier_schema_list_session_file_pointer", test_build_verifier_json_schema_list_session_file_pointer_type)
     await r.record_async("verifier_schema_unknown_fallback", test_build_verifier_json_schema_unknown_type_fallback)
+    await r.record_async("verifier_schema_object_type", test_build_verifier_json_schema_object_type_open_shape)
+    await r.record_async("verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_open_shape)
+    await r.record_async("verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects)
+    r.record("verifier_ctx_screenshot_multimodal", test_build_verifier_context_messages_screenshot_emits_multimodal)
+    r.record("verifier_ctx_screenshot_strips_b64", test_build_verifier_context_messages_screenshot_strips_b64_from_text)
+    r.record("verifier_ctx_no_screenshot_text_only", test_build_verifier_context_messages_no_screenshot_stays_text)
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)
@@ -3091,6 +3527,11 @@ async def run_all_tests():
     await r.record_async("verifier_jsondecode_error_accumulated_reasoning", test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning)
     await r.record_async("verifier_schema_with_list_str_field", test_build_verifier_json_schema_with_list_str_field)
     await r.record_async("stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues)
+    r.record("ensure_tool_result_pairing_inserts_synthetic", test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use)
+    r.record("ensure_tool_result_pairing_strips_orphan_tool_result", test_ensure_tool_result_pairing_strips_orphan_tool_result)
+    r.record("ensure_tool_result_pairing_dedupes_cross_message_ids", test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids)
+    r.record("ensure_tool_result_pairing_idempotent", test_ensure_tool_result_pairing_idempotent)
+    r.record("ensure_tool_result_pairing_preserves_well_formed", test_ensure_tool_result_pairing_preserves_well_formed_messages)
     teardown_mock()
     return r.summary()
 

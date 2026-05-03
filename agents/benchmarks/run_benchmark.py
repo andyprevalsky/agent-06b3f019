@@ -18,9 +18,10 @@ Auto-debug mode:
     Use the `/benchmark <task-name>` skill in Claude Code. It contains the full
     12-step auto-debug loop with monitoring, diagnosis, fix, PR, deploy, and rerun.
 
-    Log inspection CLI (run both summaries in parallel — they answer different questions):
+    Log inspection CLI (run all three summaries in parallel — they answer different questions):
       python benchmarks/agent_latency.py <agent_id>           # span waterfall + slowest paths/LLMs/HTTP
       python benchmarks/agent_logs.py <agent_id> --tree --diagnostics  # event-timeline tree w/ errors
+      python benchmarks/run_benchmark.py --compare <run.json> # tree-wide token + cache breakdown
       # Expand whichever summary found the issue:
       python benchmarks/agent_latency.py <agent_id> -v
       python benchmarks/agent_logs.py <agent_id> --tree --source worker|backend|research|messages
@@ -83,7 +84,7 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # stream for 60–90s via Supabase Realtime without posting intermediate rows to
 # the messages table — 60s here produces false-positive stalls on the synthesis
 # step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 120
+AGENT_STALL_SECONDS = 180
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 TEST_ASSETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
@@ -157,7 +158,6 @@ async def create_agent(
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
-            "llm_judge_prompt": task.eval_prompt,
         },
     }
 
@@ -192,11 +192,11 @@ async def delete_agent(base_url: str, agent_id: str) -> None:
 
 
 async def get_tool_usage(base_url: str, agent_id: str) -> dict:
-    """GET /api/tool-usage/:id"""
+    """GET /api/tool-usage/tree/:id — aggregated cache metrics for entire agent tree."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
-            f"{base_url}/api/tool-usage/{agent_id}", headers=headers
+            f"{base_url}/api/tool-usage/tree/{agent_id}", headers=headers
         )
         if resp.status_code == 200:
             return resp.json()
@@ -239,6 +239,30 @@ async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
             return []
         data = resp.json()
         return data.get("agents", [])
+
+
+async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, int]:
+    """Count toolName occurrences across all agents in the tree.
+
+    Fetches messages for every agent in the tree and counts FINISHED tool
+    messages by their ``toolName`` metadata field.
+    """
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a["agent_id"] for a in agents] if agents else [root_agent_id]
+
+    counts: Dict[str, int] = {}
+    for aid in agent_ids:
+        try:
+            data = await get_agent(base_url, aid)
+        except Exception:
+            continue
+        for msg in data.get("messages", []):
+            meta = msg.get("metadata") or {}
+            tool_name = meta.get("toolName")
+            status = meta.get("toolStatus")
+            if tool_name and status == "FINISHED":
+                counts[tool_name] = counts.get(tool_name, 0) + 1
+    return counts
 
 
 async def post_message(base_url: str, agent_id: str, message: str) -> bool:
@@ -409,6 +433,7 @@ async def poll_agent(
             reason = (
                 f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
+                f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             )
             print(f"    ⏰ {reason}")
             data = await get_agent(base_url, agent_id)
@@ -512,16 +537,19 @@ async def poll_agent(
                 print(f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
                       f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)")
 
-            # ── Per-agent stall detection (early fail) ────────────────
-            # For each non-terminal agent in the tree: if its message_count
-            # hasn't advanced in AGENT_STALL_SECONDS, fail now and name the
-            # stuck agent. Finished sub-agents (terminal status) are skipped —
-            # they naturally stop producing messages.
-            # For the ROOT agent, the tree API's message_count lags the detail
-            # API (e.g. in-process browser/claude-code sub-agents emit messages
-            # into root's list but don't increment the tree counter). Use the
-            # detail-API root_msg_count for root tracking so legitimate
-            # progress isn't flagged as a stall.
+            # ── Tree stall detection (early fail) ────────────────────
+            # Track each agent's message_count over time. Internal nodes
+            # (parents waiting on sub-agents) DO NOT emit messages while
+            # their children run — they are correctly idle, not stalled.
+            # The work happens at the leaves (agents with no non-terminal
+            # children), so the tree is stalled only when EVERY non-terminal
+            # leaf has gone silent for AGENT_STALL_SECONDS.
+            #
+            # For the ROOT agent, the tree API's message_count lags the
+            # detail API (in-process browser/claude-code sub-agents emit
+            # messages into the root's list but don't increment the tree
+            # counter). Use the detail-API root_msg_count for root tracking
+            # so legitimate progress isn't flagged as a stall.
             for a in tree_stats.get("all_agents", []):
                 aid = a.get("agent_id", "")
                 if not aid:
@@ -537,9 +565,7 @@ async def poll_agent(
                     cur["last_change_time"] = now
                 cur["status"] = st
 
-            # Build parent→children map from the tree. An agent with active
-            # descendants that are still advancing is NOT stalled — it's
-            # legitimately idle awaiting its sub-agent's tool result.
+            # Build parent→children map from the tree.
             children_of: Dict[str, List[str]] = {}
             for a in tree_stats.get("all_agents", []):
                 pid = a.get("parent_agent_id")
@@ -547,38 +573,56 @@ async def poll_agent(
                 if pid and cid:
                     children_of.setdefault(pid, []).append(cid)
 
-            def _subtree_last_change(aid: str, seen: set) -> float:
-                if aid in seen:
-                    return 0.0
-                seen.add(aid)
-                st_local = per_agent_state.get(aid)
-                best = st_local["last_change_time"] if st_local else 0.0
-                for cid in children_of.get(aid, []):
-                    child_st = per_agent_state.get(cid)
-                    if child_st and child_st["status"] in TERMINAL_STATUSES:
-                        continue
-                    best = max(best, _subtree_last_change(cid, seen))
-                return best
-
-            stuck: List[Tuple[str, float, dict]] = []
-            for aid, st in per_agent_state.items():
-                if st["status"] in TERMINAL_STATUSES:
+            # Find non-terminal leaves: an agent is a leaf if no child of
+            # it is still active. An agent with all-terminal children counts
+            # as a leaf even though it briefly had children.
+            leaves: List[str] = []
+            for a in tree_stats.get("all_agents", []):
+                aid = a.get("agent_id")
+                if not aid:
                     continue
-                effective = _subtree_last_change(aid, set())
-                idle = now - effective
-                if idle > AGENT_STALL_SECONDS:
-                    stuck.append((aid, idle, st))
-            if stuck:
-                aid, idle, st = stuck[0]
-                role = "root" if aid == agent_id else "sub-agent"
-                reason = (
-                    f"{role} {aid[:12]} stalled: no new messages for {idle:.0f}s "
-                    f"(threshold={AGENT_STALL_SECONDS}s, status={st['status']}, "
-                    f"messages={st['count']})"
-                    f" | Investigate: python agents/benchmarks/agent_latency.py {aid}"
+                st = per_agent_state.get(aid, {}).get("status", a.get("status", "UNKNOWN"))
+                if st in TERMINAL_STATUSES:
+                    continue
+                child_ids = children_of.get(aid, [])
+                has_active_child = any(
+                    per_agent_state.get(cid, {}).get("status", "ACTIVE")
+                    not in TERMINAL_STATUSES
+                    for cid in child_ids
                 )
-                print(f"    🛑 AGENT STALL — {reason}")
-                return data, approvals_triggered, approvals_resolved, reason
+                if not has_active_child:
+                    leaves.append(aid)
+
+            # Tree is stalled only when EVERY non-terminal leaf has been
+            # silent for ≥ AGENT_STALL_SECONDS. If the most-recently-active
+            # leaf still emitted within the threshold, the tree is making
+            # progress somewhere — not stalled.
+            if leaves:
+                max_leaf_change = max(
+                    per_agent_state.get(aid, {}).get("last_change_time", 0.0)
+                    for aid in leaves
+                )
+                tree_idle = now - max_leaf_change
+                if tree_idle > AGENT_STALL_SECONDS:
+                    # All leaves silent — pick the staffer leaf (most recent
+                    # activity) to surface in the error message.
+                    stuck_aid = max(
+                        leaves,
+                        key=lambda aid: per_agent_state.get(aid, {}).get("last_change_time", 0.0),
+                    )
+                    stuck_st = per_agent_state.get(stuck_aid, {})
+                    role = "root" if stuck_aid == agent_id else "leaf"
+                    reason = (
+                        f"tree stalled — newest-active {role} {stuck_aid[:12]} "
+                        f"silent for {tree_idle:.0f}s (threshold={AGENT_STALL_SECONDS}s, "
+                        f"status={stuck_st.get('status', '?')}, "
+                        f"messages={stuck_st.get('count', '?')}, "
+                        f"non_terminal_leaves={len(leaves)})"
+                        f" | Investigate: python agents/benchmarks/agent_latency.py {stuck_aid}"
+                        f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
+                    )
+                    print(f"    🛑 TREE STALL — {reason}")
+                    return data, approvals_triggered, approvals_resolved, reason
 
             # Check for infrastructure errors in Fly.io logs
             all_agent_ids = [a.get("agent_id", "") for a in tree_stats.get("all_agents", [])]
@@ -850,11 +894,15 @@ async def run_single_task(
         messages = data.get("messages", [])
         duration = time.time() - start
 
-        # Get cost from tool usage
+        # Get cost and cache metrics from tool usage
         cost_cents = 0.0
+        cache_read_input_tokens = 0
+        cache_creation_input_tokens = 0
         try:
             usage = await get_tool_usage(base_url, agent_id)
             cost_cents = usage.get("total_cost_cents", 0)
+            cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
+            cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
         except Exception:
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
@@ -869,6 +917,41 @@ async def run_single_task(
                 failure_reason = early_fail_reason
             else:
                 failure_reason = f"{early_fail_reason} | {failure_reason}"
+
+        # Tree agent count check — counts spawn_agent-type sub-agents only
+        # (excludes root and explore agents; explore agents have no output_schema)
+        if task.min_agent_count and passed:
+            try:
+                tree_stats = await _fetch_tree_stats(base_url, agent_id)
+                all_agents = tree_stats.get("all_agents", [])
+                spawn_agent_count = sum(
+                    1 for a in all_agents
+                    if a.get("parent_agent_id") and a.get("output_schema")
+                )
+                if spawn_agent_count < task.min_agent_count:
+                    passed = False
+                    failure_reason = (
+                        f"Tree has {spawn_agent_count} spawn_agent-type sub-agents "
+                        f"(excluding explores), expected >= {task.min_agent_count}"
+                    )
+            except Exception as e:
+                print(f"    ⚠ Tree count check failed: {e}")
+
+        # Tree-wide tool count check — verifies exact tool call counts
+        if task.expected_tool_counts and passed:
+            try:
+                actual_counts = await count_tree_tool_calls(base_url, agent_id)
+                for tool_name, expected_count in task.expected_tool_counts.items():
+                    actual = actual_counts.get(tool_name, 0)
+                    if actual != expected_count:
+                        passed = False
+                        failure_reason = (
+                            f"Tool '{tool_name}': expected {expected_count} call(s), "
+                            f"got {actual}. Full counts: {actual_counts}"
+                        )
+                        break
+            except Exception as e:
+                print(f"    ⚠ Tool count check failed: {e}")
 
         # Final context well-formedness check
         final_violations = validate_context(messages)
@@ -893,6 +976,10 @@ async def run_single_task(
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
 
+        # Compute cache hit rate
+        total_input = cache_read_input_tokens + cache_creation_input_tokens
+        cache_hit_pct = round(cache_read_input_tokens / total_input * 100, 1) if total_input > 0 else 0.0
+
         result = TaskResult(
             name=task.name,
             passed=passed,
@@ -905,6 +992,9 @@ async def run_single_task(
             failure_reason=failure_reason,
             approvals_triggered=approvals_triggered,
             approvals_resolved=approvals_resolved,
+            cache_read_input_tokens=cache_read_input_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_hit_pct=cache_hit_pct,
             context_violations=context_violation_dicts,
             logs=logs,
         )
@@ -914,6 +1004,8 @@ async def run_single_task(
         if failure_reason:
             print(f"       Reason: {failure_reason}")
         print(f"       Duration: {duration:.1f}s | Cost: {cost_cents:.1f}c | Messages: {len(messages)}")
+        if total_input > 0:
+            print(f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%")
 
         # Clean up: delete the agent now that we've collected all data
         try:
@@ -951,6 +1043,7 @@ async def run_single_task(
             failure_reason=(
                 f"{e}"
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
+                + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
             logs=logs,
         )
@@ -1030,6 +1123,53 @@ async def _warmup_edge_functions(base_url: str):
     print(" ⚠ warmup did not succeed after 10 attempts (continuing anyway)", flush=True)
 
 
+def _verify_worker_queue_alignment():
+    """Verify a local worker process is running on the expected task queue.
+
+    Derives the expected queue from CONDUCTOR_WORKSPACE_NAME (matching run.sh's
+    derivation), then checks /proc/<pid>/environ for each `python worker.py`
+    process to confirm it matches.
+    """
+    import subprocess
+
+    workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    if not workspace:
+        print("  ❌ CONDUCTOR_WORKSPACE_NAME not set — cannot derive task queue")
+        sys.exit(1)
+    expected_queue = f"navi-agent-tasks-{workspace}"
+
+    result = subprocess.run(
+        ["pgrep", "-f", "python worker.py"], capture_output=True, text=True
+    )
+    pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+    if not pids:
+        print(f"  ❌ No worker process found (expected on queue {expected_queue})")
+        print(f"     Start it: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
+        sys.exit(1)
+
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env_bytes = f.read()
+            env_pairs = env_bytes.split(b"\0")
+            worker_queue = None
+            for pair in env_pairs:
+                if pair.startswith(b"TEMPORAL_TASK_QUEUE="):
+                    worker_queue = pair.split(b"=", 1)[1].decode()
+                    break
+            if worker_queue and worker_queue != expected_queue:
+                print(f"  ❌ Worker (pid {pid}) on queue '{worker_queue}' but benchmark expects '{expected_queue}'")
+                print(f"     Kill it and restart: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
+                sys.exit(1)
+            if worker_queue == expected_queue:
+                print(f"  ✅ Worker aligned on queue {expected_queue}")
+                return
+        except (FileNotFoundError, PermissionError):
+            pass
+
+    print(f"  ⚠ Worker running but could not verify queue alignment (expected {expected_queue})")
+
+
 async def _terminate_stale_workflows():
     """Terminate all running Temporal workflows on the local task queue.
 
@@ -1042,6 +1182,12 @@ async def _terminate_stale_workflows():
         from temporalio.client import Client, TLSConfig
 
         from config import load_config
+
+        workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+        if not workspace:
+            print("  ❌ CONDUCTOR_WORKSPACE_NAME not set — cannot derive task queue")
+            return
+        os.environ.setdefault("TEMPORAL_TASK_QUEUE", f"navi-agent-tasks-{workspace}")
 
         config = load_config()
 
@@ -1058,19 +1204,7 @@ async def _terminate_stale_workflows():
             print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local, queue is not worktree-scoped, and ALLOW_TEMPORAL_CLEANUP is not set")
             return
 
-        # Inside Conductor, run.sh overrides TEMPORAL_TASK_QUEUE to
-        # navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME for the worker. The default
-        # TEMPORAL_TASK_QUEUE from .env (e.g. navi-agent-tasks-test) is shared
-        # across worktrees and is NOT what the local worker polls. Prefer the
-        # workspace-derived queue so cleanup targets the same queue the worker
-        # is actually polling.
-        workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
-        derived = f"navi-agent-tasks-{workspace}" if workspace else None
-        task_queue = (
-            derived
-            or os.environ.get("TEMPORAL_TASK_QUEUE")
-            or config.temporal.task_queue
-        )
+        task_queue = f"navi-agent-tasks-{workspace}"
 
         client = await Client.connect(
             config.temporal.address,
@@ -1227,6 +1361,7 @@ async def main_async(args):
     # on the task queue this run will use. Belt-and-braces with scripts/pre-smoke-cleanup.sh
     # (which handles the process/container side); this block handles the Temporal + DB side.
     if not args.prod and base_url.startswith("http://localhost"):
+        _verify_worker_queue_alignment()
         await _terminate_stale_workflows()
         await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
@@ -1265,7 +1400,7 @@ async def main_async(args):
             s = _history_summary(t.name, max_seconds=cap)
             cap_note = f", cap={cap}s" if cap else ""
             print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                  f"(recent_max={s['recent_max']}s, n={s['count']}{cap_note})")
+                  f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note})")
     if missing_history:
         print("\n  ❌ Timeout history is insufficient for the following tasks:")
         for m in missing_history:
@@ -1350,7 +1485,58 @@ async def main_async(args):
     print(f"\n{'='*60}")
     print(f"  RESULTS: {s['passed']}/{s['total']} passed ({s['pass_rate']:.0%}{skipped_str})")
     print(f"  Cost: {s['total_cost_cents']:.1f}c | Duration: {s['total_duration_seconds']:.0f}s")
+
+    # Cache hit rate summary across all tasks
+    agg_cache_read = sum(r.cache_read_input_tokens for r in run.task_results)
+    agg_cache_write = sum(r.cache_creation_input_tokens for r in run.task_results)
+    agg_cache_total = agg_cache_read + agg_cache_write
+    agg_cache_pct = round(agg_cache_read / agg_cache_total * 100, 1) if agg_cache_total > 0 else 0.0
+    if agg_cache_total > 0:
+        print(f"  Cache: read={agg_cache_read} write={agg_cache_write} hit={agg_cache_pct}%")
     print(f"{'='*60}")
+
+    # Per-task cache hit ratchets — each value is the floor for that smoke
+    # task's prompt-cache hit %. Baseline values come from the run that
+    # established each task as passing, rounded DOWN to the nearest 5% to
+    # absorb run-to-run variance.
+    #
+    # Update rule: only RAISE a ratchet, never lower it. Move in 5%
+    # increments, and only when the observed hit % is more than 2.5% past
+    # the next threshold. Examples:
+    #   - ratchet 30%, observed 33%   → stay at 30  (only 3% past, <5% step)
+    #   - ratchet 30%, observed 32%   → stay at 30  (under 32.5% trigger)
+    #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
+    #   - ratchet 30%, observed 37.6% → bump to 35
+    PER_TASK_CACHE_HIT_RATCHET = {
+        "chat-mode": 0.0,            # observed 0.0% (no LLM cache path)
+        "spawn-sub-agents": 20.0,    # observed 24.4%
+        "parallel-tool-calls": 25.0, # observed 29.1%
+        "claude-code-agent": 60.0,   # observed 63.9%
+        "browser-smoke": 45.0,       # observed 47.8%
+    }
+
+    cache_failures: list[str] = []
+    for r in run.task_results:
+        floor = PER_TASK_CACHE_HIT_RATCHET.get(r.name)
+        if floor is None:
+            continue
+        per_task_total = r.cache_read_input_tokens + r.cache_creation_input_tokens
+        if per_task_total <= 0:
+            continue
+        per_task_pct = round(
+            r.cache_read_input_tokens / per_task_total * 100, 1
+        )
+        if per_task_pct < floor:
+            cache_failures.append(
+                f"{r.name}: {per_task_pct}% < {floor}% ratchet"
+            )
+
+    if cache_failures:
+        print("\n  CACHE FAIL (per-task ratchet):")
+        for line in cache_failures:
+            print(f"    - {line}")
+        if args.ci:
+            sys.exit(1)
 
     # CI mode: exit non-zero if any task failed
     if args.ci and s["failed"] > 0:

@@ -7,17 +7,20 @@ prompt construction, and usage calculation.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
 
+from browser_tools.schemas import AVAILABLE_ACTIONS
 from domains.spawn_browser_agent_v3.config import STEEL_COST_CENTS_PER_MS
 from domains.spawn_browser_agent_v3.repo import (
     download_file_from_steel,
     list_session_files,
 )
+from providers.rose.browser_use import build_browser_use_system_prompt
 from utils.error_utils import extract_error_message
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 logger = structlog.get_logger()
 
@@ -152,67 +155,64 @@ async def extract_session_files(
 
 
 def get_browser_system_prompt(
-    goal: str, current_url: str, custom_instructions: str = "", available_files: Optional[List[str]] = None
+    goal: str, custom_instructions: str = "", available_files: Optional[List[str]] = None
 ) -> str:
-    """Build browser agent system prompt."""
-    current_time = datetime.now().strftime("%B %d, %Y at %I %p")
+    """Build the v3 browser-spawner system prompt.
 
+    Static portion (above SYSTEM_PROMPT_DYNAMIC_BOUNDARY) is globally
+    cacheable: it delegates to ``build_browser_use_system_prompt`` so the
+    Rose pool prompt and the v3 prompt share one source of truth (no
+    duplicated rules, screenshot guidance, or safety bullets).
+
+    Dynamic portion (below the boundary) varies per call: ``goal``,
+    ``custom_instructions``, and ``available_files``. Per-step state
+    (current time + URL) is appended separately by ``build_state_line``
+    on the user message; nothing per-step bleeds into this function.
+    """
+    # 1. Static (canonical) browser system prompt. Identical across every
+    #    spawn and across the Rose pool path. AVAILABLE_ACTIONS is the
+    #    catalog of browser_use actions the v3 executor implements; the
+    #    invariant test asserts every entry exists in BROWSER_USE_TOOLS.
+    static_prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+
+    # 2. Dynamic per-spawn addendum. Goal, custom instructions, and the
+    #    available-files list all vary BETWEEN spawns (and would otherwise
+    #    contaminate a globally-cacheable prefix), so they live below the
+    #    SYSTEM_PROMPT_DYNAMIC_BOUNDARY marker.
     files_section = ""
     if available_files:
-        files_section = f"""
-AVAILABLE FILES FOR UPLOAD:
-The following files are available to upload using the upload_file action.
-To upload a file, find a file input element (<input type="file">) and use upload_file with the filename.
-Files: {", ".join(available_files)}
-"""
+        files_section = (
+            "\n\n# Available Files for Upload\n"
+            "The following files are available to upload using the upload_file action.\n"
+            "To upload a file, find a file input element (<input type=\"file\">) and use "
+            "upload_file with the filename.\n"
+            f"AVAILABLE FILES FOR UPLOAD: {', '.join(available_files)}"
+        )
 
-    return f"""Current time: {current_time}
+    custom_section = ""
+    if custom_instructions:
+        custom_section = f"\n\n# Custom Instructions\n{custom_instructions}"
 
-CURRENT GOAL: {goal}
-CURRENT URL: {current_url}
-{files_section}
-You will receive:
-1. The current DOM tree with indexed elements like [1] button "Submit", [2] input[type=text], etc.
-2. A screenshot of the current page
-3. History of your previous actions and their results
+    dynamic_prompt = (
+        f"\n\n# Current Goal\n{goal}"
+        f"{files_section}"
+        f"{custom_section}"
+        "\n\nYou will receive a [STATE: ...] line at the end of each turn carrying the per-step time and URL."
+    )
 
-To interact with elements, use their index number from the DOM tree.
+    return static_prompt + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_prompt
 
-AVAILABLE ACTIONS:
-- click: Click an element by index
-- input_text: Type text into an input element
-- press_key: Press keyboard keys (Enter, Tab, Escape, etc.)
-- scroll: Scroll the page up or down
-- goto: Navigate to a URL
-- navback: Go back in browser history
-- wait: Wait for a specified time
-- dropdown_options: Get options from a dropdown
-- select_dropdown: Select an option from a dropdown
-- evaluate: Execute JavaScript
-- extract: Extract structured data from the page
-- upload_file: Upload a file to a file input element (requires filename from available_files)
-- screenshot: Take a full-page screenshot (returned to the orchestrating agent)
-- attempt_completion: Signal you believe the task is complete
-- send_message_to_user: Request user assistance
 
-CRITICAL SAFETY RULES:
-- NEVER delete or close any user account
-- NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
-- When making payments or posting to social media, you may be asked to confirm with the user first
+def build_state_line(current_url: str, now: Optional[datetime] = None) -> str:
+    """Build the per-step dynamic state line appended to the task message.
 
-{custom_instructions}
-
-SCREENSHOT TOOL:
-Use the screenshot action to capture a full-page screenshot. Only screenshots taken with this tool will be returned to the orchestrating agent that spawned you. The orchestrator does NOT see your per-step viewport screenshots \u2014 those are for your own use only. The orchestrator always receives a final screenshot of the last page when your task completes.
-
-IMPORTANT: One screenshot call captures the ENTIRE page (full-page, not just viewport). Do NOT call screenshot multiple times for the same page. After calling screenshot once, proceed to your next task or call attempt_completion.
-
-Use screenshot when:
-- The orchestrating agent needs visual proof of a page state
-- You need to capture something for the parent agent to inspect
-- The task explicitly asks for a screenshot to be returned
-
-Think step-by-step about what action to take next. Always prefer using element indices from the DOM tree for precise interactions."""
+    Format is strict and parseable: ``[STATE: time=<ISO 8601 UTC> url=<url>]``.
+    Kept terse (~50-80 chars) so it doesn't dwarf the cache benefit of the
+    static prompt above.
+    """
+    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    safe_url = current_url or ""
+    return f"[STATE: time={ts} url={safe_url}]"
 
 
 # ========================================

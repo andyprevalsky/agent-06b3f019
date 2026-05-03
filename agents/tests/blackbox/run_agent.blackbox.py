@@ -179,9 +179,12 @@ async def test_assistant_tool_call_ids_match_execution_and_context_results():
 
 
 async def test_attempt_completion_skip_verification_returns_completed():
-    """When attempt_completion fires with skip_verification, status is 'completed' and final_response set."""
+    """When attempt_completion fires with skip_verification, status is 'completed'.
+    AttemptCompletionTool takes no args; final_response now derives from the
+    agent's narration (response_text). Helper sends "" so final_response is "".
+    """
     tool_calls = [
-        {"tool": "attempt_completion", "result": "The answer is 42"},
+        {"tool": "attempt_completion"},
     ]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
@@ -196,12 +199,14 @@ async def test_attempt_completion_skip_verification_returns_completed():
     )
 
     assert result["status"] == "completed"
-    assert result["final_response"] == "The answer is 42"
+    # response_text is "" in the mock, and AttemptCompletionTool has no args,
+    # so final_response is the empty string fallback.
+    assert result["final_response"] == ""
 
 
 async def test_attempt_completion_plan_loop_requires_set_plan():
     """In PLAN phase, attempt_completion before set_plan should emit error and NOT complete."""
-    tool_calls = [{"tool": "attempt_completion", "result": "x"}]
+    tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
     # Record tool event to verify an ERROR was emitted
@@ -231,7 +236,7 @@ async def test_plan_loop_completes_when_set_plan_then_attempt_completion():
     """In PLAN phase: set_plan + attempt_completion within same iteration → completed."""
     tool_calls = [
         {"tool": "set_plan", "plan": {"tasks": []}},
-        {"tool": "attempt_completion", "result": "Plan done"},
+        {"tool": "attempt_completion"},
     ]
     detected_tools = [("set_plan", "tc-sp-1", 1.0), ("attempt_completion", "tc-ac-1", 2.0)]
 
@@ -327,7 +332,7 @@ async def test_status_completed_from_tool():
 
 async def test_verifier_below_threshold_adds_feedback_and_loops():
     """Verifier score < 1.0 appends feedback message; loop continues until max_iterations."""
-    tool_calls = [{"tool": "attempt_completion", "result": "partial"}]
+    tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
@@ -351,7 +356,7 @@ async def test_verifier_below_threshold_adds_feedback_and_loops():
 
 async def test_verifier_score_1_returns_completed():
     """Verifier score==1.0 after attempt_completion returns status='completed' with score."""
-    tool_calls = [{"tool": "attempt_completion", "result": "full"}]
+    tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):

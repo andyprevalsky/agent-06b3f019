@@ -53,18 +53,14 @@ def test_build_system_prompt_with_user_context():
 
 
 def test_build_verifier_prompt():
-    """build_verifier_prompt returns string with verifier instructions."""
+    """build_verifier_prompt returns the static verifier instructions when no schema."""
     from utils.prompts import build_verifier_prompt
 
-    result = build_verifier_prompt(
-        phase="EXECUTE",
-        verifier_prompt="Check if the agent found the restaurant address",
-    )
+    result = build_verifier_prompt()
 
     assert isinstance(result, str)
     assert len(result) > 100
     assert "impartial judge" in result or "ROLE" in result
-    assert "EXECUTE" in result
 
 
 def test_build_verifier_prompt_with_schema():
@@ -78,11 +74,7 @@ def test_build_verifier_prompt_with_schema():
         ]
     }
 
-    result = build_verifier_prompt(
-        phase="EXECUTE",
-        verifier_prompt="Check if the agent found the restaurant",
-        response_schema=schema,
-    )
+    result = build_verifier_prompt(response_schema=schema)
 
     assert "address" in result
     assert "phone" in result

@@ -56,17 +56,39 @@ interface BuildBodyOptions {
   temperature?: number;
 }
 
+function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
+  if (messages.length === 0) return;
+  const last = messages[messages.length - 1];
+  if (typeof last.content === 'string') {
+    last.content = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const target = last.content[last.content.length - 1];
+    if (target && typeof target === 'object') {
+      (target as Record<string, unknown>).cache_control = { type: 'ephemeral' };
+    }
+  }
+}
+
 export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unknown> {
-  const { systemText, messages: anthropicMessages } = transformMessagesForAnthropic(opts.messages);
+  const {
+    staticSystem,
+    dynamicSystem,
+    messages: anthropicMessages,
+  } = transformMessagesForAnthropic(opts.messages);
 
   const systemBlocks: Record<string, unknown>[] = [IDENTITY_BLOCK, DISCLAIMER_BLOCK];
-  if (systemText) {
+  if (staticSystem) {
     systemBlocks.push({
       type: 'text',
-      text: systemText,
-      cache_control: { type: 'ephemeral' },
+      text: staticSystem,
+      cache_control: { type: 'ephemeral', scope: 'global' },
     });
   }
+  if (dynamicSystem) {
+    systemBlocks.push({ type: 'text', text: dynamicSystem });
+  }
+
+  addCacheBreakpoint(anthropicMessages);
 
   const body: Record<string, unknown> = {
     model: opts.poolSpec.claudeAuthModel,
@@ -75,10 +97,16 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     stream: true,
     system: systemBlocks,
     thinking: { type: 'adaptive' },
-    temperature: opts.temperature ?? 1,
+    temperature: 1,
+    output_config: { effort: 'high' },
   };
 
   applyAnthropicResponseFormat(body, opts.responseFormat);
+
+  const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
+  oc.effort = 'high';
+  body.output_config = oc;
+
   return body;
 }
 

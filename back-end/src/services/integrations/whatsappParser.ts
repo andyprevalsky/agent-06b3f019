@@ -1,6 +1,9 @@
-import { MessageChannel } from '@prisma/client';
+import { MessageChannel, Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+
+const log = createLogger('WhatsAppParser');
 
 export interface WhatsAppContactWithMessages {
   contact_id: string;
@@ -87,13 +90,17 @@ export async function parseWhatsAppData(
   }, []);
 
   const totalMessages = sanitizedContacts.reduce((sum, c) => sum + c.messages.length, 0);
-  console.log(
-    `[Job ${jobId}] Processing ${totalMessages} WhatsApp messages from ${sanitizedContacts.length} contacts for user ${userId}`
-  );
+  log.info('Processing WhatsApp messages', {
+    jobId,
+    totalMessages,
+    contacts: sanitizedContacts.length,
+    userId,
+  });
   if (skippedContacts > 0) {
-    console.log(
-      `[Job ${jobId}] Skipped ${skippedContacts} contacts due to missing handles or messages`
-    );
+    log.info('Skipped contacts due to missing handles or messages', {
+      jobId,
+      skippedContacts,
+    });
   }
 
   const integration = await prisma.integration.findUnique({
@@ -109,20 +116,25 @@ export async function parseWhatsAppData(
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
 
   // Update Integration metadata
-  const existingConfig = (integration.config as any) || {};
+  const existingConfig =
+    (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
+  const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
+  const existingBatches = Number(existingConfig.batchesReceived ?? 0);
   await prisma.integration.update({
     where: { id: integration.id },
     data: {
       config: {
         ...existingConfig,
         lastUploadedAt: new Date().toISOString(),
-        totalMessagesProcessed: (existingConfig.totalMessagesProcessed || 0) + totalMessages,
-        batchesReceived: (existingConfig.batchesReceived || 0) + 1,
+        totalMessagesProcessed: existingTotalMessages + totalMessages,
+        batchesReceived: existingBatches + 1,
       },
     },
   });
 
-  console.log(
-    `[Job ${jobId}] WhatsApp sync complete: ${result.contacts} contacts, ${result.messages} messages`
-  );
+  log.info('WhatsApp sync complete', {
+    jobId,
+    contacts: result.contacts,
+    messages: result.messages,
+  });
 }

@@ -37,8 +37,40 @@ reviews:
     - "!**/*.lock"
     - "!**/package-lock.json"
     - "!**/pnpm-lock.yaml"
+    - "!**/uv.lock"
     - "!back-end/src/routes/**"
     - "!claude-code-src/**"
+    # Free-tier 150-file cap: anything below is covered by /deploy's local
+    # gates (lint/tsc/structural/blackbox/smoke/semantic) and rarely contains
+    # logic regressions worth a remote review pass.
+    # 1) Tests — already gated locally
+    - "!**/tests/**"
+    - "!**/*.blackbox.ts"
+    - "!**/*.blackbox.tsx"
+    - "!**/*.blackbox.py"
+    - "!**/*.test.ts"
+    - "!**/*.test.tsx"
+    - "!**/*.test.py"
+    - "!**/*.spec.ts"
+    - "!**/test_*.py"
+    - "!front-end/tests-e2e/**"
+    # 2) Benchmark harness — gated by the smoke run
+    - "!agents/benchmarks/**"
+    # 3) Prompt strings (no logic)
+    - "!agents/tools/prompts/**"
+    # 4) Docs, markdown, harness config
+    - "!docs/**"
+    - "!**/*.md"
+    - "!.claude/**"
+    - "!.coderabbit.yaml"
+    - "!.gitignore"
+    - "!.editorconfig"
+    - "!**/eslint.config.*"
+    # 5) Python scaffolding (re-exports + dataclass configs/types + thin HTTP repo wrappers)
+    - "!**/__init__.py"
+    - "!agents/**/config.py"
+    - "!agents/**/types.py"
+    - "!agents/**/repo.py"
 
   path_instructions:
     - path: "agents/**"

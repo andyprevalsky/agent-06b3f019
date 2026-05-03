@@ -11,6 +11,10 @@ import {
 import type { FilePointer } from '../../providers/storage';
 import { checkGithubRepoAccess } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import {
+  markPoolTokenRateLimited,
+  markUserTokenRateLimited,
+} from '../../providers/claudeCredentials';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -211,4 +215,109 @@ export async function getAgentSessions(agentId: string) {
 export async function persistOutput(taskId: string, output: string) {
   log.info(`Persisting output for session ${taskId} (${output.length} bytes)`);
   await repo.persistSessionOutput(taskId, output);
+  await detectAndMarkExhaustion(taskId, output);
+}
+
+/**
+ * Long cooldown for credentials the inner Claude Code CLI rejected as
+ * unauthenticated ("Please run /login"). This is structurally different from
+ * a per-window rate limit — the OAuth refresh token is bad/revoked and won't
+ * recover on its own, so we keep it out of rotation for a full day to give
+ * operators time to re-sync. Unlike the rate-limit banner there's no inline
+ * "resets at HH:MM" hint we can lean on.
+ */
+const POOL_AUTH_FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Authentication-failure banners emitted by Claude Code when the cached
+ * credentials envelope is unusable. These are NOT rate-limit signals — they
+ * mean the OAuth tokens themselves were rejected, so the same envelope will
+ * keep failing on every subsequent spawn until it's re-synced. Rotating the
+ * pool token immediately is the only way to make the next agent succeed.
+ */
+const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
+  /Please run \/login/i,
+  /Not logged in/i,
+  /Invalid authentication credentials/i,
+];
+
+/**
+ * Scan the persisted Claude Code terminal output for either the rate-limit
+ * banner ("You've hit your limit · resets X:XX (UTC)") or an authentication-
+ * failure banner ("Please run /login" / "Not logged in") and mark the
+ * underlying Integration as rate-limited so subsequent spawns rotate to a
+ * different pool token. Without this, a single broken OAuth envelope wedges
+ * the entire pool (LRU keeps re-selecting it) and every retry burns an E2B
+ * sandbox before failing to "/login".
+ */
+async function detectAndMarkExhaustion(taskId: string, output: string): Promise<void> {
+  const rateLimitMatch = output.match(
+    /You've hit your limit\s*·\s*resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\(UTC\))/i
+  );
+  const isRateLimited = /You've hit your limit/i.test(output);
+  const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
+  if (!isRateLimited && !authFailure) return;
+
+  const session = await repo.findSessionById(taskId);
+  const tokenSource = session?.claudeTokenSource ?? '';
+  if (tokenSource === '') {
+    log.warn(
+      `Claude Code credential failure detected for ${taskId} but no credential source recorded — cannot rotate`
+    );
+    return;
+  }
+
+  const resetUntil = rateLimitMatch !== null ? parseUtcResetTime(rateLimitMatch[1]) : null;
+  const resetLabel = rateLimitMatch?.[1] ?? (authFailure ? 'auth-failure' : 'unknown');
+  const integrationId = session?.claudeTokenIntegrationId ?? '';
+
+  // Auth-failure cooldown is longer than rate-limit cooldown because the
+  // underlying problem (revoked/expired refresh token) won't fix itself.
+  const cooldownMs = authFailure ? POOL_AUTH_FAILURE_COOLDOWN_MS : undefined;
+  const failureKind = authFailure ? 'auth failure' : 'exhaustion';
+
+  if (tokenSource === 'pool' && integrationId !== '') {
+    log.warn(
+      `Claude Code ${failureKind} on pool integration ${integrationId} (resets ${resetLabel})`
+    );
+    await markPoolTokenRateLimited(integrationId, {
+      rateLimitedUntil: resetUntil,
+      cooldownMs,
+    });
+  } else if (tokenSource === 'user' && session?.agentId !== undefined) {
+    const agent = await repo.findAgentById(session.agentId);
+    const ownerId = agent?.userId ?? '';
+    if (ownerId !== '') {
+      log.warn(`Claude Code ${failureKind} on user ${ownerId} (resets ${resetLabel})`);
+      await markUserTokenRateLimited(ownerId, {
+        rateLimitedUntil: resetUntil,
+        cooldownMs,
+      });
+    }
+  }
+}
+
+/**
+ * Parse the reset-time fragment from Claude Code's exhaustion banner into an
+ * absolute Date. The banner only includes the next-reset *time-of-day* in UTC,
+ * so we anchor it to today/tomorrow depending on whether it has already passed.
+ */
+function parseUtcResetTime(fragment: string): Date | null {
+  const match = fragment.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = match[2] ? Number(match[2]) : 0;
+  const meridiem = match[3]?.toLowerCase();
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  const now = new Date();
+  const candidate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0)
+  );
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setUTCDate(candidate.getUTCDate() + 1);
+  }
+  return candidate;
 }

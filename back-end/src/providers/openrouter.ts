@@ -13,9 +13,11 @@ export const openrouter = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1',
 });
 
-// Use OpenAI directly for prompt generation (avoids OpenRouter credit dependency)
+// Use OpenAI directly for prompt generation (avoids OpenRouter credit dependency).
+// Route through globalThis.fetch so blackbox-test fetchCapture can intercept.
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  fetch: ((url: string | URL, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch,
 });
 
 export async function generateLLMJudgePrompt(goal: string): Promise<string> {
@@ -41,20 +43,30 @@ IMPORTANT: Do NOT make excuses for the AI. Do NOT accept "as an AI, I cannot..."
 
 Return ONLY the judge prompt text, nothing else.`;
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4.1',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: `Generate a STRICT LLM judge prompt for a super-intelligent autonomous agent system with this goal:\n\n${goal}`,
-      },
-    ],
-    temperature: 0.3,
-  });
+  const fallback = `Return a score from 0 to 1 indicating how well this goal was achieved: "${goal}". Be EXTREMELY STRICT — only give 1.0 if the goal is COMPLETELY accomplished with verifiable results. The system is autonomous and can solve any problem with persistence, creativity, and tool use; do not accept "as an AI, I cannot…" as completion. 0.0 means no real progress; 1.0 means the goal is fully done with concrete, verifiable evidence.`;
 
-  return (
-    completion.choices[0].message.content ||
-    'Return a score from 0 to 1 indicating how well the goal was achieved. Be EXTREMELY STRICT - only give 1.0 if the goal is COMPLETELY accomplished with verifiable results. This is a super-intelligent system that can solve any problem with enough effort.'
-  );
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: `Generate a STRICT LLM judge prompt for a super-intelligent autonomous agent system with this goal:\n\n${goal}`,
+        },
+      ],
+      temperature: 0.3,
+    });
+
+    return completion.choices[0].message.content || fallback;
+  } catch (error) {
+    // Tests: when fastForward has no cached response and OpenAI rejects (quota,
+    // missing key, etc.), fall back to a deterministic prompt so tests that
+    // don't care about exact wording still pass. Scoped strictly to the
+    // blackbox test backend.
+    if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
+      return fallback;
+    }
+    throw error;
+  }
 }

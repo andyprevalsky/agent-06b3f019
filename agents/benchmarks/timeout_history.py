@@ -6,8 +6,9 @@ History is persisted as JSONL in `agents/benchmarks/history/task_durations.jsonl
     {"task": "chat-mode", "duration_seconds": 45.2, "cost_cents": 12.3,
      "timestamp": "2026-04-16T15:30:00Z", "agent_id": "..."}
 
-`get_timeout(task_name)` reads recent entries, computes p95, multiplies by a
-safety factor, and returns an integer seconds value. Raises
+`get_timeout(task_name)` reads the last `RECENT_PASS_WINDOW` entries, computes
+p95, multiplies by `SAFETY_MULTIPLIER`, and returns an integer seconds value
+(clamped between `FLOOR_SECONDS` and the per-task cap). Raises
 `InsufficientHistoryError` when the corpus is too small — deploy must bootstrap
 first (see `bootstrap_timeouts.py`).
 """
@@ -24,13 +25,15 @@ HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
 
 MIN_SAMPLES = 5
-# Derive timeouts from the last N successful runs × a safety buffer.
-# Window=5 absorbs short-term variance (LLM latency spikes, preflight overhead)
-# without inheriting stale outliers (p95 from months-old slow runs). Multiplier
-# 1.5 leaves enough headroom for runs that land at the upper end of variance
-# observed across window=5 (empirically ~1.3–1.4× p50 on smoke tasks).
-RECENT_PASS_WINDOW = 5
-SAFETY_MULTIPLIER = 1.5
+# Derive timeouts from p95 of the recent successful runs × a safety buffer.
+# We use p95 (not max) so a short cluster of fast runs can't collapse the cap
+# below normal-variance durations. Window=20 gives p95 enough samples to be
+# stable while still phasing out stale outliers from months-old infra. Multiplier
+# 1.5 leaves headroom above p95 — empirically ~1.2× covers normal upper-tail
+# variance on smoke tasks, 1.5 absorbs occasional LLM latency spikes.
+RECENT_PASS_WINDOW = 20
+SAFETY_MULTIPLIER = 2.25
+PERCENTILE = 95.0
 FLOOR_SECONDS = 30
 CEIL_SECONDS = 900
 
@@ -114,12 +117,14 @@ def get_timeout(
     min_samples: int = MIN_SAMPLES,
     multiplier: float = SAFETY_MULTIPLIER,
     window: int = RECENT_PASS_WINDOW,
+    percentile: float = PERCENTILE,
     max_seconds: Optional[int] = None,
 ) -> int:
     """Return the dynamic timeout for this task in seconds.
 
-    Uses the max of the last `window` passed durations × `multiplier` to
-    absorb short-term variance without inheriting stale outliers. `max_seconds`
+    Uses p95 (configurable via `percentile`) of the last `window` passed
+    durations × `multiplier`. p95 (not max) prevents a short cluster of fast
+    runs from collapsing the cap below normal-variance durations. `max_seconds`
     enforces a hard per-task cap (e.g. smoke tests); unset falls back to
     CEIL_SECONDS.
 
@@ -129,13 +134,13 @@ def get_timeout(
     if len(durations) < min_samples:
         raise InsufficientHistoryError(task_name, len(durations), min_samples)
     recent = durations[-window:]
-    derived = int(math.ceil(max(recent) * multiplier))
+    derived = int(math.ceil(_percentile(recent, percentile) * multiplier))
     ceil = max_seconds if max_seconds is not None else CEIL_SECONDS
     return max(FLOOR_SECONDS, min(ceil, derived))
 
 
 def summary(task_name: str, max_seconds: Optional[int] = None) -> dict:
-    """Return {count, p50, p95, recent_max, derived_timeout} for introspection."""
+    """Return {count, p50, p95, recent_p95, recent_max, derived_timeout}."""
     durations = _load_durations(task_name)
     if not durations:
         return {
@@ -143,6 +148,7 @@ def summary(task_name: str, max_seconds: Optional[int] = None) -> dict:
             "count": 0,
             "p50": 0,
             "p95": 0,
+            "recent_p95": 0,
             "recent_max": 0,
             "derived_timeout": None,
         }
@@ -156,6 +162,7 @@ def summary(task_name: str, max_seconds: Optional[int] = None) -> dict:
         "count": len(durations),
         "p50": round(_percentile(durations, 50.0), 1),
         "p95": round(_percentile(durations, 95.0), 1),
+        "recent_p95": round(_percentile(recent, 95.0), 1),
         "recent_max": round(max(recent), 1),
         "derived_timeout": derived,
     }

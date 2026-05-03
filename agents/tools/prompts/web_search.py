@@ -1,9 +1,10 @@
 """Prompt for web_search tool."""
 
-PROMPT = """Search the web for real-time information. Use for current events, recent data, fact-checking.
+PROMPT = """Searches the web for real-time public information and returns snippet results.
 
-WHEN NOT TO USE:
-- Do NOT use directly if spawn_agent(type="explore") is available - explore agents search more thoroughly with multiple queries and cross-referencing.
-- Do NOT use for searching user's local data (messages, contacts) - use grep instead.
-
-RETURNS: A search result with answer summary, source URLs, and optional images/links."""
+Usage:
+- Use for quick factual lookups (definitions, news, prices) where one query suffices.
+- Use for reconnaissance before deciding whether to fetch a specific URL.
+- Do not use for multi-step research with cross-referencing - prefer spawn_explore_agent.
+- Do not use to read a specific URL's content - use web_fetch.
+- Do not use to search local data (contacts, messages) - use grep."""

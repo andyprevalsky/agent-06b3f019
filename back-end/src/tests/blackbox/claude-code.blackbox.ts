@@ -190,14 +190,20 @@ function assert(condition: boolean, message: string): void {
 const INFRA_URL_PATTERNS = [
   'api.github.com',
   'openrouter.ai',
+  'anthropic.com',
+  'openai.com',
   'ip-api.com',
-  'supabase.co/realtime',
-  'supabase.co/storage',
+  'supabase.co',
   'surge.app',
   'verify.twilio.com',
   'e2b.app',
   'stripe.com',
   'parallel.ai',
+  'api.steel.dev',
+  'perplexity.ai',
+  'exa.ai',
+  'vapi.ai',
+  'googleapis.com',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));

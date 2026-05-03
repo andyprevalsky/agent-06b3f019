@@ -140,6 +140,77 @@ def test_two_consecutive_text_only_assistants_exempt():
     )
 
 
+def test_file_output_assistant_does_not_break_tool_result_pairing():
+    """File-output ASSISTANT rows (empty text + file_pointer, no tool_calls) must not
+    split a parallel tool_result run.
+
+    Repro for the spawn-sub-agents smoke failure (agent 0600ee93...): when a parent
+    agent issues two parallel spawn_browser_agent calls, each browser tool emits an
+    AssistantEvent(file_pointer=screenshot) between its '✓ Task Completed' and
+    'Browser automation complete' POST_MESSAGE rows. After dedup keeps only the latest
+    FINISHED TOOL per toolCallId, the message sequence becomes
+    [TOOL_A_finished, ASSISTANT_screenshot_A, ASSISTANT_screenshot_B, TOOL_B_finished],
+    and the empty assistant rows split the tool_result run — the second tool_use no
+    longer has a tool_result in the next user message, and Anthropic returns a 400.
+
+    The fix is to skip empty file-output ASSISTANT rows in the OAI converter, mirroring
+    the production build_llm_messages behavior.
+    """
+    from context_validator import validate_context
+
+    tc_a = "toolu_browser_A"
+    tc_b = "toolu_browser_B"
+    fp = {
+        "id": "fp-1",
+        "mime_type": "image/png",
+        "storage_path": "x/y/screenshot.png",
+        "original_filename": "screenshot.png",
+        "size_bytes": 1024,
+    }
+    messages = [
+        _make_msg("USER", "Find populations of Tokyo and NYC.", ts="2024-01-01T00:00:00.000Z"),
+        # Parent issues two parallel browser tool calls
+        _make_msg(
+            "ASSISTANT", "",
+            tool_calls=[_tc("spawn_agent", tc_a), _tc("spawn_agent", tc_b)],
+            ts="2024-01-01T00:00:01.000Z",
+        ),
+        # Browser A: ✓ Task Completed (early FINISHED)
+        {
+            "role": "TOOL", "text": "ok A", "timestamp": "2024-01-01T00:00:02.000Z",
+            "metadata": {"toolCallId": tc_a, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "title": "✓ Task Completed"},
+        },
+        # Screenshot for A (between two FINISHED rows for tc_a)
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:03.000Z", "metadata": {}, "file_pointer": fp},
+        # Browser A: Browser automation complete (late FINISHED — wins dedup)
+        {
+            "role": "TOOL", "text": "ok A final", "timestamp": "2024-01-01T00:00:04.000Z",
+            "metadata": {"toolCallId": tc_a, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "title": "Browser automation complete"},
+        },
+        # Browser B: ✓ Task Completed
+        {
+            "role": "TOOL", "text": "ok B", "timestamp": "2024-01-01T00:00:05.000Z",
+            "metadata": {"toolCallId": tc_b, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "title": "✓ Task Completed"},
+        },
+        # Screenshot for B
+        {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:06.000Z", "metadata": {}, "file_pointer": fp},
+        # Browser B: Browser automation complete
+        {
+            "role": "TOOL", "text": "ok B final", "timestamp": "2024-01-01T00:00:07.000Z",
+            "metadata": {"toolCallId": tc_b, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "title": "Browser automation complete"},
+        },
+    ]
+    violations = validate_context(messages)
+    pairing_errors = [
+        v for v in violations
+        if v.rule == "tool_result_pairing" and v.severity == "error"
+    ]
+    assert not pairing_errors, (
+        "Empty file-output ASSISTANT rows must not split parallel tool_result run; "
+        f"got pairing errors: {[v.message for v in pairing_errors]}"
+    )
+
+
 async def run_all_tests():
     print("context_validator blackbox tests:")
     r = BlackboxResult()
@@ -148,6 +219,7 @@ async def run_all_tests():
     r.record("role_alternation_text_only_then_tools_exempt", test_role_alternation_text_only_then_tools_exempt)
     r.record("role_alternation_tools_then_text_only_flagged", test_role_alternation_tools_then_text_only_flagged)
     r.record("two_consecutive_text_only_assistants_exempt", test_two_consecutive_text_only_assistants_exempt)
+    r.record("file_output_assistant_does_not_break_tool_result_pairing", test_file_output_assistant_does_not_break_tool_result_pairing)
     return r.all_passed
 
 

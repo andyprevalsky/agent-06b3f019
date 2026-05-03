@@ -180,6 +180,116 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
+def build_verifier_context_messages(  # noqa: C901
+    context: List[Dict[str, Any]],
+    system_prompt: str,
+) -> List[Dict[str, Any]]:
+    """Build verifier messages with compressed tool results and progressive cache.
+
+    Strips ASSISTANT and SYSTEM messages. Compresses USER + TOOL messages into
+    user-role batches, split by prior verifier responses (which become the
+    assistant turns to maintain user/assistant alternation).
+
+    Sequential verifier calls share a growing cached prefix:
+      call N reads [sys, user_batch1, asst_v1, ..., user_batchN-1, asst_vN-1]
+      and writes only user_batchN (the new tool results).
+
+    Multimodal: when a TOOL message carries `metadata.screenshot_b64`, the
+    current text batch is flushed and a separate multimodal user message is
+    emitted containing a text description plus an Anthropic-shaped image
+    content block. Anthropic + OpenAI both accept content arrays mixed with
+    plain-string messages, so the rest of the conversation remains text-only.
+    """
+    sorted_context = sorted(
+        context,
+        key=lambda m: m.get("timestamp", "1970-01-01"),
+    )
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    current_batch: List[str] = []
+
+    def _flush_batch() -> None:
+        """Emit current_batch as a single user-role message and reset it."""
+        nonlocal current_batch
+        if current_batch:
+            messages.append({"role": "user", "content": "\n\n".join(current_batch)})
+            current_batch = []
+
+    for msg in sorted_context:
+        role = msg.get("role", "")
+        text = msg.get("text", "")
+        metadata = msg.get("metadata", {}) or {}
+
+        if metadata.get("subAgentId"):
+            continue
+        if role in ("SYSTEM", "ASSISTANT"):
+            continue
+
+        if role == "USER":
+            current_batch.append(text)
+            continue
+
+        if role == "TOOL":
+            if metadata.get("toolStatus") == "IN_PROGRESS":
+                continue
+
+            if metadata.get("verifierMessage"):
+                _flush_batch()
+                verifier_text = text
+                if metadata.get("title"):
+                    verifier_text = f"{metadata['title']}: {text}"
+                messages.append({"role": "assistant", "content": verifier_text})
+                continue
+
+            tool_name = metadata.get("toolName", "tool")
+            title = metadata.get("title")
+            prefix = f"[{tool_name}]" + (f" {title}:" if title else ":")
+            tool_text = f"{prefix} {text}"
+            if metadata.get("structured_response"):
+                tool_text += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+
+            screenshot_b64 = metadata.get("screenshot_b64")
+            if screenshot_b64:
+                # Multimodal path. The text body must NOT include the b64 blob —
+                # we already emit it as an image block. spawn_browser_agent_v3
+                # currently sets `text` to a description ("Final-state screenshot
+                # available …"); guard here regardless in case future callers
+                # mistakenly inline the b64 into text.
+                if tool_text.find(screenshot_b64) != -1:
+                    tool_text = tool_text.replace(
+                        screenshot_b64,
+                        "<screenshot moved to image content block>",
+                    )
+
+                # Flush any pending text first so the image is its own user turn,
+                # keeping the alternation clean and the cache prefix stable for
+                # text-only batches.
+                _flush_batch()
+                media_type = metadata.get("screenshot_media_type", "image/png")
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": tool_text},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": screenshot_b64,
+                            },
+                        },
+                    ],
+                })
+                continue
+
+            current_batch.append(tool_text)
+
+    current_batch.append("Evaluate the agent's progress as JSON.")
+    _flush_batch()
+
+    return messages
+
+
 def convert_context_to_messages(  # noqa: C901
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -281,15 +391,13 @@ def convert_context_to_messages(  # noqa: C901
             messages.append({"role": "user", "content": content})
 
         elif role == "ASSISTANT":
-            # Still track declared tool IDs even if not including assistant messages
-            # This ensures TOOL messages can be properly matched
+            if not include_assistant:
+                continue
+
             if metadata.get("tool_calls"):
                 for tc in metadata["tool_calls"]:
                     tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
-
-            if not include_assistant:
-                continue
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
@@ -463,6 +571,16 @@ async def build_llm_messages(  # noqa: C901
     # Files are already embedded as multimodal content in their respective messages,
     # and the static system prompt already has guidance on passing files via attachments.
 
+    def _ts_header(msg: Dict) -> str:
+        """Format message timestamp as a short header the LLM can use for temporal context."""
+        ts = msg.get("timestamp")
+        if not ts:
+            return ""
+        dt = parse_timestamp(ts)
+        if dt.year == 1970:
+            return ""
+        return f"[{dt.strftime('%Y-%m-%d %H:%M')}] "
+
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
 
@@ -541,9 +659,10 @@ async def build_llm_messages(  # noqa: C901
                 metadata_texts.append(build_attachment_metadata_text(fp))
 
         # Determine LLM role and base text
+        ts_prefix = _ts_header(msg)
         if role == "USER":
             llm_role = "user"
-            full_text = text
+            full_text = ts_prefix + text
 
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
@@ -558,10 +677,29 @@ async def build_llm_messages(  # noqa: C901
 
         if role == "ASSISTANT":
             llm_role = "assistant"
-            full_text = text
+            full_text = ts_prefix + text
 
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
+
+            raw_tool_calls = metadata.get("tool_calls")
+
+            # File-output ASSISTANT rows: empty text, no tool_calls, only an
+            # attachment (e.g. browser screenshots posted as AssistantEvent
+            # between two TOOL FINISHED rows in spawn_browser_agent_v3 /
+            # spawn_claude_code_agent / spawn_sub_agents). The LLM API
+            # discards image blocks on assistant role anyway, so the row
+            # contributes nothing semantically — but emitting it splits an
+            # otherwise contiguous tool_result run, which means the
+            # FOLLOWING tool_result no longer "immediately follows" the
+            # tool_use that declared it. Anthropic rejects that with
+            # "tool_use ids ... have no matching tool_result in the next
+            # message" (see context_validator._check_tool_result_pairing).
+            # Skip these rows entirely so the tool_use/tool_result chain
+            # stays intact.
+            has_attachment = bool(file_pointer) or bool(metadata.get("attachments"))
+            if not text.strip() and not raw_tool_calls and has_attachment:
+                continue
 
             if content:
                 # LLM APIs reject multimodal blocks in assistant messages.
@@ -574,8 +712,6 @@ async def build_llm_messages(  # noqa: C901
                         full_text += f"\n\n[Attached file: {fname}]"
 
             assistant_msg: Dict[str, Any] = {"role": llm_role, "content": full_text}
-
-            raw_tool_calls = metadata.get("tool_calls")
             if raw_tool_calls:
                 if not isinstance(raw_tool_calls, list):
                     raise ValueError(
@@ -654,12 +790,12 @@ async def build_llm_messages(  # noqa: C901
                                 fname = block.get("file", {}).get("filename", "file")
                                 tool_content += f"\n\n[Attached file: {fname}]"
                     label = tool_name or "tool"
-                    messages.append({"role": "user", "content": f"[{label} result]: {tool_content}"})
+                    messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
                     continue
 
-                tool_content = text
+                tool_content = ts_prefix + text
                 if metadata.get("title"):
-                    tool_content = f"{metadata['title']}: {tool_content}"
+                    tool_content = f"{ts_prefix}{metadata['title']}: {text}"
                 if metadata.get("structured_response"):
                     tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
                 if metadata_texts:
@@ -683,7 +819,7 @@ async def build_llm_messages(  # noqa: C901
                 continue
 
             # Non-terminal TOOL messages are passed as context text.
-            full_text = f"[TOOL]: {text}"
+            full_text = f"{ts_prefix}[TOOL]: {text}"
             if metadata_texts:
                 full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
             if content:
@@ -695,10 +831,10 @@ async def build_llm_messages(  # noqa: C901
 
         if role == "SYSTEM":
             llm_role = "user"
-            full_text = f"[SYSTEM]: {text}"
+            full_text = f"{ts_prefix}[SYSTEM]: {text}"
         else:
             llm_role = "user"
-            full_text = text
+            full_text = ts_prefix + text
 
         if metadata_texts:
             full_text = full_text + "\n\n" + "\n\n".join(metadata_texts)
@@ -738,10 +874,163 @@ async def build_llm_messages(  # noqa: C901
         else:
             i += 1
 
+    # Defensive: pair every assistant tool_call with a tool result before sending
+    # to the LLM. Mirrors claude-code-src's ensureToolResultPairing — when an
+    # activity (set_plan, spawn_agent, spawn_claude_code_agent, …) crashes or
+    # times out before the parent TOOL terminal row is written, the assistant's
+    # tool_use ends up orphaned in DB. Anthropic rejects with 400 (or stalls)
+    # if a tool_use lacks a matching tool_result. We fill the gap with a
+    # synthetic error tool_result so the loop can continue.
+    messages = _ensure_tool_result_pairing(messages)
+
     # Resolve context pointers to <resolved-ref> blocks
     messages = await resolve_pointers_in_messages(messages, local_context=context)
 
     return messages
+
+
+SYNTHETIC_TOOL_RESULT_PLACEHOLDER = "[Tool result missing due to internal error]"
+
+
+def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure every assistant tool_call has a matching tool message.
+
+    OpenAI-format invariants the Anthropic transform relies on:
+    - Every assistant.tool_calls[i].id has a tool message with that tool_call_id
+      somewhere after it (and before the next assistant turn).
+    - No two assistant messages declare the same tool_call_id.
+    - tool messages whose tool_call_id is not declared by any preceding assistant
+      are dropped (build_llm_messages already converts those to user text upstream
+      — this is the belt-and-suspenders pass for any that slipped through).
+
+    Repairs the message list in place by:
+    1. Stripping duplicate tool_call ids that appear in a later assistant.
+    2. Inserting synthetic error tool messages for any tool_call id with no
+       matching tool message before the next assistant.
+    3. Dropping orphaned tool messages whose tool_call_id has no preceding
+       declaration.
+
+    Idempotent — running it twice on its own output is a no-op.
+    """
+    seen_ids: set[str] = set()
+    repaired = False
+
+    # Pass 1: dedupe tool_call ids across assistant messages. Anthropic rejects
+    # duplicate tool_use ids in the same conversation; the in-message merge above
+    # only catches consecutive assistants.
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        tcs = msg.get("tool_calls")
+        if not tcs:
+            continue
+        deduped: list = []
+        for tc in tcs:
+            tc_id = tc.get("id")
+            if tc_id and tc_id in seen_ids:
+                repaired = True
+                continue
+            if tc_id:
+                seen_ids.add(tc_id)
+            deduped.append(tc)
+        if deduped:
+            msg["tool_calls"] = deduped
+        else:
+            msg.pop("tool_calls", None)
+
+    # Pass 2: walk the list, fill in missing tool messages, drop orphan tool
+    # messages. We rebuild a fresh list to keep insertion logic simple.
+    result: List[Dict[str, Any]] = []
+    declared_at_or_before: set[str] = set()
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        role = msg.get("role")
+
+        if role == "assistant":
+            tcs = msg.get("tool_calls") or []
+            for tc in tcs:
+                tc_id = tc.get("id")
+                if tc_id:
+                    declared_at_or_before.add(tc_id)
+            result.append(msg)
+
+            # Collect every tool message that follows this assistant up to the
+            # next assistant, and check coverage.
+            covered: set[str] = set()
+            j = i + 1
+            tool_run: List[Dict[str, Any]] = []
+            non_tool_run: List[Dict[str, Any]] = []
+            while j < len(messages) and messages[j].get("role") != "assistant":
+                m2 = messages[j]
+                if m2.get("role") == "tool":
+                    tcid = m2.get("tool_call_id")
+                    if tcid and tcid in declared_at_or_before:
+                        if tcid in covered:
+                            # Duplicate tool result for the same id — drop second.
+                            repaired = True
+                        else:
+                            covered.add(tcid)
+                            tool_run.append(m2)
+                    else:
+                        # Orphaned tool message — drop.
+                        repaired = True
+                else:
+                    non_tool_run.append(m2)
+                j += 1
+
+            # Synthesize missing tool messages for any declared id not covered.
+            tc_ids = [tc.get("id") for tc in tcs if tc.get("id")]
+            tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
+            for tc_id in tc_ids:
+                if tc_id not in covered:
+                    repaired = True
+                    synthetic: Dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
+                    }
+                    name = tc_names.get(tc_id)
+                    if name:
+                        synthetic["name"] = name
+                    tool_run.append(synthetic)
+
+            # Tool messages first (so tool_use→tool_result pairing is contiguous),
+            # then any non-tool messages (user text, etc.) that lived in this gap.
+            result.extend(tool_run)
+            result.extend(non_tool_run)
+            i = j
+            continue
+
+        if role == "tool":
+            # Tool message at the head of the list (no preceding assistant) or
+            # following a non-assistant — both are orphans.
+            tcid = msg.get("tool_call_id")
+            if tcid and tcid in declared_at_or_before:
+                # Belongs to a prior assistant we already emitted (rare — would
+                # mean an assistant→tool→user→tool sequence). Keep it.
+                result.append(msg)
+            else:
+                repaired = True
+            i += 1
+            continue
+
+        # system, user, etc. — pass through.
+        result.append(msg)
+        i += 1
+
+    if repaired:
+        try:
+            logger.warning(
+                "tool_result_pairing.repaired",
+                original_count=len(messages),
+                repaired_count=len(result),
+            )
+        except Exception:
+            # Logger may be unavailable inside Temporal sandbox during replay.
+            pass
+
+    return result
 
 
 async def call_llm_structured_streaming(  # noqa: C901
@@ -753,7 +1042,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     on_chunk: Callable[[str, int], Awaitable[None]],
     reasoning_max_tokens: Optional[int] = None,
     model_preference: Optional[str] = None,
-    model_seed: Optional[int] = None,  # Index into Rose model pool (bypasses racing)
+    model_seed: Optional[int] = None,  # Index into Rose model pool (pins to one waterfall step)
     agent_id: Optional[str] = None,  # For cancellation checking
     on_tool_detected: Optional[
         Callable[[str, str], Awaitable[None]]
@@ -766,8 +1055,10 @@ async def call_llm_structured_streaming(  # noqa: C901
     ] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
-    skip_cache: bool = False,  # Skip prompt caching (for single-use calls like param populator)
+    skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
+    thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
+    effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
@@ -806,7 +1097,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             "temperature": temperature,
             "max_tokens": max_tokens,
             "reasoning_max_tokens": reasoning_max_tokens,
-            "skip_cache": skip_cache,
+            "skip_cache_write": skip_cache_write,
             "has_claude_token": claude_token is not None,
         },
     )
@@ -820,7 +1111,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         # spans nest under the caller; only mint when nothing is bound.
         request_id = current_request_id() or str(uuid.uuid4())[:8]
         logger.info(
-            f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
+            f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
         )
 
         # Build JSON schema from Pydantic model
@@ -883,11 +1174,13 @@ async def call_llm_structured_streaming(  # noqa: C901
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=model_seed,
-                skip_cache=skip_cache,
+                skip_cache_write=skip_cache_write,
                 claude_auth=claude_auth_from_token(claude_token),
                 agent_id=agent_id,
                 request_id=request_id,
                 call_site=call_site,
+                thinking=thinking,
+                effort=effort,
             ):
                 chunk_count += 1
 
@@ -917,16 +1210,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 if kind == "usage":
                     stream_usage = dict(chunk.data)
                     final_finish_reason = stream_usage.get("finish_reason", "") or final_finish_reason
-                    cache_read = stream_usage.get("cache_read_input_tokens", 0) or 0
-                    cache_write = stream_usage.get("cache_creation_input_tokens", 0) or 0
-                    prompt_tokens = stream_usage.get("prompt_tokens", 0) or 0
-                    total_input = prompt_tokens + cache_read + cache_write
-                    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
-                    logger.info(
-                        f"📊 Usage received: prompt={prompt_tokens} completion={stream_usage.get('completion_tokens', 0)} "
-                        f"cache_read={cache_read} cache_write={cache_write} cache_hit={cache_pct}% "
-                        f"finish={final_finish_reason}"
-                    )
+                    # llm.cache event is emitted from RoseClient.complete (single source).
                     continue
 
                 if kind == "done":
@@ -1239,7 +1523,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 on_raw_progress=on_raw_progress,
                 claude_token=claude_token,
                 on_model_detected=on_model_detected,
-                skip_cache=skip_cache,
+                skip_cache_write=skip_cache_write,
                 call_site=call_site,
                 _is_escalation=True,
             )
@@ -1449,9 +1733,6 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
                 "cancelled": False,
-                # Include racing-adjusted values if present
-                "winner_prompt_tokens": stream_usage.get("winner_prompt_tokens"),
-                "winner_completion_tokens": stream_usage.get("winner_completion_tokens"),
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": stream_usage.get("cache_read_input_tokens", 0),
@@ -1771,7 +2052,7 @@ async def call_llm(
     max_tokens: int = 4096,
     response_format: Optional[Dict] = None,
     claude_token: Optional[str] = None,
-    skip_cache: bool = False,
+    skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1807,7 +2088,7 @@ async def call_llm(
             extra={
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "skip_cache": skip_cache,
+                "skip_cache_write": skip_cache_write,
                 "has_claude_token": claude_token is not None,
             },
         )
@@ -1819,7 +2100,7 @@ async def call_llm(
         if pool is not None:
             request_id = current_request_id() or str(uuid.uuid4())[:8]
             logger.info(
-                f"📤 [{request_id}] [{call_site}] Routing Rose model in-process: {model} pool={pool} skip_cache={skip_cache}"
+                f"📤 [{request_id}] [{call_site}] Routing Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
             )
 
             rose_client = RoseClient()
@@ -1830,7 +2111,7 @@ async def call_llm(
                     response_format=response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    skip_cache=skip_cache,
+                    skip_cache_write=skip_cache_write,
                     claude_auth=claude_auth_from_token(claude_token),
                     agent_id=agent_id,
                     request_id=request_id,
@@ -1935,24 +2216,33 @@ async def _call_llm_verifier(  # noqa: C901
     agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Simple LLM call for verifier - no streaming UI, no tool detection.
+    Sole LLM helper for the verifier — no streaming UI, no tool detection.
+
+    All verifier code paths route through this helper via the ``check_progress``
+    activity. The activity forces ``model="rose-labs/rose-1-ultra"`` so the
+    pool resolution below is guaranteed to succeed; the assertion guards against
+    misuse if a future caller skips ``check_progress``.
 
     Args:
         messages: Chat messages for the LLM
-        model: Model to use
+        model: Model to use (must resolve to a Rose pool)
         config: Application config
         response_schema: Optional response schema to include output extraction
         claude_token: Optional Claude OAuth token for direct Anthropic calls
+        call_site: Cache-logging tag (e.g. "verifier_plan", "verifier_execute",
+            "verifier_post_dag", "verifier_browser", "verifier_claude_code").
+        agent_id: Optional agent ID for tracing.
 
     Returns:
         Tuple of (parsed JSON dict with reasoning, score, and optionally output), usage dict)
     """
     pool = pool_for_model(model)
-    if pool is None:
-        raise ValueError(
-            f"_call_llm_verifier requires a Rose model (got {model!r}); "
-            f"non-Rose verifier path is not supported."
-        )
+    # The check_progress activity always forces a Rose model. Assertion guards
+    # against direct misuse — there is no non-Rose verifier fallback.
+    assert pool is not None, (
+        f"_call_llm_verifier requires a Rose model (got {model!r}); "
+        f"all verifier paths must go through check_progress, which forces rose-1-ultra."
+    )
 
     response_format = _build_verifier_json_schema(response_schema)
 
@@ -1974,7 +2264,6 @@ async def _call_llm_verifier(  # noqa: C901
     chunk_count = 0
     stream_usage: Optional[Dict[str, Any]] = None
 
-    stream_interrupted = False
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     rose_client = RoseClient()
     try:
@@ -2023,7 +2312,6 @@ async def _call_llm_verifier(  # noqa: C901
             elif kind == "done":
                 pass
     except RoseError as e:
-        stream_interrupted = True
         logger.warning(
             f"Verifier RoseClient error after {chunk_count} chunks, "
             f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
@@ -2044,12 +2332,11 @@ async def _call_llm_verifier(  # noqa: C901
             )
         accumulated_json = json.dumps(first_input)
 
+    # llm.cache event is emitted from RoseClient.complete (single source).
+    # Still need these locally for the returned usage dict consumed by callers.
     cache_read = stream_usage.get("cache_read_input_tokens", 0) if stream_usage else 0
     cache_write = stream_usage.get("cache_creation_input_tokens", 0) if stream_usage else 0
     prompt_toks = stream_usage.get("prompt_tokens", 0) if stream_usage else 0
-    logger.info(
-        f"🏁 [{call_site}] Verifier streaming complete: {chunk_count} chunks, reasoning={len(accumulated_reasoning)}, json={len(accumulated_json)}, interrupted={stream_interrupted}, cache_read={cache_read}, cache_write={cache_write}"
-    )
 
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
@@ -2084,8 +2371,21 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     """
     Build a JSON schema for the verifier response.
 
-    If response_schema is provided, includes an 'output' field with the schema fields.
-    The output is always included in the response, but should only be used when score >= 1.0.
+    Field order is load-bearing — structured-output models populate fields in the
+    order they appear in the schema. We force commitment in this sequence:
+
+      With response_schema:
+        1. ``output``     — extract the schema fields from tool results FIRST.
+        2. ``reasoning``  — detailed feedback to the agent, anchored in tool evidence.
+        3. ``score``      — final numeric commitment (0.0–1.0).
+
+      Without response_schema:
+        1. ``reasoning`` — analysis of whether the goal is accomplished.
+        2. ``score``     — final numeric commitment (0.0–1.0).
+
+    The rubric: score = 1.0 iff every field in ``output`` can be accurately
+    populated from real, extracted tool-result evidence. Without a response
+    schema, score = 1.0 iff the goal is accomplished by visible tool results.
 
     Args:
         response_schema: Optional response schema with fields definition
@@ -2093,11 +2393,18 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     Returns:
         JSON schema dict for use with OpenAI structured outputs
     """
-    # Base schema always has reasoning and score
-    properties = {"reasoning": {"type": "string"}, "score": {"type": "number", "minimum": 0, "maximum": 1}}
-    required = ["reasoning", "score"]
+    # Build properties in the canonical commitment order.
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
 
-    # If response_schema provided, add output field
+    # When the schema contains an open-object field ("object" / "list[object]"),
+    # we MUST relax the OpenAI strict-mode flag — strict mode forbids
+    # `additionalProperties: true` (open shapes). Anthropic + claudeAuth paths
+    # accept open shapes regardless. Tracked here so the JSON-schema envelope
+    # at the bottom can flip `strict` accordingly.
+    has_open_object = False
+
+    # If response_schema provided, the verifier extracts schema fields FIRST.
     if response_schema and response_schema.get("fields"):
         output_properties = {}
         output_required = []
@@ -2119,6 +2426,29 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
                 json_type = {"type": "array", "items": {"type": "string"}}
             elif field_type == "list[int]":
                 json_type = {"type": "array", "items": {"type": "integer"}}
+            elif field_type == "object":
+                # Open-shape object — sub-fields are described in `description`
+                # rather than declared in JSON schema. The verifier is expected
+                # to populate per the description text. additionalProperties=True
+                # is incompatible with OpenAI strict mode, so we disable strict
+                # at the envelope level when this branch is taken.
+                has_open_object = True
+                json_type = {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": field.get("description", ""),
+                }
+            elif field_type == "list[object]":
+                # Open-shape list of objects. See note on `object` above.
+                has_open_object = True
+                json_type = {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                    "description": field.get("description", ""),
+                }
             elif field_type == "file_pointer":
                 # Full FilePointer schema - used by main agent and spawn_sub_agent verifiers
                 # Expects context to contain full FilePointer with all fields populated
@@ -2237,45 +2567,128 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
         }
         required.append("output")
 
+    # Reasoning before score — text first, numeric commit last so the score is
+    # the conclusion of the analysis rather than its anchor.
+    properties["reasoning"] = {
+        "type": "string",
+        "description": (
+            "Detailed walk-through anchored in tool messages. When score < 1.0, "
+            "this is shown to the agent as feedback — name the missing fields "
+            "(or missing goal evidence) and what would unblock them."
+        ),
+    }
+    required.append("reasoning")
+
+    properties["score"] = {"type": "number", "minimum": 0, "maximum": 1}
+    required.append("score")
+
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "ProgressScoreWithOutput" if response_schema else "ProgressScore",
             "schema": {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
-            "strict": True,
+            # OpenAI strict mode forbids `additionalProperties: true`. When the
+            # schema contains an open-object field (`object` / `list[object]`),
+            # we drop strict so the open shape is accepted. Anthropic +
+            # claudeAuth paths are unaffected (they always accept open shapes).
+            "strict": not has_open_object,
         },
     }
 
 
+# The verifier always uses Rose Ultra. Every code path — main loop, post-DAG,
+# browser, claude_code — routes through the check_progress activity below, so
+# this constant is the single source of truth for the verifier model.
+VERIFIER_MODEL = "rose-labs/rose-1-ultra"
+
+
 @activity.defn
 @traced("check_progress")
-async def check_progress(
+async def check_progress(  # noqa: C901
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
-    model: str = "rose-labs/rose-1-lite",
-    phase: str = "EXECUTE",  # Kept for backward compat but no longer used
+    model: str = VERIFIER_MODEL,  # IGNORED — verifier always forces rose-1-ultra. Kept for backward compat.
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Use LLM judge to check progress toward goal.
+    Use LLM judge to check progress toward goal. Canonical entry point — all
+    verifier paths (main loop, post-DAG, browser, claude_code) MUST call this
+    activity rather than `_call_llm_verifier` directly.
+
+    Verifier model is **mandatory** — the ``model`` arg is accepted for
+    backward compatibility with positional callers but always overridden to
+    ``rose-labs/rose-1-ultra``. ``claude_token`` is passed through verbatim
+    (the workflow owns rotation; rotation is not done here).
+
+    Context scoping (C14): the verifier judges only the calling agent's own
+    context. There is no in-function filter because scoping is enforced at
+    every call site by the message-fetch boundary, not here:
+
+    - Main loop / post-DAG / sub-agent verifier: ``poll_new_messages`` queries
+      the backend by ``agent_id``, so ``context`` only contains rows the DB
+      already filtered to this agent. Sub-agents run in a separate workflow
+      with their own ``agent_id``, so a parent's messages can never appear.
+    - Browser sub-agent verifier: ``verifier_context`` is built locally from
+      the browser session's action history, DOM, and final-state screenshot —
+      nothing from the parent reaches it.
+    - Claude-code sub-agent verifier: ``verifier_context`` is built locally
+      from the sandbox terminal output and the run's action summary —
+      nothing from the parent reaches it.
+    - Explore sub-agent: runs with ``skip_verification=True`` — no verifier
+      executes at all.
+
+    Do NOT add a "drop messages whose agent_id != this agent" filter here —
+    that would mask a real leak rather than fix it. If a leak shows up, fix
+    the upstream call site so it builds an agent-scoped context, and add an
+    invariant test instead.
 
     Args:
-        context: Message history (first USER message is the goal)
-        verifier_system_prompt: Pre-built verifier system prompt (from build_verifier_prompt)
-        model: LLM model to use
-        phase: Deprecated - no longer used (prompt is pre-built by caller)
-        response_schema: Response schema for structured output extraction
-        claude_token: Optional Claude OAuth token for direct Anthropic calls
+        context: Message history (first USER message is the goal). MUST be
+            agent-scoped by the caller — see scoping notes above.
+        verifier_system_prompt: Pre-built verifier system prompt
+            (from ``utils.prompts.build_verifier_prompt``).
+        model: IGNORED. Always forced to ``rose-labs/rose-1-ultra`` (B2).
+        response_schema: Optional response schema for structured output
+            extraction. Pass ``None`` (or omit) to score the goal without an
+            output-extraction rubric — the prompt-builder is expected to
+            simplify accordingly.
+        claude_token: Optional Claude OAuth token for direct Anthropic calls.
+        call_site: Cache-logging tag. Use the appropriate variant:
+            ``verifier_plan``, ``verifier_execute``, ``verifier_post_dag``,
+            ``verifier_browser``, ``verifier_claude_code``.
+        agent_id: Optional agent ID for tracing.
 
     Returns:
-        Dict with 'score' (float 0.0-1.0), 'reasoning' (str), and optionally 'structured_response'
+        Dict with:
+        - ``score`` (float 0.0-1.0)
+        - ``reasoning`` (str)
+        - ``message`` (str, formatted "{reasoning}\\n\\nScore: {score}")
+        - ``usage`` (dict): contains ``prompt_tokens``, ``completion_tokens``,
+            ``total_tokens``, ``actual_model``, ``pool_name``,
+            ``cache_creation_input_tokens``, ``cache_read_input_tokens``,
+            ``claude_token_error``. Callers (e.g. post-DAG verifier) can use
+            these for token-cost tracking.
+        - ``structured_response`` (dict | None): always returned as
+            ``result["output"]`` regardless of score — callers decide what
+            to do with partial output (C2).
     """
-    # If no schema provided, use empty schema for output extraction
-    if not response_schema:
-        response_schema = {"fields": []}
+    # B2: Force verifier model and ignore the caller-passed model arg.
+    forced_model = VERIFIER_MODEL
+    if model != forced_model:
+        logger.debug(
+            "check_progress overriding caller model",
+            requested_model=model,
+            forced_model=forced_model,
+        )
+
+    # C7: Pass response_schema=None through unchanged when not provided. Do NOT
+    # default to an empty {"fields": []} dict — the prompt-side simplification
+    # (utils/prompts.py:build_verifier_prompt) decides how to handle missing
+    # schema. _build_verifier_json_schema also branches on this directly.
+    schema_for_call = response_schema if response_schema else None
 
     try:
         # DEBUG: Log what we received
@@ -2292,17 +2705,15 @@ async def check_progress(
                 elif not isinstance(m, dict):
                     logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
 
+        # C14: scoping is enforced at the message-fetch boundary by every
+        # caller (poll_new_messages by agent_id, or locally-built browser /
+        # claude-code verifier_context). No filtering here — see docstring.
         _safe_heartbeat("Checking progress with LLM judge")
 
         config = load_config()
-        # Use the pre-built verifier prompt directly (no double-building)
         system_prompt = verifier_system_prompt
 
-        # Convert full context to OpenAI message format (no truncation)
-        # NOTE: SYSTEM and ASSISTANT messages are excluded from verifier (default)
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(convert_context_to_messages(context, include_system=False))
-        messages.append({"role": "user", "content": "Evaluate the agent's progress as JSON."})
+        messages = build_verifier_context_messages(context, system_prompt)
 
         # Resolve context pointers
         messages = await resolve_pointers_in_messages(messages, local_context=context)
@@ -2332,9 +2743,9 @@ async def check_progress(
             try:
                 result, usage = await _call_llm_verifier(
                     messages,
-                    model,
+                    forced_model,
                     config,
-                    response_schema,
+                    schema_for_call,
                     claude_token=claude_token,
                     call_site=call_site,
                     agent_id=agent_id,
@@ -2357,7 +2768,8 @@ async def check_progress(
                     raise last_error from last_error
 
         score = result["score"]
-        reasoning = result["reasoning"]
+        # C3: score_reasoning is gone. Read only `reasoning` now.
+        reasoning = result.get("reasoning", "")
 
         logger.info(
             "Progress checked",
@@ -2369,8 +2781,11 @@ async def check_progress(
             has_output="output" in result,
         )
 
-        # Only use output when score >= 1.0 (schema enforcement is handled by strict JSON schema)
-        structured_response = result.get("output") if score >= 1.0 else None
+        # C2: Always return whatever `output` the verifier produced — let
+        # downstream callers decide what to do with partial output. Even at
+        # score < 1.0 the partial extraction is useful for the agent's next
+        # iteration (it sees what fields are already grounded).
+        structured_response = result.get("output")
 
         return {
             "score": score,
@@ -2387,7 +2802,16 @@ async def check_progress(
             "score": 0.5,
             "reasoning": error_message,
             "message": f"{error_message}\n\nScore: 0.5",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "actual_model": None,
+                "pool_name": None,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "claude_token_error": None,
+            },
             "structured_response": None,
         }
 
@@ -2435,9 +2859,9 @@ async def call_llm_activity(  # noqa: C901
             without changing system prompt/tools (preserves cache prefix).
         required_tool: If set, validates the LLM called this tool. Raises ValueError
             if the tool is not in the response.
-        skip_cache_write: If True, reads from prompt cache but does not create new
-            cache entries (the extra user message creates a unique suffix that would
-            never be hit again).
+        skip_cache_write: If True, skips message-level cache breakpoint (avoids
+            writing a cache entry for the unique trailing message) but keeps
+            system+tools markers so the shared prefix can still be read from cache.
 
     Returns:
         Dict with:
@@ -2487,7 +2911,7 @@ async def call_llm_activity(  # noqa: C901
         _is_claude = [False]  # Mutable list so closures can update it
 
         def on_model_detected(actual_model: str):
-            # "-claude" suffix = user's own Claude token ($0, skipped racing)
+            # "-claude" suffix = user's own Claude token ($0, skipped the waterfall)
             # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
             _is_claude[0] = is_user_claude
@@ -2538,7 +2962,7 @@ async def call_llm_activity(  # noqa: C901
             claude_token=claude_token,
             on_model_detected=on_model_detected,
             call_site=call_site,
-            skip_cache=skip_cache_write,
+            skip_cache_write=skip_cache_write,
         )
 
         # Send final done=True chunk
@@ -2846,7 +3270,7 @@ async def call_planner_llm_activity(
 
     When claude_max_token is provided, it's passed to the Rose completions endpoint
     which calls Anthropic directly ($0 cost via user's Claude subscription).
-    If that fails, the endpoint falls back to racing automatically.
+    If that fails, the endpoint falls through to the waterfall automatically.
 
     Args:
         messages: Conversation history (user/assistant messages)
@@ -2910,7 +3334,6 @@ async def call_planner_llm_activity(
         result, usage, _ = await call_llm_structured_streaming(
             messages=full_messages,
             model=model,
-            # Keep planner sampling conservative to reduce tool-selection drift.
             temperature=0.2,
             max_tokens=16384,
             response_model=PlannerResponse,
@@ -2918,8 +3341,9 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
             claude_token=claude_max_token,
-            skip_cache=True,  # Plan is generated once per iteration — no cache reuse
+            skip_cache_write=False,
             call_site="planner",
+            effort="max",
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

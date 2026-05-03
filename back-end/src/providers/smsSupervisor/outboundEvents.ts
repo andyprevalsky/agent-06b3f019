@@ -7,10 +7,12 @@
  * Only fires for SMS-source root agents.
  */
 
-import { prisma } from '../database';
+import { createLogger } from '../logger';
 import { sendSms, getUserPhone } from '../smsQueue';
 import { SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { createShortcode } from './shortcodes';
+
+const log = createLogger('OutboundEvents');
 
 /**
  * Notify user that a new agent has been started.
@@ -21,7 +23,7 @@ export async function notifyAgentStarted(
 ): Promise<void> {
   const startTime = Date.now();
 
-  console.log('[SMS Outbound] notifyAgentStarted', {
+  log.info('notifyAgentStarted', {
     userId,
     agentId: agent.id,
     goalPreview: agent.goal.substring(0, 80),
@@ -29,7 +31,7 @@ export async function notifyAgentStarted(
 
   const phone = await getUserPhone(userId);
   if (!phone) {
-    console.log('[SMS Outbound] No phone for user, skipping', { userId });
+    log.info('No phone for user, skipping', { userId });
     return;
   }
 
@@ -40,7 +42,7 @@ export async function notifyAgentStarted(
 
   const result = await sendSms(phone, message);
 
-  console.log('[SMS Outbound] agentStarted SMS sent', {
+  log.info('agentStarted SMS sent', {
     userId,
     agentPrefix: prefix,
     success: result.success,
@@ -61,7 +63,7 @@ export async function notifyPlannerMessage(
 ): Promise<void> {
   const startTime = Date.now();
 
-  console.log('[SMS Outbound] notifyPlannerMessage', {
+  log.info('notifyPlannerMessage', {
     userId,
     agentId: agent.id,
     isQuestion,
@@ -70,7 +72,7 @@ export async function notifyPlannerMessage(
 
   const phone = await getUserPhone(userId);
   if (!phone) {
-    console.log('[SMS Outbound] No phone for user, skipping', { userId });
+    log.info('No phone for user, skipping', { userId });
     return;
   }
 
@@ -82,7 +84,7 @@ export async function notifyPlannerMessage(
 
   const result = await sendSms(phone, message);
 
-  console.log('[SMS Outbound] plannerMessage SMS sent', {
+  log.info('plannerMessage SMS sent', {
     userId,
     agentPrefix: prefix,
     isQuestion,
@@ -104,7 +106,7 @@ export async function notifyWriteLock(
 ): Promise<void> {
   const startTime = Date.now();
 
-  console.log('[SMS Outbound] notifyWriteLock', {
+  log.info('notifyWriteLock', {
     userId,
     agentId: agent.id,
     attentionRequestId,
@@ -113,7 +115,7 @@ export async function notifyWriteLock(
 
   const phone = await getUserPhone(userId);
   if (!phone) {
-    console.log('[SMS Outbound] No phone for user, skipping', { userId });
+    log.info('No phone for user, skipping', { userId });
     return;
   }
 
@@ -131,7 +133,7 @@ export async function notifyWriteLock(
 
   const result = await sendSms(phone, message);
 
-  console.log('[SMS Outbound] writeLock SMS sent', {
+  log.info('writeLock SMS sent', {
     userId,
     agentPrefix: prefix,
     shortcode,
@@ -152,7 +154,7 @@ export async function notifyCompletion(
 ): Promise<void> {
   const startTime = Date.now();
 
-  console.log('[SMS Outbound] notifyCompletion', {
+  log.info('notifyCompletion', {
     userId,
     agentId: agent.id,
     summaryLength: summary.length,
@@ -160,7 +162,7 @@ export async function notifyCompletion(
 
   const phone = await getUserPhone(userId);
   if (!phone) {
-    console.log('[SMS Outbound] No phone for user, skipping', { userId });
+    log.info('No phone for user, skipping', { userId });
     return;
   }
 
@@ -171,7 +173,7 @@ export async function notifyCompletion(
 
   const result = await sendSms(phone, message);
 
-  console.log('[SMS Outbound] completion SMS sent', {
+  log.info('completion SMS sent', {
     userId,
     agentPrefix: prefix,
     success: result.success,
@@ -189,7 +191,7 @@ export async function notifyCostLimit(
 ): Promise<void> {
   const startTime = Date.now();
 
-  console.log('[SMS Outbound] notifyCostLimit', {
+  log.info('notifyCostLimit', {
     userId,
     agentId: agent.id,
     treeCostCents: agent.treeCostCents,
@@ -198,7 +200,7 @@ export async function notifyCostLimit(
 
   const phone = await getUserPhone(userId);
   if (!phone) {
-    console.log('[SMS Outbound] No phone for user, skipping', { userId });
+    log.info('No phone for user, skipping', { userId });
     return;
   }
 
@@ -207,7 +209,7 @@ export async function notifyCostLimit(
 
   const result = await sendSms(phone, message);
 
-  console.log('[SMS Outbound] costLimit SMS sent', {
+  log.info('costLimit SMS sent', {
     userId,
     agentPrefix: prefix,
     success: result.success,

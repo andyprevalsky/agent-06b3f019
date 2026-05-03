@@ -23,6 +23,11 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+# Single source of truth for verifier rules. Embedded in the # Verification
+# section below so the browser-use prompt cites the same block as the main
+# agent, planner, verifier, explore agent, and attempt_completion tool prompt.
+from utils.prompts import VERIFICATION_RULES
+
 logger = structlog.get_logger()
 
 
@@ -37,7 +42,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "navback": {"description": "Go back to the previous page in browser history", "params": {}},
     "wait": {
-        "description": "Wait for x seconds (capped at 30s)",
+        "description": "Wait for x seconds (no enforced cap; use sparingly).",
         "params": {"seconds": {"type": "integer", "description": "Seconds to wait (default: 3)"}},
     },
     "click": {
@@ -71,12 +76,13 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "scroll": {
         "description": (
-            "Scroll by pages. Use down=True for scroll down, down=False for scroll up. "
-            "Use index for scroll containers."
+            "Scroll by pages (approximate; one 'page' is a fixed pixel amount per call, NOT a true viewport-aware page). "
+            "Use down=True for scroll down, down=False for scroll up. Use index for scroll containers. "
+            "For deeply long pages, you may need multiple scroll calls; pages=10 is approximate and may not actually reach the bottom/top in one call."
         ),
         "params": {
             "down": {"type": "boolean", "description": "True=scroll down, False=scroll up (default: true)", "required": True},
-            "pages": {"type": "number", "description": "0.5=half page, 1=full page, 10=to bottom/top (default: 1.0)"},
+            "pages": {"type": "number", "description": "0.5=half page, 1=full page, 10=approximately to bottom/top (default: 1.0). Approximate; may need multiple calls."},
             "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
         },
     },
@@ -86,8 +92,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "extract": {
         "description": (
-            "LLM extracts structured data from page markdown. "
-            "Use when on right page and know what to extract."
+            "Run an LLM extraction over the current page's rendered markdown to pull out structured CONTENT "
+            "(text, lists, tables, prices, names, links). NOT for running JavaScript or querying live DOM "
+            "state; use `evaluate` for that. Use `extract` when you are on the right page and need to read "
+            "and summarize visible content. NOT interchangeable with `evaluate`."
         ),
         "params": {
             "query": {"type": "string", "description": "What to extract from the page", "required": True},
@@ -99,16 +107,22 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {"index": {"type": "integer", "description": "Element index of the dropdown", "required": True}},
     },
     "select_dropdown": {
-        "description": "Set the option of a <select> element",
+        "description": (
+            "Set the option of a NATIVE HTML <select> element only. Does NOT work for ARIA/custom dropdowns "
+            "(role=listbox, combobox, or any non-native widget). For custom dropdowns, click to open and "
+            "click the desired option, or use `evaluate` to drive the underlying state."
+        ),
         "params": {
-            "index": {"type": "integer", "description": "Element index of the dropdown", "required": True},
-            "text": {"type": "string", "description": "Exact text of the option to select", "required": True},
+            "index": {"type": "integer", "description": "Element index of the native <select>", "required": True},
+            "text": {"type": "string", "description": "Exact text of the <option> to select", "required": True},
         },
     },
     "evaluate": {
         "description": (
-            "Execute browser JavaScript. Wrap in IIFE with try-catch. "
-            "Use for hover, drag, custom selectors, shadow DOM."
+            "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
+            "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
+            "computed styles, dispatching events, querying iframe contents. Wrap in IIFE with try-catch. "
+            "NOT for extracting visible content; for that, use `extract`. NOT interchangeable with `extract`."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -124,16 +138,29 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Open a new browser tab, optionally navigating to a URL",
         "params": {"url": {"type": "string", "description": "URL to open in new tab (defaults to about:blank)"}},
     },
-    "done": {
-        "description": "Complete the task and provide final result",
+    "upload_file": {
+        "description": (
+            "Upload a file to a file input element. The file must be available in the session's available_files "
+            "list. Find an <input type='file'> element in the DOM tree and pass its index along with the filename."
+        ),
         "params": {
-            "text": {"type": "string", "description": "Final result message in the format user requested", "required": True},
-            "success": {"type": "boolean", "description": "True if task completed successfully (default: true)"},
+            "index": {"type": "integer", "description": "Element index of the <input type='file'>", "required": True},
+            "filename": {"type": "string", "description": "Filename to upload (must match available_files)", "required": True},
         },
     },
     "attempt_completion": {
-        "description": "Attempt to complete the task with a result message",
-        "params": {"result": {"type": "string", "description": "The result/answer for the user", "required": True}},
+        "description": (
+            "Complete the task. After this call, an automated grader scores your work against the live "
+            "browser DOM, so make sure the page actually shows the answer before completing. Your `reasoning` "
+            "is shown in the UI for the human, NOT read by the grader."
+        ),
+        "params": {
+            "reasoning": {
+                "type": "string",
+                "description": "Brief UI-display summary of what you accomplished. Not graded.",
+                "required": True,
+            },
+        },
     },
     "send_message_to_user": {
         "description": "Send a message to the user (for updates or asking for help)",
@@ -143,7 +170,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Take a full-page screenshot of the current page (captures entire page, not just viewport). "
             "The screenshot is saved and returned to the orchestrating agent. "
-            "Only call once per page — one call captures everything."
+            "Only call once per page; one call captures everything."
         ),
         "params": {},
     },
@@ -170,50 +197,80 @@ def generate_tool_descriptions(available_actions: List[str]) -> str:
 
 
 def build_browser_use_system_prompt(available_actions: List[str]) -> str:
-    """Dynamic system prompt — enumerates the agent's available actions."""
+    """Canonical browser-automation system prompt.
+
+    Static across calls with the same `available_actions` (no time, no URL,
+    no per-step state). The v3 spawner delegates to this builder so the
+    Rose pool prompt and the v3 prompt share one source of truth; per-spawn
+    extras (goal, custom_instructions, available_files) are appended below
+    the SYSTEM_PROMPT_DYNAMIC_BOUNDARY by the spawner.
+    """
     tool_descriptions = generate_tool_descriptions(available_actions)
-    return f"""You are a browser-use agent operating in thinking mode. You automate browser tasks by outputting structured JSON actions.
+    return f"""You are a browser-automation agent. You read browser state and emit JSON actions to navigate, click, fill forms, and extract content.
 
-<intro>
-You excel at:
-1. Navigating complex websites and extracting precise information
-2. Automating form submissions and interactive web actions
-3. Operating effectively in an agent loop
-4. Efficiently performing diverse web tasks
-</intro>
+# Input
 
-<input>
-At every step, your input will consist of:
+At every step your input consists of:
 1. Current URL, viewport size, scroll position
 2. Interactive elements indexed for actions (format: [index]<type>text</type>)
 3. Previous action results and history
 4. Optional screenshot of the browser
-</input>
 
-<browser_rules>
+# Browser Rules
+
 - Only interact with elements that have a numeric [index] assigned
 - Only use indexes that are explicitly provided in the current state
 - If expected elements are missing, try scrolling or waiting
-- By default, only elements in the visible viewport are listed - use scroll if content is offscreen
+- By default, only elements in the visible viewport are listed; use scroll if content is offscreen
 - You can scroll by pages using the pages parameter (0.5 for half page, 2.0 for two pages)
-- If you fill an input field and action is interrupted, suggestions may have appeared
-</browser_rules>
+- If you fill an input field and the action is interrupted, suggestions may have appeared
 
-<available_actions>
+# Available Actions
+
 {tool_descriptions}
-</available_actions>
 
-<output>
+# Output Format
+
 You must ALWAYS respond with valid JSON in this exact format:
+<output>
 {{
-  "thinking": "A structured reasoning block analyzing: current page state, what was attempted, what worked/failed, and strategic planning for next steps.",
-  "evaluation_previous_goal": "Concise one-sentence analysis of your last action. Clearly state success, failure, or uncertain.",
-  "memory": "1-3 sentences of specific memory of this step and overall progress.",
-  "next_goal": "State the next immediate goal and action to achieve it.",
+  "thinking": "A structured reasoning block: current page state, what you just attempted, what worked/failed, and the next concrete step.",
   "action": [{{"action_name": {{...params...}}}}]
 }}
-Action list should NEVER be empty.
-</output>"""
+</output>
+The action list must NEVER be empty. Do NOT include any other top-level fields; extras are ignored and waste tokens.
+
+# Verification
+
+{VERIFICATION_RULES.strip()}
+
+Browser-specific notes:
+- The grader also reads the live browser state (the current URL, title,
+  scroll position, and the browser-extracted DOM tree) alongside the action
+  history (tool names + non-content params).
+- The grader does NOT see your `thinking` field. It reads the page DOM
+  independently and decides whether the goal is satisfied based on what
+  the page actually shows, NOT on what you reported.
+- Before calling `attempt_completion`, ensure the page DOM actually shows
+  the answer. If the answer isn't on the visible page, navigate, scroll,
+  or use `extract` to expose it first.
+- Match the goal's required output format EXACTLY. If the goal asks for an
+  integer, the page must clearly show that integer.
+
+# Safety Rules
+
+- NEVER delete or close any user account
+- NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
+- When making payments or posting to social media, you may be asked to confirm with the user first
+
+# Screenshot Tool
+
+Use the `screenshot` action to capture a full-page screenshot. One call
+captures the ENTIRE page (full-page, not just viewport). Do NOT call
+`screenshot` multiple times for the same page. Per-step viewport screenshots
+returned in browser state are for your own use; the orchestrator only
+receives screenshots you take with the `screenshot` action plus the final
+page screenshot when your task completes."""
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +491,10 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
             f'(raw: "{action_name}") - add to _ACTION_NAME_MAP or _VALID_ACTIONS'
         )
 
-    thinking = completion.get("next_goal") or completion.get("thinking")
+    # `thinking` is the canonical field. `next_goal` is a defensive fallback for
+    # older runs / pre-shrunken-envelope models that still emit it; relaxed to
+    # optional and only consulted when `thinking` is absent.
+    thinking = completion.get("thinking") or completion.get("next_goal")
 
     if normalized_action == "click_coordinates":
         x = params.get("x", params.get("coordinate_x"))
@@ -520,8 +580,13 @@ def _normalize_action_params(
         out["tab_id"] = params["tab_id"]
     if params.get("message"):
         out["message"] = params["message"]
-    if params.get("reasoning"):
-        out["reasoning"] = params["reasoning"]
+    # Defensive remap: legacy training data has the LLM emit `result` for
+    # attempt_completion. The Pydantic model (AttemptCompletionBrowserTool)
+    # and downstream handler (handler.py reading params.get("reasoning"))
+    # expect `reasoning`. Accept either; prefer `reasoning` when both are set.
+    reasoning_value = params.get("reasoning") or params.get("result")
+    if reasoning_value:
+        out["reasoning"] = reasoning_value
     if params.get("reason"):
         out["reason"] = params["reason"]
 

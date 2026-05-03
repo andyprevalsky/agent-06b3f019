@@ -15,7 +15,7 @@ import { prisma } from '../database';
 import { startAgentWorkflow } from '../temporal';
 import { createMessage } from '../messages';
 import { setResponseSchema } from '../setResponseSchema';
-import { callRouterLlm, RouterDecision } from './routerLlm';
+import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { executeWebSearch } from './chatTools';
 import {
@@ -23,6 +23,7 @@ import {
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
+import { fetchClaudeCodeAccessToken, fetchPoolToken } from '../claudeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('ChatHandler');
@@ -50,11 +51,36 @@ export async function handleChatMessage(config: {
   agentId: string;
   userId: string;
   model: string;
+  claudeToken?: string;
 }): Promise<ChatResult> {
   log.info('[ChatHandler] Processing message', {
     agentId: config.agentId,
     model: config.model,
   });
+
+  // Fetch Claude token for direct Anthropic passthrough (enables prompt caching)
+  let claudeToken: string | null = null;
+  try {
+    const userToken = await fetchClaudeCodeAccessToken(config.userId);
+    if (userToken) {
+      claudeToken = userToken;
+      log.info('[ChatHandler] Using user Claude token', { userId: config.userId });
+    } else {
+      const poolResult = await fetchPoolToken();
+      if (poolResult) {
+        claudeToken = poolResult.accessToken;
+        log.info('[ChatHandler] Using pool Claude token', {
+          userId: config.userId,
+          poolTokenId: poolResult.poolTokenId,
+        });
+      }
+    }
+  } catch (error) {
+    log.warn('[ChatHandler] Failed to fetch Claude token, falling back to waterfall', {
+      userId: config.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // Fetch messages from DB
   const dbMessages = await prisma.message.findMany({
@@ -77,9 +103,12 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages,
     model: config.model,
+    claudeToken,
   });
 
   const { decision, webSearchToolCallId } = routerResponse;
+
+  recordChatUsage(config.agentId, config.userId, 'chat_router', routerResponse.usage);
 
   log.info('[ChatHandler] Router decision', {
     agentId: config.agentId,
@@ -210,7 +239,10 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     messages: updatedMessages,
     model: config.model,
+    claudeToken,
   });
+
+  recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
 
   // 1. Save reasoning as ASSISTANT message (no metadata) - matches worker behavior
   await createMessage({
@@ -303,7 +335,6 @@ async function startTemporalWorkflowForChat(
     reasoningMaxTokens: agent.reasoningMaxTokens,
     verifier: {
       type: agent.verifier.type,
-      llmJudgePrompt: agent.verifier.llmJudgePrompt,
     },
     startPhase, // 'plan' or 'execute' - determines whether to skip PLAN phase
     priceLimitCents: agent.priceLimitCents,
@@ -323,4 +354,50 @@ async function startTemporalWorkflowForChat(
     workflowId,
     goal: goal.substring(0, 100),
   });
+}
+
+function recordChatUsage(
+  agentId: string,
+  userId: string,
+  toolName: string,
+  usage: ChatLlmUsage
+): void {
+  log.info('[ChatHandler] Recording chat usage', {
+    agentId,
+    toolName,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    cache_read: usage.cache_read_input_tokens,
+    cache_write: usage.cache_creation_input_tokens,
+  });
+  prisma.toolUsage
+    .create({
+      data: {
+        userId,
+        agentId,
+        toolName,
+        totalCostCents: 0,
+        usageItems: [
+          {
+            type: 'llm',
+            call_site: 'chat',
+            number_of_tokens: usage.total_tokens,
+            tokens_in: usage.prompt_tokens,
+            tokens_out: usage.completion_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+          },
+        ],
+      },
+    })
+    .then(() => {
+      log.info('[ChatHandler] Chat usage recorded successfully', { agentId, toolName });
+    })
+    .catch((err) => {
+      log.warn('[ChatHandler] Failed to record chat usage', {
+        agentId,
+        toolName,
+        error: String(err),
+      });
+    });
 }

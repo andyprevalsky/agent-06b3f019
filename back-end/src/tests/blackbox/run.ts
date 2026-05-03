@@ -27,9 +27,9 @@ function readEnv(...names: string[]): string | undefined {
 
 const blackboxDir = dirname(new URL(import.meta.url).pathname);
 const allFiles = readdirSync(blackboxDir)
-  .filter(f => f.endsWith('.blackbox.ts'))
+  .filter((f) => f.endsWith('.blackbox.ts'))
   .sort();
-const allDomains = allFiles.map(f => f.replace('.blackbox.ts', ''));
+const allDomains = allFiles.map((f) => f.replace('.blackbox.ts', ''));
 
 const rawArgs = process.argv.slice(2);
 let listOnly = false;
@@ -45,7 +45,7 @@ for (let i = 0; i < rawArgs.length; i++) {
   if (arg === '--concurrency') {
     const value = rawArgs[i + 1];
     if (!value) {
-      console.error('Missing value for --concurrency');
+      process.stderr.write('Missing value for --concurrency\n');
       process.exit(1);
     }
     concurrencyArg = Number(value);
@@ -57,66 +57,82 @@ for (let i = 0; i < rawArgs.length; i++) {
     continue;
   }
   if (arg.startsWith('--')) {
-    console.error(`Unknown option: ${arg}`);
+    process.stderr.write(`Unknown option: ${arg}\n`);
     process.exit(1);
   }
   if (domainsArg) {
-    console.error(`Multiple domain arguments provided: "${domainsArg}" and "${arg}"`);
+    process.stderr.write(`Multiple domain arguments provided: "${domainsArg}" and "${arg}"\n`);
     process.exit(1);
   }
   domainsArg = arg;
 }
 
 if (listOnly) {
-  console.log('Available black-box test domains:\n');
-  allDomains.forEach(d => console.log(`  ${d}`));
-  console.log(`\nTotal: ${allDomains.length} domains`);
+  process.stdout.write('Available black-box test domains:\n\n');
+  allDomains.forEach((d) => process.stdout.write(`  ${d}\n`));
+  process.stdout.write(`\nTotal: ${allDomains.length} domains\n`);
   process.exit(0);
 }
 
 const requested = domainsArg
-  ? domainsArg.split(',').map(s => s.trim()).filter(Boolean)
+  ? domainsArg
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
   : allDomains;
 if (requested.length === 0) {
-  console.error('No black-box test domains selected.');
+  process.stderr.write('No black-box test domains selected.\n');
   process.exit(1);
 }
-const unknown = requested.filter(d => !allDomains.includes(d));
+const unknown = requested.filter((d) => !allDomains.includes(d));
 if (unknown.length) {
-  console.error(`Unknown domain(s): ${unknown.join(', ')}`);
-  console.error(`Available: ${allDomains.join(', ')}`);
+  process.stderr.write(`Unknown domain(s): ${unknown.join(', ')}\n`);
+  process.stderr.write(`Available: ${allDomains.join(', ')}\n`);
   process.exit(1);
 }
 
 if (concurrencyArg !== undefined && (!Number.isInteger(concurrencyArg) || concurrencyArg <= 0)) {
-  console.error(`Invalid --concurrency value: ${concurrencyArg}. Expected a positive integer.`);
+  process.stderr.write(
+    `Invalid --concurrency value: ${concurrencyArg}. Expected a positive integer.\n`
+  );
   process.exit(1);
 }
 
 const envConcurrencyValue = readEnv('BLACKBOX_TEST_CONCURRENCY', 'CONTRACT_TEST_CONCURRENCY');
 const envConcurrency = envConcurrencyValue ? Number(envConcurrencyValue) : undefined;
 if (envConcurrency !== undefined && (!Number.isInteger(envConcurrency) || envConcurrency <= 0)) {
-  console.error(`Invalid BLACKBOX_TEST_CONCURRENCY/CONTRACT_TEST_CONCURRENCY: ${envConcurrencyValue}. Expected a positive integer.`);
+  process.stderr.write(
+    `Invalid BLACKBOX_TEST_CONCURRENCY/CONTRACT_TEST_CONCURRENCY: ${envConcurrencyValue}. Expected a positive integer.\n`
+  );
   process.exit(1);
 }
 const parsedConcurrency = concurrencyArg ?? envConcurrency;
-const concurrency = Number.isInteger(parsedConcurrency) && (parsedConcurrency as number) > 0
-  ? Math.min(requested.length, parsedConcurrency as number)
-  : Math.min(requested.length, 6);
-const runId = readEnv('BLACKBOX_TEST_RUN_ID', 'CONTRACT_TEST_RUN_ID') || `${Date.now()}-${process.pid}`;
+const concurrency =
+  Number.isInteger(parsedConcurrency) && (parsedConcurrency as number) > 0
+    ? Math.min(requested.length, parsedConcurrency as number)
+    : Math.min(requested.length, 6);
+const runId =
+  readEnv('BLACKBOX_TEST_RUN_ID', 'CONTRACT_TEST_RUN_ID') || `${Date.now()}-${process.pid}`;
 const envTimeoutMsValue = readEnv('BLACKBOX_TEST_TIMEOUT_MS', 'CONTRACT_TEST_TIMEOUT_MS');
 const envTimeoutMs = envTimeoutMsValue ? Number(envTimeoutMsValue) : undefined;
 if (envTimeoutMs !== undefined && (!Number.isInteger(envTimeoutMs) || envTimeoutMs <= 0)) {
-  console.error(`Invalid BLACKBOX_TEST_TIMEOUT_MS/CONTRACT_TEST_TIMEOUT_MS: ${envTimeoutMsValue}. Expected a positive integer.`);
+  process.stderr.write(
+    `Invalid BLACKBOX_TEST_TIMEOUT_MS/CONTRACT_TEST_TIMEOUT_MS: ${envTimeoutMsValue}. Expected a positive integer.\n`
+  );
   process.exit(1);
 }
 const timeoutMs = envTimeoutMs ?? 5 * 60 * 1000;
 const artifactDir = readEnv('BLACKBOX_TEST_ARTIFACT_DIR', 'CONTRACT_TEST_ARTIFACT_DIR');
-const rawCaseConcurrency = readEnv('BLACKBOX_TEST_CASE_CONCURRENCY', 'CONTRACT_TEST_CASE_CONCURRENCY');
+const rawCaseConcurrency = readEnv(
+  'BLACKBOX_TEST_CASE_CONCURRENCY',
+  'CONTRACT_TEST_CASE_CONCURRENCY'
+);
 const caseConcurrency = rawCaseConcurrency ? Number(rawCaseConcurrency) : 30;
 
 if (!Number.isInteger(caseConcurrency) || caseConcurrency <= 0) {
-  console.error(`Invalid BLACKBOX_TEST_CASE_CONCURRENCY/CONTRACT_TEST_CASE_CONCURRENCY: ${rawCaseConcurrency}. Expected a positive integer.`);
+  process.stderr.write(
+    `Invalid BLACKBOX_TEST_CASE_CONCURRENCY/CONTRACT_TEST_CASE_CONCURRENCY: ${rawCaseConcurrency}. Expected a positive integer.\n`
+  );
   process.exit(1);
 }
 
@@ -124,8 +140,8 @@ if (artifactDir) {
   mkdirSync(artifactDir, { recursive: true });
 }
 
-console.log(
-  `Running black-box tests for ${requested.length} domain(s) with domainConcurrency=${concurrency}, caseConcurrency=${caseConcurrency} (runId=${runId})...\n`
+process.stdout.write(
+  `Running black-box tests for ${requested.length} domain(s) with domainConcurrency=${concurrency}, caseConcurrency=${caseConcurrency} (runId=${runId})...\n\n`
 );
 
 interface Result {
@@ -207,7 +223,7 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
 async function runWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  worker: (item: T, workerIndex: number) => Promise<R>,
+  worker: (item: T, workerIndex: number) => Promise<R>
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
@@ -236,20 +252,20 @@ async function main(): Promise<void> {
   }
 
   // Print output for failed domains so you can see what went wrong
-  const failures = results.filter(r => !r.passed);
+  const failures = results.filter((r) => !r.passed);
   for (const r of failures) {
-    console.log(`--- FAIL: ${r.domain} ---`);
-    console.log(r.output);
+    process.stdout.write(`--- FAIL: ${r.domain} ---\n`);
+    process.stdout.write(`${r.output}\n`);
   }
 
-  console.log('='.repeat(60));
-  console.log('\nBlack-box Test Summary:\n');
+  process.stdout.write(`${'='.repeat(60)}\n`);
+  process.stdout.write('\nBlack-box Test Summary:\n\n');
   for (const r of results) {
-    console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.domain} (${r.duration}ms)`);
+    process.stdout.write(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.domain} (${r.duration}ms)\n`);
   }
-  const passed = results.filter(r => r.passed).length;
+  const passed = results.filter((r) => r.passed).length;
   const failed = failures.length;
-  console.log(`\n${passed} passed, ${failed} failed, ${results.length} total`);
+  process.stdout.write(`\n${passed} passed, ${failed} failed, ${results.length} total\n`);
   if (artifactDir) {
     writeFileSync(
       join(artifactDir, 'summary.json'),
@@ -270,14 +286,16 @@ async function main(): Promise<void> {
           })),
         },
         null,
-        2,
-      ),
+        2
+      )
     );
   }
   if (failed > 0) process.exit(1);
 }
 
 main().catch((error) => {
-  console.error('\nBlack-box test runner crashed:', error);
+  process.stderr.write(
+    `\nBlack-box test runner crashed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exit(1);
 });

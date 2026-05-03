@@ -32,10 +32,12 @@ EXTRACT_LLM_TEMPERATURE = 0.1
 ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 
 # Verifier settings
+# `check_progress` (helpers/llm.py) forces rose-1-ultra + claude_token
+# internally — there is no LITE fallback anymore (B2). The model arg is
+# preserved here so the call site stays explicit, but it's effectively
+# advisory.
 VERIFIER_ULTRA_MODEL = "rose-labs/rose-1-ultra"
-VERIFIER_LITE_MODEL = "rose-labs/rose-1-lite"
 VERIFIER_ULTRA_TIMEOUT_SECONDS = 7
-VERIFIER_LITE_TIMEOUT_SECONDS = 15
 
 # Write lock approval timeout
 WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120

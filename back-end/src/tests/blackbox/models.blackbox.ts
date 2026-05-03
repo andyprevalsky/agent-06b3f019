@@ -501,6 +501,29 @@ async function testBoundary_openRouterCallOnCacheMiss() {
   }
 }
 
+/** Filter out infra calls from concurrent tests (anthropic, openrouter, etc.). */
+const MODELS_INFRA_HOSTS = [
+  'anthropic.com',
+  'openai.com',
+  'supabase.co',
+  'api.github.com',
+  'ip-api.com',
+  'surge.app',
+  'verify.twilio.com',
+  'e2b.app',
+  'stripe.com',
+  'parallel.ai',
+  'exa.ai',
+  'perplexity.ai',
+  'vapi.ai',
+  'googleapis.com',
+  'api.steel.dev',
+];
+
+function filterInfra(captures: { url: string }[]): { url: string }[] {
+  return captures.filter((c) => !MODELS_INFRA_HOSTS.some((h) => c.url.includes(h)));
+}
+
 async function testBoundary_noOutboundCallOnCacheHit() {
   // Warm the cache first
   await ensureCacheWarm();
@@ -514,10 +537,11 @@ async function testBoundary_noOutboundCallOnCacheHit() {
 
   const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
-  if (body.captures.length > 0) {
+  const body = capturesRes.data as { captures: { url: string }[] };
+  const relevant = filterInfra(body.captures);
+  if (relevant.length > 0) {
     throw new Error(
-      `Expected 0 outbound calls on cache hit, got ${body.captures.length}: ${JSON.stringify(body.captures).substring(0, 500)}`
+      `Expected 0 outbound calls on cache hit, got ${relevant.length}: ${JSON.stringify(relevant).substring(0, 500)}`
     );
   }
 }
@@ -532,9 +556,10 @@ async function testBoundary_clearCacheNoOutbound() {
 
   const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: unknown[] };
-  if (body.captures.length > 0) {
-    throw new Error(`Expected 0 outbound calls on DELETE /cache, got ${body.captures.length}`);
+  const body = capturesRes.data as { captures: { url: string }[] };
+  const relevant = filterInfra(body.captures);
+  if (relevant.length > 0) {
+    throw new Error(`Expected 0 outbound calls on DELETE /cache, got ${relevant.length}`);
   }
 }
 

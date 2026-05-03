@@ -71,15 +71,6 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         expected_tools=["web_search"],
         is_chat_mode=True,
     ),
-    "people-search": TestPrompt(
-        name="people-search",
-        title="Test People Search",
-        description="Tests Exa people search tool",
-        prompt="Use people_search to get me info about Andy Prevalsky",
-        timeout=120,
-        expected_tools=["people_search"],
-        is_chat_mode=True,
-    ),
     "parallel-tool-calls": TestPrompt(
         name="parallel-tool-calls",
         title="Test Parallel Tool Calls",

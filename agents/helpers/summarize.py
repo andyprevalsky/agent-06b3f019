@@ -13,26 +13,19 @@ TOOL_DISPLAY_NAMES = {
     "spawn_sub_agent": "Sub Agent Spawned",
     "spawn_browser_agent": "Browser Agents Spawned",
     "spawn_claude_code_agent": "Code Agents Spawned",
-    "deep_research": "Deep Research Runs",
-    "find_all": "Find All Queries",
-    "enrich": "Enrichments",
-    "monitor": "Monitors Created",
-    "check_monitor_events": "Monitor Checks",
     "message_person": "Messages Sent",
-    "search_user_network_for_people": "Network Searches",
     "send_message_to_user": "User Messages",
     "wait_for": "Wait Operations",
     "set_plan": "Plans Set",
-    "search_x402_bazaar": "Bazaar Searches",
-    "pay_for_x402_bazaar_service": "Bazaar Payments",
 }
 
 # Tools to exclude from the summary (internal/meta tools)
+# Note: verifier-feedback messages are now tagged as toolName="attempt_completion"
+# but flagged with metadata.verifierMessage=True. We filter by that flag in
+# _count_tool_usage so the verifier rows don't double-count attempt_completion.
 EXCLUDED_TOOLS = {
-    "check_progress",
     "completion_summary",
     "attempt_completion",
-    "enable_write_permissions",
     "request_user_approval",
     "request_user_signup",
 }
@@ -54,7 +47,12 @@ def _count_tool_usage(context: List[Dict[str, Any]]) -> Dict[str, int]:
     tool_counts: Dict[str, int] = {}
     for msg in context:
         if msg.get("role") == "TOOL":
-            metadata = msg.get("metadata", {})
+            metadata = msg.get("metadata", {}) or {}
+            # Verifier feedback is tagged toolName="attempt_completion" but has
+            # verifierMessage=True. Skip those rows so they don't get counted
+            # alongside real tool results.
+            if metadata.get("verifierMessage"):
+                continue
             tool_name = metadata.get("toolName")
             tool_status = metadata.get("toolStatus")
             if tool_name and tool_name not in EXCLUDED_TOOLS and tool_status == "FINISHED":
@@ -158,7 +156,7 @@ Format your response as:
             model=model,
             temperature=0.3,
             max_tokens=1000,
-            skip_cache=True,  # One-shot call — no cache reuse
+            skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="context_compression",
         )
 
@@ -260,7 +258,7 @@ Just write plain text describing what was done."""
             model=model,
             temperature=0.3,
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
-            skip_cache=True,  # One-shot call — no cache reuse
+            skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="completion_summary",
         )
 

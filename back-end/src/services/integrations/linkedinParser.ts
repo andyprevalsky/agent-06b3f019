@@ -1,8 +1,11 @@
-import { MessageChannel } from '@prisma/client';
+import { MessageChannel, Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
 import AdmZip from 'adm-zip';
 import { parse } from 'csv-parse/sync';
+
+const log = createLogger('LinkedInParser');
 
 // ── Types ──────────────────────────────────────────────
 
@@ -64,7 +67,7 @@ function parseLinkedInDate(dateStr: string): Date {
   const isoAttempt = new Date(dateStr.replace(/\//g, '-'));
   if (!isNaN(isoAttempt.getTime())) return isoAttempt;
 
-  console.warn(`[LinkedInParser] Unparseable date "${dateStr}", using current time`);
+  log.warn('Unparseable date, using current time', { dateStr });
   return new Date();
 }
 
@@ -93,7 +96,9 @@ function parseCsvBuffer(buffer: Buffer, columns: string[]): Record<string, strin
       trim: true,
     });
   } catch (err) {
-    console.error('[LinkedInParser] CSV parse error:', err);
+    log.error('CSV parse error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }
@@ -176,32 +181,20 @@ export function parseLinkedInZip(zipPath: string): LinkedInExportData {
     }
   }
 
-  console.log(
-    `[LinkedInParser] Extracted: ${result.connections.length} connections, ${result.messages.length} messages, ${result.positions.length} positions`
-  );
+  log.info('Extracted LinkedIn data', {
+    connections: result.connections.length,
+    messages: result.messages.length,
+    positions: result.positions.length,
+  });
   return result;
 }
 
 // ── Transform to ContactToUpsert ────────────────────────
 
-function buildProfileUrlIndex(connections: LinkedInConnection[]): Map<string, LinkedInConnection> {
-  const index = new Map<string, LinkedInConnection>();
-  for (const conn of connections) {
-    if (conn.url) {
-      // Normalize URL: strip trailing slash, lowercase
-      const normalized = conn.url.replace(/\/$/, '').toLowerCase();
-      index.set(normalized, conn);
-    }
-  }
-  return index;
-}
-
 export function transformLinkedInContacts(
   data: LinkedInExportData,
   userProfileUrl?: string
 ): ContactToUpsert[] {
-  const urlIndex = buildProfileUrlIndex(data.connections);
-
   // Group messages by sender profile URL (excluding messages from the user themselves)
   const messagesBySender = new Map<string, LinkedInMessage[]>();
   for (const msg of data.messages) {
@@ -319,7 +312,7 @@ export async function importLinkedInData(
   zipPath: string,
   jobId: string
 ): Promise<{ contacts: number; messages: number }> {
-  console.log(`[Job ${jobId}] Parsing LinkedIn ZIP: ${zipPath}`);
+  log.info('Parsing LinkedIn ZIP', { jobId, zipPath });
 
   const data = parseLinkedInZip(zipPath);
 
@@ -353,18 +346,22 @@ export async function importLinkedInData(
       }
     }
     if (userProfileUrl) {
-      console.log(
-        `[Job ${jobId}] Detected user profile URL via frequency heuristic: ${userProfileUrl}`
-      );
+      log.info('Detected user profile URL via frequency heuristic', {
+        jobId,
+        userProfileUrl,
+      });
     }
   }
 
   const contactsToUpsert = transformLinkedInContacts(data, userProfileUrl);
   const totalMessages = contactsToUpsert.reduce((sum, c) => sum + c.messages.length, 0);
 
-  console.log(
-    `[Job ${jobId}] Processing ${totalMessages} LinkedIn messages from ${contactsToUpsert.length} contacts for user ${userId}`
-  );
+  log.info('Processing LinkedIn messages', {
+    jobId,
+    totalMessages,
+    contacts: contactsToUpsert.length,
+    userId,
+  });
 
   // Upsert via shared manager
   const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
@@ -375,26 +372,31 @@ export async function importLinkedInData(
   });
 
   if (integration) {
-    const existingConfig = (integration.config as any) || {};
+    const existingConfig =
+      (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
+    const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
+    const existingTotalContacts = Number(existingConfig.totalContactsProcessed ?? 0);
+    const existingBatches = Number(existingConfig.batchesReceived ?? 0);
     await prisma.integration.update({
       where: { id: integration.id },
       data: {
         config: {
           ...existingConfig,
           lastUploadedAt: new Date().toISOString(),
-          totalMessagesProcessed: (existingConfig.totalMessagesProcessed || 0) + totalMessages,
-          totalContactsProcessed:
-            (existingConfig.totalContactsProcessed || 0) + contactsToUpsert.length,
-          batchesReceived: (existingConfig.batchesReceived || 0) + 1,
-          profile: data.profile,
-          positions: data.positions,
+          totalMessagesProcessed: existingTotalMessages + totalMessages,
+          totalContactsProcessed: existingTotalContacts + contactsToUpsert.length,
+          batchesReceived: existingBatches + 1,
+          profile: data.profile as unknown as Prisma.InputJsonValue,
+          positions: data.positions as unknown as Prisma.InputJsonValue,
         },
       },
     });
   }
 
-  console.log(
-    `[Job ${jobId}] ✅ LinkedIn sync complete: ${result.contacts} contacts, ${result.messages} messages`
-  );
+  log.info('LinkedIn sync complete', {
+    jobId,
+    contacts: result.contacts,
+    messages: result.messages,
+  });
   return result;
 }

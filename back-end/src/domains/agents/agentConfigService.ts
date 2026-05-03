@@ -103,7 +103,6 @@ function formatAgentResponse(
         agent.verifier !== null
           ? {
               type: agent.verifier.type,
-              llm_judge_prompt: agent.verifier.llmJudgePrompt,
             }
           : null,
       tools: agent.tools.map((at) => ({
@@ -145,14 +144,6 @@ export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, 
 
   if (body.tool_ids !== undefined) {
     await repo.replaceAgentTools(agentId, body.tool_ids);
-  }
-
-  if (
-    body.verifier_prompt !== undefined &&
-    body.verifier_prompt !== '' &&
-    agent.verifier !== null
-  ) {
-    await repo.updateVerifierPrompt(agent.verifier.id, body.verifier_prompt);
   }
 
   // Signal Temporal AFTER all DB writes to ensure persistence first

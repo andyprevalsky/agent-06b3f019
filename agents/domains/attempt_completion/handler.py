@@ -41,18 +41,18 @@ class AttemptCompletionManager(ToolManager):
 
         The workflow/activity runs the verifier after this to confirm.
         If verification passes the loop exits; otherwise the agent continues.
+
+        ``attempt_completion`` is parameterless by contract — any args supplied
+        in ``tool_call`` are silently ignored and never surfaced in the
+        user-visible message or persisted in the DB. This keeps the contract
+        machine-checkable: the verifier reads only prior tool-call results,
+        never args passed to ``attempt_completion``.
         """
-        result_text = tool_call.get("result", "")
-        message = (
-            f"{EVENT_MESSAGE}\n\nCompletion result: {result_text}"
-            if result_text
-            else EVENT_MESSAGE
-        )
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=EVENT_TITLE,
-                message=message,
+                message=EVENT_MESSAGE,
                 status=MessageStatus.FINISHED,
             ),
             agent_id=agent_id,

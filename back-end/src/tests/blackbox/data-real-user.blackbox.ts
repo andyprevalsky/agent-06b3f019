@@ -110,6 +110,26 @@ const AgentNetworkGrepResponse = z.object({
   message: z.string().optional(),
 });
 
+const NetworkGrepResponse = z.object({
+  matches: z.array(
+    z.object({
+      person_id: z.string(),
+      first_name: z.string().nullable(),
+      last_name: z.string().nullable(),
+      phone_number: z.string().nullable(),
+      email: z.string().nullable(),
+      company: z.string().nullable(),
+      title: z.string().nullable(),
+      relation: z.string().nullable(),
+      communication_frequency: z.string().nullable(),
+      messages_exchanged: z.number().nullable(),
+    })
+  ),
+  total_matches: z.number(),
+  truncated: z.boolean(),
+  message: z.string().optional(),
+});
+
 // ==================== TEST INFRASTRUCTURE ====================
 
 interface TestResult {
@@ -487,6 +507,97 @@ async function testGrep_realUserMultipleThreads() {
   }
 }
 
+// 14. Network grep with empty pattern — exercises networkService formatter (lines 40-49)
+//    + truncation branch (lines 69-76) since real user has 890 contacts > NETWORK_GREP_LIMIT (20)
+async function testGrepNetwork_realUserEmptyPatternTopContacts() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: testUserHeaders(),
+    body: JSON.stringify({ pattern: '', source: 'network' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network top contacts)');
+  if (body.matches.length === 0) {
+    throw new Error('Expected non-empty top contacts for real user');
+  }
+  // Verify formatter ran — first contact should have all expected fields
+  const first = body.matches[0];
+  if (typeof first.person_id !== 'string') {
+    throw new Error('Expected person_id string in formatted contact');
+  }
+  // Real user has > NETWORK_GREP_LIMIT (20) contacts, so should be truncated
+  if (body.total_matches > body.matches.length && body.truncated !== true) {
+    throw new Error(
+      `Expected truncated=true when total ${body.total_matches} > matches ${body.matches.length}`
+    );
+  }
+  // When truncated, expect a "Showing top X of Y" message
+  if (body.truncated === true && !body.message?.includes('Showing top')) {
+    throw new Error(
+      `Expected truncation message to include 'Showing top', got: ${body.message ?? 'undefined'}`
+    );
+  }
+}
+
+// 15. Network grep with keyword pattern that matches contacts — formatter path
+async function testGrepNetwork_realUserKeywordMatch() {
+  // Search a common name fragment that should match real user's contacts
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: testUserHeaders(),
+    body: JSON.stringify({ pattern: 'a', source: 'network' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network keyword)');
+  if (body.matches.length === 0) {
+    throw new Error("Expected matches for 'a' pattern in real user network");
+  }
+  // Verify each match has all formatter-output fields
+  for (const m of body.matches.slice(0, 3)) {
+    if (typeof m.person_id !== 'string') {
+      throw new Error('Expected person_id string');
+    }
+    // first_name, last_name etc. can be null but must be present in shape
+  }
+}
+
+// 16. Grep with email-only contact — exercises service.ts thread-name fallback (lines 220-221)
+//    The fallback chain is: firstName+lastName || phoneNumber ?? email ?? personId.
+//    When firstName/lastName/phoneNumber are all null, falls through to email.
+async function testGrep_realUserEmailOnlyThreadName() {
+  // Search for "research@iresearch.dnb.com" which is a known email-only person
+  // with messages in the test user's data. This forces the thread-name fallback
+  // to use email (or personId if email is also null).
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: testUserHeaders(),
+    body: JSON.stringify({ pattern: 'research', limit: 10 }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(GrepResponse, res.data, 'POST /grep (email-only person)');
+  // Verify each match's thread name is non-empty (proving the fallback chain produced a value)
+  for (const match of body.matches) {
+    if (!match.thread || match.thread === '.thread') {
+      throw new Error(`Expected non-empty thread name, got: ${match.thread}`);
+    }
+  }
+}
+
+// 17. Grep with `network` source via empty pattern using API-key auth (cross-check)
+async function testGrepNetwork_realUserApiKey() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: testUserHeaders(),
+    body: JSON.stringify({ pattern: '', source: 'network', limit: 5 }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network api key)');
+  // Limit param is ignored by network grep (uses NETWORK_GREP_LIMIT), but request must succeed
+  if (body.matches.length === 0) {
+    throw new Error('Expected non-empty network matches via API key');
+  }
+}
+
 // ==================== RUN ====================
 
 async function runAll() {
@@ -518,6 +629,24 @@ async function runAll() {
     { name: 'POST /data/grep -- real user person by name', fn: testGrep_realUserPersonByName },
     { name: 'POST /data/grep -- real user agent network', fn: testGrepAgentNetwork_realUserAgent },
     { name: 'POST /data/grep -- real user multiple threads', fn: testGrep_realUserMultipleThreads },
+    // network source — real-user contacts (exercises networkService formatter + truncation)
+    {
+      name: 'POST /data/grep -- network source empty pattern returns top contacts',
+      fn: testGrepNetwork_realUserEmptyPatternTopContacts,
+    },
+    {
+      name: 'POST /data/grep -- network source keyword matches real contacts',
+      fn: testGrepNetwork_realUserKeywordMatch,
+    },
+    {
+      name: 'POST /data/grep -- network source via API key cross-check',
+      fn: testGrepNetwork_realUserApiKey,
+    },
+    // email-only thread name fallback (service.ts lines 220-221)
+    {
+      name: 'POST /data/grep -- email-only person thread-name fallback',
+      fn: testGrep_realUserEmailOnlyThreadName,
+    },
   ];
 
   console.log(`Running ${parallelTests.length} tests (concurrency=${CASE_CONCURRENCY})...`);

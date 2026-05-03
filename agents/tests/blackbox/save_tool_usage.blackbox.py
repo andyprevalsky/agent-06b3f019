@@ -31,9 +31,9 @@ async def test_happy_path():
         await save_tool_usage(
             agent_id="agent-1",
             user_id="user-42",
-            tool_name="deep_research",
+            tool_name="web_search",
             usage_items=[
-                {"description": "Perplexity API call", "cost_cents": 5},
+                {"description": "Web search API call", "cost_cents": 5},
             ],
         )
 

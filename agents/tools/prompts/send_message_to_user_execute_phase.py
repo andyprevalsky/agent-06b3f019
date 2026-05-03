@@ -1,11 +1,9 @@
 """Prompt for send_message_to_user_execute_phase tool."""
 
-PROMPT = """Send an informational message to the user during execution (non-blocking). Use for status updates or sharing findings mid-execution.
+PROMPT = """Sends an informational message to the user during EXECUTE phase; does not block.
 
-WHEN NOT TO USE:
-- Do NOT use during PLAN phase - use send_message_to_user instead.
-- Do NOT use for questions or clarifications - the user cannot respond during EXECUTE phase.
-
-RETURNS: Nothing. Message is delivered but workflow continues immediately.
-
-EXCLUSIVITY: Must be the ONLY tool in that turn. Do NOT batch with other tool calls."""
+Usage:
+- Use for status updates or sharing findings mid-execution.
+- Do not use during PLAN phase - use send_message_to_user.
+- Do not use to ask a question; the user cannot reply during EXECUTE phase.
+- MUST be the only tool in that turn; do not batch with other tool calls."""

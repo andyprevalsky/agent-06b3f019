@@ -1,11 +1,10 @@
 """Prompt for send_message_to_user tool (PLAN phase)."""
 
-PROMPT = """Send a message to the user during PLAN phase. Use is_question=true for clarification questions that block the workflow until the user responds, or false for non-blocking FYI messages (e.g., sharing the plan).
+PROMPT = """Sends a message to the user during PLAN phase, optionally blocking until they reply.
 
-WHEN NOT TO USE:
-- Do NOT use during EXECUTE phase - use send_message_to_user_execute_phase instead.
-- Do NOT use to share tool results or raw data - synthesize findings first.
-
-RETURNS: If is_question=true, blocks until user responds and the response appears in context. If is_question=false, sends immediately and continues.
-
-EXCLUSIVITY: Must be the ONLY tool in that turn. Do NOT batch with other tool calls."""
+Usage:
+- Use is_question=true to ask a clarification; the workflow blocks until the user responds.
+- Use is_question=false to share the plan or an FYI without blocking.
+- Do not use during EXECUTE phase - use send_message_to_user_execute_phase.
+- Do not dump raw tool results; synthesize findings first.
+- MUST be the only tool in that turn; do not batch with other tool calls."""

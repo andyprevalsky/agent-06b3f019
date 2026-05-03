@@ -1,16 +1,15 @@
-"""Per-tool prompt registry.
+"""Tool description prompt fragments - system-prompt-level usage notes for each tool.
 
-Each tool has a dedicated prompt file exporting a PROMPT constant.
-The TOOL_PROMPTS dict maps tool names to their full description text,
-which is the single source of truth for tool guidance sent to the LLM.
+Each fragment is a brief prose note (when/why to use, exclusivity, common mistakes).
+Pydantic Field(description=...) on the tool model in `agents/utils/tool_schemas.py`
+is the canonical source for parameter-level documentation; these prompt fragments
+do NOT restate the schema and complement (not duplicate) the Pydantic descriptions.
 """
 
-from tools.prompts.add_memory import PROMPT as add_memory_prompt
 from tools.prompts.attempt_completion import PROMPT as attempt_completion_prompt
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
-from tools.prompts.read_memories import PROMPT as read_memories_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
 from tools.prompts.send_message_to_user import PROMPT as send_message_to_user_prompt
 from tools.prompts.send_message_to_user_execute_phase import (
@@ -43,12 +42,9 @@ TOOL_PROMPTS: dict[str, str] = {
     "message_person": message_person_prompt,
     "call_phone_number": call_phone_number_prompt,
     # Research
+    "grep": grep_prompt,
     "web_search": web_search_prompt,
     "web_fetch": web_fetch_prompt,
-    "grep": grep_prompt,
-    # Memory
-    "add_memory": add_memory_prompt,
-    "read_memories": read_memories_prompt,
     # Workflow
     "set_plan": set_plan_prompt,
     "attempt_completion": attempt_completion_prompt,

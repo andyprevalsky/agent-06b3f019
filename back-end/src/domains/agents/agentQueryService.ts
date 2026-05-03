@@ -144,7 +144,6 @@ export async function getAgentDetail(agentId: string, userId?: string, since?: D
       verifier: agent.verifier
         ? {
             type: agent.verifier.type,
-            llm_judge_prompt: agent.verifier.llmJudgePrompt,
           }
         : null,
       tools: agent.tools.map((at) => ({

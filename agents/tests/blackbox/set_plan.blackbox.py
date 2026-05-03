@@ -585,62 +585,12 @@ async def test_handler_planner_exception_yields_error():
 
 
 # =========================================================================
-# service.run_planner_attempt / _apply_generated_schema tests
+# service.run_planner_attempt tests
 # =========================================================================
-
-
-def _patch_service_workflow(fake_workflow):
-    import domains.set_plan.service as s
-
-    original = s.workflow
-    s.workflow = fake_workflow
-
-    def restore():
-        s.workflow = original
-
-    return restore
-
-
-async def test_apply_generated_schema_new_format():
-    """_apply_generated_schema reads 'schema' sub-key and sets output_schema."""
-    from domains.set_plan.service import _apply_generated_schema
-
-    restore = _patch_service_workflow(_FakeWorkflowModule())
-    try:
-        wf = _FakeWFInstance()
-
-        async def track_cost(*a, **kw):
-            return None
-
-        wf._track_llm_cost = track_cost
-
-        schema = {"schema": {"fields": [{"name": "x", "type": "str"}]}, "usage": {"prompt_tokens": 1, "completion_tokens": 2}}
-        _apply_generated_schema(wf, schema)
-        assert wf.output_schema == {"fields": [{"name": "x", "type": "str"}]}
-    finally:
-        restore()
-
-
-async def test_apply_generated_schema_legacy_format():
-    """Legacy (direct schema dict) also sets output_schema."""
-    from domains.set_plan.service import _apply_generated_schema
-
-    restore = _patch_service_workflow(_FakeWorkflowModule())
-    try:
-        wf = _FakeWFInstance()
-        _apply_generated_schema(wf, {"fields": []})
-        assert wf.output_schema == {"fields": []}
-    finally:
-        restore()
-
-
-def test_apply_generated_schema_none_skips():
-    """None schema does NOT overwrite output_schema."""
-    from domains.set_plan.service import _apply_generated_schema
-
-    wf = _FakeWFInstance(output_schema={"existing": True})
-    _apply_generated_schema(wf, None)
-    assert wf.output_schema == {"existing": True}
+# Note: _apply_generated_schema was removed when schema generation moved to
+# the workflow startup path (set_response_schema_activity in
+# agents/workflows/agent_workflow.py). Tests for it were deleted alongside
+# the production code.
 
 
 async def run_all_tests():
@@ -686,10 +636,6 @@ async def run_all_tests():
     await r.record_async("handler_retries_emit_event", test_handler_retries_emit_retry_event)
     await r.record_async("handler_fails_after_retries", test_handler_fails_after_all_retries)
     await r.record_async("handler_planner_exception", test_handler_planner_exception_yields_error)
-    # _apply_generated_schema
-    await r.record_async("apply_schema_new", test_apply_generated_schema_new_format)
-    await r.record_async("apply_schema_legacy", test_apply_generated_schema_legacy_format)
-    r.record("apply_schema_none", test_apply_generated_schema_none_skips)
     teardown_mock()
     return r.all_passed
 

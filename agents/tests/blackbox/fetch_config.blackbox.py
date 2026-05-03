@@ -24,7 +24,7 @@ def _setup():
                     "reasoning_max_tokens": 256,
                     "status": "ACTIVE",
                     "tools": [{"id": "tool-1"}, {"id": "tool-2"}],
-                    "verifier": {"llm_judge_prompt": "Check quality"},
+                    "verifier": {"type": "FLOAT_LLM_JUDGE"},
                     "parentAgentId": None,
                     "response_schema": None,
                     "token_in_price_microdollars": 100,
@@ -48,7 +48,6 @@ async def test_happy_path():
     assert result["model"] == "rose-1-lite"
     assert result["status"] == "ACTIVE"
     assert result["tool_ids"] == ["tool-1", "tool-2"]
-    assert result["verifier_prompt"] == "Check quality"
 
 
 async def test_boundary():

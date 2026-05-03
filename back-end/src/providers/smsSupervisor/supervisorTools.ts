@@ -14,12 +14,14 @@
  */
 
 import { prisma } from '../database';
-import { getTemporalClient } from '../temporal';
-import { startAgentWorkflow } from '../temporal';
+import { getTemporalClient, startAgentWorkflow } from '../temporal';
 import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
 import { cleanupAgentSessions } from '../agentCleanup';
 import { createMessage } from '../messages';
+import { createLogger } from '../logger';
+
+const log = createLogger('SmsSupervisorTools');
 
 // ============================================
 // Tool Schemas (for LLM structured output)
@@ -143,7 +145,7 @@ export const TOOL_SCHEMAS = [
 
 export interface ToolCall {
   tool: string;
-  arguments: Record<string, any>;
+  arguments: Record<string, unknown>;
 }
 
 export interface ToolResult {
@@ -151,6 +153,32 @@ export interface ToolResult {
   success: boolean;
   result: string;
   error?: string;
+}
+
+// Per-tool argument types (validated upstream via JSON schema)
+interface ReplyToAgentArgs {
+  agent_id_or_prefix: string;
+  message: string;
+  attention_request_id?: string;
+  reject?: boolean;
+}
+
+interface KillAgentArgs {
+  agent_id_or_prefix: string;
+}
+
+interface IncreaseBudgetArgs {
+  agent_id_or_prefix: string;
+  amount_dollars: number;
+}
+
+interface StartNewAgentArgs {
+  goal: string;
+  budget_dollars?: number;
+}
+
+interface WebSearchArgs {
+  query: string;
 }
 
 // ============================================
@@ -170,7 +198,7 @@ async function resolveAgentPrefix(
 } | null> {
   const input = prefixOrId.trim();
 
-  console.log('[SMS Tools] Resolving agent prefix', { input, userId });
+  log.info('Resolving agent prefix', { input, userId });
 
   // Try exact match first (full UUID)
   if (input.length > 6) {
@@ -178,7 +206,7 @@ async function resolveAgentPrefix(
       where: { id: input, userId, deletedAt: null },
     });
     if (agent) {
-      console.log('[SMS Tools] Resolved by exact match', { agentId: agent.id });
+      log.info('Resolved by exact match', { agentId: agent.id });
       return agent;
     }
   }
@@ -194,13 +222,13 @@ async function resolveAgentPrefix(
   });
 
   if (agent) {
-    console.log('[SMS Tools] Resolved by prefix', {
+    log.info('Resolved by prefix', {
       prefix: input,
       agentId: agent.id,
       goal: agent.goal.substring(0, 50),
     });
   } else {
-    console.log('[SMS Tools] No agent found for prefix', { prefix: input, userId });
+    log.info('No agent found for prefix', { prefix: input, userId });
   }
 
   return agent;
@@ -214,9 +242,9 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
 
-  console.log('[SMS Tools] Executing tool', {
+  log.info('Executing tool', {
     tool,
-    args,
+    args: JSON.stringify(args),
     userId,
   });
 
@@ -225,19 +253,19 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
 
     switch (tool) {
       case 'reply_to_agent':
-        result = await executeReplyToAgent(args, userId);
+        result = await executeReplyToAgent(args as unknown as ReplyToAgentArgs, userId);
         break;
       case 'kill_agent':
-        result = await executeKillAgent(args, userId);
+        result = await executeKillAgent(args as unknown as KillAgentArgs, userId);
         break;
       case 'increase_budget':
-        result = await executeIncreaseBudget(args, userId);
+        result = await executeIncreaseBudget(args as unknown as IncreaseBudgetArgs, userId);
         break;
       case 'start_new_agent':
-        result = await executeStartNewAgent(args, userId);
+        result = await executeStartNewAgent(args as unknown as StartNewAgentArgs, userId);
         break;
       case 'web_search':
-        result = await executeWebSearchTool(args);
+        result = await executeWebSearchTool(args as unknown as WebSearchArgs);
         break;
       case 'attempt_completion':
         // attempt_completion is handled by the handler loop, not here
@@ -252,7 +280,7 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
         };
     }
 
-    console.log('[SMS Tools] Tool execution complete', {
+    log.info('Tool execution complete', {
       tool,
       success: result.success,
       resultLength: result.result.length,
@@ -263,9 +291,9 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
     return result;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error('[SMS Tools] Tool execution failed', {
+    log.error('Tool execution failed', {
       tool,
-      args,
+      args: JSON.stringify(args),
       error: errorMsg,
       stack: error instanceof Error ? error.stack : undefined,
       durationMs: Date.now() - startTime,
@@ -284,7 +312,7 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
 // Individual Tool Implementations
 // ============================================
 
-async function executeReplyToAgent(args: Record<string, any>, userId: string): Promise<ToolResult> {
+async function executeReplyToAgent(args: ReplyToAgentArgs, userId: string): Promise<ToolResult> {
   const { agent_id_or_prefix, message, attention_request_id, reject } = args;
 
   const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
@@ -297,7 +325,8 @@ async function executeReplyToAgent(args: Record<string, any>, userId: string): P
     };
   }
 
-  console.log('[SMS Tools:reply] Replying to agent', {
+  log.info('Replying to agent', {
+    phase: 'reply',
     agentId: agent.id,
     userId,
     messagePreview: message?.substring(0, 100),
@@ -314,11 +343,13 @@ async function executeReplyToAgent(args: Record<string, any>, userId: string): P
       metadata: { source: 'sms_supervisor' },
     });
 
-    console.log('[SMS Tools:reply] Posted USER message', {
+    log.info('Posted USER message', {
+      phase: 'reply',
       agentId: agent.id,
     });
   } catch (error) {
-    console.error('[SMS Tools:reply] Failed to post message', {
+    log.error('Failed to post message', {
+      phase: 'reply',
       agentId: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -343,13 +374,15 @@ async function executeReplyToAgent(args: Record<string, any>, userId: string): P
         : message;
       await handle.signal('receive_user_response', signalValue);
 
-      console.log('[SMS Tools:reply] Signaled workflow', {
+      log.info('Signaled workflow', {
+        phase: 'reply',
         workflowId: agent.temporalWorkflowId,
         agentId: agent.id,
         reject: !!reject,
       });
     } catch (error) {
-      console.error('[SMS Tools:reply] Failed to signal workflow', {
+      log.error('Failed to signal workflow', {
+        phase: 'reply',
         workflowId: agent.temporalWorkflowId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -366,12 +399,14 @@ async function executeReplyToAgent(args: Record<string, any>, userId: string): P
         data: { userResponse },
       });
 
-      console.log('[SMS Tools:reply] Resolved attention request', {
+      log.info('Resolved attention request', {
+        phase: 'reply',
         requestId: attention_request_id,
         reject: !!reject,
       });
     } catch (error) {
-      console.warn('[SMS Tools:reply] Failed to resolve attention request', {
+      log.warn('Failed to resolve attention request', {
+        phase: 'reply',
         requestId: attention_request_id,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -391,7 +426,7 @@ async function executeReplyToAgent(args: Record<string, any>, userId: string): P
   };
 }
 
-async function executeKillAgent(args: Record<string, any>, userId: string): Promise<ToolResult> {
+async function executeKillAgent(args: KillAgentArgs, userId: string): Promise<ToolResult> {
   const { agent_id_or_prefix } = args;
 
   const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
@@ -404,7 +439,8 @@ async function executeKillAgent(args: Record<string, any>, userId: string): Prom
     };
   }
 
-  console.log('[SMS Tools:kill] Killing agent', {
+  log.info('Killing agent', {
+    phase: 'kill',
     agentId: agent.id,
     goal: agent.goal.substring(0, 80),
   });
@@ -412,7 +448,7 @@ async function executeKillAgent(args: Record<string, any>, userId: string): Prom
   // Recursive delete (same logic as DELETE /api/agents/:id)
   await deleteAgentRecursive(agent.id);
 
-  console.log('[SMS Tools:kill] Agent killed', { agentId: agent.id });
+  log.info('Agent killed', { phase: 'kill', agentId: agent.id });
 
   return {
     tool: 'kill_agent',
@@ -422,7 +458,7 @@ async function executeKillAgent(args: Record<string, any>, userId: string): Prom
 }
 
 async function executeIncreaseBudget(
-  args: Record<string, any>,
+  args: IncreaseBudgetArgs,
   userId: string
 ): Promise<ToolResult> {
   const { agent_id_or_prefix, amount_dollars } = args;
@@ -440,7 +476,8 @@ async function executeIncreaseBudget(
   const addCents = Math.round(amount_dollars * 100);
   const newLimitCents = agent.priceLimitCents + addCents;
 
-  console.log('[SMS Tools:budget] Increasing budget', {
+  log.info('Increasing budget', {
+    phase: 'budget',
     agentId: agent.id,
     currentLimitCents: agent.priceLimitCents,
     addCents,
@@ -462,12 +499,14 @@ async function executeIncreaseBudget(
       await handle.signal('price_limit_increased', {
         new_limit_cents: newLimitCents,
       });
-      console.log('[SMS Tools:budget] Signaled price_limit_increased', {
+      log.info('Signaled price_limit_increased', {
+        phase: 'budget',
         workflowId: agent.temporalWorkflowId,
         newLimitCents,
       });
     } catch (error) {
-      console.error('[SMS Tools:budget] Failed to signal workflow', {
+      log.error('Failed to signal workflow', {
+        phase: 'budget',
         workflowId: agent.temporalWorkflowId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -481,28 +520,16 @@ async function executeIncreaseBudget(
   };
 }
 
-async function executeStartNewAgent(
-  args: Record<string, any>,
-  userId: string
-): Promise<ToolResult> {
+async function executeStartNewAgent(args: StartNewAgentArgs, userId: string): Promise<ToolResult> {
   const { goal, budget_dollars } = args;
   const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
 
-  console.log('[SMS Tools:start] Starting new agent', {
+  log.info('Starting new agent', {
+    phase: 'start',
     userId,
     goal: goal.substring(0, 100),
     priceLimitCents,
   });
-
-  // Generate verifier prompt
-  const verifierPrompt = `You are judging whether the agent has achieved the following goal: "${goal}"
-
-Scoring Instructions:
-- Return a float between 0.0 and 1.0.
-- 0.0 means no progress or only explanations/plans.
-- 1.0 means the goal is FULLY accomplished with verifiable proof.
-- Do not award 1.0 for partial completion.
-- The agent has access to tools and can solve problems through persistence and creativity.`;
 
   const agent = await prisma.$transaction(async (tx) => {
     const newAgent = await tx.agent.create({
@@ -521,7 +548,6 @@ Scoring Instructions:
       data: {
         agentId: newAgent.id,
         type: 'FLOAT_LLM_JUDGE',
-        llmJudgePrompt: verifierPrompt,
       },
     });
 
@@ -547,7 +573,6 @@ Scoring Instructions:
       reasoningMaxTokens: 2048,
       verifier: {
         type: 'FLOAT_LLM_JUDGE',
-        llmJudgePrompt: verifierPrompt,
       },
       priceLimitCents,
     });
@@ -557,13 +582,15 @@ Scoring Instructions:
       data: { temporalWorkflowId: workflowId },
     });
 
-    console.log('[SMS Tools:start] Agent created and workflow started', {
+    log.info('Agent created and workflow started', {
+      phase: 'start',
       agentId: agent.id,
       prefix: agent.id.substring(0, 6),
       workflowId,
     });
   } catch (error) {
-    console.error('[SMS Tools:start] Failed to start workflow', {
+    log.error('Failed to start workflow', {
+      phase: 'start',
       agentId: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -588,15 +615,16 @@ Scoring Instructions:
   };
 }
 
-async function executeWebSearchTool(args: Record<string, any>): Promise<ToolResult> {
+async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
   const { query } = args;
 
-  console.log('[SMS Tools:search] Executing web search', { query });
+  log.info('Executing web search', { phase: 'search', query });
   const startTime = Date.now();
 
   const searchResult = await executeWebSearch(query);
 
-  console.log('[SMS Tools:search] Search complete', {
+  log.info('Search complete', {
+    phase: 'search',
     query,
     answerLength: searchResult.answer.length,
     sourceCount: searchResult.sources.length,
@@ -637,7 +665,8 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
   // Terminate Temporal workflow
   if (agent.temporalWorkflowId) {
     try {
-      console.log('[SMS Tools:kill] Terminating workflow', {
+      log.info('Terminating workflow', {
+        phase: 'kill',
         workflowId: agent.temporalWorkflowId,
         agentId,
       });
@@ -645,7 +674,8 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.terminate('Agent killed via SMS');
     } catch (error) {
-      console.warn('[SMS Tools:kill] Failed to terminate workflow', {
+      log.warn('Failed to terminate workflow', {
+        phase: 'kill',
         workflowId: agent.temporalWorkflowId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -658,5 +688,5 @@ async function deleteAgentRecursive(agentId: string): Promise<void> {
     data: { deletedAt: new Date() },
   });
 
-  console.log('[SMS Tools:kill] Deleted agent', { agentId });
+  log.info('Deleted agent', { phase: 'kill', agentId });
 }

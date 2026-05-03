@@ -1,6 +1,9 @@
 import { Person } from '@prisma/client';
 import { MessageRecord } from '../types/person';
 import { prisma } from './database';
+import { createLogger } from './logger';
+
+const log = createLogger('PersonCollision');
 
 export interface CollisionResult {
   isDuplicate: boolean;
@@ -109,7 +112,7 @@ export async function findCollision(userId: string, person: PersonData): Promise
           reason: 'Exact phone match for this user',
         };
       }
-    } catch (error) {
+    } catch {
       // Ignore unique constraint errors (person doesn't exist yet)
     }
   }
@@ -139,7 +142,7 @@ export async function mergePersonRecords(
   existingPersonId: string,
   newPersonData: PersonData
 ): Promise<Person> {
-  console.log(`Merging person records: existing=${existingPersonId}`);
+  log.info('Merging person records', { existingPersonId });
 
   // Fetch existing record
   const existing = await prisma.person.findUnique({
@@ -151,8 +154,8 @@ export async function mergePersonRecords(
   }
 
   // Helper to merge arrays and dedupe
-  const mergeArrays = (existingArr: any, newArr: any[]): any[] => {
-    const existing = Array.isArray(existingArr) ? existingArr : [];
+  const mergeArrays = <T>(existingArr: unknown, newArr: T[]): T[] => {
+    const existing = Array.isArray(existingArr) ? (existingArr as T[]) : [];
     const combined = [...existing, ...newArr];
 
     // Simple deduplication by stringifying objects
@@ -212,7 +215,7 @@ export async function mergePersonRecords(
     },
   });
 
-  console.log(`Person records merged successfully: ${existingPersonId}`);
+  log.info('Person records merged successfully', { existingPersonId });
 
   return updated;
 }

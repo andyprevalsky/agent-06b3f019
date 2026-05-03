@@ -100,7 +100,7 @@ async def evaluate_condition_activity(
             },
         },
         claude_token=claude_token,
-        skip_cache=True,  # Unique evidence each poll -- no cache reuse
+        skip_cache_write=True,  # Unique evidence each poll -- no cache reuse
         call_site="wait_for",
     )
     raw = result.get("content", "")

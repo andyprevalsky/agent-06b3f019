@@ -1,10 +1,10 @@
 """Prompt for call_phone_number tool."""
 
-PROMPT = """Make an outbound phone call to extract structured data via voice AI. Provide a phone number, system prompt for the voice agent, and output schema defining what data to extract.
+PROMPT = """Places an outbound phone call where a voice agent follows your system prompt and extracts data matching your output schema.
 
-WHEN NOT TO USE:
-- Do NOT call the same number in parallel - this results in multiple simultaneous calls to the same person.
-- Do NOT use for sending messages - use message_person instead.
-- Do NOT use when the information can be found online - use spawn_agent(type="explore") first.
-
-RETURNS: Structured data matching the output_schema, extracted from the voice conversation. Includes call transcript."""
+Usage:
+- Use when the information is only obtainable by speaking to a person (appointment confirmation, callback, voice-only verification).
+- Do not use to send a written message - use message_person.
+- Do not use for information available online - use spawn_explore_agent.
+- Do not batch parallel calls to the same number; different numbers in parallel are fine.
+- Returns structured data matching output_schema plus the call transcript."""

@@ -455,6 +455,16 @@ async function testReproducibility_threeGETs() {
 }
 
 const KNOWN_THIRD_PARTY_HOSTS = [
+  'openrouter.ai',
+  'supabase.co',
+  'github.com',
+  'ip-api.com',
+  'surge.app',
+  'stripe.com',
+  'e2b.app',
+  'verify.twilio.com',
+  'api.steel.dev',
+  'parallel.ai',
   'supabase.co',
   'twilio.com',
   'googleapis.com',

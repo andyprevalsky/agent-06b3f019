@@ -1,7 +1,10 @@
 import { MessageChannel } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
 import AdmZip from 'adm-zip';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+
+const log = createLogger('EmailParser');
 
 export interface ParsedEmail {
   from: string;
@@ -101,7 +104,9 @@ export function parseEmlContent(emlContent: string): ParsedEmail | null {
       bodyHtml,
     };
   } catch (error) {
-    console.error('Error parsing EML:', error);
+    log.error('Error parsing EML', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -276,7 +281,10 @@ export function parseEmailZip(zipPath: string): ParsedEmail[] {
           emails.push(parsed);
         }
       } catch (error) {
-        console.error(`Error parsing ${entry.entryName}:`, error);
+        log.error('Error parsing entry', {
+          entryName: entry.entryName,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -406,13 +414,14 @@ export async function importEmailsToDb(
   emails: ParsedEmail[],
   jobId: string
 ): Promise<{ contacts: number; messages: number }> {
-  console.log(`[Job ${jobId}] Processing ${emails.length} emails for user ${userId}`);
+  log.info('Processing emails', { jobId, emails: emails.length, userId });
 
   // Transform emails to contacts format
   const contactsToUpsert = transformEmailsToContacts(emails, userEmails);
-  console.log(
-    `[Job ${jobId}] Found ${contactsToUpsert.length} valid contacts (sent at least one email)`
-  );
+  log.info('Found valid contacts (sent at least one email)', {
+    jobId,
+    contacts: contactsToUpsert.length,
+  });
 
   // Get or create integration
   const integration = await prisma.integration.upsert({
@@ -447,8 +456,10 @@ export async function importEmailsToDb(
     },
   });
 
-  console.log(
-    `[Job ${jobId}] ✅ Email import complete: ${result.contacts} contacts, ${result.messages} messages`
-  );
+  log.info('Email import complete', {
+    jobId,
+    contacts: result.contacts,
+    messages: result.messages,
+  });
   return result;
 }

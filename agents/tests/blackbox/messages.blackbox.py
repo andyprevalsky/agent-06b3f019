@@ -91,7 +91,7 @@ async def test_post_message_boundary():
             agent_id="agent-boundary-1",
             text="Boundary test message",
             role="TOOL",
-            metadata={"toolName": "enrich", "toolStatus": "FINISHED"},
+            metadata={"toolName": "wait_for", "toolStatus": "FINISHED"},
         )
 
     call = assert_captured_call(
@@ -102,7 +102,7 @@ async def test_post_message_boundary():
     body = json.loads(call["requestBody"])
     assert body["role"] == "TOOL"
     assert body["message"] == "Boundary test message"
-    assert body["metadata"]["toolName"] == "enrich"
+    assert body["metadata"]["toolName"] == "wait_for"
 
 
 async def test_post_message_with_file_pointer():
@@ -212,11 +212,11 @@ async def test_update_agent_tree_state_happy_path():
 
         await update_agent_tree_state(
             agent_id="agent-tree-1",
-            tools_in_use=["web_search", "enrich"],
+            tools_in_use=["web_search", "wait_for"],
             bus_id="bus-root-1",
             broadcast_payload={
                 "agentId": "agent-tree-1",
-                "toolsInUse": ["web_search", "enrich"],
+                "toolsInUse": ["web_search", "wait_for"],
                 "status": "ACTIVE",
                 "progress": 0.5,
                 "messageCount": 3,
@@ -234,7 +234,7 @@ async def test_update_agent_tree_state_happy_path():
     # Verify PATCH body includes tools_in_use, progress, message_count, status
     patch_call = next(c for c in captures if c["method"] == "PATCH")
     body = json.loads(patch_call["requestBody"])
-    assert body["tools_in_use"] == ["web_search", "enrich"]
+    assert body["tools_in_use"] == ["web_search", "wait_for"]
     assert body["progress"] == 0.5
     assert body["message_count"] == 3
     assert body["status"] == "ACTIVE"
@@ -274,9 +274,9 @@ async def test_update_agent_tree_state_handles_broadcast_failure():
         # Should NOT raise
         await update_agent_tree_state(
             agent_id="agent-bf",
-            tools_in_use=["enrich"],
+            tools_in_use=["wait_for"],
             bus_id="bus-err",
-            broadcast_payload={"agentId": "agent-bf", "toolsInUse": ["enrich"]},
+            broadcast_payload={"agentId": "agent-bf", "toolsInUse": ["wait_for"]},
         )
 
     captures = get_captured_requests()
@@ -300,7 +300,7 @@ async def test_update_agent_tree_state_patch_raises():
         # Should NOT raise
         await update_agent_tree_state(
             agent_id="agent-pe",
-            tools_in_use=["enrich"],
+            tools_in_use=["wait_for"],
             bus_id="bus-pe",
             broadcast_payload={"agentId": "agent-pe"},
         )
@@ -431,8 +431,8 @@ async def test_stream_tool_event_handles_errors():
         agent_id="a",
         stream_id="s",
         tool_call_id="t",
-        tool_name="enrich",
-        title="Starting enrich...",
+        tool_name="wait_for",
+        title="Starting wait_for...",
     )
 
 

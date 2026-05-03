@@ -621,7 +621,6 @@ async def test_handler_empty_generated_message_yields_error():
                 "messages": [],
             },
             "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": "some context"},
             "generate_message_activity": {"message": "", "usage": {}},
         }
     )
@@ -653,7 +652,6 @@ async def test_handler_generate_message_raises_yields_error():
                 "messages": [],
             },
             "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": ""},
             "generate_message_activity": RuntimeError("llm timeout"),
         }
     )
@@ -674,7 +672,7 @@ async def test_handler_generate_message_raises_yields_error():
 
 
 async def test_handler_cold_outreach_email_path():
-    """No person found but email id is provided -> cold outreach flow."""
+    """No person found but email id is provided -> cold outreach flow gets through approval."""
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
@@ -694,7 +692,6 @@ async def test_handler_cold_outreach_email_path():
                 "subject": "Hello",
                 "usage": {"prompt_tokens": 5, "completion_tokens": 3, "actual_model": "rose-1-lite"},
             },
-            "send_email_activity": None,
         }
     )
     restore = _patch_handler_workflow(fake)
@@ -738,7 +735,6 @@ async def test_handler_user_rejects_approval():
                 "messages": [],
             },
             "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": ""},
             "generate_message_activity": {"message": "Hey!", "usage": {}},
         }
     )
@@ -760,8 +756,12 @@ async def test_handler_user_rejects_approval():
     assert any("too soon" in (e.message or "") for e in errs)
 
 
-async def test_handler_imessage_send_failure():
-    """imessage send returns success=False -> ERROR event."""
+async def test_handler_successful_imessage_finished_event():
+    """End-to-end happy path for iMessage yields FINISHED event with usage.
+
+    After ghost-tool removal message_person no longer dispatches a send activity;
+    it stops after generate + approval and emits a FINISHED event.
+    """
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
@@ -775,95 +775,10 @@ async def test_handler_imessage_send_failure():
                 "messages": [],
             },
             "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": ""},
-            "generate_message_activity": {"message": "Hey!", "usage": {}},
-            "queue_imessage_activity": {"success": False, "error": "Mac not connected"},
-        }
-    )
-    restore = _patch_handler_workflow(fake)
-    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
-        try:
-            events = await _collect(
-                MessagePersonManager().execute_tool(
-                    workflow_instance=_WFInstance(),
-                    tool_call={"person_id": "Alice Smith", "channel": "imessage", "intent": "hi"},
-                    tool_call_id="tc-sf",
-                )
-            )
-        finally:
-            restore()
-
-    errs = [e for e in events if e.status == MessageStatus.ERROR]
-    assert any("Failed to send iMessage" in (e.title or "") for e in errs)
-
-
-async def test_handler_send_activity_exception_email():
-    """Exception in send_email_activity produces error event with normalized message."""
-    from domains.message_person.handler import MessagePersonManager
-    from tools.base import MessageStatus
-
-    async def fake_approval(*args, **kwargs):
-        return {"response": "ok", "question": "", "attention_request_id": None}
-
-    fake = _FakeWFModule(
-        activity_results={
-            "read_message_history_activity": {
-                "person": {"firstName": "Alice", "lastName": "Smith", "email": "a@x.com"},
-                "messages": [],
-            },
-            "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": ""},
-            "generate_message_activity": {
-                "message": "Hey",
-                "subject": "Sub",
-                "usage": {},
-            },
-            "send_email_activity": RuntimeError("Gmail not connected"),
-        }
-    )
-    restore = _patch_handler_workflow(fake)
-    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
-        try:
-            events = await _collect(
-                MessagePersonManager().execute_tool(
-                    workflow_instance=_WFInstance(),
-                    tool_call={
-                        "person_id": "Alice Smith",
-                        "channel": "email",
-                        "from_email": "me@roselabs.ai",
-                        "intent": "hello",
-                    },
-                    tool_call_id="tc-email-err",
-                )
-            )
-        finally:
-            restore()
-
-    errs = [e for e in events if e.status == MessageStatus.ERROR]
-    assert any("Failed to send Email" in (e.title or "") for e in errs)
-
-
-async def test_handler_successful_imessage_send_finished_event():
-    """End-to-end success for iMessage yields FINISHED event with usage."""
-    from domains.message_person.handler import MessagePersonManager
-    from tools.base import MessageStatus
-
-    async def fake_approval(*args, **kwargs):
-        return {"response": "ok", "question": "", "attention_request_id": None}
-
-    fake = _FakeWFModule(
-        activity_results={
-            "read_message_history_activity": {
-                "person": {"firstName": "Alice", "lastName": "Smith", "phoneNumber": "+15551234567"},
-                "messages": [],
-            },
-            "fetch_recent_messages_activity": {"messages": []},
-            "people_search_activity": {"answer": ""},
             "generate_message_activity": {
                 "message": "Hello Alice!",
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-1-lite"},
             },
-            "queue_imessage_activity": {"success": True},
         }
     )
     restore = _patch_handler_workflow(fake)
@@ -943,9 +858,7 @@ async def run_all_tests():
     await r.record_async("handler_gen_raises", test_handler_generate_message_raises_yields_error)
     await r.record_async("handler_cold_outreach_email", test_handler_cold_outreach_email_path)
     await r.record_async("handler_user_rejects", test_handler_user_rejects_approval)
-    await r.record_async("handler_imessage_fail", test_handler_imessage_send_failure)
-    await r.record_async("handler_email_exception", test_handler_send_activity_exception_email)
-    await r.record_async("handler_imessage_success", test_handler_successful_imessage_send_finished_event)
+    await r.record_async("handler_imessage_success", test_handler_successful_imessage_finished_event)
     teardown_mock()
     return r.all_passed
 

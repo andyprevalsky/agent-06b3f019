@@ -57,7 +57,6 @@ export async function startAgentWorkflow(params: {
   reasoningMaxTokens: number;
   verifier: {
     type: string;
-    llmJudgePrompt: string;
   };
   taskQueue?: string; // Optional: override task queue (for testing isolation)
   parentWorkflowId?: string; // Optional: parent workflow ID for sub-agents
@@ -80,7 +79,12 @@ export async function startAgentWorkflow(params: {
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
-  const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE || 'navi-agent-tasks';
+  const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
+  if (!taskQueue) {
+    throw new Error(
+      'TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME'
+    );
+  }
   const workflowId = params.agentId;
 
   log.info('Starting agent workflow', {
@@ -99,7 +103,6 @@ export async function startAgentWorkflow(params: {
       params.reasoningMaxTokens,
       {
         type: params.verifier.type,
-        llmJudgePrompt: params.verifier.llmJudgePrompt,
       },
       [], // Start with empty context, workflow will poll for goal message
       params.parentWorkflowId || null, // Parent workflow ID for signaling

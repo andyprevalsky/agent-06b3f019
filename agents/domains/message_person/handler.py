@@ -23,17 +23,14 @@ from domains.message_person.service import (
     generate_message_activity,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, extract_root_error
-from tools.people_search import people_search_activity
 from tools.read_message_history import read_message_history_activity
 from tools.request_user_approval import UserRejectedError, request_user_approval_direct
-from tools.send_email import send_email_activity
-from tools.send_sms_as_user import queue_imessage_activity
 
 logger = structlog.get_logger()
 
 
 class MessagePersonManager(ToolManager):
-    """Unified tool: resolve person -> read history -> enrich -> generate message -> approve -> send."""
+    """Unified tool: resolve person -> read history -> generate message -> approve."""
 
     tool_name = "message_person"
     requires_approval = False  # Approval handled internally after message generation
@@ -117,17 +114,8 @@ class MessagePersonManager(ToolManager):
         context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
         general_messages_context = await self._fetch_voice_context(context_gates, user_id)
 
-        # -- Step 2: Exa enrichment (only if we have a name) --
+        # -- Step 2: Exa enrichment removed (people_search tool deleted) --
         exa_context = ""
-        has_name = person.get("firstName") and person.get("lastName")
-        if has_name:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"Gathering Information about {person_display}",
-                message=f"Researching **{person_display}** online...",
-                status=MessageStatus.IN_PROGRESS,
-            )
-            exa_context = await self._enrich_person(person)
 
         # -- Step 3: Generate message via LLM --
         yield ToolEvent(
@@ -153,6 +141,7 @@ class MessagePersonManager(ToolManager):
             channel,
             person_email_addr,
             general_messages_context,
+            agent_id,
         )
         if isinstance(gen_result, ToolEvent):
             yield gen_result
@@ -191,31 +180,18 @@ class MessagePersonManager(ToolManager):
             return
 
         # -- Step 5: Send --
+        # Channel-specific send activities (queue_imessage_activity, send_email_activity)
+        # were removed along with their parent ghost tools. message_person now stops at
+        # message generation + approval; an external integration is responsible for delivery.
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"Sending {channel_label} to {person_display}",
+            title=f"Send pending for {channel_label} to {person_display}",
             message=(
-                f"Delivering email from **{from_email}** to **{person_display}**..."
-                if channel == "email"
-                else f"Delivering message to **{person_display}**..."
+                f"Message approved for **{person_display}** but no send transport is wired up. "
+                "Connect an iMessage/email integration to deliver this message."
             ),
             status=MessageStatus.IN_PROGRESS,
         )
-
-        send_error = await self._send_message(
-            channel,
-            user_id,
-            agent_id,
-            person_phone,
-            person_email_addr,
-            generated_message,
-            generated_subject,
-            from_email,
-            person_display,
-        )
-        if send_error:
-            yield send_error
-            return
 
         # -- Done --
         yield self._build_finished_event(
@@ -372,28 +348,6 @@ class MessagePersonManager(ToolManager):
             return ""
 
     @staticmethod
-    async def _enrich_person(person: dict[str, Any]) -> str:
-        try:
-            exa_query = f"{person.get('firstName')} {person.get('lastName')}"
-            if person.get("company"):
-                exa_query += f" {person.get('company')}"
-            exa_result = await workflow.execute_activity(
-                people_search_activity,
-                args=[exa_query, 3],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=2,
-                    backoff_coefficient=2.0,
-                    initial_interval=timedelta(seconds=1),
-                    maximum_interval=timedelta(seconds=10),
-                ),
-            )
-            return exa_result.get("answer", "")
-        except Exception as e:
-            logger.warning("Exa enrichment failed, continuing without it", error=str(e))
-            return ""
-
-    @staticmethod
     async def _generate_message(
         model: str,
         user_name: str,
@@ -405,6 +359,7 @@ class MessagePersonManager(ToolManager):
         channel: str,
         person_email: str | None,
         general_messages_context: str,
+        agent_id: str | None = None,
     ) -> dict[str, Any] | ToolEvent:
         try:
             return await workflow.execute_activity(
@@ -420,6 +375,7 @@ class MessagePersonManager(ToolManager):
                     channel,
                     person_email,
                     general_messages_context,
+                    agent_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(
@@ -481,75 +437,6 @@ class MessagePersonManager(ToolManager):
                 type=EventType.POST_MESSAGE,
                 title=f"Message to {person_display} cancelled",
                 message=error_msg,
-                status=MessageStatus.ERROR,
-            )
-        return None
-
-    @staticmethod
-    async def _send_message(  # noqa: C901
-        channel: str,
-        user_id: str,
-        agent_id: str,
-        person_phone: str | None,
-        person_email: str | None,
-        generated_message: str,
-        generated_subject: str | None,
-        from_email: str,
-        person_display: str,
-    ) -> ToolEvent | None:
-        channel_label = "iMessage" if channel == "imessage" else "Email"
-        try:
-            if channel == "imessage":
-                send_result = await workflow.execute_activity(
-                    queue_imessage_activity,
-                    args=[user_id, agent_id, person_phone, generated_message],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=1),
-                        maximum_interval=timedelta(seconds=10),
-                    ),
-                )
-                if not send_result.get("success"):
-                    error_msg = send_result.get("error", "Unknown error")
-                    if "imessage" in error_msg.lower() or "mac" in error_msg.lower():
-                        error_msg = "iMessage integration is not setup for the current user (Mac app not connected)"
-                    return ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title=f"Failed to send iMessage to {person_display}",
-                        message=error_msg,
-                        status=MessageStatus.ERROR,
-                    )
-            else:  # email
-                await workflow.execute_activity(
-                    send_email_activity,
-                    args=[
-                        user_id,
-                        person_email,
-                        generated_subject or "(no subject)",
-                        generated_message,
-                        None,
-                        from_email,
-                    ],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3,
-                        backoff_coefficient=2.0,
-                        initial_interval=timedelta(seconds=1),
-                        maximum_interval=timedelta(seconds=10),
-                    ),
-                )
-        except Exception as e:
-            error_str = extract_root_error(e)
-            if channel == "email" and ("gmail" in error_str.lower() or "not connected" in error_str.lower()):
-                error_str = "Email integration is not setup for the current user"
-            elif channel == "imessage" and ("imessage" in error_str.lower() or "mac" in error_str.lower()):
-                error_str = "iMessage integration is not setup for the current user (Mac app not connected)"
-            return ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"Failed to send {channel_label} to {person_display}",
-                message=error_str,
                 status=MessageStatus.ERROR,
             )
         return None

@@ -1,5 +1,8 @@
 import { MessageChannel } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('PersonMessageManager');
 
 const PERSON_CHUNK_SIZE = 50;
 const MESSAGE_BATCH_SIZE = 10000;
@@ -98,9 +101,12 @@ export async function upsertPersonAndMessageRecords(
   jobId: string
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
-  console.log(
-    `[Job ${jobId}] Processing ${totalMessages} messages from ${contacts.length} contacts for user ${userId}`
-  );
+  log.info('Processing messages', {
+    jobId,
+    totalMessages,
+    contacts: contacts.length,
+    userId,
+  });
 
   let messagesProcessed = 0;
   let contactsProcessed = 0;
@@ -170,14 +176,18 @@ export async function upsertPersonAndMessageRecords(
         const personId = personMap.get(contact.identifier);
 
         if (!personId) {
-          console.warn(
-            `[Job ${jobId}] ⚠️ Person not found for contact ${contact.identifier}, skipping messages`
-          );
+          log.warn('Person not found for contact, skipping messages', {
+            jobId,
+            identifier: contact.identifier,
+          });
           continue;
         }
 
         if (!contact.messages?.length) {
-          console.warn(`[Job ${jobId}] ⚠️ No messages for contact ${contact.identifier}, skipping`);
+          log.warn('No messages for contact, skipping', {
+            jobId,
+            identifier: contact.identifier,
+          });
           continue;
         }
 
@@ -217,18 +227,28 @@ export async function upsertPersonAndMessageRecords(
         contactsProcessed++;
         messagesProcessed += contact.messages.length;
 
-        console.log(
-          `[Job ${jobId}] Processed contact ${contact.identifier}: ${contact.messages.length} messages (${messagesProcessed}/${totalMessages} total)`
-        );
+        log.info('Processed contact', {
+          jobId,
+          identifier: contact.identifier,
+          messagesInContact: contact.messages.length,
+          messagesProcessed,
+          totalMessages,
+        });
       } catch (error) {
-        console.error(`[Job ${jobId}] Error processing contact ${contact.identifier}:`, error);
+        log.error('Error processing contact', {
+          jobId,
+          identifier: contact.identifier,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
 
-  console.log(
-    `[Job ${jobId}] ✅ Stored ${messagesProcessed} messages from ${contactsProcessed} contacts`
-  );
+  log.info('Stored messages', {
+    jobId,
+    messagesProcessed,
+    contactsProcessed,
+  });
   return { contacts: contactsProcessed, messages: messagesProcessed };
 }
 

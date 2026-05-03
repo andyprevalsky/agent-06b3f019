@@ -345,10 +345,6 @@ def test_trajectory_various_tool_params_extracted():
         ("spawn_sub_agent", {"goal": "research"}, ""),
         ("spawn_claude_code_agent", {"goal": "refactor"}, ""),
         ("send_message_to_user", {}, ""),
-        ("find_all", {"entity_type": "people"}, ""),
-        ("enrich", {"query": "Acme"}, ""),
-        ("monitor", {"description": "watch file xyz"}, ""),
-        ("people_search", {"query": "Alice Smith"}, ""),
     ]
     context: list[dict] = [{"role": "USER", "text": "go"}]
     for i, (name, data, text) in enumerate(tools):
@@ -626,7 +622,12 @@ async def test_query_blueprints_helper_forwards_events_and_returns_results():
 
 
 def test_trajectory_result_summary_fallbacks():
-    """_extract_result_summary fallback paths: title present, title absent."""
+    """_extract_result_summary fallback paths: title present, title absent.
+
+    Uses an unknown tool to exercise the title-fallback branch; spawn_*
+    short-circuits to "SUCCESS" before hitting the title path, so we use a
+    tool name with no special-case to land in the fallback.
+    """
     from tools.knowledge_base import _build_trajectory_blueprint
 
     context = [
@@ -635,11 +636,11 @@ def test_trajectory_result_summary_fallbacks():
             "role": "TOOL",
             "text": "",
             "metadata": {
-                "toolName": "find_all",
+                "toolName": "some_tool_with_title",
                 "toolStatus": "FINISHED",
                 "toolCallId": "tc-t",
                 "title": "Found 5 items",
-                "data": {"entity_type": "contact"},
+                "data": {},
             },
         },
         {

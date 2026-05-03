@@ -7,7 +7,7 @@ Covers:
   - normalize_browser_use_response (flat, nested, name remap, click-coords, errors)
   - _normalize_action_params (seconds → time_ms, down → direction+amount, typing_text → text)
   - rose-1-browser-use pool registration
-  - complete_browser_use HTTP path: racing-only, claudeAuth happy, claudeAuth 401 fall-through
+  - complete_browser_use HTTP path: waterfall-only, claudeAuth happy, claudeAuth 401 fall-through
 """
 
 import asyncio
@@ -79,7 +79,7 @@ def test_browser_use_tool_catalog_completeness():
 
 def test_build_browser_use_system_prompt_includes_actions():
     prompt = build_browser_use_system_prompt(["click", "goto"])
-    assert "<available_actions>" in prompt
+    assert "# Available Actions" in prompt
     assert "- click:" in prompt
     assert "- goto:" in prompt
     assert '"thinking"' in prompt
@@ -272,9 +272,19 @@ def test_normalize_input_text_remap():
     assert out["params"]["text"] == "hello"
 
 
-def test_normalize_prefers_next_goal_over_thinking():
+def test_normalize_prefers_thinking_over_next_goal():
+    # Envelope was shrunk: `thinking` is the canonical field. `next_goal` is
+    # only consulted as a defensive fallback when `thinking` is absent.
     out = normalize_browser_use_response({
         "thinking": "thinking str",
+        "next_goal": "next goal str",
+        "action": [{"action_name": "scroll", "down": True}],
+    })
+    assert out["thinking"] == "thinking str"
+
+
+def test_normalize_falls_back_to_next_goal_when_no_thinking():
+    out = normalize_browser_use_response({
         "next_goal": "next goal str",
         "action": [{"action_name": "scroll", "down": True}],
     })
@@ -427,8 +437,8 @@ def _anthropic_text_sse(text: str) -> str:
 _ACTION_TEXT = '{"thinking": "x", "action": [{"action_name": "click", "index": 3}]}'
 
 
-async def test_complete_browser_use_racing_only_path():
-    """No claudeAuth → goes straight to openrouter → returns racing mode."""
+async def test_complete_browser_use_waterfall_only_path():
+    """No claudeAuth → goes straight to openrouter → returns waterfall mode."""
     sse_body = _openai_sse([
         {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
         {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
@@ -449,10 +459,10 @@ async def test_complete_browser_use_racing_only_path():
         action_history=[],
         available_actions=["click", "goto"],
         include_screenshot=False,
-        call_site="test-bu-racing",
+        call_site="test-bu-waterfall",
     )
 
-    assert result["mode"] == "racing"
+    assert result["mode"] == "waterfall"
     assert result["action"]["action"] == "click"
     assert result["action"]["index"] == 3
     assert result["pool_name"] == "rose-1-browser-use"
@@ -493,7 +503,7 @@ async def test_complete_browser_use_claude_path_succeeds():
     assert result["claude_token_error"] is None
 
 
-async def test_complete_browser_use_claude_401_falls_through_to_racing():
+async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
     """Anthropic 401 → fall through to openrouter; claude_token_error=auth_error."""
     sse_body = _openai_sse([
         {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
@@ -519,7 +529,7 @@ async def test_complete_browser_use_claude_401_falls_through_to_racing():
         call_site="test-bu-fallthrough",
     )
 
-    assert result["mode"] == "racing"
+    assert result["mode"] == "waterfall"
     assert result["claude_token_error"] == "auth_error"
     assert result["action"]["action"] == "click"
 
@@ -559,7 +569,8 @@ async def run_all_tests():
     r.record("normalize_remap_done", test_normalize_remaps_done_to_attempt_completion)
     r.record("normalize_click_coordinates", test_normalize_click_coordinates_to_click_with_coords)
     r.record("normalize_input_text_remap", test_normalize_input_text_remap)
-    r.record("normalize_prefers_next_goal", test_normalize_prefers_next_goal_over_thinking)
+    r.record("normalize_prefers_thinking", test_normalize_prefers_thinking_over_next_goal)
+    r.record("normalize_falls_back_to_next_goal", test_normalize_falls_back_to_next_goal_when_no_thinking)
     r.record("normalize_string_completion", test_normalize_string_completion_extracts_json)
     r.record("normalize_string_garbage_raises", test_normalize_string_garbage_raises)
     r.record("normalize_empty_action_raises", test_normalize_empty_action_array_raises)
@@ -575,9 +586,9 @@ async def run_all_tests():
     r.record("params_query_to_instruction", test_params_query_to_instruction)
     r.record("params_select_dropdown_text_value", test_params_select_dropdown_text_to_value)
 
-    await r.record_async("complete_browser_use_racing_only", test_complete_browser_use_racing_only_path)
+    await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
-    await r.record_async("complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_racing)
+    await r.record_async("complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall)
 
     teardown_mock()
     return r.summary()

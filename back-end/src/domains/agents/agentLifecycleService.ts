@@ -8,6 +8,7 @@ import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPri
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { setResponseSchema } from '../../providers/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { fetchClaudeTokenForUser } from '../../providers/claudeCredentials';
 import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
@@ -34,18 +35,6 @@ export function resolvePromptSecrets(text: string): string {
     log.warn(`Unresolved prompt secret: {{${varName}}} (env var ${envKey} not set)`);
     return `{{${varName}}}`;
   });
-}
-
-/** Auto-generate verifier prompt from goal. */
-export function generateVerifierPrompt(goal: string): string {
-  return `You are judging whether the agent has achieved the following goal: "${goal}"
-
-Scoring Instructions:
-- Return a float between 0.0 and 1.0.
-- 0.0 means no progress or only explanations/plans.
-- 1.0 means the goal is FULLY accomplished with verifiable proof.
-- Do not award 1.0 for partial completion.
-- The agent has access to tools and can solve problems through persistence and creativity.`;
 }
 
 /** Fetch model pricing and resolve geolocation. */
@@ -76,7 +65,7 @@ async function startSubAgentWorkflow(
   body: CreateAgentBody,
   agentDbId: string,
   userId: string,
-  verifier: { type: string; llm_judge_prompt: string },
+  verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
   const workflowId = await startAgentWorkflow({
@@ -85,7 +74,7 @@ async function startSubAgentWorkflow(
     goal: body.goal,
     model: body.model,
     reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type, llmJudgePrompt: verifier.llm_judge_prompt },
+    verifier: { type: verifier.type },
     ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
     ...(body.parent_workflow_id !== undefined ? { parentWorkflowId: body.parent_workflow_id } : {}),
     ...(body.parent_agent_id !== undefined ? { parentAgentId: body.parent_agent_id } : {}),
@@ -105,7 +94,7 @@ async function startDirectWorkflow(
   body: CreateAgentBody,
   agentDbId: string,
   userId: string,
-  verifier: { type: string; llm_judge_prompt: string },
+  verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
   const startPhase = body.start_phase!;
@@ -123,7 +112,7 @@ async function startDirectWorkflow(
     goal: body.goal,
     model: body.model,
     reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type, llmJudgePrompt: verifier.llm_judge_prompt },
+    verifier: { type: verifier.type },
     startPhase,
     priceLimitCents,
   });
@@ -133,12 +122,12 @@ async function startDirectWorkflow(
 }
 
 /** Start root agent in chat mode (fire-and-forget). */
-function startChatMode(
+async function startChatMode(
   body: CreateAgentBody,
   agentDbId: string,
   agentId: string,
   userId: string
-): void {
+): Promise<void> {
   const repoName = `agent-${agentId.substring(0, 8)}`;
   createGithubRepo(repoName)
     .then(async (repoUrl) => {
@@ -161,23 +150,26 @@ function startChatMode(
       });
     });
 
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
-    log.error('Chat handler error', {
-      agent_id: agentDbId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    repo
-      .failAgentIfStillActive(
-        agentDbId,
-        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
-      )
-      .catch((updateErr: unknown) =>
-        log.error('Failed to update agent status', {
-          agent_id: agentDbId,
-          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-        })
-      );
-  });
+  const claudeToken = (await fetchClaudeTokenForUser(userId)) ?? undefined;
+  handleChatMessage({ agentId: agentDbId, userId, model: body.model, claudeToken }).catch(
+    (err: unknown) => {
+      log.error('Chat handler error', {
+        agent_id: agentDbId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      repo
+        .failAgentIfStillActive(
+          agentDbId,
+          'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+        )
+        .catch((updateErr: unknown) =>
+          log.error('Failed to update agent status', {
+            agent_id: agentDbId,
+            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+          })
+        );
+    }
+  );
 }
 /* c8 ignore stop */
 
@@ -194,11 +186,7 @@ export async function createAgent(
   if (isInternal) {
     body.goal = resolvePromptSecrets(body.goal);
   }
-  const verifierPrompt =
-    body.verifier?.llm_judge_prompt !== undefined && body.verifier.llm_judge_prompt !== ''
-      ? body.verifier.llm_judge_prompt
-      : generateVerifierPrompt(body.goal);
-  const verifier = { type: 'FLOAT_LLM_JUDGE' as const, llm_judge_prompt: verifierPrompt };
+  const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP);
   const isSubAgent = body.parent_agent_id !== undefined;
@@ -223,7 +211,6 @@ export async function createAgent(
     proxyCity: proxyGeo.city,
     priceLimitCents: body.price_limit_cents,
     verifierType: verifier.type,
-    verifierPrompt: verifier.llm_judge_prompt,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
   });
 
@@ -252,7 +239,7 @@ async function launchAgentWorkflow(
   userId: string,
   isSubAgent: boolean,
   agentId: string,
-  verifier: { type: 'FLOAT_LLM_JUDGE'; llm_judge_prompt: string }
+  verifier: { type: 'FLOAT_LLM_JUDGE' }
 ): Promise<string | null> {
   if (isSubAgent) {
     try {
@@ -280,7 +267,7 @@ async function launchAgentWorkflow(
     return startDirectWorkflow(body, agent.agent.id, userId, verifier, agent.agent.priceLimitCents);
   }
   await repo.updateAgent(agent.agent.id, { status: 'ACTIVE' });
-  startChatMode(body, agent.agent.id, agentId, userId);
+  void startChatMode(body, agent.agent.id, agentId, userId);
   return null;
 }
 /* c8 ignore stop */

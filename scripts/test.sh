@@ -278,9 +278,11 @@ if $SMOKE; then
     exit 1
   fi
 
-  # Derive TEMPORAL_TASK_QUEUE from CONDUCTOR_WORKSPACE_NAME so the benchmark's
-  # stale-workflow cleanup targets the correct Temporal Cloud task queue.
-  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME:-local}"
+  if [ -z "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
+    echo "ERROR: CONDUCTOR_WORKSPACE_NAME not set — cannot derive Temporal task queue for smoke benchmarks."
+    exit 1
+  fi
+  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME}"
   bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
   bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
 

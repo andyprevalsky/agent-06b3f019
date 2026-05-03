@@ -23,6 +23,10 @@ export interface ToolUsageCreated {
 export interface UsageItem {
   type?: string;
   number_of_tokens?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
   [key: string]: unknown;
 }
 
@@ -32,6 +36,8 @@ export interface ToolUsageSummary {
   total_cost_cents: number;
   total_cost_dollars: number;
   total_tokens_from_tools: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
   usages: {
     id: string;
     tool_name: string;
@@ -39,4 +45,15 @@ export interface ToolUsageSummary {
     usage_items: unknown;
     created_at: Date;
   }[];
+}
+
+export interface TreeToolUsageSummary {
+  root_agent_id: string;
+  agent_count: number;
+  tool_usage_count: number;
+  total_cost_cents: number;
+  total_cost_dollars: number;
+  total_tokens_from_tools: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
 }

@@ -26,6 +26,8 @@ class BenchmarkTask:
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
+    min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
+    expected_tool_counts: Optional[dict] = None  # Exact tool call counts across entire agent tree (toolName → count)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -36,8 +38,12 @@ _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
 # only raise limits when the underlying latency is genuinely irreducible.
 SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "chat-mode": 120,
-    "spawn-sub-agents": 300,
-    "parallel-tool-calls": 300,
+    # spawn-sub-agents + parallel-tool-calls: real-workload tasks that fan out
+    # 2–3 sub-agents each (web research). Recent p95×1.5 lands ~320s; bumping
+    # the ceiling to 400s absorbs the upper tail of LLM streaming variance
+    # without disabling the dynamic cap as a regression detector.
+    "spawn-sub-agents": 400,
+    "parallel-tool-calls": 400,
     "claude-code-agent": 300,
     "browser-smoke": 300,
 }

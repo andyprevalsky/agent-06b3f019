@@ -1,4 +1,8 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { createLogger } from '../../providers/logger';
+
+const log = createLogger('VcfParser');
 
 export interface ParsedVCard {
   firstName: string;
@@ -63,12 +67,13 @@ function parseVCard(vcardText: string): ParsedVCard | null {
         fullName = valuePart.trim();
         break;
 
-      case 'N':
+      case 'N': {
         // N format: LastName;FirstName;MiddleName;Prefix;Suffix
         const nameParts = valuePart.split(';');
         lastName = (nameParts[0] || '').trim();
         firstName = (nameParts[1] || '').trim();
         break;
+      }
 
       case 'EMAIL':
         if (valuePart && !valuePart.includes('@reply.') && !valuePart.includes('@hous.')) {
@@ -82,11 +87,12 @@ function parseVCard(vcardText: string): ParsedVCard | null {
         }
         break;
 
-      case 'ORG':
+      case 'ORG': {
         // ORG format: Company;Department
         const orgParts = valuePart.split(';');
         company = (orgParts[0] || '').trim() || null;
         break;
+      }
 
       case 'TITLE':
         title = valuePart.trim() || null;
@@ -173,7 +179,7 @@ export async function importVcfContacts(
 
       if (existingPerson) {
         // Update existing person with new info if fields are empty
-        const updateData: Record<string, any> = {};
+        const updateData: Prisma.PersonUpdateInput = {};
 
         if (!existingPerson.firstName && contact.firstName) {
           updateData.firstName = contact.firstName;
@@ -224,7 +230,10 @@ export async function importVcfContacts(
         created++;
       }
     } catch (error) {
-      console.error(`Error importing contact ${contact.fullName}:`, error);
+      log.error('Error importing contact', {
+        fullName: contact.fullName,
+        error: error instanceof Error ? error.message : String(error),
+      });
       skipped++;
     }
   }

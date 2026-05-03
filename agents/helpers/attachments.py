@@ -7,7 +7,7 @@ Handles resolving FilePointers to multimodal content for LLM messages.
 import base64
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -414,6 +414,51 @@ def extract_file_pointer_dicts(context: List[Dict]) -> List[Dict]:
             result.append(att_data)
 
     return result
+
+
+@activity.defn
+async def fetch_parent_attachments_activity(parent_agent_id: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Fetch parent agent's attachment metadata from the backend for sub-agent context propagation.
+
+    Returns a serialisable dict with two sub-dicts:
+        {"filename_to_pointer": {...}, "all_pointers_by_id": {...}}
+    """
+    config = load_config()
+    backend_url = config.backend.api_url.rstrip("/")
+    api_key = config.backend.api_key
+    if not api_key:
+        raise ValueError("BACKEND_API_KEY not configured")
+
+    filename_to_pointer: Dict[str, Any] = {}
+    all_pointers_by_id: Dict[str, Any] = {}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{backend_url}/api/agents/{parent_agent_id}",
+                headers={"X-API-Key": api_key},
+            )
+            response.raise_for_status()
+            parent_data = response.json()
+            parent_messages = parent_data.get("messages", [])
+
+            file_pointers = extract_attachments_from_context(parent_messages)
+            for fp in file_pointers:
+                fp_dict = asdict(fp)
+                filename_to_pointer[fp.original_filename] = fp_dict
+                if fp.id:
+                    all_pointers_by_id[fp.id] = fp_dict
+
+            logger.info(
+                "Extracted parent attachments",
+                parent_agent_id=parent_agent_id,
+                attachment_count=len(file_pointers),
+                filenames=list(filename_to_pointer.keys()),
+            )
+    except Exception as e:
+        logger.warning(f"Failed to fetch parent attachments: {e}")
+
+    return {"filename_to_pointer": filename_to_pointer, "all_pointers_by_id": all_pointers_by_id}
 
 
 @activity.defn

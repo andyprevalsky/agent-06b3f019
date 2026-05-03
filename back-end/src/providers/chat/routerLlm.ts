@@ -5,7 +5,7 @@
  */
 
 import { z } from 'zod';
-import { createStreamingCompletion } from '../rose';
+import { createStreamingCompletion, markCacheable } from '../rose';
 import { ROUTER_SYSTEM_PROMPT } from './chatPrompts';
 import {
   broadcastAssistantStream,
@@ -43,10 +43,19 @@ export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 // ============================================
 // Router Response with streaming metadata
 // ============================================
+export interface ChatLlmUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+}
+
 export interface RouterResponse {
   decision: RouterDecision;
   streamId: string;
-  webSearchToolCallId?: string; // Set if web_search detected during streaming
+  webSearchToolCallId?: string;
+  usage: ChatLlmUsage;
 }
 
 // ============================================
@@ -77,8 +86,16 @@ const ROUTER_JSON_SCHEMA = {
     },
     mode: {
       type: 'string',
+      // Enum constraint mirrors the Zod discriminated-union (z.enum(['plan',
+      // 'execute']) above) so structured-output validation rejects any
+      // out-of-band value (e.g. "research") instead of silently coercing to
+      // 'plan' at the `raw.mode || 'plan'` fallback below. The runtime only
+      // reads `mode` when action === 'start_superintelligence'; for the other
+      // two actions, the value is ignored, so the LLM may pick either of the
+      // enum members without effect.
+      enum: ['plan', 'execute'],
       description:
-        'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence, empty string for other actions.',
+        'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence; ignored for other actions (pick either enum value).',
     },
   },
   required: ['reasoning', 'action', 'query', 'goal', 'mode'],
@@ -336,14 +353,18 @@ export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
+  claudeToken: string | null;
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
 
-  // Convert messages to OpenAI format (with multimodal support)
+  // Convert messages to OpenAI format (with multimodal support).
+  // The system prompt is wrapped in `markCacheable` so the static prefix is
+  // explicitly tagged for Anthropic prompt caching at the call-site level.
+  // See back-end/src/providers/rose/cache.ts for the helper contract.
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [{ role: 'system', content: ROUTER_SYSTEM_PROMPT }];
+  }> = [markCacheable(ROUTER_SYSTEM_PROMPT)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -408,6 +429,7 @@ export async function callRouterLlm(params: {
         schema: ROUTER_JSON_SCHEMA,
       },
     },
+    claude_token: params.claudeToken ?? undefined,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
@@ -421,14 +443,33 @@ export async function callRouterLlm(params: {
   let chunkCount = 0;
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
+  const usage: ChatLlmUsage = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  };
+  let actualModel = '';
+  let usageData:
+    | {
+        prompt_tokens: number;
+        completion_tokens: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        finish_reason?: string;
+      }
+    | undefined;
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of stream) {
     chunkCount++;
 
     // Detect user's Claude token usage from "-claude" suffix in actual_model
-    // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = racing ($)
-    const actualModel = chunk.actual_model;
+    // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = waterfall ($)
+    if (chunk.actual_model) actualModel = chunk.actual_model;
+    if (chunk.usage)
+      usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
     if (chunkCount === 1) {
       log.info('[RouterLLM] First chunk', {
         actualModel,
@@ -495,6 +536,14 @@ export async function callRouterLlm(params: {
       }
     }
 
+    if (chunk.usage) {
+      usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
+      usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
+      usage.total_tokens = chunk.usage.total_tokens ?? 0;
+      usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
+      usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
+    }
+
     // Log progress every 50 chunks
     if (chunkCount % 50 === 0) {
       log.info('[RouterLLM] Progress', {
@@ -522,6 +571,26 @@ export async function callRouterLlm(params: {
     reasoningLength: accumulatedReasoning.length,
     jsonLength: fullJson.length,
   });
+
+  if (usageData) {
+    const cacheRead = usageData.cache_read_input_tokens ?? 0;
+    const cacheWrite = usageData.cache_creation_input_tokens ?? 0;
+    const promptTokens = usageData.prompt_tokens ?? 0;
+    const totalInput = promptTokens + cacheRead + cacheWrite;
+    const cacheHitPct = totalInput > 0 ? Math.round((cacheRead / totalInput) * 100) : 0;
+    log.info('llm.cache', {
+      call_site: 'routerLlm',
+      agent_id: params.agentId,
+      actual_model: actualModel,
+      is_claude: isClaude,
+      prompt_tokens: promptTokens,
+      completion_tokens: usageData.completion_tokens ?? 0,
+      cache_read: cacheRead,
+      cache_write: cacheWrite,
+      cache_hit_pct: cacheHitPct,
+      finish: usageData.finish_reason ?? 'unknown',
+    });
+  }
 
   // Parse the complete JSON
   if (!fullJson) {
@@ -593,5 +662,6 @@ export async function callRouterLlm(params: {
     decision,
     streamId,
     webSearchToolCallId,
+    usage,
   };
 }

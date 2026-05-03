@@ -6,7 +6,6 @@ No framework types (request/response). Typed args in, typed results out.
 
 from __future__ import annotations
 
-import asyncio
 from collections import deque
 from datetime import timedelta
 from typing import Any
@@ -20,8 +19,6 @@ from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
     PLANNER_MODEL,
-    SCHEMA_ACTIVITY_MAX_ATTEMPTS,
-    SCHEMA_ACTIVITY_TIMEOUT_SECONDS,
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
@@ -277,7 +274,7 @@ async def run_planner_attempt(
 
     Returns the planner result dict.
     """
-    from helpers.llm import call_planner_llm_activity, set_response_schema_activity
+    from helpers.llm import call_planner_llm_activity
 
     agent_id = workflow_instance.agent_id
     planner_args = [
@@ -291,72 +288,23 @@ async def run_planner_attempt(
         tool_call_id,
     ]
 
-    if attempt == 0 and response_schema is None:
-        # First attempt with no schema: run planner + schema generation in parallel
-        workflow.logger.info(f"[TIMING] Starting PARALLEL planner + schema generation (attempt {attempt + 1})")
-        planner_task = workflow.execute_activity(
-            call_planner_llm_activity,
-            args=planner_args,
-            start_to_close_timeout=timedelta(seconds=PLANNER_ACTIVITY_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=PLANNER_ACTIVITY_MAX_ATTEMPTS),
-        )
-        schema_task = workflow.execute_activity(
-            set_response_schema_activity,
-            args=[agent_id, user_messages],
-            start_to_close_timeout=timedelta(seconds=SCHEMA_ACTIVITY_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=SCHEMA_ACTIVITY_MAX_ATTEMPTS),
-        )
+    # Schema generation is now done synchronously at workflow startup so the
+    # prompt cache prefix is stable from the very first LLM call. The planner
+    # only runs the planner LLM here.
+    workflow.logger.info(
+        f"[TIMING] Starting planner LLM (attempt {attempt + 1}, schema_exists={response_schema is not None})"
+    )
+    planner_only_start = workflow.now()
+    planner_result_raw = await workflow.execute_activity(
+        call_planner_llm_activity,
+        args=planner_args,
+        start_to_close_timeout=timedelta(seconds=PLANNER_ACTIVITY_TIMEOUT_SECONDS),
+        retry_policy=RetryPolicy(maximum_attempts=PLANNER_ACTIVITY_MAX_ATTEMPTS),
+    )
+    planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
+    workflow.logger.info(f"[TIMING] Planner LLM completed: {planner_only_elapsed * 1000:.1f}ms")
 
-        parallel_start = workflow.now()
-        planner_result_raw, generated_schema = await asyncio.gather(planner_task, schema_task)
-        parallel_elapsed = (workflow.now() - parallel_start).total_seconds()
-        workflow.logger.info(f"[TIMING] Parallel activities completed: {parallel_elapsed * 1000:.1f}ms")
-
-        await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan", call_site="planner")
-        planner_result = planner_result_raw.get("result", planner_result_raw)
-
-        # Unpack schema result
-        _apply_generated_schema(workflow_instance, generated_schema)
-    else:
-        # Retry or schema already exists -- just call planner
-        workflow.logger.info(
-            f"[TIMING] Starting planner LLM only (attempt {attempt + 1}, schema_exists={response_schema is not None})"
-        )
-        planner_only_start = workflow.now()
-        planner_result_raw = await workflow.execute_activity(
-            call_planner_llm_activity,
-            args=planner_args,
-            start_to_close_timeout=timedelta(seconds=PLANNER_ACTIVITY_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=PLANNER_ACTIVITY_MAX_ATTEMPTS),
-        )
-        planner_only_elapsed = (workflow.now() - planner_only_start).total_seconds()
-        workflow.logger.info(f"[TIMING] Planner LLM only completed: {planner_only_elapsed * 1000:.1f}ms")
-
-        await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan", call_site="planner")
-        planner_result = planner_result_raw.get("result", planner_result_raw)
+    await workflow_instance._track_usage(planner_result_raw.get("usage"), tool_name="set_plan", call_site="planner")
+    planner_result = planner_result_raw.get("result", planner_result_raw)
 
     return planner_result
-
-
-def _apply_generated_schema(workflow_instance: Any, generated_schema: Any) -> None:
-    """Unpack and apply schema generation result to workflow instance."""
-    schema_data = None
-    if isinstance(generated_schema, dict) and "schema" in generated_schema:
-        schema_data = generated_schema["schema"]
-        schema_usage = generated_schema.get("usage", {})
-        if schema_usage:
-            # Fire-and-forget cost tracking is fine here; errors are non-fatal
-            asyncio.ensure_future(
-                workflow_instance._track_llm_cost(
-                    schema_usage.get("prompt_tokens", 0),
-                    schema_usage.get("completion_tokens", 0),
-                    call_site="schema_generation",
-                )
-            )
-    elif generated_schema:
-        # Backwards compat: old format returned schema directly
-        schema_data = generated_schema
-
-    if schema_data:
-        workflow_instance.output_schema = schema_data
-        workflow.logger.info(f"Generated output_schema with {len(schema_data.get('fields', []))} fields")

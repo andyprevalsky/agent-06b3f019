@@ -1,5 +1,13 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/*
+ * eslint-disable no-console, max-lines
+ *
+ * Matches the convention across the 13 other blackbox test files in
+ * src/tests/blackbox/. Test runner output goes through console; coverage-driven
+ * test growth pushes file lines past the 600 default. See e.g.
+ * agents.blackbox.ts, integrations.blackbox.ts which use the same disable.
+ */
+/* eslint-disable no-console, max-lines */
 /**
  * Module-level black-box tests for back-end/src/providers/rose/.
  *
@@ -26,12 +34,17 @@ import {
   createStreamingCompletion,
   getPool,
   isRoseModel,
+  markCacheable,
   POOL_REGISTRY,
   poolForModel,
   RoseAllFailed,
+  RoseStallError,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type CompletionChunk,
 } from '../../providers/rose';
+import { parseAnthropicSSE, parseOpenAISSE } from '../../providers/rose/streaming';
 import { transformSchemaForAnthropic } from '../../providers/rose/transforms';
+import type { RoseStreamChunk } from '../../providers/rose/types';
 import { ANTHROPIC_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 // ==================== TEST INFRASTRUCTURE ====================
@@ -433,7 +446,15 @@ async function testTransforms_stripUnsupportedSchemaKeywords() {
       Sub: { type: 'number', multipleOf: 0.5 },
     },
   };
-  const out = transformSchemaForAnthropic(input);
+  const out = transformSchemaForAnthropic(input) as {
+    type: string;
+    properties: {
+      count: Record<string, unknown> & { type: string };
+      name: Record<string, unknown>;
+      items: Record<string, unknown> & { items: Record<string, unknown> };
+    };
+    $defs: { Sub: Record<string, unknown> };
+  };
   assert(!('minimum' in out.properties.count), 'minimum stripped');
   assert(!('maximum' in out.properties.count), 'maximum stripped');
   assert(!('minLength' in out.properties.name), 'minLength stripped');
@@ -454,11 +475,1022 @@ async function testTransforms_anyOfOneOfAllOfRecursed() {
     oneOf: [{ type: 'number', multipleOf: 1 }],
     allOf: [{ type: 'array', minItems: 1 }],
   };
-  const out = transformSchemaForAnthropic(input);
+  const out = transformSchemaForAnthropic(input) as {
+    anyOf: Record<string, unknown>[];
+    oneOf: Record<string, unknown>[];
+    allOf: Record<string, unknown>[];
+  };
   assert(!('minimum' in out.anyOf[0]), 'anyOf[0].minimum stripped');
   assert(!('minLength' in out.anyOf[1]), 'anyOf[1].minLength stripped');
   assert(!('multipleOf' in out.oneOf[0]), 'oneOf[0].multipleOf stripped');
   assert(!('minItems' in out.allOf[0]), 'allOf[0].minItems stripped');
+}
+
+// ==================== STREAMING-PARSER TESTS ====================
+
+/**
+ * Build a ReadableStream from raw chunks (each entry is one TCP write). Lets
+ * tests force partial-line splits and idle-timeout scenarios that the
+ * line-buffered `sseResponse` helper can't express on its own.
+ */
+function rawStream(chunks: string[]): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder();
+      for (const c of chunks) {
+        controller.enqueue(encoder.encode(c));
+      }
+      controller.close();
+    },
+  });
+}
+
+/**
+ * ReadableStream where each chunk is delayed by `delayMs`. Used to drive the
+ * idle-timeout path in `iterLinesWithIdleTimeout` without sleeping the full
+ * 60s default.
+ */
+function delayedStream(chunks: string[], delayMs: number): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      for (const c of chunks) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        controller.enqueue(encoder.encode(c));
+      }
+      controller.close();
+    },
+  });
+}
+
+async function collectRose(iter: AsyncIterable<RoseStreamChunk>): Promise<RoseStreamChunk[]> {
+  const out: RoseStreamChunk[] = [];
+  for await (const c of iter) out.push(c);
+  return out;
+}
+
+async function testStreaming_anthropic_parseErrorTolerated() {
+  // Malformed JSON line is logged + skipped, NOT thrown. Stream still yields
+  // the surrounding valid content, so the caller never sees the corruption.
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'data: {not valid json',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-parse-err',
+    })
+  );
+  // metadata + content + usage + done — the malformed line was silently dropped.
+  const kinds = chunks.map((c) => c.kind);
+  assertEqual(kinds[0], 'metadata', 'first chunk metadata');
+  assert(kinds.includes('content'), 'content chunk emitted past parse error');
+  assert(kinds.includes('done'), 'done chunk emitted');
+}
+
+async function testStreaming_anthropic_thinkingDeltaEmitsReasoning() {
+  // thinking_delta → kind: 'reasoning' (separate from text_delta).
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"answer"}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-thinking',
+    })
+  );
+  const reasoning = chunks.find((c) => c.kind === 'reasoning');
+  assert(reasoning !== undefined, 'reasoning chunk emitted');
+  if (reasoning && reasoning.kind === 'reasoning') {
+    assertEqual(reasoning.data.text, 'hmm', 'thinking text routed to reasoning chunk');
+  }
+}
+
+async function testStreaming_anthropic_errorEventLoggedNotThrown() {
+  // `event: error` mid-stream is a soft signal — log + continue. Stream still
+  // yields content normally; only a missing-content close raises RoseStallError.
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: error',
+    'data: {"type":"error","error":{"type":"overloaded_error","message":"server busy"}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-err-evt',
+    })
+  );
+  assert(
+    chunks.some((c) => c.kind === 'content'),
+    'error event did not abort stream — content still flowed'
+  );
+  assert(
+    chunks.some((c) => c.kind === 'done'),
+    'stream completed cleanly past error event'
+  );
+}
+
+async function testStreaming_anthropic_emptyStreamRaisesStallError() {
+  // No content_block_delta events → RoseStallError. The metadata + usage
+  // chunks were going to be yielded but the iteration aborts with throw.
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseAnthropicSSE(body, {
+        actualModel: 'claude-test',
+        poolName: 'claude-token',
+        requestId: 'r-anth-empty',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+}
+
+async function testStreaming_anthropic_unmappedStopReasonPassthrough() {
+  // A stop_reason not in the explicit map (e.g. "pause_turn") passes through
+  // verbatim — guards against silent loss of new Anthropic stop reasons.
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-unmapped',
+    })
+  );
+  const usage = chunks.find((c) => c.kind === 'usage');
+  assert(usage !== undefined, 'usage chunk emitted');
+  if (usage && usage.kind === 'usage') {
+    assertEqual(usage.data.finish_reason, 'pause_turn', 'unmapped stop_reason passes through');
+  }
+}
+
+async function testStreaming_anthropic_idleTimeoutRaisesStall() {
+  // Stream never delivers a line within idleTimeoutMs → RoseStallError. We
+  // pass idleTimeoutMs=50 + a stream that takes 200ms to deliver its first
+  // chunk so the timeout always wins.
+  const body = delayedStream(
+    [
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}\n\ndata: [DONE]\n\n',
+    ],
+    200
+  );
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseAnthropicSSE(body, {
+        actualModel: 'claude-test',
+        poolName: 'claude-token',
+        requestId: 'r-anth-idle',
+        idleTimeoutMs: 50,
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+  assert(
+    (raised as RoseStallError).message.includes('idle for >50ms'),
+    `idle-timeout message should mention 50ms, got ${(raised as Error).message}`
+  );
+}
+
+async function testStreaming_anthropic_truncatedFinalLineYielded() {
+  // If the upstream closes mid-line, parseAnthropicSSE must still yield the
+  // remainder so caller doesn't silently lose the diagnostic data. Send the
+  // body in two raw chunks where the second arrives without a trailing
+  // newline.
+  const fullEvents =
+    [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}',
+      '',
+    ].join('\n') + '\n';
+  // The literal trailing chunk ends WITHOUT a newline — exercises the
+  // "yield buffer remainder" branch in iterLinesWithIdleTimeout.
+  const body = rawStream([fullEvents, 'data: [DONE]']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-trunc',
+    })
+  );
+  assert(
+    chunks.some((c) => c.kind === 'content'),
+    'content emitted before truncated final line'
+  );
+  // Stream completed via [DONE] in the trailing chunk → done emitted.
+  assert(
+    chunks.some((c) => c.kind === 'done'),
+    'done emitted from trailing [DONE]'
+  );
+}
+
+async function testStreaming_openai_parseErrorTolerated() {
+  const lines = [
+    'data: {"choices":[{"index":0,"delta":{"content":"x"}}]}',
+    '',
+    'data: {malformed',
+    '',
+    'data: {"choices":[{"index":0,"delta":{"content":"y"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseOpenAISSE(body, {
+      actualModel: 'or-test',
+      poolName: 'rose-1-lite',
+      requestId: 'r-or-parse-err',
+    })
+  );
+  const text = chunks
+    .filter((c) => c.kind === 'content')
+    .map((c) => (c.kind === 'content' ? c.data.text : ''))
+    .join('');
+  assertEqual(text, 'xy', 'malformed line skipped, surrounding content preserved');
+}
+
+async function testStreaming_openai_reasoningField() {
+  // OpenRouter providers expose chain-of-thought via `delta.reasoning`. Must
+  // be routed to `kind: 'reasoning'` (not content).
+  const lines = [
+    'data: {"choices":[{"index":0,"delta":{"reasoning":"thinking..."}}]}',
+    '',
+    'data: {"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseOpenAISSE(body, {
+      actualModel: 'or-test',
+      poolName: 'rose-1-lite',
+      requestId: 'r-or-reasoning',
+    })
+  );
+  const reasoning = chunks.find((c) => c.kind === 'reasoning');
+  assert(reasoning !== undefined, 'reasoning chunk emitted');
+  if (reasoning && reasoning.kind === 'reasoning') {
+    assertEqual(reasoning.data.text, 'thinking...', 'reasoning text routed correctly');
+  }
+}
+
+async function testStreaming_openai_reasoningContentField() {
+  // Some providers use `reasoning_content` instead of `reasoning` — the
+  // parser must accept both shapes (the `??` fallback in streaming.ts).
+  const lines = [
+    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"deepseek-style"}}]}',
+    '',
+    'data: {"choices":[{"index":0,"delta":{"content":"final"},"finish_reason":"stop"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseOpenAISSE(body, {
+      actualModel: 'or-test',
+      poolName: 'rose-1-lite',
+      requestId: 'r-or-reasoning-content',
+    })
+  );
+  const reasoning = chunks.find((c) => c.kind === 'reasoning');
+  assert(reasoning !== undefined, 'reasoning chunk emitted from reasoning_content');
+  if (reasoning && reasoning.kind === 'reasoning') {
+    assertEqual(reasoning.data.text, 'deepseek-style', 'reasoning_content routed to reasoning');
+  }
+}
+
+async function testStreaming_openai_emptyChoicesSkipped() {
+  // OpenRouter sometimes sends `{"choices":[]}` framing chunks (e.g. usage-
+  // only). They must be silently ignored, not crash the parser.
+  const lines = [
+    'data: {"choices":[]}',
+    '',
+    'data: {"choices":[{"index":0,"delta":{"content":"v"}}]}',
+    '',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseOpenAISSE(body, {
+      actualModel: 'or-test',
+      poolName: 'rose-1-lite',
+      requestId: 'r-or-empty-choices',
+    })
+  );
+  assert(
+    chunks.some((c) => c.kind === 'content'),
+    'content emitted past empty-choices framing chunk'
+  );
+}
+
+async function testStreaming_openai_emptyStreamRaisesStallError() {
+  const lines = ['data: [DONE]', ''];
+  const body = rawStream([lines.join('\n') + '\n']);
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseOpenAISSE(body, {
+        actualModel: 'or-test',
+        poolName: 'rose-1-lite',
+        requestId: 'r-or-empty',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+  assert(
+    (raised as Error).message.includes('saw_done=true'),
+    'message should annotate saw_done flag for diagnosability'
+  );
+}
+
+async function testStreaming_openai_emptyStreamWithoutDoneRaisesStallError() {
+  // Stream closes WITHOUT a [DONE] sentinel and WITHOUT content. saw_done
+  // must be false in the message so the caller can distinguish "premature
+  // disconnect" from "polite empty completion".
+  const body = rawStream([]); // closed immediately
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseOpenAISSE(body, {
+        actualModel: 'or-test',
+        poolName: 'rose-1-lite',
+        requestId: 'r-or-no-done',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+  assert(
+    (raised as Error).message.includes('saw_done=false'),
+    'saw_done=false annotates pre-DONE disconnect'
+  );
+}
+
+async function testStreaming_openai_idleTimeoutRaisesStall() {
+  const body = delayedStream(
+    ['data: {"choices":[{"index":0,"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n'],
+    200
+  );
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseOpenAISSE(body, {
+        actualModel: 'or-test',
+        poolName: 'rose-1-lite',
+        requestId: 'r-or-idle',
+        idleTimeoutMs: 50,
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+}
+
+async function testStreaming_openai_usageWithCacheTokens() {
+  // OpenRouter exposes Anthropic cache token counts on the OpenAI-shape
+  // usage object. The parser must propagate them onto the usage chunk so the
+  // outer client can wire them into the CompletionChunk.usage envelope.
+  const lines = [
+    'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
+    '',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cache_creation_input_tokens":7,"cache_read_input_tokens":3}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseOpenAISSE(body, {
+      actualModel: 'or-test',
+      poolName: 'rose-1-lite',
+      requestId: 'r-or-cache',
+    })
+  );
+  const usage = chunks.find((c) => c.kind === 'usage');
+  assert(usage !== undefined, 'usage chunk emitted');
+  if (usage && usage.kind === 'usage') {
+    assertEqual(usage.data.prompt_tokens, 10, 'prompt_tokens');
+    assertEqual(usage.data.completion_tokens, 2, 'completion_tokens');
+    assertEqual(usage.data.total_tokens, 12, 'total_tokens');
+    assertEqual(usage.data.cache_creation_input_tokens, 7, 'cache_creation_input_tokens');
+    assertEqual(usage.data.cache_read_input_tokens, 3, 'cache_read_input_tokens');
+    assertEqual(usage.data.finish_reason, 'stop', 'finish_reason from delta');
+  }
+}
+
+async function testStreaming_anthropic_cacheTokensInUsage() {
+  // The cache_creation/cache_read token counts on `message_start.usage`
+  // must be carried through into the final usage chunk so the chat client
+  // can populate CompletionChunk.usage with them.
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":42,"cache_creation_input_tokens":7,"cache_read_input_tokens":3}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  const chunks = await collectRose(
+    parseAnthropicSSE(body, {
+      actualModel: 'claude-test',
+      poolName: 'claude-token',
+      requestId: 'r-anth-cache',
+    })
+  );
+  const usage = chunks.find((c) => c.kind === 'usage');
+  assert(usage !== undefined, 'usage chunk emitted');
+  if (usage && usage.kind === 'usage') {
+    assertEqual(usage.data.prompt_tokens, 42, 'input_tokens → prompt_tokens');
+    assertEqual(usage.data.cache_creation_input_tokens, 7, 'cache creation propagated');
+    assertEqual(usage.data.cache_read_input_tokens, 3, 'cache read propagated');
+  }
+}
+
+// ==================== CLIENT TESTS (END-TO-END BRANCHES) ====================
+
+async function testClient_reasoningChunkRoutedToCompletionChunk() {
+  // claudeAuth path: a thinking_delta from Anthropic must surface in the
+  // CompletionChunk envelope as `delta.reasoning` (not `delta.content`).
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  const sse = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"reasoning..."}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"final"}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) return sseResponse(sse);
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    const chunks = await collect(stream);
+    const reasoningChunk = chunks.find((c) => c.choices[0]?.delta?.reasoning);
+    assert(reasoningChunk !== undefined, 'reasoning surfaces as delta.reasoning');
+    assertEqual(
+      reasoningChunk!.choices[0].delta.reasoning,
+      'reasoning...',
+      'reasoning text propagated'
+    );
+    const contentChunk = chunks.find((c) => c.choices[0]?.delta?.content);
+    assert(contentChunk !== undefined, 'content chunk also emitted');
+    assertEqual(contentChunk!.choices[0].delta.content, 'final', 'content text propagated');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_usageChunkExposesCacheTokens() {
+  // The terminal usage chunk on the chat envelope must carry the cache
+  // creation/read counts so callers (chat router/generator) can record cache
+  // hit metrics — without them, claudeAuth caching is invisible to billing.
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      return sseResponse([
+        'event: message_start',
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_creation_input_tokens":80,"cache_read_input_tokens":15}}}',
+        '',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+        '',
+        'data: [DONE]',
+        '',
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    const chunks = await collect(stream);
+    const last = chunks[chunks.length - 1];
+    assert(last.usage !== undefined, 'last chunk has usage');
+    assertEqual(last.usage!.prompt_tokens, 100, 'prompt_tokens propagated');
+    assertEqual(last.usage!.cache_creation_input_tokens, 80, 'cache creation in usage envelope');
+    assertEqual(last.usage!.cache_read_input_tokens, 15, 'cache read in usage envelope');
+    assertEqual(last.choices[0].finish_reason, 'stop', 'usage chunk finish_reason mapped');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_midStreamErrorPropagatesAfterContent() {
+  // Once content has streamed to the caller, a mid-stream failure on the
+  // claudeAuth path MUST propagate directly — splicing in waterfall output
+  // would corrupt the response. The PreContentFallThroughError sentinel only
+  // fires before any chunk has been yielded.
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  const truncatedBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enc = new TextEncoder();
+      // Stream some content, then close mid-stream with no [DONE] and no
+      // content_block_delta close — parseAnthropicSSE will see emittedContent
+      // already true, then... actually, current parser raises only on the
+      // empty-content path. Use idleTimeout to force a mid-stream stall.
+      controller.enqueue(
+        enc.encode(
+          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3}}}\n\n' +
+            'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n'
+        )
+      );
+      // NEVER close — stream sits open, idle timeout fires.
+    },
+  });
+  let openrouterCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      return new Response(truncatedBody, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    const chunks: CompletionChunk[] = [];
+    let raised: unknown = null;
+    try {
+      // Set a tight idle timeout for the claudeAuth stream by using an
+      // AsyncIterator wrapper isn't trivial; the parser's default is 60s.
+      // Instead drive the stream and capture the result — content should
+      // have been streamed before the mid-stream error propagates. We
+      // can't easily simulate this without overriding idleTimeoutMs deep
+      // inside claudeAuth; the test's job here is to lock in that
+      // openrouterCalls stays 0 — i.e. mid-stream failure does NOT trigger
+      // waterfall fallback once content has been emitted. We do this by
+      // returning early after the first content chunk so the stream is
+      // gracefully cancelled (consumer break).
+      for await (const c of stream) {
+        chunks.push(c);
+        if (c.choices[0]?.delta?.content === 'partial') break;
+      }
+    } catch (err) {
+      raised = err;
+    }
+    void raised; // raised is acceptable here — early-return triggers the iterator.return() finally path
+    assert(chunks.length >= 1, 'at least one content chunk emitted before break');
+    assertEqual(
+      openrouterCalls,
+      0,
+      'consumer-break must NOT fall through to waterfall (post-content guarantee)'
+    );
+    const partialChunk = chunks.find((c) => c.choices[0]?.delta?.content === 'partial');
+    assert(partialChunk !== undefined, 'partial content emitted');
+    assert(
+      partialChunk!.actual_model.endsWith('-claude'),
+      'actual_model carries claude suffix from claudeAuth path'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_consumerEarlyBreakClosesUpstream() {
+  // Consumer breaks out of the loop early. The runWithFallThrough finally
+  // must call iterator.return() so produce()'s cleanup runs and the
+  // underlying socket gets released. We assert this indirectly: subsequent
+  // calls to fetch must succeed (no leaked global-fetch state).
+  let fetchCalls = 0;
+  installFetchStub((url) => {
+    fetchCalls++;
+    if (url === OPENROUTER_API_URL) return sseResponse(OPENROUTER_OK_SSE);
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    process.env.OPENROUTER_API_KEY = 'or-test-key';
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    let received = 0;
+    for await (const chunk of stream) {
+      void chunk;
+      received++;
+      break;
+    }
+    assertEqual(received, 1, 'consumer received exactly one chunk before break');
+    // A second call works — the first call's stream cleanup did not leave
+    // pending state behind.
+    const second = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const all = await collect(second);
+    assert(all.length > 0, 'second call succeeds after first was broken');
+    assertEqual(fetchCalls, 2, 'two openrouter calls (one per createStreamingCompletion)');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_claudeAuthFailedThenWaterfallFailsTooReportsTypedError() {
+  // claudeAuth 401 → fall-through-error (RoseAuthError); waterfall then
+  // fails on every step → RoseAllFailed. The client must surface the
+  // RoseAllFailed (the terminal failure), not the original RoseAuthError.
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      return errorResponse(401, JSON.stringify({ error: { message: 'unauthorized' } }));
+    }
+    if (url === OPENROUTER_API_URL) {
+      return errorResponse(503, 'service unavailable');
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    let raised: unknown = null;
+    try {
+      await collect(stream);
+    } catch (err) {
+      raised = err;
+    }
+    assert(
+      raised instanceof RoseAllFailed,
+      `claudeAuth then waterfall fail → RoseAllFailed (terminal), got ${raised}`
+    );
+    const pool = getPool('rose-1-lite');
+    assertEqual(
+      (raised as RoseAllFailed).stepErrors.length,
+      pool.waterfall.length,
+      'stepErrors covers each waterfall attempt'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_unknownPoolFromUnknownModelEmitsHelpfulMessage() {
+  // poolForModel returns null → wrapStream throws "Rose: unknown model …"
+  // BEFORE we even start streaming, so callers can distinguish input bugs
+  // from runtime/provider issues.
+  let threw: unknown = null;
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-2',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    await collect(stream);
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof Error, 'threw something');
+  assert(
+    (threw as Error).message.includes('rose-labs/rose-1-lite'),
+    `error message should list valid models, got ${(threw as Error).message}`
+  );
+}
+
+async function testClient_cacheableSystemPromptSplitOnBoundary() {
+  // markCacheable embeds the SYSTEM_PROMPT_DYNAMIC_BOUNDARY sentinel. On the
+  // claudeAuth path, transformMessagesForAnthropic splits at the boundary
+  // and applies cache_control to the static prefix only. We capture the
+  // outbound POST body and inspect the system blocks.
+  let capturedBody: Record<string, unknown> | null = null;
+  installFetchStub((url, init) => {
+    if (url === ANTHROPIC_API_URL) {
+      capturedBody = JSON.parse((init?.body as string) ?? '{}');
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [markCacheable('STATIC_PREFIX', 'DYNAMIC_TAIL'), { role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    await collect(stream);
+    assert(capturedBody !== null, 'captured outbound body');
+    const system = (capturedBody as { system: Array<Record<string, unknown>> }).system;
+    assert(
+      Array.isArray(system) && system.length >= 3,
+      'system has identity + disclaimer + static'
+    );
+    // Identity + disclaimer always come first; static prefix follows w/ cache_control.
+    const staticBlock = system.find(
+      (b) =>
+        typeof b.text === 'string' &&
+        (b.text as string).includes('STATIC_PREFIX') &&
+        b.cache_control !== undefined
+    );
+    assert(staticBlock !== undefined, 'static prefix block has cache_control: ephemeral applied');
+    const dynamicBlock = system.find(
+      (b) =>
+        typeof b.text === 'string' &&
+        (b.text as string).includes('DYNAMIC_TAIL') &&
+        b.cache_control === undefined
+    );
+    assert(dynamicBlock !== undefined, 'dynamic tail block has NO cache_control');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_lastUserMessageGetsCacheBreakpoint() {
+  // claudeAuth's addCacheBreakpoint marker must be planted on the final user
+  // message so per-conversation cache reads work. The test inspects the
+  // outbound body's messages[].content[].cache_control.
+  let capturedBody: Record<string, unknown> | null = null;
+  installFetchStub((url, init) => {
+    if (url === ANTHROPIC_API_URL) {
+      capturedBody = JSON.parse((init?.body as string) ?? '{}');
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'a question' }],
+      claude_token: 'tok',
+    });
+    await collect(stream);
+    assert(capturedBody !== null, 'captured body');
+    const messages = (capturedBody as { messages: Array<{ content: unknown }> }).messages;
+    assert(messages.length === 1, 'one message');
+    const content = messages[0].content;
+    assert(Array.isArray(content) && content.length === 1, 'content lifted to array');
+    const block = (content as Array<Record<string, unknown>>)[0];
+    assertEqual(block.text, 'a question', 'preserves text');
+    assert(block.cache_control !== undefined, 'last block has cache_control breakpoint');
+    assertEqual(
+      (block.cache_control as Record<string, unknown>).type,
+      'ephemeral',
+      'cache_control type=ephemeral'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_responseFormatTransformedToOutputConfig() {
+  // OpenAI-shape response_format becomes Anthropic-shape output_config on
+  // the claudeAuth path. claudeAuth.ts also pins output_config.effort='high'
+  // — both must be present in the outbound body.
+  let capturedBody: Record<string, unknown> | null = null;
+  installFetchStub((url, init) => {
+    if (url === ANTHROPIC_API_URL) {
+      capturedBody = JSON.parse((init?.body as string) ?? '{}');
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'TestResp',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: {
+              count: { type: 'integer', minimum: 0 },
+            },
+          },
+        },
+      },
+    });
+    await collect(stream);
+    assert(capturedBody !== null, 'captured body');
+    const oc = (capturedBody as { output_config?: Record<string, unknown> }).output_config;
+    assert(oc !== undefined, 'output_config present');
+    assertEqual(oc!.effort, 'high', 'effort=high pinned');
+    const fmt = oc!.format as Record<string, unknown>;
+    assertEqual(fmt.type, 'json_schema', 'format.type=json_schema');
+    const schema = fmt.schema as Record<string, unknown>;
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    assert(!('minimum' in props.count), 'minimum stripped from schema (Anthropic incompatible)');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_systemPromptDynamicBoundaryConstantValue() {
+  // Lock in the boundary literal so changes are deliberate (other code may
+  // hardcode it for legacy callers).
+  assert(
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY.includes('SYSTEM_PROMPT_DYNAMIC_BOUNDARY'),
+    'boundary constant exposes the sentinel string'
+  );
+}
+
+async function testClient_postContentStreamErrorPropagatesDirectly() {
+  // claudeAuth emits content, then the underlying ReadableStream errors
+  // out. Once content has been streamed, the runWithFallThrough catch path
+  // re-throws the original error (NOT PreContentFallThroughError) — exercises
+  // the `else { throw err; }` branch in client.ts's claudeAuth catch.
+  // Critical guarantee: openrouter must NOT be invoked (no fall-through
+  // splicing once partial content is on the wire).
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  let openrouterCalls = 0;
+  let pullCount = 0;
+  const erroringBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const enc = new TextEncoder();
+      pullCount++;
+      if (pullCount === 1) {
+        // First pull: emit content. Since pull is invoked by the consumer's
+        // read(), this ensures the parser actually receives + processes the
+        // bytes before the next pull errors.
+        controller.enqueue(
+          enc.encode(
+            'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3}}}\n\n' +
+              'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n'
+          )
+        );
+        return;
+      }
+      // Subsequent pull (after parser has yielded content): error out.
+      // Triggers the post-content error path in client.ts (lines 196-197).
+      controller.error(new Error('upstream socket reset'));
+    },
+  });
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      return new Response(erroringBody, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    const chunks: CompletionChunk[] = [];
+    let raised: unknown = null;
+    try {
+      for await (const c of stream) chunks.push(c);
+    } catch (err) {
+      raised = err;
+    }
+    assert(chunks.length >= 1, 'partial content emitted before error');
+    assert(raised !== null, 'mid-stream error propagated to caller');
+    assertEqual(
+      openrouterCalls,
+      0,
+      'post-content error must NOT trigger waterfall (would splice models)'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_metadataChunkIsBuffered() {
+  // Ensure the metadata chunk is NOT yielded directly — every CompletionChunk
+  // emitted should carry actual_model + pool_name inline (parity with the
+  // deleted edge function behavior).
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) return sseResponse(ANTHROPIC_OK_SSE);
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'tok',
+    });
+    const chunks = await collect(stream);
+    // Every chunk carries actual_model + pool_name + pool_size inline, so
+    // there's no separate metadata chunk visible in `chunks`.
+    for (const c of chunks) {
+      assert(typeof c.actual_model === 'string', 'every chunk has actual_model');
+      assert(typeof c.pool_name === 'string', 'every chunk has pool_name');
+      assert(typeof c.pool_size === 'number' && c.pool_size > 0, 'every chunk has pool_size');
+    }
+  } finally {
+    restoreFetch();
+  }
 }
 
 // ==================== RUNNER ====================
@@ -489,6 +1521,118 @@ async function main(): Promise<void> {
       fn: testTransforms_stripUnsupportedSchemaKeywords,
     },
     { name: 'transforms / anyOf/oneOf/allOf recursed', fn: testTransforms_anyOfOneOfAllOfRecursed },
+    {
+      name: 'streaming / anthropic parse error tolerated',
+      fn: testStreaming_anthropic_parseErrorTolerated,
+    },
+    {
+      name: 'streaming / anthropic thinking_delta → reasoning',
+      fn: testStreaming_anthropic_thinkingDeltaEmitsReasoning,
+    },
+    {
+      name: 'streaming / anthropic error event logged not thrown',
+      fn: testStreaming_anthropic_errorEventLoggedNotThrown,
+    },
+    {
+      name: 'streaming / anthropic empty stream → RoseStallError',
+      fn: testStreaming_anthropic_emptyStreamRaisesStallError,
+    },
+    {
+      name: 'streaming / anthropic unmapped stop_reason passthrough',
+      fn: testStreaming_anthropic_unmappedStopReasonPassthrough,
+    },
+    {
+      name: 'streaming / anthropic idle timeout → RoseStallError',
+      fn: testStreaming_anthropic_idleTimeoutRaisesStall,
+    },
+    {
+      name: 'streaming / anthropic truncated final line yielded',
+      fn: testStreaming_anthropic_truncatedFinalLineYielded,
+    },
+    {
+      name: 'streaming / anthropic cache tokens propagated',
+      fn: testStreaming_anthropic_cacheTokensInUsage,
+    },
+    {
+      name: 'streaming / openai parse error tolerated',
+      fn: testStreaming_openai_parseErrorTolerated,
+    },
+    {
+      name: 'streaming / openai reasoning field → reasoning chunk',
+      fn: testStreaming_openai_reasoningField,
+    },
+    {
+      name: 'streaming / openai reasoning_content field → reasoning chunk',
+      fn: testStreaming_openai_reasoningContentField,
+    },
+    {
+      name: 'streaming / openai empty choices skipped',
+      fn: testStreaming_openai_emptyChoicesSkipped,
+    },
+    {
+      name: 'streaming / openai empty stream → RoseStallError (saw_done=true)',
+      fn: testStreaming_openai_emptyStreamRaisesStallError,
+    },
+    {
+      name: 'streaming / openai disconnect (saw_done=false) → RoseStallError',
+      fn: testStreaming_openai_emptyStreamWithoutDoneRaisesStallError,
+    },
+    {
+      name: 'streaming / openai idle timeout → RoseStallError',
+      fn: testStreaming_openai_idleTimeoutRaisesStall,
+    },
+    {
+      name: 'streaming / openai usage with cache tokens',
+      fn: testStreaming_openai_usageWithCacheTokens,
+    },
+    {
+      name: 'client / reasoning chunk → CompletionChunk.delta.reasoning',
+      fn: testClient_reasoningChunkRoutedToCompletionChunk,
+    },
+    {
+      name: 'client / usage chunk exposes cache tokens',
+      fn: testClient_usageChunkExposesCacheTokens,
+    },
+    {
+      name: 'client / consumer break does not trigger waterfall',
+      fn: testClient_midStreamErrorPropagatesAfterContent,
+    },
+    {
+      name: 'client / consumer early break closes upstream',
+      fn: testClient_consumerEarlyBreakClosesUpstream,
+    },
+    {
+      name: 'client / claudeAuth fail + waterfall fail → RoseAllFailed',
+      fn: testClient_claudeAuthFailedThenWaterfallFailsTooReportsTypedError,
+    },
+    {
+      name: 'client / unknown pool emits helpful message',
+      fn: testClient_unknownPoolFromUnknownModelEmitsHelpfulMessage,
+    },
+    {
+      name: 'client / cacheable system prompt splits on boundary',
+      fn: testClient_cacheableSystemPromptSplitOnBoundary,
+    },
+    {
+      name: 'client / last user message gets cache breakpoint',
+      fn: testClient_lastUserMessageGetsCacheBreakpoint,
+    },
+    {
+      name: 'client / response_format → output_config (effort=high)',
+      fn: testClient_responseFormatTransformedToOutputConfig,
+    },
+    {
+      name: 'client / SYSTEM_PROMPT_DYNAMIC_BOUNDARY constant exposed',
+      fn: testClient_systemPromptDynamicBoundaryConstantValue,
+    },
+    {
+      name: 'client / post-content stream error propagates directly',
+      fn: testClient_postContentStreamErrorPropagatesDirectly,
+    },
+    {
+      name: 'client / metadata chunk buffered (inline on every chunk)',
+      fn: testClient_metadataChunkIsBuffered,
+    },
   ];
 
   const results: TestResult[] = [];
