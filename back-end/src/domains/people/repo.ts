@@ -92,21 +92,10 @@ export async function createPerson(data: {
   contactStatus?: string;
   networkOrientation?: string;
   notes?: string;
-  embedding: number[];
   emailAddresses: string[];
 }) {
+  // Embedding column is left null; embedding generation is temporarily disabled.
   return prisma.person.create({ data });
-}
-
-// ---------------------------------------------------------------------------
-// Update embedding
-// ---------------------------------------------------------------------------
-
-export async function updatePersonEmbedding(id: string, embedding: number[]) {
-  return prisma.person.update({
-    where: { id },
-    data: { embedding },
-  });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
 /**
  * People domain service — business logic for people CRUD, search, and messages.
+ *
+ * Embedding generation (OpenAI text-embedding-3-small) is temporarily disabled.
+ * Person create/update stores `null` for the embedding column, and search
+ * returns an empty array since semantic match is unavailable without
+ * embeddings. Falls back to no results rather than blowing up the caller.
  */
 
-import {
-  type PersonSignals,
-  searchPeopleBySignals,
-  getEmbedding,
-  buildPersonEmbeddingText,
-} from '../../providers/embeddings';
+import type { PersonSignals } from '../../providers/embeddings';
 import {
   type PersonData,
   findCollision,
@@ -15,7 +15,7 @@ import {
 } from '../../providers/personCollision';
 import * as repo from './repo';
 import { ALLOWED_SORT_COLUMNS, type PaginationInfo, ValidationError, NotFoundError } from './types';
-import { DEFAULT_PEOPLE_LIMIT, MAX_PEOPLE_LIMIT, DEFAULT_SEARCH_LIMIT } from './config';
+import { DEFAULT_PEOPLE_LIMIT, MAX_PEOPLE_LIMIT } from './config';
 
 // Re-export message functions from the split file
 export { getPersonMessages, getRecentMessages } from './service.messages';
@@ -38,70 +38,15 @@ export async function searchPeople(userId: string, querySignals: PersonSignals, 
     );
   }
 
-  const resolvedLimit = limit !== null && limit !== undefined ? limit : DEFAULT_SEARCH_LIMIT;
-  const results = await searchPeopleBySignals(userId, querySignals, resolvedLimit);
-
+  // Semantic search depends on OpenAI embeddings, which are temporarily
+  // disabled. Treat "no embedding" as "no semantic match" and return an
+  // empty result set rather than calling OpenAI.
+  void userId;
+  void limit;
   return {
     query: querySignals,
-    results,
-    count: results.length,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Create / upsert person — helpers
-// ---------------------------------------------------------------------------
-
-function buildMergedSignals(
-  merged: Awaited<ReturnType<typeof mergePersonRecords>>,
-  personData: PersonData
-): PersonSignals {
-  return {
-    first_name: merged.firstName ?? personData.first_name,
-    last_name: merged.lastName ?? personData.last_name,
-    age: merged.age ?? undefined,
-    location: merged.location ?? undefined,
-    profession: merged.profession ?? undefined,
-    company: merged.company ?? undefined,
-    title: merged.title ?? undefined,
-    industry: merged.industry ?? undefined,
-    relation: merged.relation ?? undefined,
-    communication_frequency: merged.communicationFrequency ?? undefined,
-    relationship_quality: merged.relationshipQuality ?? undefined,
-    skills: (merged.skills as string[]) ?? undefined,
-    interests: (merged.interests as string[]) ?? undefined,
-    total_online_reach: merged.totalOnlineReach ?? undefined,
-    estimated_net_worth_usd: merged.estimatedNetWorthUsd ?? undefined,
-    estimated_world_power_ranking: merged.estimatedWorldPowerRanking ?? undefined,
-    current_bandwidth: merged.currentBandwidth ?? undefined,
-    contact_status: merged.contactStatus ?? undefined,
-    network_orientation: merged.networkOrientation ?? undefined,
-    notes: merged.notes ?? undefined,
-  };
-}
-
-function buildNewPersonSignals(personData: PersonData): PersonSignals {
-  return {
-    first_name: personData.first_name,
-    last_name: personData.last_name,
-    age: personData.age,
-    location: personData.location,
-    profession: personData.profession,
-    company: personData.company,
-    title: personData.title,
-    industry: personData.industry,
-    relation: personData.relation,
-    communication_frequency: personData.communication_frequency,
-    relationship_quality: personData.relationship_quality,
-    skills: personData.skills,
-    interests: personData.interests,
-    total_online_reach: personData.total_online_reach,
-    estimated_net_worth_usd: personData.estimated_net_worth_usd,
-    estimated_world_power_ranking: personData.estimated_world_power_ranking,
-    current_bandwidth: personData.current_bandwidth,
-    contact_status: personData.contact_status,
-    network_orientation: personData.network_orientation,
-    notes: personData.notes,
+    results: [],
+    count: 0,
   };
 }
 
@@ -127,16 +72,10 @@ export async function createOrMergePerson(userId: string, personData: PersonData
     collision.existingPersonId !== null
   ) {
     const merged = await mergePersonRecords(collision.existingPersonId, personData);
-    const signals = buildMergedSignals(merged, personData);
-    const embeddingText = buildPersonEmbeddingText(signals);
-    const embedding = await getEmbedding(embeddingText, userId);
-    const updated = await repo.updatePersonEmbedding(merged.id, embedding);
-    return { person: updated, merged: true, reason: collision.reason };
+    // Embedding generation is temporarily disabled; mergePersonRecords already
+    // updated the row, so just return it as-is.
+    return { person: merged, merged: true, reason: collision.reason };
   }
-
-  const signals = buildNewPersonSignals(personData);
-  const embeddingText = buildPersonEmbeddingText(signals);
-  const embedding = await getEmbedding(embeddingText, userId);
 
   const person = await repo.createPerson({
     userId,
@@ -166,7 +105,6 @@ export async function createOrMergePerson(userId: string, personData: PersonData
     contactStatus: personData.contact_status,
     networkOrientation: personData.network_orientation,
     notes: personData.notes,
-    embedding,
     emailAddresses: personData.emailAddresses ?? [],
   });
 

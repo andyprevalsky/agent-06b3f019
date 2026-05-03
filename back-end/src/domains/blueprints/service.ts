@@ -1,24 +1,17 @@
 /**
  * Blueprints domain service -- business logic for blueprint search, CRUD, and feedback.
+ *
+ * Blueprints are temporarily disabled. The OpenAI-embedding-driven search and
+ * create paths are short-circuited (search returns [], create is a no-op stub
+ * that does NOT touch OpenAI or the DB). The remaining list/find/delete/
+ * feedback paths still operate against the existing DB rows for back-compat.
  */
 
-// eslint-disable-next-line no-restricted-imports -- domain-specific OpenAI embeddings client, single consumer
-import OpenAI from 'openai';
 import type { Prisma, BlueprintMetadata } from './types';
-import { createLogger } from '../../providers/logger';
-import {
-  SIMILARITY_THRESHOLD,
-  DEFAULT_SEARCH_LIMIT,
-  EMBEDDING_MODEL,
-  OPENAI_API_KEY,
-  BLACKBOX_CAPTURE_MODE,
-} from './config';
 import * as repo from './repo';
 
-const log = createLogger('Blueprints');
-
 // ---------------------------------------------------------------------------
-// Error classes
+// Error classes (kept for back-compat with route handlers)
 // ---------------------------------------------------------------------------
 
 export class EmbeddingError extends Error {
@@ -30,159 +23,48 @@ export class EmbeddingError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI client (module-level singleton)
-// ---------------------------------------------------------------------------
-
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-  fetch: ((url: string | URL, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch,
-});
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const EMBEDDING_DIM = 1536;
-
-function deterministicFakeEmbedding(text: string): number[] {
-  const out = new Array<number>(EMBEDDING_DIM);
-  for (let i = 0; i < EMBEDDING_DIM; i++) {
-    let h = 0x811c9dc5 ^ i;
-    for (let j = 0; j < text.length; j++) {
-      h ^= text.charCodeAt(j);
-      h = Math.imul(h, 0x01000193);
-    }
-    out[i] = ((h >>> 0) / 0xffffffff) * 2 - 1;
-  }
-  return out;
-}
-
-async function getEmbedding(text: string): Promise<number[]> {
-  try {
-    const response = await openai.embeddings.create({
-      model: EMBEDDING_MODEL,
-      input: text,
-    });
-    return response.data[0].embedding;
-  } catch (error) {
-    if (BLACKBOX_CAPTURE_MODE) {
-      log.info('Blueprint embedding fallback (capture mode)', {
-        reason: error instanceof Error ? error.message.slice(0, 80) : 'unknown',
-      });
-      return deterministicFakeEmbedding(text);
-    }
-    throw error;
-  }
-}
-
-/**
- * Calculate cosine similarity between two vectors.
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) {
-    throw new Error('Vectors must have the same length');
-  }
-
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denominator === 0) return 0;
-
-  return dotProduct / denominator;
-}
-
-// ---------------------------------------------------------------------------
-// Search
+// Search (disabled)
 // ---------------------------------------------------------------------------
 
 /**
- * Search blueprints by goal similarity using pre-computed embeddings.
- * Returns top-K results above the similarity threshold, or [] on embedding failure.
+ * Disabled: blueprint similarity search relied on OpenAI embeddings, which
+ * are temporarily turned off. Always returns no matches.
  */
 export async function searchByGoal(
-  userId: string,
-  goal: string,
-  limit: number = DEFAULT_SEARCH_LIMIT
-) {
-  const blueprints = await repo.findManyWithEmbeddings(userId);
-
-  if (blueprints.length === 0) {
-    return [];
-  }
-
-  // Generate embedding for the query goal
-  let queryEmbedding: number[];
-  try {
-    queryEmbedding = await getEmbedding(goal);
-  } catch (embeddingError) {
-    log.error('Embeddings failed', {
-      error: embeddingError instanceof Error ? embeddingError.message : String(embeddingError),
-    });
-    return [];
-  }
-
-  // Filter blueprints that have embeddings
-  const blueprintsWithEmbeddings = blueprints.filter(
-    (bp) => bp.embedding !== null && bp.embedding !== undefined
-  );
-
-  if (blueprintsWithEmbeddings.length === 0) {
-    return [];
-  }
-
-  // Calculate cosine similarity (skip blueprints with mismatched embedding dimensions)
-  const withSimilarity: Array<(typeof blueprintsWithEmbeddings)[number] & { similarity: number }> =
-    [];
-  for (const bp of blueprintsWithEmbeddings) {
-    const embedding = bp.embedding as unknown;
-    if (!Array.isArray(embedding) || embedding.length !== queryEmbedding.length) {
-      log.warn('Skipping blueprint with incompatible embedding', { id: bp.id });
-      continue;
-    }
-    const score = cosineSimilarity(queryEmbedding, embedding as number[]);
-    withSimilarity.push({ ...bp, similarity: score });
-  }
-
-  // Filter by threshold, sort, and strip internal fields
-  return withSimilarity
-    .filter((bp) => bp.similarity >= SIMILARITY_THRESHOLD)
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, limit)
-    .map(({ similarity: _similarity, embedding: _embedding, ...bp }) => bp);
+  _userId: string,
+  _goal: string,
+  _limit?: number
+): Promise<never[]> {
+  return [];
 }
 
 // ---------------------------------------------------------------------------
-// Create
+// Create (disabled)
 // ---------------------------------------------------------------------------
 
 /**
- * Save a new blueprint with an auto-generated embedding.
- * Throws EmbeddingError if embedding generation fails.
+ * Disabled: blueprint creation required generating an OpenAI embedding for the
+ * title. Returns a stub object so existing internal callers (agents) continue
+ * to receive a successful response without any DB write or external call.
  */
 export async function createBlueprint(
   userId: string,
   title: string,
   blueprint: Prisma.InputJsonValue
-) {
-  let embedding: number[];
-  try {
-    embedding = await getEmbedding(title);
-  } catch (embeddingError) {
-    log.error('Failed to generate embedding for blueprint', {
-      error: embeddingError instanceof Error ? embeddingError.message : String(embeddingError),
-    });
-    throw new EmbeddingError(embeddingError);
-  }
-
-  return repo.create({ userId, title, blueprint, embedding });
+): Promise<{
+  id: null;
+  userId: string;
+  title: string;
+  blueprint: Prisma.InputJsonValue;
+  disabled: true;
+}> {
+  return {
+    id: null,
+    userId,
+    title,
+    blueprint,
+    disabled: true,
+  };
 }
 
 // ---------------------------------------------------------------------------
