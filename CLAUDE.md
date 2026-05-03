@@ -8,12 +8,16 @@ AI agent platform with model racing infrastructure.
 ## Architecture
 
 ```
-front-end/     → React/TypeScript/Vite (Vercel)
-back-end/      → Express/TypeScript/Prisma (Render)
-agents/        → Python Temporal workers (Fly.io)
-research/gepa/ → Offline reward-model pipeline (no runtime services)
-mac-app/       → Electron desktop app (macOS only)
-docs/          → API documentation (Mintlify)
+front-end/        → React/TypeScript/Vite (Vercel)
+back-end/         → Express/TypeScript/Prisma (Render)
+agents/           → Python Temporal workers (Fly.io)
+research/gepa/    → Offline reward-model pipeline (no runtime services)
+mac-app/          → Electron desktop app (macOS only)
+docs/             → API documentation (Mintlify)
+claude-code-src/  → Vendored Claude Code source (READ-ONLY reference). Its
+                    prompts and agent loop are extensively battle-tested;
+                    our repo is still at the 0-users stage. Lift patterns
+                    liberally when designing or refining our agent harness.
 ```
 
 **Key entry points:**
