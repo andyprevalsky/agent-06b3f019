@@ -374,6 +374,20 @@ class _FakeSpawnWF:
             if isinstance(val, Exception):
                 raise val
             return val() if callable(val) else val
+        # Default mock for the for_each batch path: synthesize one child per cfg.
+        if name == "spawn_sub_agents_batch_activity":
+            cfgs = (args or [None, []])[1] or []
+            return {
+                "agents": [
+                    {
+                        "agent_id": f"child-{i}",
+                        "status": "ACTIVE",
+                        "goal": cfg.get("goal", ""),
+                        "temporal_workflow_id": f"wf-child-{i}",
+                    }
+                    for i, cfg in enumerate(cfgs)
+                ]
+            }
         return ""
 
     def start_activity(self, fn, args=None, **kwargs):
@@ -383,6 +397,9 @@ class _FakeSpawnWF:
         # Evaluate once; if not satisfied, return anyway (no real waiting)
         predicate()
         return
+
+    def info(self):
+        return type("I", (), {"workflow_id": "wf-test"})()
 
 
 class _FakeWFInstance:
@@ -396,12 +413,16 @@ class _FakeWFInstance:
         self.context_gates = {}
         self.handled_events = []
         self._tracked_usage = []
+        self.tree_state_updates = 0
 
     async def _handle_tool_event(self, event, tcid, tname):
         self.handled_events.append((event, tcid, tname))
 
     async def _track_usage(self, usage, **kwargs):
         self._tracked_usage.append((usage, kwargs))
+
+    async def _update_tree_state(self, **kwargs):
+        self.tree_state_updates += 1
 
 
 def _patch_spawn_workflow(fake):
@@ -425,6 +446,15 @@ class _FakeDelegateManager:
 
     def execute_tool(self, workflow_instance, tool_call, tool_call_id, **kwargs):
         self.last_call = {"tool_call": tool_call, "tool_call_id": tool_call_id}
+
+        async def _gen():
+            for e in self._events:
+                yield e
+
+        return _gen()
+
+    def finalize_child(self, workflow_instance, child_info, sub_agent, child_tool_id, bus_id):
+        self.last_call = {"child_info": child_info, "child_tool_id": child_tool_id, "bus_id": bus_id}
 
         async def _gen():
             for e in self._events:
@@ -1431,7 +1461,7 @@ async def test_handler_for_each_drain_exception_counts_as_failure():
     import domains.spawn_agent.handler as h
 
     class _BadDrainMgr:
-        def execute_tool(self, wf, tc, tcid, **kw):
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id):
             async def _gen():
                 # Yield first event success, then raise on second iteration
                 yield ToolEvent(
@@ -1474,7 +1504,7 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
     import domains.spawn_agent.handler as h
 
     class _BadSpawnMgr:
-        def execute_tool(self, wf, tc, tcid, **kw):
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id):
             async def _gen():
                 raise RuntimeError("spawn explosion")
                 yield  # generator marker
