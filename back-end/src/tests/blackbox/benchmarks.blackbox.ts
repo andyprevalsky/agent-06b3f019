@@ -162,6 +162,10 @@ const KNOWN_TAGS = [
   'for-each',
   'outreach',
   'job-applications',
+  'cache',
+  'load-test',
+  'scale',
+  'batch',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================
@@ -406,7 +410,7 @@ async function testList_chatModeTasksHaveNoStartPhase() {
 }
 
 async function testList_approvalHandlingValues() {
-  const validValues = new Set([null, 'auto_approve', 'prompt_user', 'ignore']);
+  const validValues = new Set([null, 'auto_approve', 'prompt_user', 'ignore', 'count_only']);
   const res = await request(`${BASE_URL}/api/benchmarks`);
   if (res.status !== 200) return;
   const body = res.data as { tasks: BenchmarkTask[] };

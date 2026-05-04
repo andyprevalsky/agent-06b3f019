@@ -26,7 +26,6 @@ if not os.getenv("BACKEND_API_KEY"):
 
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
-
 from config import load_config
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.grep.repo import fetch_local_data_summary, grep_activity
@@ -42,8 +41,10 @@ from domains.spawn_agent.service import (
 )
 from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
-from domains.spawn_sub_agents.service import spawn_sub_agent_activity
-from helpers.attachments import fetch_parent_attachments_activity
+from domains.spawn_sub_agents.service import (
+    spawn_sub_agent_activity,
+    spawn_sub_agents_batch_activity,
+)
 from domains.wait_for.service import evaluate_condition_activity
 from domains.web_fetch.handler import web_fetch_activity
 from health_server import run_health_server, set_queue_metrics, set_worker_status
@@ -68,7 +69,7 @@ from helpers import (
     post_agent_message,
     update_agent_status,
 )
-from helpers.attachments import resolve_attachments_activity
+from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -522,6 +523,7 @@ async def main():
         workflows=[AgentWorkflow],
         activities=[
             spawn_sub_agent_activity,
+            spawn_sub_agents_batch_activity,
             fetch_parent_attachments_activity,
             create_approval_request_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API

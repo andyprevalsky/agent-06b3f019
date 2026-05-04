@@ -19,7 +19,6 @@ from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
     spawn_sub_agent_activity,
 )
-from helpers.attachments import fetch_parent_attachments_activity
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 
@@ -34,8 +33,12 @@ class SpawnSubAgentManager(ToolManager):
         return "spawn_sub_agent"
 
     async def execute_tool(  # noqa: C901
-        self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str,
-        *, parent_attachments: Dict[str, Any] | None = None,
+        self,
+        workflow_instance: Any,
+        tool_call: Dict[str, Any],
+        tool_call_id: str,
+        *,
+        parent_attachments: Dict[str, Any] | None = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Execute spawn_sub_agent tool with event-driven architecture.
 
@@ -129,90 +132,8 @@ class SpawnSubAgentManager(ToolManager):
                 )
                 return
 
-            logger.info("✅ Spawned sub-agent, setting up tracking...")
-
-            child_tool_id = tool_call_id
-            child_agent_id = child_info["agent_id"]
-
-            workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
-            workflow_instance.pending_children.add(child_agent_id)
-
-            child_temporal_workflow_id = child_info.get("temporal_workflow_id")
-            if child_temporal_workflow_id:
-                workflow_instance.child_workflow_ids[child_agent_id] = child_temporal_workflow_id
-
-            await workflow_instance._post_message(
-                child_info["goal"],
-                "TOOL",
-                metadata={
-                    "toolCallId": child_tool_id,
-                    "toolName": "spawn_sub_agent",
-                    "toolStatus": "IN_PROGRESS",
-                    "title": "Sub-agent starting",
-                    "subAgentId": child_agent_id,
-                    "progress": 0.0,
-                },
-            )
-
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Spawning sub-agent",
-                message="",
-                status=MessageStatus.IN_PROGRESS,
-                metadata={
-                    "toolName": "spawn_sub_agent",
-                    "subAgentIds": [child_agent_id],
-                    "busId": bus_id,
-                },
-            )
-
-            logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
-
-            await workflow.wait_condition(lambda cid=child_agent_id: cid in workflow_instance.child_results)
-
-            child_result = workflow_instance.child_results.get(child_agent_id, {})
-            child_status = child_result.get("status", "completed")
-
-            if child_status == "failed":
-                for event in self._build_failure_events(child_agent_id, child_result, bus_id):
-                    yield event
-                return
-
-            logger.info(f"🎉 Sub-agent {child_agent_id} completed!")
-
-            structured_response = child_result.get("structured_response", {})
-            output_schema = sub_agent.get("output_schema", {})
-
-            file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
-
-            if file_pointers:
-                logger.info(
-                    "Posting sub-agent output files as ASSISTANT messages",
-                    child_agent_id=child_agent_id,
-                    file_count=len(file_pointers),
-                )
-                for fp in file_pointers:
-                    yield AssistantEvent(
-                        message="",
-                        file_pointer=fp,
-                    )
-
-            child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
-
-            workflow_instance.child_results.pop(child_agent_id, None)
-
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Spawning sub-agent",
-                message=child_summary,
-                status=MessageStatus.FINISHED,
-                metadata={
-                    "toolName": "spawn_sub_agent",
-                    "subAgentIds": [child_agent_id],
-                    "busId": bus_id,
-                    "structured_response": structured_response,
-                },
-            )
+            async for event in self.finalize_child(workflow_instance, child_info, sub_agent, tool_call_id, bus_id):
+                yield event
 
         except Exception as e:
             error_msg = extract_error_message(e)
@@ -224,6 +145,98 @@ class SpawnSubAgentManager(ToolManager):
                 status=MessageStatus.ERROR,
                 metadata={"toolName": "spawn_sub_agent"},
             )
+
+    async def finalize_child(
+        self,
+        workflow_instance: Any,
+        child_info: Dict[str, Any],
+        sub_agent: Dict[str, Any],
+        child_tool_id: str,
+        bus_id: str,
+    ) -> AsyncGenerator[ToolEvent, None]:
+        """Set up tracking, post IN_PROGRESS, wait for completion, post FINISHED.
+
+        Shared between the per-child spawn path (execute_tool) and the batch
+        path (_spawn_for_each via spawn_sub_agents_batch_activity). Caller has
+        already created the row in the backend; this method only handles the
+        parent-side bookkeeping + completion lifecycle.
+
+        If ``child_info["status"] == "FAILED"`` (spawn-time failure surfaced by
+        the batch endpoint), emits a failure event immediately and skips the
+        wait_condition.
+        """
+        if str(child_info.get("status", "")).upper() == "FAILED":
+            err = child_info.get("error", "spawn failed")
+            for event in self._build_failure_events(child_info.get("agent_id", ""), {"error_reason": err}, bus_id):
+                yield event
+            return
+
+        logger.info("✅ Spawned sub-agent, setting up tracking...")
+        child_agent_id = child_info["agent_id"]
+        workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
+        workflow_instance.pending_children.add(child_agent_id)
+
+        child_temporal_workflow_id = child_info.get("temporal_workflow_id")
+        if child_temporal_workflow_id:
+            workflow_instance.child_workflow_ids[child_agent_id] = child_temporal_workflow_id
+
+        await workflow_instance._post_message(
+            child_info.get("goal", ""),
+            "TOOL",
+            metadata={
+                "toolCallId": child_tool_id,
+                "toolName": "spawn_sub_agent",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Sub-agent starting",
+                "subAgentId": child_agent_id,
+                "progress": 0.0,
+            },
+        )
+
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Spawning sub-agent",
+            message="",
+            status=MessageStatus.IN_PROGRESS,
+            metadata={
+                "toolName": "spawn_sub_agent",
+                "subAgentIds": [child_agent_id],
+                "busId": bus_id,
+            },
+        )
+
+        logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
+        await workflow.wait_condition(lambda cid=child_agent_id: cid in workflow_instance.child_results)
+
+        child_result = workflow_instance.child_results.get(child_agent_id, {})
+        if child_result.get("status", "completed") == "failed":
+            for event in self._build_failure_events(child_agent_id, child_result, bus_id):
+                yield event
+            return
+
+        logger.info(f"🎉 Sub-agent {child_agent_id} completed!")
+        structured_response = child_result.get("structured_response", {})
+        output_schema = sub_agent.get("output_schema", {})
+        file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
+        if file_pointers:
+            for fp in file_pointers:
+                yield AssistantEvent(message="", file_pointer=fp)
+
+        child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
+        workflow_instance.child_results.pop(child_agent_id, None)
+
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Spawning sub-agent",
+            message=child_summary,
+            status=MessageStatus.FINISHED,
+            metadata={
+                "toolName": "spawn_sub_agent",
+                "subAgentIds": [child_agent_id],
+                "busId": bus_id,
+                "structured_response": structured_response,
+            },
+        )
 
     @staticmethod
     def _build_failure_events(

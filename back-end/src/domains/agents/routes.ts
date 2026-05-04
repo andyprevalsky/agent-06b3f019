@@ -9,11 +9,12 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
-import { createAgentSchema, updateStatusSchema, updateAgentSchema } from './types';
+import { createAgentSchema, updateAgentSchema, updateStatusSchema } from './types';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
+import batchRoutes from './routes.batch';
 
 const log = createLogger('Agents');
 const router = Router();
@@ -164,6 +165,10 @@ router.post(
     }
   })
 );
+
+// Bulk create up to 200 agents in one HTTP call. Implementation lives in
+// routes.batch.ts to keep this file under the lint budget.
+router.use('/batch', batchRoutes);
 
 router.delete(
   '/:id',

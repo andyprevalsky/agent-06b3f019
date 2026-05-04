@@ -12,13 +12,18 @@ try {
   if (!Array.isArray(parsed)) {
     log.error('Benchmark tasks file is not an array');
   } else {
+    // tasks.json entries are keyed by `name` and `prompt` (mirrors
+    // benchmarks.blackbox.ts BenchmarkTaskSchema). The earlier `id`/`goal`
+    // validator never matched any entry, which silently turned the route into
+    // a permanent 500 — fix is to validate the actual shape.
     const valid = parsed.every(
       (t: unknown) =>
         typeof t === 'object' &&
         t !== null &&
-        'id' in t &&
-        'goal' in t &&
-        typeof (t as Record<string, unknown>).id === 'string'
+        'name' in t &&
+        'prompt' in t &&
+        typeof (t as Record<string, unknown>).name === 'string' &&
+        typeof (t as Record<string, unknown>).prompt === 'string'
     );
     if (!valid) {
       log.error('Benchmark tasks file contains malformed entries');

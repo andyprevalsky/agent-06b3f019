@@ -39,6 +39,11 @@ export const ResponseSchemaSchema = z.object({
 
 // Validation schemas
 export const createAgentSchema = z.object({
+  // Optional caller-supplied agent id. When set, the row is created with this
+  // exact id (instead of randomUUID()) so the caller's batch retry is
+  // idempotent. Used by the spawn_sub_agents_batch worker activity, which
+  // mints child ids upfront and passes the same ids on retry.
+  agent_id: z.string().uuid().optional(),
   goal: z.string().min(1),
   model: z.string().optional().default('rose-labs/rose-1-lite'),
   reasoning_max_tokens: z.number().int().min(0).optional().default(256),
@@ -135,7 +140,19 @@ export const generateSchemaRequestSchema = z.object({
   goal: z.string().min(1),
 });
 
+// Batch creation: up to 200 children in one HTTP call, used by the
+// spawn_sub_agents_batch worker activity. Each child must include `agent_id`
+// (worker mints them upfront) so the call is idempotent on retry.
+export const BATCH_CREATE_MAX = 200;
+export const batchCreateAgentsSchema = z.object({
+  agents: z
+    .array(createAgentSchema.extend({ agent_id: z.string().uuid() }))
+    .min(1)
+    .max(BATCH_CREATE_MAX),
+});
+
 export type CreateAgentBody = z.infer<typeof createAgentSchema>;
+export type BatchCreateAgentsBody = z.infer<typeof batchCreateAgentsSchema>;
 export type PostMessageBody = z.infer<typeof postMessageSchema>;
 export type UpdateStatusBody = z.infer<typeof updateStatusSchema>;
 export type UpdateAgentBody = z.infer<typeof updateAgentSchema>;

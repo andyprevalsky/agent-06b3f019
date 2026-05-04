@@ -23,7 +23,6 @@ from domains.spawn_agent.config import (
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
     FOR_EACH_MAX_DEPTH,
-    FOR_EACH_MAX_INFLIGHT,
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
 )
@@ -36,14 +35,14 @@ from domains.spawn_agent.service import (
     spawn_explore_agent_activity,
     validate_spawn_params,
 )
-from helpers.attachments import extract_attachments_from_context
+from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.tracing import span
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
-from helpers.attachments import fetch_parent_attachments_activity
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
+from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 
 logger = structlog.get_logger()
 
@@ -372,7 +371,9 @@ class SpawnAgentManager(ToolManager):
 
         manager = get_sub_agent_manager()
         async for event in manager.execute_tool(
-            workflow_instance, sub_agent_tool_call, tool_call_id,
+            workflow_instance,
+            sub_agent_tool_call,
+            tool_call_id,
             parent_attachments=parent_attachments,
         ):
             yield event
@@ -383,12 +384,20 @@ class SpawnAgentManager(ToolManager):
         tool_call: Dict[str, Any],
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
-        """Thin wrapper: calls _spawn_sub_agent for each item in items/items_csv.
+        """Fan out N sub-agents via the batch backend endpoint, then drain
+        per-child completion events concurrently.
 
-        Two-phase approach:
-        1. SPAWN phase -- create all children as fast as possible (MAX_INFLIGHT
-           concurrent spawns).
-        2. DRAIN phase -- resume all generators concurrently.
+        Two-phase:
+        1. BATCH SPAWN — one HTTP call to /api/agents/batch via the
+           spawn_sub_agents_batch_activity. The activity mints stable
+           agent_ids upfront so its own retries are idempotent.
+        2. DRAIN — for each batch result, run SpawnSubAgentManager.finalize_child
+           in parallel. finalize_child posts the IN_PROGRESS row, waits for
+           completion, and posts FINISHED (or a failure event if the child
+           failed at spawn time).
+
+        FOR_EACH_MAX_INFLIGHT no longer throttles spawns — concurrency is now
+        bounded server-side by the batch endpoint's max-200 limit.
         """
         items = coerce_for_each_items(tool_call)
         if not items:
@@ -404,7 +413,14 @@ class SpawnAgentManager(ToolManager):
         output_schema = tool_call.get("output_schema")
         context_gates = tool_call.get("context_gates")
 
-        # Pre-fetch parent attachments once for the entire batch
+        # Resolve bus_id once (matches per-child SpawnSubAgentManager logic).
+        parent_bus_id = getattr(workflow_instance, "bus_id", None)
+        if parent_bus_id is None:
+            workflow_instance.bus_id = workflow_instance.agent_id
+            await workflow_instance._update_tree_state()
+            parent_bus_id = workflow_instance.bus_id
+
+        # Pre-fetch parent attachments once for the entire batch.
         parent_attachments = await workflow.execute_activity(
             fetch_parent_attachments_activity,
             args=[workflow_instance.agent_id],
@@ -412,13 +428,11 @@ class SpawnAgentManager(ToolManager):
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
-        # Build per-item tool_calls shaped as spawn_agent(type=sub_agent)
-        per_item_calls: List[tuple] = []
-        for i, item in enumerate(items):
-            row_goal = build_for_each_goal(base_goal, item)
-            item_tool_call: Dict[str, Any] = {
-                "type": "sub_agent",
-                "goal": row_goal,
+        # Build per-item agent_cfgs (shape used by spawn_sub_agent_activity).
+        agent_cfgs: List[Dict[str, Any]] = []
+        for item in items:
+            cfg: Dict[str, Any] = {
+                "goal": build_for_each_goal(base_goal, item),
                 "output_schema": output_schema,
                 "verifier": verifier,
                 "attachments": attachments,
@@ -426,67 +440,75 @@ class SpawnAgentManager(ToolManager):
                 "start_phase": start_phase,
             }
             if context_gates:
-                item_tool_call["context_gates"] = context_gates
-            per_item_calls.append((item_tool_call, f"{tool_call_id}:{i}"))
+                cfg["context_gates"] = context_gates
+            agent_cfgs.append(cfg)
 
+        # Wait for un-pause before spawning (parents pause cascades to children).
+        await workflow.wait_condition(lambda: not workflow_instance.is_paused)
+
+        parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
+        parent_source = getattr(workflow_instance, "agent_source", "WEB")
+
+        # Phase 1: one batch activity = one backend HTTP call.
+        batch_result = await workflow.execute_activity(
+            spawn_sub_agents_batch_activity,
+            args=[
+                workflow_instance.user_id,
+                agent_cfgs,
+                workflow_instance.agent_id,
+                workflow.info().workflow_id,
+                workflow_instance.depth + 1,
+                getattr(workflow_instance, "is_paused", False),
+                parent_model,
+                parent_bus_id,
+                parent_source,
+                parent_attachments,
+                None,  # child_agent_ids — let activity mint them
+            ],
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        children = batch_result.get("agents", [])
+        if len(children) != len(agent_cfgs):
+            logger.warning(
+                "Batch result length mismatch",
+                expected=len(agent_cfgs),
+                got=len(children),
+            )
+
+        sub_manager = get_sub_agent_manager()
         failed_count = 0
-        spawn_semaphore = asyncio.Semaphore(FOR_EACH_MAX_INFLIGHT)
 
-        async def _spawn_one(tc: Dict, tcid: str):
-            """Spawn one child. Returns (generator, tcid) to drain later, or None on failure."""
+        async def _drain_child(idx: int, child_info: Dict[str, Any]):
             nonlocal failed_count
-            async with spawn_semaphore:
-                # Hold off spawning while parent is paused
-                await workflow.wait_condition(lambda: not workflow_instance.is_paused)
-                gen = self._spawn_sub_agent(
-                    workflow_instance, tc, tcid,
-                    parent_attachments=parent_attachments,
-                )
-                try:
-                    event = await gen.__anext__()
+            tcid = f"{tool_call_id}:{idx}"
+            cfg = agent_cfgs[idx] if idx < len(agent_cfgs) else {}
+            sub_agent_for_finalize = {
+                "goal": cfg.get("goal", ""),
+                "output_schema": cfg.get("output_schema"),
+            }
+            saw_error = False
+            try:
+                async for event in sub_manager.finalize_child(
+                    workflow_instance, child_info, sub_agent_for_finalize, tcid, parent_bus_id
+                ):
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:
-                        failed_count += 1
-                        return None
-                    return (gen, tcid)
-                except StopAsyncIteration:
-                    return None
-                except Exception as exc:
-                    failed_count += 1
-                    logger.warning("for_each child spawn failed", tcid=tcid, error=str(exc))
-                    return None
-
-        async def _drain_one(gen, tcid: str):
-            """Drain remaining events."""
-            nonlocal failed_count
-            last_status = None
-            try:
-                async for event in gen:
-                    await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
-                    if isinstance(event, ToolEvent) and event.status:
-                        last_status = event.status
-                if last_status == MessageStatus.ERROR:
-                    failed_count += 1
+                        saw_error = True
             except Exception as exc:
+                saw_error = True
+                logger.warning("for_each child finalize failed", tcid=tcid, error=str(exc))
+            if saw_error:
                 failed_count += 1
-                logger.warning("for_each child drain failed", tcid=tcid, error=str(exc))
 
-        # Phase 1: Spawn all children
-        spawn_tasks = [asyncio.create_task(_spawn_one(tc, tcid)) for tc, tcid in per_item_calls]
-        spawn_results = await asyncio.gather(*spawn_tasks)
-        pending_gens = [r for r in spawn_results if r is not None]
+        await asyncio.gather(*(asyncio.create_task(_drain_child(i, child)) for i, child in enumerate(children)))
 
-        # Phase 2: Wait for ALL spawned children to complete
-        if pending_gens:
-            drain_tasks = [asyncio.create_task(_drain_one(gen, tcid)) for gen, tcid in pending_gens]
-            await asyncio.gather(*drain_tasks)
-
-        # Propagate failure so DAG executor sees it
         if failed_count > 0:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="for_each failed",
-                message=f"{failed_count}/{len(per_item_calls)} children failed",
+                message=f"{failed_count}/{len(children)} children failed",
                 status=MessageStatus.ERROR,
             )
             return
