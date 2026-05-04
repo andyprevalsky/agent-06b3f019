@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from benchmarks.benchmark_tasks import (
     BenchmarkTask,
     all_tasks,
+    apply_sub_agent_count,
     get_smoke_cap,
     get_task_by_name,
     get_tasks_by_tag,
@@ -1348,6 +1349,14 @@ async def main_async(args):
             if args.row_end is not None:
                 t.row_end = args.row_end
 
+    # Apply CLI sub-agent count override (re-template {n} in prompt + eval_prompt)
+    if args.sub_agent_count is not None:
+        for t in tasks:
+            if t.sub_agent_count is None:
+                continue
+            apply_sub_agent_count(t, args.sub_agent_count)
+            print(f"  🔧 {t.name}: sub_agent_count overridden to {args.sub_agent_count}")
+
     # Authenticate
     print("\n  Authenticating...")
     try:
@@ -1592,6 +1601,12 @@ def main():
         type=int,
         default=None,
         help="Override task row_end — slice CSV attachments ending at this 1-indexed data row (inclusive)",
+    )
+    parser.add_argument(
+        "--sub-agent-count",
+        type=int,
+        default=None,
+        help="Override sub_agent_count — substitutes {n} in prompt/eval_prompt for load-test tasks",
     )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(

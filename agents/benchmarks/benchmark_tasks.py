@@ -28,6 +28,7 @@ class BenchmarkTask:
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts across entire agent tree (toolName → count)
+    sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt/eval_prompt
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -59,6 +60,8 @@ def _load_tasks() -> List[BenchmarkTask]:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
+        if t.sub_agent_count is not None:
+            apply_sub_agent_count(t, t.sub_agent_count)
         if t.name in SMOKE_TIMEOUT_CAPS:
             cap = SMOKE_TIMEOUT_CAPS[t.name]
             if t.timeout_seconds > cap:
@@ -68,6 +71,21 @@ def _load_tasks() -> List[BenchmarkTask]:
                     f"the underlying code instead."
                 )
     return tasks
+
+
+def apply_sub_agent_count(task: BenchmarkTask, n: int) -> None:
+    """Substitute the {n} placeholder in prompt + eval_prompt with the chosen count.
+
+    Caches the original templates on the task so repeat calls (e.g. CLI override
+    after JSON load already substituted) work correctly.
+    """
+    prompt_tpl = getattr(task, "_prompt_template", None) or task.prompt
+    eval_tpl = getattr(task, "_eval_prompt_template", None) or task.eval_prompt
+    task._prompt_template = prompt_tpl
+    task._eval_prompt_template = eval_tpl
+    task.sub_agent_count = n
+    task.prompt = prompt_tpl.replace("{n}", str(n))
+    task.eval_prompt = eval_tpl.replace("{n}", str(n))
 
 
 _cached_tasks: Optional[List[BenchmarkTask]] = None

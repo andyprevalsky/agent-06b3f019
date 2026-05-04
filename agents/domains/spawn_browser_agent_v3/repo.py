@@ -6,7 +6,6 @@ Typed args in, typed results out.
 
 from __future__ import annotations
 
-import json
 import uuid as uuid_module
 from typing import Any, Dict, List, Optional
 

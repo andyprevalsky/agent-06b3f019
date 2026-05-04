@@ -8,6 +8,7 @@ import { prisma } from '../../providers/database';
 
 export {
   createAgentTransaction,
+  createAgentBatchTransaction,
   updateAgent,
   failAgentIfStillActive,
   softDeleteAgent,
@@ -17,6 +18,7 @@ export {
   createAgentTools,
   replaceAgentTools,
 } from './repoMutations';
+export type { BatchCreateAgentParams } from './repoMutations';
 
 // ---------------------------------------------------------------------------
 // Agent queries
@@ -158,6 +160,40 @@ export async function findParentGoal(parentAgentId: string): Promise<string | nu
     select: { goal: true },
   });
   return parent?.goal ?? null;
+}
+
+/** Fetch an agent's proxy geo fields. Used by sub-agent creation to inherit
+ *  the parent's proxyCountry/State/City instead of geolocating the worker IP. */
+export async function findAgentProxy(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      proxyCountry: true,
+      proxyState: true,
+      proxyCity: true,
+    },
+  });
+}
+
+/** Look up existing agents by IDs scoped to a user. Used by the batch-create
+ *  endpoint to skip duplicate inserts on retry — the worker mints stable
+ *  agent_ids upfront, so a re-POST with the same ids returns the existing
+ *  row's status instead of creating duplicates or 409ing. */
+export async function findExistingAgentsByIds(agentIds: string[], userId: string) {
+  return prisma.agent.findMany({
+    where: { id: { in: agentIds }, userId },
+    select: {
+      id: true,
+      status: true,
+      temporalWorkflowId: true,
+      createdAt: true,
+      updatedAt: true,
+      goal: true,
+      model: true,
+      source: true,
+      reasoningMaxTokens: true,
+    },
+  });
 }
 
 /** Fetch parent agent status. */

@@ -25,13 +25,24 @@ interface OpenRouterModel {
   };
 }
 
+// In-process cache layered in front of the DB cache. Prices change ~daily and
+// are read on every agent create; caching here removes one Postgres roundtrip
+// per spawn during sub-agent fan-outs.
+const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }>();
+
 /**
- * Fetch model pricing - checks Supabase cache first, then OpenRouter API
+ * Fetch model pricing - checks in-process cache, then Supabase cache, then OpenRouter API
  */
 export async function getModelPricing(modelId: string): Promise<ModelPricing | null> {
+  const nowMs = Date.now();
+  const memHit = memoryCache.get(modelId);
+  if (memHit && memHit.expiresAt > nowMs) {
+    return memHit.pricing;
+  }
+
   const now = new Date();
 
-  // Check Supabase cache first
+  // Check Supabase cache next
   const cached = await prisma.modelPricingCache.findUnique({
     where: { modelId },
   });
@@ -39,10 +50,12 @@ export async function getModelPricing(modelId: string): Promise<ModelPricing | n
   // If cache exists and hasn't expired, use it
   if (cached && cached.expiresAt > now) {
     log.info(`Using cached pricing for ${modelId}`);
-    return {
+    const pricing = {
       prompt: (cached.tokenInPriceMicrodollars / 1_000_000).toString(),
       completion: (cached.tokenOutPriceMicrodollars / 1_000_000).toString(),
     };
+    memoryCache.set(modelId, { pricing, expiresAt: cached.expiresAt.getTime() });
+    return pricing;
   }
 
   // Cache miss or expired - fetch from OpenRouter
@@ -144,5 +157,11 @@ async function upsertPricing(modelId: string, pricing: ModelPricing, now: Date) 
     },
   });
 
+  memoryCache.set(modelId, { pricing, expiresAt: expiresAt.getTime() });
   log.info(`Cached pricing for ${modelId} (expires in 24h)`);
+}
+
+/** Test-only: clear the in-process pricing cache. */
+export function _clearPricingMemoryCache() {
+  memoryCache.clear();
 }

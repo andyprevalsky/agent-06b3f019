@@ -37,8 +37,15 @@ export function resolvePromptSecrets(text: string): string {
   });
 }
 
-/** Fetch model pricing and resolve geolocation. */
-async function resolveCreateMetadata(model: string, clientIP: string | null) {
+/** Fetch model pricing and resolve geolocation. Sub-agents inherit their
+ *  parent's stored proxy fields rather than geolocating the worker IP, which
+ *  would otherwise stamp every sub-agent with the Fly.io worker's location.
+ *  Exported so agentBatchService can reuse the exact same path. */
+export async function resolveCreateMetadata(
+  model: string,
+  clientIP: string | null,
+  parentAgentId: string | null
+) {
   const pricing = await getModelPricing(model);
   let tokenInPriceMicrodollars: number | null = null;
   let tokenOutPriceMicrodollars: number | null = null;
@@ -49,7 +56,16 @@ async function resolveCreateMetadata(model: string, clientIP: string | null) {
   }
 
   let proxyGeo = DEFAULT_GEOLOCATION;
-  if (clientIP !== null) {
+  if (parentAgentId !== null) {
+    const parentProxy = await repo.findAgentProxy(parentAgentId);
+    if (parentProxy !== null && parentProxy !== undefined && parentProxy.proxyCountry !== null) {
+      proxyGeo = {
+        country: parentProxy.proxyCountry,
+        ...(parentProxy.proxyState !== null ? { state: parentProxy.proxyState } : {}),
+        ...(parentProxy.proxyCity !== null ? { city: parentProxy.proxyCity } : {}),
+      };
+    }
+  } else if (clientIP !== null) {
     const geo = await getGeoFromIP(clientIP);
     if (geo !== null && geo !== undefined) {
       proxyGeo = geo;
@@ -59,8 +75,14 @@ async function resolveCreateMetadata(model: string, clientIP: string | null) {
   return { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo };
 }
 
+// Note: the batch service composes resolveCreateMetadata via a wrapper there;
+// see agentBatchService.ts. Resolving here directly avoids exporting the
+// private helper and keeps this file under the lint budget.
+
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
-/** Start a sub-agent workflow and update DB. */
+/** Start a sub-agent workflow. The Agent row already has temporalWorkflowId
+ *  set to agentId by createAgentTransaction (workflow ID === agent ID by
+ *  convention; see providers/temporal.ts:88), so no UPDATE is needed here. */
 async function startSubAgentWorkflow(
   body: CreateAgentBody,
   agentDbId: string,
@@ -68,7 +90,7 @@ async function startSubAgentWorkflow(
   verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
-  const workflowId = await startAgentWorkflow({
+  return startAgentWorkflow({
     agentId: agentDbId,
     userId,
     goal: body.goal,
@@ -85,8 +107,6 @@ async function startSubAgentWorkflow(
     priceLimitCents,
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
   });
-  await repo.updateAgent(agentDbId, { temporalWorkflowId: workflowId });
-  return workflowId;
 }
 
 /** Start root agent directly in plan/execute (bypass chat). */
@@ -116,7 +136,8 @@ async function startDirectWorkflow(
     startPhase,
     priceLimitCents,
   });
-  await repo.updateAgent(agentDbId, { temporalWorkflowId: workflowId });
+  // temporalWorkflowId was set during createAgentTransaction (see comment on
+  // startSubAgentWorkflow above), so no UPDATE is needed here.
   await broadcastAgentModeStarted(agentDbId);
   return workflowId;
 }
@@ -187,10 +208,16 @@ export async function createAgent(
     body.goal = resolvePromptSecrets(body.goal);
   }
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
-  const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
-    await resolveCreateMetadata(body.model, clientIP);
   const isSubAgent = body.parent_agent_id !== undefined;
-  const agentId = randomUUID();
+  const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
+    await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null);
+  const agentId = body.agent_id ?? randomUUID();
+  // Workflow ID === agent ID by convention (see providers/temporal.ts:88).
+  // For sub-agents and direct (plan/execute) root agents, the workflow always
+  // starts immediately after this transaction, so set the column up-front and
+  // skip the post-launch UPDATE. Chat-mode roots leave it null until they
+  // transition out of chat.
+  const willStartWorkflow = isSubAgent || body.start_phase !== undefined;
   const agent = await repo.createAgentTransaction({
     agentId,
     userId,
@@ -212,6 +239,7 @@ export async function createAgent(
     priceLimitCents: body.price_limit_cents,
     verifierType: verifier.type,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
+    temporalWorkflowId: willStartWorkflow ? agentId : null,
   });
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);

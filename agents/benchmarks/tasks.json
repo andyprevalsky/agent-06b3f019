@@ -259,6 +259,23 @@
     "start_phase": "plan"
   },
   {
+    "name": "load-test-sias",
+    "title": "Load-Test: Fan Out N SIA Sub-Agents",
+    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} SIA sub-agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_sub_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every sub-agent (the row context will append the assigned ID): \"You are a load-test sub-agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. Briefly show the arithmetic, then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every sub-agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_sub_agent_for_each + attempt_completion.",
+    "eval_prompt": "Agent issued a single spawn_sub_agent_for_each tool call with type=for_each that fanned out exactly {n} SIA sub-agents (one per integer ID 1..{n}). Each child computed value = ID*ID + ID*3 + 7 via reasoning only — no web_search, web_fetch, browser, code, or nested spawn_agent calls. Parent collected all {n} structured `value` outputs and reported the final sum. The expected sum for {n}=30 with this formula is 11060 (sum_{i=1..30} (i^2 + 3i + 7)); for other n, the LLM judge can validate by summing the formula. Pass requires: (a) exactly {n} sub-agents spawned, (b) every child returned a numeric value, (c) parent reported a single numeric sum.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["load-test", "scale"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "sub_agent_count": 30
+  },
+  {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
     "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",

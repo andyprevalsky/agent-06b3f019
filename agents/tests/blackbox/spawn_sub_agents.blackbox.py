@@ -759,6 +759,192 @@ def test_get_manager_singleton():
     assert a.tool_name == "spawn_sub_agent"
 
 
+# ── spawn_sub_agents_batch_activity ────────────────────────────────────
+
+
+def _setup_batch_mock(results):
+    """Set up the /api/agents/batch endpoint with a fixed results array."""
+    setup_mock(
+        {
+            "/api/agents/batch": {
+                "status": 201 if all(r["status"] != "FAILED" for r in results) else 207,
+                "json": {"results": results},
+            },
+        }
+    )
+
+
+async def test_batch_happy_path_returns_spawn_result():
+    """Batch endpoint returns N STARTING_UP results -> SpawnResult shape preserved."""
+    _setup_batch_mock(
+        [
+            {"agent_id": "c-1", "status": "STARTING_UP", "temporal_workflow_id": "c-1", "goal": "G1"},
+            {"agent_id": "c-2", "status": "STARTING_UP", "temporal_workflow_id": "c-2", "goal": "G2"},
+            {"agent_id": "c-3", "status": "STARTING_UP", "temporal_workflow_id": "c-3", "goal": "G3"},
+        ]
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+
+        result = await spawn_sub_agents_batch_activity(
+            user_id="u-1",
+            sub_agents=[{"goal": f"G{i}", "verifier": {}} for i in (1, 2, 3)],
+            parent_agent_id="p-1",
+            parent_workflow_id="wf-p-1",
+            depth=1,
+            parent_is_paused=False,
+            child_agent_ids=["c-1", "c-2", "c-3"],
+        )
+    assert result["spawned"] == 3
+    assert result["completed"] == 3
+    assert result["failed"] == 0
+    assert {a["agent_id"] for a in result["agents"]} == {"c-1", "c-2", "c-3"}
+    teardown_mock()
+
+
+async def test_batch_partial_failure_marks_failed_in_result():
+    """Mixed STARTING_UP + FAILED in 207 response -> proper completed/failed counts."""
+    _setup_batch_mock(
+        [
+            {"agent_id": "c-1", "status": "STARTING_UP", "temporal_workflow_id": "c-1", "goal": "G1"},
+            {"agent_id": "c-2", "status": "FAILED", "temporal_workflow_id": None, "error": "boom"},
+            {"agent_id": "c-3", "status": "STARTING_UP", "temporal_workflow_id": "c-3", "goal": "G3"},
+        ]
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+
+        result = await spawn_sub_agents_batch_activity(
+            user_id="u-1",
+            sub_agents=[{"goal": "G1", "verifier": {}}, {"goal": "G2", "verifier": {}}, {"goal": "G3", "verifier": {}}],
+            parent_agent_id="p-1",
+            parent_workflow_id="wf-p-1",
+            depth=1,
+            parent_is_paused=False,
+            child_agent_ids=["c-1", "c-2", "c-3"],
+        )
+    assert result["completed"] == 2
+    assert result["failed"] == 1
+    failed_entry = next(a for a in result["agents"] if a["agent_id"] == "c-2")
+    assert failed_entry["status"] == "FAILED"
+    assert failed_entry["error"] == "boom"
+    teardown_mock()
+
+
+async def test_batch_posts_caller_supplied_agent_ids():
+    """Activity sends each child's agent_id verbatim to the backend."""
+    _setup_batch_mock(
+        [
+            {"agent_id": "fixed-1", "status": "STARTING_UP", "temporal_workflow_id": "fixed-1"},
+            {"agent_id": "fixed-2", "status": "STARTING_UP", "temporal_workflow_id": "fixed-2"},
+        ]
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+
+        await spawn_sub_agents_batch_activity(
+            user_id="u-1",
+            sub_agents=[{"goal": "G1", "verifier": {}}, {"goal": "G2", "verifier": {}}],
+            parent_agent_id="p-1",
+            parent_workflow_id="wf-p-1",
+            depth=1,
+            parent_is_paused=False,
+            child_agent_ids=["fixed-1", "fixed-2"],
+        )
+    reqs = get_captured_requests()
+    posted = [r for r in reqs if r["method"] == "POST" and r["url"].endswith("/api/agents/batch")]
+    assert len(posted) == 1, f"Expected 1 POST to /batch, got {len(posted)}"
+    body = json.loads(posted[0]["requestBody"])
+    posted_ids = [a["agent_id"] for a in body["agents"]]
+    assert posted_ids == ["fixed-1", "fixed-2"], f"Got {posted_ids}"
+    teardown_mock()
+
+
+async def test_batch_mints_ids_when_not_supplied():
+    """If no child_agent_ids are passed, activity generates UUIDs and includes them."""
+    _setup_batch_mock(
+        [
+            {"agent_id": "x", "status": "STARTING_UP", "temporal_workflow_id": "x"},
+        ]
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+
+        await spawn_sub_agents_batch_activity(
+            user_id="u-1",
+            sub_agents=[{"goal": "only", "verifier": {}}],
+            parent_agent_id="p-1",
+            parent_workflow_id="wf-p-1",
+            depth=1,
+            parent_is_paused=False,
+        )
+    reqs = get_captured_requests()
+    posted = [r for r in reqs if r["method"] == "POST" and r["url"].endswith("/api/agents/batch")]
+    body = json.loads(posted[0]["requestBody"])
+    assert "agent_id" in body["agents"][0]
+    # Has UUID shape (8-4-4-4-12)
+    aid = body["agents"][0]["agent_id"]
+    parts = aid.split("-")
+    assert len(parts) == 5 and len(aid) == 36, f"Not a UUID: {aid}"
+    teardown_mock()
+
+
+def test_build_spawn_result_from_batch_zero_results():
+    """Empty results list -> zero spawned/completed/failed."""
+    from domains.spawn_sub_agents.service import _build_spawn_result_from_batch
+
+    out = _build_spawn_result_from_batch([], [])
+    assert out["spawned"] == 0 and out["completed"] == 0 and out["failed"] == 0
+
+
+def test_build_spawn_result_from_batch_unknown_status_treated_as_starting_up():
+    """A result without explicit status defaults to STARTING_UP (not FAILED)."""
+    from domains.spawn_sub_agents.service import _build_spawn_result_from_batch
+
+    out = _build_spawn_result_from_batch(
+        [{"agent_id": "c-1", "status": "", "temporal_workflow_id": "c-1"}],
+        [{"goal": "G"}],
+    )
+    assert out["completed"] == 1 and out["failed"] == 0
+    assert out["agents"][0]["status"] == "STARTING_UP"
+
+
+async def test_batch_retries_on_429():
+    """A 429 from the backend causes the activity to retry. Final 201 wins."""
+    # First mock returns 429, second returns 201. We cycle responses by
+    # re-arming the mock between requests via teardown/setup. The simplest
+    # approach: assert that retry path is exercised via the 429 status code
+    # being parsed and passed to backoff (no exception thrown for ≥429 retry
+    # within MAX_SPAWN_ATTEMPTS).
+    setup_mock(
+        {
+            "/api/agents/batch": {"status": 429, "json": {"error": "Too many requests"}},
+        }
+    )
+    raised = False
+    with patch("temporalio.activity.heartbeat"), patch("asyncio.sleep") as sleep_mock:
+        sleep_mock.return_value = None
+        try:
+            from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+
+            await spawn_sub_agents_batch_activity(
+                user_id="u-1",
+                sub_agents=[{"goal": "G", "verifier": {}}],
+                parent_agent_id="p-1",
+                parent_workflow_id="wf-1",
+                depth=1,
+                parent_is_paused=False,
+                child_agent_ids=["c-1"],
+            )
+        except RuntimeError as e:
+            raised = True
+            assert "429" in str(e)
+    # Sleep should have been called between retries (at least once).
+    assert sleep_mock.call_count >= 1, "Expected backoff sleeps between retries"
+    assert raised, "Persistent 429 should ultimately raise RuntimeError"
+    teardown_mock()
+
+
 async def run_all_tests():
     print("spawn-sub-agents blackbox tests:")
     r = BlackboxResult()
@@ -798,6 +984,14 @@ async def run_all_tests():
     await r.record_async("fetch_parent_attachments_activity", test_fetch_parent_attachments_activity)
     # singleton
     r.record("get_manager_singleton", test_get_manager_singleton)
+    # batch activity
+    await r.record_async("batch_happy_path", test_batch_happy_path_returns_spawn_result)
+    await r.record_async("batch_partial_failure", test_batch_partial_failure_marks_failed_in_result)
+    await r.record_async("batch_posts_supplied_ids", test_batch_posts_caller_supplied_agent_ids)
+    await r.record_async("batch_mints_ids", test_batch_mints_ids_when_not_supplied)
+    r.record("batch_result_zero", test_build_spawn_result_from_batch_zero_results)
+    r.record("batch_result_unknown_status", test_build_spawn_result_from_batch_unknown_status_treated_as_starting_up)
+    await r.record_async("batch_retries_on_429", test_batch_retries_on_429)
     teardown_mock()
     return r.all_passed
 

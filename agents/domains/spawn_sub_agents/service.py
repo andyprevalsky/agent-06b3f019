@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import uuid
 from typing import Any, Dict, List
 
 import structlog
@@ -17,7 +18,12 @@ from domains.spawn_sub_agents.config import (
     MAX_SPAWN_ATTEMPTS,
     RETRYABLE_STATUS_CODES,
 )
-from domains.spawn_sub_agents.repo import create_sub_agent, fetch_parent_attachments, spawn_http_client
+from domains.spawn_sub_agents.repo import (
+    create_sub_agent,
+    create_sub_agents_batch,
+    fetch_parent_attachments,
+    spawn_http_client,
+)
 from domains.spawn_sub_agents.types import SpawnResult
 from helpers.tracing import traced
 
@@ -217,7 +223,9 @@ async def spawn_sub_agent_activity(
             all_pointers_by_id = parent_attachments.get("all_pointers_by_id", {})
         else:
             activity.heartbeat("Fetching parent agent's attachments...")
-            filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(backend_url, api_key, parent_agent_id)
+            filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(
+                backend_url, api_key, parent_agent_id
+            )
 
         # Spawn with bounded concurrency
         async with spawn_http_client() as client:
@@ -338,3 +346,207 @@ async def spawn_sub_agent_activity(
     except Exception as e:
         logger.error("Failed to spawn sub-agents", error=str(e))
         raise
+
+
+# ---------------------------------------------------------------------------
+# Batch activity: one HTTP call → up to 200 sub-agents.
+# ---------------------------------------------------------------------------
+
+
+def _build_batch_payload_item(
+    user_id: str,
+    agent_cfg: Dict[str, Any],
+    parent_agent_id: str,
+    parent_workflow_id: str,
+    depth: int,
+    parent_is_paused: bool,
+    parent_model: str,
+    bus_id: str | None,
+    parent_source: str,
+    resolved_attachments: List[Dict[str, Any]],
+    agent_id: str,
+) -> Dict[str, Any]:
+    """Build one entry of the batch POST body. Mirrors `build_spawn_payload`
+    but adds `agent_id` so the call is idempotent on retry."""
+    payload = build_spawn_payload(
+        user_id=user_id,
+        agent_cfg=agent_cfg,
+        parent_agent_id=parent_agent_id,
+        parent_workflow_id=parent_workflow_id,
+        depth=depth,
+        parent_is_paused=parent_is_paused,
+        parent_model=parent_model,
+        bus_id=bus_id,
+        parent_source=parent_source,
+        resolved_attachments=resolved_attachments,
+    )
+    payload["agent_id"] = agent_id
+    return payload
+
+
+@activity.defn
+@traced("spawn_sub_agents_batch_activity")
+async def spawn_sub_agents_batch_activity(
+    user_id: str,
+    sub_agents: List[Dict[str, Any]],
+    parent_agent_id: str,
+    parent_workflow_id: str,
+    depth: int,
+    parent_is_paused: bool,
+    parent_model: str = "rose-labs/rose-1-lite",
+    bus_id: str | None = None,
+    parent_source: str = "WEB",
+    parent_attachments: ParentAttachments | None = None,
+    child_agent_ids: List[str] | None = None,
+) -> SpawnResult:
+    """Spawn N sub-agents in one HTTP call to POST /api/agents/batch.
+
+    Mints a stable agent_id per child upfront (or reuses ``child_agent_ids``
+    when supplied) so that activity-level retries are idempotent: re-POSTing
+    the same ids returns the existing rows untouched (already_existed=true).
+
+    Retries the HTTP call on 429/5xx with exponential backoff per the existing
+    constants (MAX_SPAWN_ATTEMPTS, BASE_BACKOFF_SECONDS). Permanent failures
+    (4xx other than 429) propagate as activity errors so the workflow can
+    decide whether to fail the for_each.
+    """
+    structlog.contextvars.bind_contextvars(agent_id=parent_agent_id)
+
+    activity.heartbeat(f"Batch-spawning {len(sub_agents)} sub-agents")
+
+    config = load_config()
+    backend_url = config.backend.api_url.rstrip("/")
+    api_key = config.backend.api_key
+    if not api_key:
+        raise ValueError("BACKEND_API_KEY not configured - required for spawning sub-agents")
+
+    if parent_attachments is not None:
+        filename_to_pointer = parent_attachments.get("filename_to_pointer", {})
+        all_pointers_by_id = parent_attachments.get("all_pointers_by_id", {})
+    else:
+        activity.heartbeat("Fetching parent agent's attachments...")
+        filename_to_pointer, all_pointers_by_id = await fetch_parent_attachments(backend_url, api_key, parent_agent_id)
+
+    # Mint or reuse caller-supplied ids — used as the canonical agent_id for
+    # each child row so retries from this activity are idempotent.
+    minted_ids = (
+        list(child_agent_ids)
+        if child_agent_ids is not None and len(child_agent_ids) == len(sub_agents)
+        else [str(uuid.uuid4()) for _ in sub_agents]
+    )
+
+    payloads = [
+        _build_batch_payload_item(
+            user_id=user_id,
+            agent_cfg=agent_cfg,
+            parent_agent_id=parent_agent_id,
+            parent_workflow_id=parent_workflow_id,
+            depth=depth,
+            parent_is_paused=parent_is_paused,
+            parent_model=parent_model,
+            bus_id=bus_id,
+            parent_source=parent_source,
+            resolved_attachments=resolve_attachments_for_sub_agent(agent_cfg, filename_to_pointer, all_pointers_by_id),
+            agent_id=minted_ids[i],
+        )
+        for i, agent_cfg in enumerate(sub_agents)
+    ]
+
+    last_error = "unknown error"
+    async with spawn_http_client() as client:
+        for attempt in range(1, MAX_SPAWN_ATTEMPTS + 1):
+            try:
+                activity.heartbeat(f"Batch attempt {attempt} ({len(payloads)} agents)")
+                response = await create_sub_agents_batch(client, backend_url, api_key, payloads)
+
+                # 201 (all succeeded) and 207 (partial workflow-start failure)
+                # both carry a valid `results` body. 4xx (non-429) is permanent;
+                # 429/5xx is retryable per existing convention.
+                if response.status_code in (200, 201, 207):
+                    body = response.json() or {}
+                    results = body.get("results", [])
+                    if not isinstance(results, list):
+                        raise ValueError(f"Malformed batch response (no results array): {body}")
+                    return _build_spawn_result_from_batch(results, sub_agents)
+
+                status_code = response.status_code
+                response_text = response.text[:500]
+                last_error = f"HTTP {status_code}: {response_text}"
+                if status_code in RETRYABLE_STATUS_CODES and attempt < MAX_SPAWN_ATTEMPTS:
+                    delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    sleep_s = delay + random.uniform(0, delay * 0.3)
+                    logger.warning(
+                        "Retrying batch spawn after HTTP error",
+                        attempt=attempt,
+                        status_code=status_code,
+                        sleep_seconds=round(sleep_s, 2),
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+                logger.error(
+                    "Batch spawn HTTP error (non-retryable)",
+                    status_code=status_code,
+                    response_text=response_text,
+                )
+                raise RuntimeError(last_error)
+
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt < MAX_SPAWN_ATTEMPTS:
+                    delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    sleep_s = delay + random.uniform(0, delay * 0.3)
+                    logger.warning(
+                        "Retrying batch spawn after exception",
+                        attempt=attempt,
+                        error=last_error,
+                        sleep_seconds=round(sleep_s, 2),
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+                logger.error("Batch spawn failed (exhausted retries)", error=last_error)
+                raise
+
+    raise RuntimeError(f"Batch spawn unreachable end-of-loop: {last_error}")
+
+
+def _build_spawn_result_from_batch(
+    results: List[Dict[str, Any]],
+    sub_agents: List[Dict[str, Any]],
+) -> SpawnResult:
+    """Reshape backend batch results into the same SpawnResult that today's
+    per-child spawn_sub_agent_activity returns, so the for_each handler can
+    drop in the new activity without changing its consumer code."""
+    spawned: List[Dict[str, Any]] = []
+    completed = 0
+    failed = 0
+    for i, r in enumerate(results):
+        status = (r.get("status") or "").upper()
+        agent_id = r.get("agent_id", "")
+        goal = r.get("goal") or sub_agents[i].get("goal", "")
+        if status == "FAILED":
+            failed += 1
+            spawned.append(
+                {
+                    "agent_id": agent_id,
+                    "goal": goal,
+                    "status": "FAILED",
+                    "error": r.get("error") or "workflow start failed",
+                }
+            )
+            continue
+        completed += 1
+        spawned.append(
+            {
+                "agent_id": agent_id,
+                "temporal_workflow_id": r.get("temporal_workflow_id"),
+                "goal": goal,
+                "model": r.get("model"),
+                "status": status or "STARTING_UP",
+            }
+        )
+    return SpawnResult(
+        spawned=len(spawned),
+        completed=completed,
+        failed=failed,
+        agents=spawned,
+    )

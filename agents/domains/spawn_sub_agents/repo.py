@@ -84,3 +84,22 @@ async def create_sub_agent(
         headers=backend_api_headers(api_key),
         json=payload,
     )
+
+
+async def create_sub_agents_batch(
+    client: httpx.AsyncClient,
+    backend_url: str,
+    api_key: str,
+    payloads: list[Dict[str, Any]],
+) -> httpx.Response:
+    """POST to the batch endpoint to create up to 200 sub-agents in one call.
+
+    Each payload must include `agent_id`. The backend returns a 201 (all
+    succeeded) or 207 (partial: some workflow starts failed) with a
+    `{ results: [...] }` body whose entries mirror the input order.
+    """
+    return await client.post(
+        f"{backend_url}/api/agents/batch",
+        headers=backend_api_headers(api_key),
+        json={"agents": payloads},
+    )
