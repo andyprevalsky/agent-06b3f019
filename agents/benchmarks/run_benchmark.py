@@ -1524,7 +1524,7 @@ async def main_async(args):
         "browser-smoke": 45.0,       # observed 47.8%
     }
 
-    cache_failures: list[str] = []
+    cache_failures: list[tuple[str, str, float, float]] = []
     for r in run.task_results:
         floor = PER_TASK_CACHE_HIT_RATCHET.get(r.name)
         if floor is None:
@@ -1536,16 +1536,26 @@ async def main_async(args):
             r.cache_read_input_tokens / per_task_total * 100, 1
         )
         if per_task_pct < floor:
-            cache_failures.append(
-                f"{r.name}: {per_task_pct}% < {floor}% ratchet"
-            )
+            cache_failures.append((r.name, r.agent_id, per_task_pct, floor))
 
     if cache_failures:
-        print("\n  CACHE FAIL (per-task ratchet):")
-        for line in cache_failures:
-            print(f"    - {line}")
-        if args.ci:
-            sys.exit(1)
+        print("\n  ❌ CACHE RATCHET FAILED (per-task prompt-cache hit floor):")
+        for name, _aid, pct, floor in cache_failures:
+            print(f"    - {name}: {pct}% < {floor}% ratchet")
+        print(
+            "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
+            "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
+        )
+        for name, aid, _pct, _floor in cache_failures:
+            print(
+                f"    cd agents && source venv/bin/activate && "
+                f"python benchmarks/agent_cache.py {aid}  # {name}"
+            )
+        print(
+            "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
+            "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
+        )
+        sys.exit(1)
 
     # CI mode: exit non-zero if any task failed
     if args.ci and s["failed"] > 0:

@@ -15,7 +15,7 @@
     "dev": "MAC_APP_PORT=${MAC_APP_PORT:-5174} && tsc -p tsconfig.main.json && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:$MAC_APP_PORT && electron .\"",
     "build": "vite build && tsc -p tsconfig.main.json && electron-builder",
     "build:vite": "vite build && tsc -p tsconfig.main.json",
-    "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
+    "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx --yes node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
     "type-check": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

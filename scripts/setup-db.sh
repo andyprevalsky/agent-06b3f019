@@ -31,10 +31,23 @@ if ! docker ps &>/dev/null 2>&1; then
     fi
 fi
 
-# Create Postgres container (skip if already exists)
+# Create Postgres container (recreate if port mapping drifted)
 if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    echo "🐘 Postgres container exists, starting..."
-    docker start "$DB_CONTAINER" >/dev/null 2>&1 || true
+    EXISTING_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}')
+    if [ "$EXISTING_PORT" != "$LOCAL_DB_PORT" ]; then
+        echo "🐘 Postgres container port drift ($EXISTING_PORT → $LOCAL_DB_PORT), recreating..."
+        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+        docker run -d \
+            --name "$DB_CONTAINER" \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=victoria \
+            -p "$LOCAL_DB_PORT:5432" \
+            -v "$DB_VOLUME:/var/lib/postgresql/data" \
+            postgres:16-alpine >/dev/null
+    else
+        echo "🐘 Postgres container exists, starting..."
+        docker start "$DB_CONTAINER" >/dev/null 2>&1 || true
+    fi
 else
     echo "🐘 Creating local Postgres container..."
     docker run -d \
