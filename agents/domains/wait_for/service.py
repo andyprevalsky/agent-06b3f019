@@ -69,11 +69,9 @@ async def evaluate_condition_activity(
     Returns:
         Dict with satisfied (bool), reasoning (str)
     """
-    from helpers.llm import call_llm, prepare_schema_for_openai
+    from helpers.llm import call_llm
 
     activity.heartbeat("Evaluating condition")
-
-    schema = prepare_schema_for_openai(ConditionEvaluation)
 
     system_prompt = (
         "You are a yes/no classifier. Given a condition and evidence gathered from "
@@ -91,14 +89,7 @@ async def evaluate_condition_activity(
         messages,
         model=model,
         max_tokens=200,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "ConditionEvaluation",
-                "schema": schema,
-                "strict": True,
-            },
-        },
+        response_model=ConditionEvaluation,
         claude_token=claude_token,
         skip_cache_write=True,  # Unique evidence each poll -- no cache reuse
         call_site="wait_for",

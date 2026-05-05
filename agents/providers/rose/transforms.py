@@ -498,6 +498,7 @@ def apply_anthropic_tool_config(
                 {
                     "name": t.get("name"),
                     "description": t.get("description"),
+                    **({"strict": t.get("strict")} if "strict" in t else {}),
                     "input_schema": t.get("input_schema"),
                 }
                 for t in tools

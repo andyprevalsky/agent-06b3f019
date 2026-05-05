@@ -15,7 +15,7 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, create_model
 from temporalio import activity
 
 from config import load_config
@@ -34,6 +34,10 @@ from providers.rose import (
     RoseError,
     claude_auth_from_token,
     pool_for_model,
+)
+from providers.rose.schema import (
+    SYNTHETIC_OUTPUT_TOOL_NAME,
+    build_openai_response_format,
 )
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
@@ -1155,13 +1159,6 @@ async def call_llm_structured_streaming(  # noqa: C901
             f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
         )
 
-        # Build JSON schema from Pydantic model
-        schema = prepare_schema_for_openai(response_model)
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {"name": response_model.__name__, "schema": schema, "strict": True},
-        }
-
         # Stream state
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
         accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
@@ -1211,7 +1208,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             async for chunk in rose_client.complete(
                 pool=pool,
                 messages=messages,
-                response_format=response_format,
+                response_model=response_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=model_seed,
@@ -2092,6 +2089,7 @@ async def call_llm(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     response_format: Optional[Dict] = None,
+    response_model: Optional[Type[BaseModel]] = None,
     claude_token: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
@@ -2126,17 +2124,25 @@ async def call_llm(
         config = load_config()
         model = model or config.openrouter.model
 
+        if response_format is not None and response_model is not None:
+            raise ValueError("call_llm accepts either response_model or response_format, not both")
+
+        effective_response_format = response_format
+        if response_model is not None:
+            effective_response_format = build_openai_response_format(response_model)
+
         dump_llm_context(
             call_site=call_site,
             messages=messages,
             agent_id=agent_id,
             model=model,
-            response_format=response_format,
+            response_format=effective_response_format,
             extra={
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "skip_cache_write": skip_cache_write,
                 "has_claude_token": claude_token is not None,
+                "response_model": response_model.__name__ if response_model else None,
             },
         )
 
@@ -2155,7 +2161,7 @@ async def call_llm(
                 rose_response = await rose_client.collect(
                     pool=pool,
                     messages=messages,
-                    response_format=response_format,
+                    response_model=response_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     skip_cache_write=skip_cache_write,
@@ -2173,6 +2179,11 @@ async def call_llm(
                 raise ValueError(f"Rose call failed: {exc}") from exc
 
             content = rose_response.content
+            if response_model is not None:
+                content = _content_from_structured_rose_response(
+                    rose_response.tool_calls,
+                    response_model,
+                ) or content
             usage = rose_response.usage or {}
 
             result = {
@@ -2210,7 +2221,7 @@ async def call_llm(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=response_format,
+            response_format=effective_response_format,
         )
 
         # Log full response to debug
@@ -2222,6 +2233,8 @@ async def call_llm(
         )
 
         content = response.choices[0].message.content or ""
+        if response_model is not None and content:
+            content = response_model.model_validate_json(content).model_dump_json()
 
         result = {
             "content": content,
@@ -2247,6 +2260,31 @@ async def call_llm(
     except Exception as e:
         logger.error("LLM call failed", error=extract_error_message(e))
         raise
+
+
+def _content_from_structured_rose_response(
+    tool_calls: List[Dict[str, Any]],
+    response_model: Type[BaseModel],
+) -> Optional[str]:
+    for tool_call in tool_calls:
+        if tool_call.get("name") != SYNTHETIC_OUTPUT_TOOL_NAME:
+            continue
+        arguments = tool_call.get("arguments") or ""
+        if not isinstance(arguments, str) or not arguments:
+            continue
+        try:
+            validated = response_model.model_validate_json(arguments)
+            return validated.model_dump_json()
+        except Exception:
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict) and set(parsed) == {"value"}:
+                    validated = response_model.model_validate(parsed["value"])
+                    return validated.model_dump_json()
+            except Exception:
+                pass
+            return arguments
+    return None
 
 
 # NOTE: decide_next_action was removed - it was dead code (never called)
@@ -2291,6 +2329,7 @@ async def _call_llm_verifier(  # noqa: C901
         f"all verifier paths must go through check_progress, which forces rose-1-ultra."
     )
 
+    response_model = _build_verifier_response_model(response_schema)
     response_format = _build_verifier_json_schema(response_schema)
 
     dump_llm_context(
@@ -2317,7 +2356,7 @@ async def _call_llm_verifier(  # noqa: C901
         async for chunk in rose_client.complete(
             pool=pool,
             messages=messages,
-            response_format=response_format,
+            response_model=response_model,
             temperature=0.3,
             max_tokens=4096,
             claude_auth=claude_auth_from_token(claude_token),
@@ -2398,7 +2437,7 @@ async def _call_llm_verifier(  # noqa: C901
     if not json_content:
         raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
 
-    parsed = json.loads(json_content)
+    parsed = response_model.model_validate(json.loads(json_content)).model_dump()
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -2412,6 +2451,72 @@ async def _call_llm_verifier(  # noqa: C901
     }
 
     return parsed, usage
+
+
+def _build_verifier_response_model(
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> Type[BaseModel]:
+    """Build the verifier's Pydantic contract for RoseClient.complete."""
+    fields: Dict[str, Any] = {}
+    openai_strict = True
+
+    if response_schema and response_schema.get("fields"):
+        output_fields: Dict[str, Any] = {}
+        for field in response_schema["fields"]:
+            if field.get("type") in ("object", "list[object]"):
+                openai_strict = False
+            annotation = _verifier_field_annotation(field.get("type"))
+            output_fields[field["name"]] = (
+                annotation,
+                Field(..., description=field.get("description", "")),
+            )
+        output_model = create_model("VerifierOutput", **output_fields)
+        fields["output"] = (output_model, ...)
+
+    fields["reasoning"] = (
+        str,
+        Field(
+            ...,
+            description=(
+                "Detailed walk-through anchored in tool messages. When score < 1.0, "
+                "name the missing fields or missing goal evidence."
+            ),
+        ),
+    )
+    fields["score"] = (float, Field(..., ge=0, le=1))
+
+    name = "ProgressScoreWithOutput" if response_schema else "ProgressScore"
+    model = create_model(name, **fields)
+    setattr(model, "rose_openai_strict", openai_strict)
+    return model
+
+
+def _verifier_field_annotation(field_type: Optional[str]) -> Any:
+    if field_type == "str":
+        return str
+    if field_type == "int":
+        return int
+    if field_type == "float":
+        return float
+    if field_type == "bool":
+        return bool
+    if field_type == "list[str]":
+        return List[str]
+    if field_type == "list[int]":
+        return List[int]
+    if field_type == "object":
+        return Dict[str, Any]
+    if field_type == "list[object]":
+        return List[Dict[str, Any]]
+    if field_type == "file_pointer":
+        return FilePointer
+    if field_type == "list[file_pointer]":
+        return List[FilePointer]
+    if field_type == "session_file_pointer":
+        return Dict[str, str]
+    if field_type == "list[session_file_pointer]":
+        return List[Dict[str, str]]
+    return str
 
 
 def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

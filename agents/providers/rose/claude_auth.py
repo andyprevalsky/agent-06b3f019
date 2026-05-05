@@ -195,6 +195,10 @@ def build_anthropic_body(
     # deterministic across retries/rotations.
     native_tools = tools
     came_from_response_format = False
+    force_structured_native_tool = any(
+        isinstance(tool, dict) and tool.get("__rose_force_tool_choice")
+        for tool in (native_tools or [])
+    )
     if native_tools is None and response_format is not None:
         extracted = _extract_tools_from_response_format(response_format)
         if extracted is not None:
@@ -227,7 +231,7 @@ def build_anthropic_body(
     #     more than forcing the call; downgrade to auto.
     tc = body.get("tool_choice", {})
     if isinstance(tc, dict) and tc.get("type") in ("any", "tool") and "thinking" in body:
-        if came_from_response_format:
+        if came_from_response_format or force_structured_native_tool:
             body.pop("thinking", None)
         else:
             body["tool_choice"] = {"type": "auto"}
@@ -390,10 +394,10 @@ async def _attempt_with_token(
                         request_id=request_id,
                         agent_id=agent_id,
                         call_site=call_site,
-                        body=error_body[:500],
+                        body=error_body[:2000],
                     )
                     raise RoseInvalidRequest(
-                        f"Anthropic 400: {error_body[:200]}",
+                        f"Anthropic 400: {error_body[:2000]}",
                         status=status,
                     )
 
@@ -402,12 +406,12 @@ async def _attempt_with_token(
                         await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(
-                        f"Anthropic {status}: {error_body[:200]}",
+                        f"Anthropic {status}: {error_body[:2000]}",
                         status=status,
                     )
 
                 raise RoseError(
-                    f"Anthropic {status}: {error_body[:200]}",
+                    f"Anthropic {status}: {error_body[:2000]}",
                     status=status,
                 )
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:

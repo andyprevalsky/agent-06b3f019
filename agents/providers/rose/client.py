@@ -23,9 +23,10 @@ import asyncio
 import contextlib
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Type
 
 import structlog
+from pydantic import BaseModel
 
 from config import load_config
 from providers.rose.browser_use import build_browser_use_messages, normalize_browser_use_response
@@ -41,6 +42,11 @@ from providers.rose.errors import (
 )
 from providers.rose.legacy_adapter import classify_claude_token_error
 from providers.rose.pools import PoolName, get_pool
+from providers.rose.schema import (
+    build_anthropic_tools_from_response_model,
+    build_openai_response_format,
+    tool_requires_forced_choice,
+)
 from providers.rose.types import ChunkKind, ClaudeAuthContext, RoseResponse, StreamChunk
 from providers.rose.waterfall import waterfall_complete
 
@@ -90,9 +96,7 @@ class RoseClient:
         *,
         pool: PoolName,
         messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Any = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        response_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
@@ -116,6 +120,24 @@ class RoseClient:
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
 
+        openrouter_response_format = (
+            build_openai_response_format(response_model)
+            if response_model is not None
+            else None
+        )
+        claude_auth_tools = None
+        claude_auth_tool_choice = None
+        if claude_auth is not None:
+            if response_model is not None:
+                claude_auth_tools = build_anthropic_tools_from_response_model(
+                    response_model,
+                    model=pool_spec.claude_auth_model,
+                )
+                if claude_auth_tools and any(
+                    tool_requires_forced_choice(tool) for tool in claude_auth_tools
+                ):
+                    claude_auth_tool_choice = "any"
+
         logger.info(
             "rose.complete.start",
             request_id=rid,
@@ -123,7 +145,7 @@ class RoseClient:
             call_site=call_site,
             pool=pool,
             claude_auth_present=claude_auth is not None,
-            tool_count=len(tools or []),
+            claude_auth_tool_count=len(claude_auth_tools or []),
             deadline_s=deadline_s,
         )
 
@@ -207,9 +229,9 @@ class RoseClient:
                     async for chunk in _guarded(_try_claude_auth(
                         pool_spec=pool_spec,
                         messages=messages,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        response_format=response_format,
+                        tools=claude_auth_tools,
+                        tool_choice=claude_auth_tool_choice,
+                        response_format=None,
                         max_tokens=max_tokens,
                         skip_cache_write=skip_cache_write,
                         auth=claude_auth,
@@ -250,9 +272,9 @@ class RoseClient:
             async for chunk in _guarded(waterfall_complete(
                 pool_spec=pool_spec,
                 messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                response_format=response_format,
+                tools=None,
+                tool_choice=None,
+                response_format=openrouter_response_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
@@ -370,9 +392,7 @@ class RoseClient:
         *,
         pool: PoolName,
         messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Any = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        response_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
@@ -389,9 +409,7 @@ class RoseClient:
         async for chunk in self.complete(
             pool=pool,
             messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            response_format=response_format,
+            response_model=response_model,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,

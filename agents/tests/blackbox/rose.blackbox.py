@@ -50,6 +50,9 @@ from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
 )
+from providers.rose.schema import (
+    build_anthropic_tools_from_response_model,
+)
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -64,6 +67,7 @@ from providers.rose.transforms import (
     transform_schema_for_anthropic,
 )
 from providers.rose.waterfall import build_openrouter_body, waterfall_complete
+from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 
 
 # =====================================================================
@@ -412,6 +416,127 @@ def test_transform_schema_recurses_into_anyOf_oneOf_allOf_defs():
 def test_transform_schema_passthrough_non_dict():
     assert transform_schema_for_anthropic("not-a-dict") == "not-a-dict"
     assert transform_schema_for_anthropic(None) is None
+
+
+def _walk_schema(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for value in obj.values():
+            yield from _walk_schema(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_schema(item)
+
+
+def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by_default():
+    AgentAction = create_agent_action_model(ALL_PHASE_TOOLS)
+
+    tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-6",
+    )
+
+    assert tools is not None
+    assert len(tools) == len(ALL_PHASE_TOOLS)
+    by_name = {tool["name"]: tool for tool in tools}
+    assert set(by_name) == set(ALL_PHASE_TOOLS)
+
+    wait_for = by_name["wait_for"]
+    assert "strict" not in wait_for
+    wait_schema = wait_for["input_schema"]
+    assert "tool" not in wait_schema["properties"]
+    assert "tool" not in wait_schema["required"]
+    # Pydantic runtime validators/defaults remain authoritative. The native
+    # Anthropic schema should not force defaults/nulls into tool arguments.
+    assert wait_schema["required"] == []
+    assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
+    assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
+
+    spawn_agent = by_name["spawn_agent"]["input_schema"]
+    assert spawn_agent["required"] == ["type", "goal"]
+    assert "output_schema" in spawn_agent["properties"]
+
+    for tool in tools:
+        assert "strict" not in tool
+
+
+def test_pydantic_response_model_adds_strict_only_for_opted_in_tools():
+    from pydantic import BaseModel
+    from typing import ClassVar, Literal, Optional
+
+    class LooseTool(BaseModel):
+        """Loose test tool."""
+
+        tool: Literal["loose_tool"]
+        value: int
+
+    class StrictTool(BaseModel):
+        """Strict test tool."""
+
+        anthropic_strict_tool: ClassVar[bool] = True
+        tool: Literal["strict_tool"]
+        value: int
+        optional_value: Optional[int] = None
+
+    class AgentAction(BaseModel):
+        response: str
+        tool_calls: list[LooseTool | StrictTool]
+
+    unsupported = {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "maxLength",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+    }
+
+    unsupported_model_tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-4",
+    )
+    assert unsupported_model_tools is not None
+    assert all("strict" not in tool for tool in unsupported_model_tools)
+
+    tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-6",
+    )
+    assert tools is not None
+    by_name = {tool["name"]: tool for tool in tools}
+    assert "strict" not in by_name["loose_tool"]
+    assert by_name["strict_tool"]["strict"] is True
+    for node in _walk_schema(by_name["strict_tool"]["input_schema"]):
+        assert not (unsupported & set(node)), node
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False, node
+
+
+def test_pydantic_response_model_without_tool_calls_builds_synthetic_native_tool():
+    from pydantic import BaseModel, Field
+
+    class ProgressScore(BaseModel):
+        reasoning: str
+        score: float = Field(ge=0, le=1)
+
+    tools = build_anthropic_tools_from_response_model(
+        ProgressScore,
+        model="claude-sonnet-4-6",
+    )
+
+    assert tools is not None
+    assert len(tools) == 1
+    tool = tools[0]
+    assert tool["name"] == "submit_response"
+    assert "strict" not in tool
+    schema = tool["input_schema"]
+    assert schema["type"] == "object"
+    assert set(schema["required"]) == {"reasoning", "score"}
+    assert schema["properties"]["score"]["minimum"] == 0
+    assert schema["properties"]["score"]["maximum"] == 1
 
 
 # =====================================================================
@@ -1391,6 +1516,156 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     assert metadata.data.get("claude_token_error") == "auth_error"
 
 
+async def test_client_splits_pydantic_model_to_claude_native_tools():
+    AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
+
+    sse_lines = []
+    sse_lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 10}},
+    })
+    sse_lines += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "wait_for",
+            "input": {},
+        },
+    })
+    sse_lines += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": '{"condition":"package ships"}',
+        },
+    })
+    sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    sse_lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use"},
+        "usage": {"output_tokens": 5},
+    })
+    sse_lines += _ev("message_stop", {"type": "message_stop"})
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "wait until the package ships"}],
+        response_model=AgentAction,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-pydantic-native-tools",
+    ):
+        chunks.append(chunk)
+
+    assert "format" not in seen_body.get("output_config", {})
+    tools = {tool["name"]: tool for tool in seen_body["tools"]}
+    assert set(tools) == {"wait_for", "attempt_completion"}
+    assert "strict" not in tools["wait_for"]
+    wait_schema = tools["wait_for"]["input_schema"]
+    assert "tool" not in wait_schema["properties"]
+    assert wait_schema["required"] == []
+    assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
+    assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
+
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "wait_for"
+    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+
+
+async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
+    from pydantic import BaseModel, Field
+
+    class ProgressScore(BaseModel):
+        reasoning: str
+        score: float = Field(ge=0, le=1)
+
+    sse_lines = []
+    sse_lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 10}},
+    })
+    sse_lines += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_submit",
+            "name": "submit_response",
+            "input": {},
+        },
+    })
+    sse_lines += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": '{"reasoning":"done","score":1}',
+        },
+    })
+    sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    sse_lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use"},
+        "usage": {"output_tokens": 5},
+    })
+    sse_lines += _ev("message_stop", {"type": "message_stop"})
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "score progress"}],
+        response_model=ProgressScore,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-pydantic-submit-tool",
+    ):
+        chunks.append(chunk)
+
+    assert "format" not in seen_body.get("output_config", {})
+    assert seen_body["tool_choice"] == {"type": "any"}
+    assert "thinking" not in seen_body
+    assert len(seen_body["tools"]) == 1
+    tool = seen_body["tools"][0]
+    assert tool["name"] == "submit_response"
+    assert "__rose_force_tool_choice" not in tool
+    assert tool["input_schema"]["properties"]["score"]["minimum"] == 0
+    assert tool["input_schema"]["properties"]["score"]["maximum"] == 1
+
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "submit_response"
+    assert json.loads(tool_call.data["arguments"]) == {"reasoning": "done", "score": 1}
+
+
 async def test_client_deadline_enforced():
     """A long-stalling stream gets capped by the top-level deadline."""
 
@@ -1617,6 +1892,9 @@ async def run_all_tests():
     r.record("schema_collapses_addl_props", test_transform_schema_collapses_object_additionalProperties)
     r.record("schema_recurses_into_combinators", test_transform_schema_recurses_into_anyOf_oneOf_allOf_defs)
     r.record("schema_passthrough_non_dict", test_transform_schema_passthrough_non_dict)
+    r.record("pydantic_to_anthropic_native_tools", test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by_default)
+    r.record("pydantic_to_anthropic_selective_strict", test_pydantic_response_model_adds_strict_only_for_opted_in_tools)
+    r.record("pydantic_to_anthropic_synthetic_submit_tool", test_pydantic_response_model_without_tool_calls_builds_synthetic_native_tool)
 
     r.record("tool_config_explicit_tools", test_apply_tool_config_with_explicit_tools_and_choice)
     r.record("tool_config_choice_auto_specific", test_apply_tool_config_choice_auto_and_specific_tool)
@@ -1663,6 +1941,8 @@ async def run_all_tests():
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
+    await r.record_async("client_pydantic_submit_tool_split", test_client_splits_plain_pydantic_model_to_forced_submit_tool)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
 
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)

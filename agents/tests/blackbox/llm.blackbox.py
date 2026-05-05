@@ -796,6 +796,51 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
             assert "cache_control" not in block, "message breakpoint should be stripped"
 
 
+async def test_call_llm_rose_response_model_uses_submit_tool():
+    """call_llm response_model routes Rose claudeAuth through native submit_response tool."""
+    import httpx
+    from pydantic import BaseModel
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm
+
+    class SimpleResult(BaseModel):
+        answer: str
+        ok: bool
+
+    sse = _anthropic_sse_body(
+        tool_calls=[
+            {
+                "name": "submit_response",
+                "input": {"answer": "done", "ok": True},
+            }
+        ],
+        stop_reason="tool_use",
+    )
+    captured: dict = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        result = await call_llm(
+            messages=[{"role": "user", "content": "return result"}],
+            model="rose",
+            response_model=SimpleResult,
+            claude_token="ct-123",
+            call_site="test-submit-model",
+        )
+
+    body = captured["body"]
+    assert "format" not in body.get("output_config", {})
+    assert body["tool_choice"] == {"type": "any"}
+    assert body["tools"][0]["name"] == "submit_response"
+    assert json.loads(result["content"]) == {"answer": "done", "ok": True}
+
+
 async def test_call_llm_rose_http_error_raises():
     """Persistent 5xx from every waterfall step raises RoseAllFailed."""
     setup_mock({
@@ -3451,6 +3496,7 @@ async def run_all_tests():
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
     await r.record_async("call_llm_rose_with_claude_token_and_skip_cache_write", test_call_llm_rose_with_claude_token_and_skip_cache_write)
+    await r.record_async("call_llm_rose_response_model_submit_tool", test_call_llm_rose_response_model_uses_submit_tool)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
     await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)
