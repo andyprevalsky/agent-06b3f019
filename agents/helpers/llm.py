@@ -2483,7 +2483,10 @@ def _build_verifier_response_model(
             ),
         ),
     )
-    fields["score"] = (float, Field(..., ge=0, le=1))
+    fields["score"] = (
+        float,
+        Field(..., description="Final numeric commitment from 0.0 to 1.0."),
+    )
 
     name = "ProgressScoreWithOutput" if response_schema else "ProgressScore"
     model = create_model(name, **fields)
@@ -2731,7 +2734,10 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     }
     required.append("reasoning")
 
-    properties["score"] = {"type": "number", "minimum": 0, "maximum": 1}
+    properties["score"] = {
+        "type": "number",
+        "description": "Final numeric commitment from 0.0 to 1.0.",
+    }
     required.append("score")
 
     return {

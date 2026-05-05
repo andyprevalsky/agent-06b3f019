@@ -336,6 +336,28 @@ def test_build_verifier_json_schema():
     assert result["json_schema"]["name"] == "ProgressScore"
 
 
+def test_verifier_score_schema_has_no_numeric_bounds():
+    """Verifier score guidance stays descriptive so Anthropic output_config accepts it."""
+    from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
+
+    unsupported = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            assert unsupported.isdisjoint(obj)
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    response_format = _build_verifier_json_schema()
+    pydantic_schema = _build_verifier_response_model().model_json_schema()
+
+    walk(response_format["json_schema"]["schema"])
+    walk(pydantic_schema)
+
+
 def test_build_verifier_json_schema_with_response_schema():
     """_build_verifier_json_schema with response schema adds output property."""
     from helpers.llm import _build_verifier_json_schema
@@ -3478,6 +3500,7 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_none_cases", test_extract_nested_agent_json_blob_none_cases)
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
+    r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
     r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
