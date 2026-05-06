@@ -320,6 +320,9 @@ async def run_planner_attempt(
         claude_max_token,
         agent_id,
         tool_call_id,
+        getattr(workflow_instance, "claude_max_token_source", None),
+        getattr(workflow_instance, "claude_max_token_pool_id", None),
+        getattr(workflow_instance, "user_id", None),
     ]
 
     # Schema generation is now done synchronously at workflow startup so the

@@ -32,8 +32,11 @@ orchestration.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
@@ -313,7 +316,17 @@ async def claude_auth_complete(
                 yield chunk
             return
         except _RotateToken as rotate:
-            await _cool_down(current_auth, rotate.reason, request_id, agent_id, call_site)
+            setattr(auth, "rotated", True)
+            setattr(auth, "last_rotation_reason", rotate.reason)
+            setattr(auth, "last_rate_limited_until", rotate.rate_limited_until)
+            await _cool_down(
+                current_auth,
+                rotate.reason,
+                request_id,
+                agent_id,
+                call_site,
+                rate_limited_until=rotate.rate_limited_until,
+            )
             rotations += 1
             if rotations > current_auth.max_rotations:
                 raise RoseAuthError(
@@ -332,10 +345,17 @@ async def claude_auth_complete(
 class _RotateToken(Exception):
     """Internal signal — the current token should be cooled down and swapped."""
 
-    def __init__(self, reason: str, *, status: Optional[int]) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        status: Optional[int],
+        rate_limited_until: Optional[str] = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.status = status
+        self.rate_limited_until = rate_limited_until
 
 
 async def _attempt_with_token(
@@ -381,10 +401,24 @@ async def _attempt_with_token(
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
-                    raise _RotateToken("rate_limit", status=status)
+                    raise _RotateToken(
+                        "rate_limit",
+                        status=status,
+                        rate_limited_until=_extract_rate_limited_until(response, error_body),
+                    )
 
                 if status in (401, 403):
-                    raise _RotateToken("auth_error", status=status)
+                    rate_limited_until = _extract_rate_limited_until(response, error_body)
+                    reason = (
+                        "rate_limit"
+                        if rate_limited_until or _looks_like_usage_limit(error_body)
+                        else "auth_error"
+                    )
+                    raise _RotateToken(
+                        reason,
+                        status=status,
+                        rate_limited_until=rate_limited_until,
+                    )
 
                 if status == 400:
                     # Do NOT rotate — request shape is the problem; next
@@ -446,12 +480,146 @@ def _backoff_for_429(response: httpx.Response, attempt: int) -> float:
     return min(2 ** attempt, _BACKOFF_CAP_S)
 
 
+_RESET_HEADER_NAMES = (
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-input-tokens-reset",
+    "anthropic-ratelimit-output-tokens-reset",
+    "anthropic-ratelimit-requests-reset",
+    "x-ratelimit-reset",
+    "x-rate-limit-reset",
+    "ratelimit-reset",
+)
+_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_EPOCH_RESET_RE = re.compile(
+    r"(?:reset|until|retry(?:_|\s|-)?after|available(?:_|\s|-)?at)[^\d]{0,32}(\d{10,13})",
+    re.IGNORECASE,
+)
+_DURATION_RE = re.compile(
+    r"(?:try again|retry|reset|available)[^.\n]{0,80}?\bin\s+(\d+)\s*(second|seconds|minute|minutes|hour|hours)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_rate_limited_until(response: httpx.Response, error_body: str) -> Optional[str]:
+    """Return the backend cooldown timestamp Anthropic gives us, when present."""
+    for header_name in _RESET_HEADER_NAMES:
+        parsed = _parse_reset_value(response.headers.get(header_name))
+        if parsed:
+            return parsed
+
+    parsed = _parse_body_reset_time(error_body)
+    if parsed:
+        return parsed
+
+    return _parse_retry_after(response.headers.get("retry-after"))
+
+
+def _parse_body_reset_time(error_body: str) -> Optional[str]:
+    for match in _ISO_TS_RE.finditer(error_body or ""):
+        parsed = _parse_reset_value(match.group(0))
+        if parsed:
+            return parsed
+
+    for match in _EPOCH_RESET_RE.finditer(error_body or ""):
+        parsed = _parse_epoch_value(match.group(1))
+        if parsed:
+            return parsed
+
+    duration_match = _DURATION_RE.search(error_body or "")
+    if duration_match:
+        amount = int(duration_match.group(1))
+        unit = duration_match.group(2).lower()
+        seconds = amount
+        if unit.startswith("minute"):
+            seconds = amount * 60
+        elif unit.startswith("hour"):
+            seconds = amount * 60 * 60
+        return _format_utc(datetime.now(timezone.utc) + timedelta(seconds=seconds))
+
+    return None
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    stripped = value.strip()
+    try:
+        seconds = max(0.0, float(stripped))
+        return _format_utc(datetime.now(timezone.utc) + timedelta(seconds=seconds))
+    except ValueError:
+        pass
+    return _parse_http_date(stripped)
+
+
+def _parse_reset_value(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    stripped = value.strip().strip('"')
+
+    parsed_epoch = _parse_epoch_value(stripped)
+    if parsed_epoch:
+        return parsed_epoch
+
+    try:
+        dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return _format_utc(dt)
+    except ValueError:
+        pass
+
+    return _parse_http_date(stripped)
+
+
+def _parse_epoch_value(value: str) -> Optional[str]:
+    try:
+        epoch = int(value)
+    except (TypeError, ValueError):
+        return None
+    if epoch > 10_000_000_000:
+        epoch = int(epoch / 1000)
+    if epoch < 1_000_000_000:
+        return None
+    return _format_utc(datetime.fromtimestamp(epoch, tz=timezone.utc))
+
+
+def _parse_http_date(value: str) -> Optional[str]:
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return _format_utc(dt)
+
+
+def _format_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _looks_like_usage_limit(error_body: str) -> bool:
+    body = (error_body or "").lower()
+    return any(
+        phrase in body
+        for phrase in (
+            "usage limit",
+            "rate limit",
+            "rate_limit",
+            "quota",
+            "too many requests",
+        )
+    )
+
+
 async def _cool_down(
     auth: ClaudeAuthContext,
     reason: str,
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    rate_limited_until: Optional[str] = None,
 ) -> None:
     """Mark the current token as cooled-down via the backend callback."""
     logger.warning(
@@ -460,6 +628,7 @@ async def _cool_down(
         agent_id=agent_id,
         call_site=call_site,
         reason=reason,
+        rate_limited_until=rate_limited_until,
         source=auth.source,
         pool_token_id=auth.pool_token_id,
     )
@@ -471,7 +640,7 @@ async def _cool_down(
         )
         return
     try:
-        await auth.mark_rate_limited(auth, _COOLDOWN_SECONDS)
+        await auth.mark_rate_limited(auth, _COOLDOWN_SECONDS, rate_limited_until)
     except Exception as exc:
         logger.warning(
             "rose.claude_auth.cooldown_failed",

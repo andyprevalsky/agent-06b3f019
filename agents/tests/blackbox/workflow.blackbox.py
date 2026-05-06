@@ -414,6 +414,9 @@ async def mock_call_llm_activity(
     extra_user_message: Optional[str] = None,
     required_tool: Optional[str] = None,
     skip_cache_write: bool = False,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Mock LLM activity that returns an attempt_completion tool call to end the loop.
 
@@ -459,6 +462,9 @@ async def mock_check_progress(
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "score": 1.0,
@@ -2629,6 +2635,41 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
         _restore_workflow(original)
 
 
+async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.claude_max_token = "old-token"
+    wf.claude_max_token_source = "pool"
+    wf.claude_max_token_pool_id = "pool-old"
+    wf.claude_max_token_fetched_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_claude_max_token_activity"] = {
+        "accessToken": "fresh-token",
+        "source": "pool",
+        "poolTokenId": "pool-fresh",
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="claude-sonnet-4-6-claude",
+            call_site="test",
+            claude_token_rotated=True,
+        )
+        assert wf.claude_max_token == "fresh-token"
+        assert wf.claude_max_token_source == "pool"
+        assert wf.claude_max_token_pool_id == "pool-fresh"
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "fetch_claude_max_token_activity" in activity_names
+        assert "mark_claude_token_rate_limited_activity" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_parent_state_no_parent_returns_early():
     wf = _bare_workflow_instance()
     wf.parent_workflow_id = None
@@ -2779,6 +2820,7 @@ async def run_all_tests():
     await r.record_async("wf_get_model_pricing_exception", test_workflow_get_model_pricing_exception_returns_none)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token)
+    await r.record_async("wf_on_tokens_successful_claude_rotation", test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token)
     await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
     await r.record_async("wf_query_parent_state_exception", test_workflow_query_parent_state_exception_returns_empty)
 

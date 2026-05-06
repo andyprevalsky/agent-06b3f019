@@ -316,3 +316,9 @@
 {"task": "parallel-tool-calls", "duration_seconds": 126.2, "cost_cents": 26.0, "timestamp": "2026-05-07T01:17:05.710241+00:00", "agent_id": "c1012a63-ab16-443a-babd-ce4bbd0a2f7d"}
 {"task": "claude-code-agent", "duration_seconds": 191.3, "cost_cents": 5.0, "timestamp": "2026-05-07T01:17:05.710241+00:00", "agent_id": "68044538-3fae-4845-9c15-0c571d1045e6"}
 {"task": "browser-smoke", "duration_seconds": 95.8, "cost_cents": 4.0, "timestamp": "2026-05-07T01:17:05.710241+00:00", "agent_id": "d9a49d75-fb46-40d3-a2fe-70870e0268de"}
+{"task": "chat-mode", "duration_seconds": 15.1, "cost_cents": 0.0, "timestamp": "2026-05-05T16:18:20.610471+00:00", "agent_id": "4b43c60b-322e-4d00-953d-5c769188aa2e"}
+{"task": "chat-mode", "duration_seconds": 15.1, "cost_cents": 0.0, "timestamp": "2026-05-05T16:26:25.244599+00:00", "agent_id": "5cf9dcdb-d7f5-4a27-ac85-a64418071109"}
+{"task": "browser-smoke", "duration_seconds": 125.8, "cost_cents": 19.0, "timestamp": "2026-05-05T16:26:25.244599+00:00", "agent_id": "7c0cffdf-da02-46ba-9099-ccf9cdcf823d"}
+{"task": "chat-mode", "duration_seconds": 15.2, "cost_cents": 0.0, "timestamp": "2026-05-05T19:24:18.981689+00:00", "agent_id": "ca90a529-efd5-4340-8ee8-ab906cb1a040"}
+{"task": "chat-mode", "duration_seconds": 15.1, "cost_cents": 0.0, "timestamp": "2026-05-05T19:31:34.969036+00:00", "agent_id": "5e930539-483d-4f24-977a-d20477cacbd4"}
+{"task": "browser-smoke", "duration_seconds": 110.6, "cost_cents": 18.0, "timestamp": "2026-05-05T19:31:34.969036+00:00", "agent_id": "7bf2de70-5b44-44d2-a8ff-ab7d2184b128"}

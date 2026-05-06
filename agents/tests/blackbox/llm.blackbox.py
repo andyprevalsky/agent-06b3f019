@@ -613,6 +613,37 @@ async def test_mark_claude_token_rate_limited_user_success():
     assert "rateLimitedUntil" in body
 
 
+async def test_mark_claude_token_rate_limited_uses_explicit_reset_time():
+    """Exact Anthropic usage-limit reset timestamps are passed through."""
+    setup_mock({
+        "/api/integrations/claude-code/token/rate-limited": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import mark_claude_token_rate_limited_activity
+
+        result = await mark_claude_token_rate_limited_activity(
+            source="pool",
+            user_id="u-1",
+            pool_token_id="pool-42",
+            cooldown_seconds=60,
+            rate_limited_until="2026-05-05T20:15:00Z",
+        )
+
+    assert result is True
+    call = assert_captured_call(
+        url_contains="/api/integrations/claude-code/token/rate-limited",
+        method="POST",
+    )
+    body = json.loads(call["requestBody"])
+    assert body["source"] == "pool"
+    assert body["poolTokenId"] == "pool-42"
+    assert body["rateLimitedUntil"] == "2026-05-05T20:15:00Z"
+
+
 async def test_mark_claude_token_rate_limited_pool_success():
     """Pool source includes poolTokenId in body."""
     setup_mock({
@@ -3002,7 +3033,16 @@ async def test_check_progress_retries_on_transient_failure_then_succeeds():
 
     call_count = [0]
 
-    async def fake_verifier(messages, model, config, response_schema, claude_token=None, call_site="", agent_id=None):
+    async def fake_verifier(
+        messages,
+        model,
+        config,
+        response_schema,
+        claude_token=None,
+        call_site="",
+        agent_id=None,
+        **_kwargs,
+    ):
         call_count[0] += 1
         if call_count[0] == 1:
             raise ValueError("transient parse error")
@@ -3511,6 +3551,7 @@ async def run_all_tests():
     await r.record_async("fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error)
     await r.record_async("fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field)
     await r.record_async("mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success)
+    await r.record_async("mark_claude_token_rate_limited_explicit_reset", test_mark_claude_token_rate_limited_uses_explicit_reset_time)
     await r.record_async("mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success)
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)

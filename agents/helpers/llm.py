@@ -30,6 +30,7 @@ from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_t
 from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
+    ClaudeAuthContext,
     RoseClient,
     RoseError,
     claude_auth_from_token,
@@ -68,6 +69,57 @@ def _safe_time() -> float:
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _build_claude_auth_context(
+    claude_token: Optional[str],
+    *,
+    source: Optional[str] = None,
+    user_id: Optional[str] = None,
+    pool_token_id: Optional[str] = None,
+    max_rotations: int = 3,
+) -> Optional[ClaudeAuthContext]:
+    """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
+    if not claude_token:
+        return None
+
+    if source not in ("user", "pool") or not user_id:
+        return claude_auth_from_token(claude_token)
+
+    async def _mark_rate_limited(
+        ctx: ClaudeAuthContext,
+        cooldown_seconds: int,
+        rate_limited_until: Optional[str] = None,
+    ) -> bool:
+        return await mark_claude_token_rate_limited_activity(
+            source=ctx.source,
+            user_id=ctx.user_id,
+            pool_token_id=ctx.pool_token_id,
+            cooldown_seconds=cooldown_seconds,
+            rate_limited_until=rate_limited_until,
+        )
+
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ClaudeAuthContext]:
+        result = await fetch_claude_max_token_activity(fetch_user_id)
+        if not result or not result.get("accessToken"):
+            return None
+        return _build_claude_auth_context(
+            result.get("accessToken"),
+            source=result.get("source"),
+            user_id=fetch_user_id,
+            pool_token_id=result.get("poolTokenId"),
+            max_rotations=max_rotations,
+        )
+
+    return ClaudeAuthContext(
+        token=claude_token,
+        source=source,
+        user_id=user_id,
+        pool_token_id=pool_token_id if source == "pool" else None,
+        mark_rate_limited=_mark_rate_limited,
+        fetch_fresh=_fetch_fresh,
+        max_rotations=max_rotations,
+    )
 
 
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
@@ -1099,6 +1151,9 @@ async def call_llm_structured_streaming(  # noqa: C901
         Callable[[int], Awaitable[None]]
     ] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
@@ -1203,6 +1258,12 @@ async def call_llm_structured_streaming(  # noqa: C901
         ttft_logged = False
 
         rose_client = RoseClient()
+        claude_auth_context = _build_claude_auth_context(
+            claude_token,
+            source=claude_token_source,
+            user_id=claude_token_user_id,
+            pool_token_id=claude_token_pool_id,
+        )
 
         try:
             async for chunk in rose_client.complete(
@@ -1213,7 +1274,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 max_tokens=max_tokens,
                 seed=model_seed,
                 skip_cache_write=skip_cache_write,
-                claude_auth=claude_auth_from_token(claude_token),
+                claude_auth=claude_auth_context,
                 agent_id=agent_id,
                 request_id=request_id,
                 call_site=call_site,
@@ -1503,6 +1564,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
+                    "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
                     "cancelled": True,
                 }
             else:
@@ -1514,6 +1576,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
+                    "claude_token_rotated": False,
                     "cancelled": True,
                 }
             return empty_response, usage, detected_tools_ordered
@@ -1560,6 +1623,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 on_attention_stream=on_attention_stream,
                 on_raw_progress=on_raw_progress,
                 claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                claude_token_user_id=claude_token_user_id,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -1770,6 +1836,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_name": pool_name,
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
+                "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
                 "cancelled": False,
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
@@ -1784,6 +1851,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_name": pool_name,
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
+                "claude_token_rotated": False,
                 "cancelled": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -2091,6 +2159,9 @@ async def call_llm(
     response_format: Optional[Dict] = None,
     response_model: Optional[Type[BaseModel]] = None,
     claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
@@ -2157,6 +2228,12 @@ async def call_llm(
             )
 
             rose_client = RoseClient()
+            claude_auth_context = _build_claude_auth_context(
+                claude_token,
+                source=claude_token_source,
+                user_id=claude_token_user_id,
+                pool_token_id=claude_token_pool_id,
+            )
             try:
                 rose_response = await rose_client.collect(
                     pool=pool,
@@ -2165,7 +2242,7 @@ async def call_llm(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     skip_cache_write=skip_cache_write,
-                    claude_auth=claude_auth_from_token(claude_token),
+                    claude_auth=claude_auth_context,
                     agent_id=agent_id,
                     request_id=request_id,
                     call_site=call_site,
@@ -2297,6 +2374,9 @@ async def _call_llm_verifier(  # noqa: C901
     config: Any,
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -2352,6 +2432,12 @@ async def _call_llm_verifier(  # noqa: C901
 
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     rose_client = RoseClient()
+    claude_auth_context = _build_claude_auth_context(
+        claude_token,
+        source=claude_token_source,
+        user_id=claude_token_user_id,
+        pool_token_id=claude_token_pool_id,
+    )
     try:
         async for chunk in rose_client.complete(
             pool=pool,
@@ -2359,7 +2445,7 @@ async def _call_llm_verifier(  # noqa: C901
             response_model=response_model,
             temperature=0.3,
             max_tokens=4096,
-            claude_auth=claude_auth_from_token(claude_token),
+            claude_auth=claude_auth_context,
             agent_id=agent_id,
             request_id=verifier_request_id,
             call_site=call_site,
@@ -2446,6 +2532,7 @@ async def _call_llm_verifier(  # noqa: C901
         "actual_model": actual_model,
         "pool_name": pool_name,
         "claude_token_error": claude_token_error,
+        "claude_token_rotated": stream_usage.get("claude_token_rotated", False) if stream_usage else False,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }
@@ -2770,6 +2857,9 @@ async def check_progress(  # noqa: C901
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal. Canonical entry point — all
@@ -2905,6 +2995,9 @@ async def check_progress(  # noqa: C901
                     config,
                     schema_for_call,
                     claude_token=claude_token,
+                    claude_token_source=claude_token_source,
+                    claude_token_pool_id=claude_token_pool_id,
+                    claude_token_user_id=claude_token_user_id,
                     call_site=call_site,
                     agent_id=agent_id,
                 )
@@ -2992,6 +3085,9 @@ async def call_llm_activity(  # noqa: C901
     skip_cache_write: bool = False,
     include_attempt_completion_result: bool = False,
     llm_only_user_preamble: str = "",
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -3144,6 +3240,9 @@ async def call_llm_activity(  # noqa: C901
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
             claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
             on_model_detected=on_model_detected,
             call_site=call_site,
             skip_cache_write=skip_cache_write,
@@ -3382,6 +3481,7 @@ async def mark_claude_token_rate_limited_activity(
     user_id: str,
     pool_token_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
+    rate_limited_until: Optional[str] = None,
 ) -> bool:
     """
     Mark the current Claude token as rate-limited in the backend for a cooldown period.
@@ -3395,13 +3495,13 @@ async def mark_claude_token_rate_limited_activity(
     rateLimitedUntil passes. This is NOT a permanent disable.
     """
     config = load_config()
-    rate_limited_until = (
+    effective_rate_limited_until = rate_limited_until or (
         datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
     ).isoformat().replace("+00:00", "Z")
 
     body: Dict[str, Any] = {
         "source": source,
-        "rateLimitedUntil": rate_limited_until,
+        "rateLimitedUntil": effective_rate_limited_until,
     }
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
@@ -3422,7 +3522,7 @@ async def mark_claude_token_rate_limited_activity(
             )
             if response.status_code == 200:
                 logger.info(
-                    f"✅ Marked {source} Claude token rate-limited until {rate_limited_until}"
+                    f"✅ Marked {source} Claude token rate-limited until {effective_rate_limited_until}"
                 )
                 return True
             logger.warning(
@@ -3445,6 +3545,9 @@ async def call_planner_llm_activity(
     claude_max_token: Optional[str] = None,
     agent_id: Optional[str] = None,
     tool_call_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -3531,6 +3634,9 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
             claude_token=claude_max_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
             skip_cache_write=False,
             call_site="planner",
             effort="max",

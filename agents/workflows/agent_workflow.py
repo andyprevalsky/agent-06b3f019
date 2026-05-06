@@ -735,6 +735,8 @@ class AgentWorkflow:
                 get_response_schema=self._make_response_schema_getter(),
                 claude_token=self.claude_max_token,
                 get_claude_token=lambda: self.claude_max_token,
+                get_claude_token_source=lambda: self.claude_max_token_source,
+                get_claude_token_pool_id=lambda: self.claude_max_token_pool_id,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -790,6 +792,8 @@ class AgentWorkflow:
                     handle_tool_event_fn=self._handle_tool_event,
                     poll_messages=self._poll_messages,
                     claude_token=self.claude_max_token,
+                    claude_token_source=self.claude_max_token_source,
+                    claude_token_pool_id=self.claude_max_token_pool_id,
                     on_tokens=self._on_tokens,
                     system_prompt_text=execute_system_prompt,
                     tool_names=execute_tools,
@@ -861,6 +865,8 @@ class AgentWorkflow:
             get_response_schema=self._make_response_schema_getter(),
             claude_token=self.claude_max_token,
             get_claude_token=lambda: self.claude_max_token,
+            get_claude_token_source=lambda: self.claude_max_token_source,
+            get_claude_token_pool_id=lambda: self.claude_max_token_pool_id,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -926,6 +932,9 @@ class AgentWorkflow:
                     self.claude_max_token,
                     "verifier_post_dag",
                     agent_id,
+                    self.claude_max_token_source,
+                    self.claude_max_token_pool_id,
+                    user_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -947,6 +956,7 @@ class AgentWorkflow:
                         cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                         call_site="verifier_post_dag",
                         claude_token_error=v_usage.get("claude_token_error"),
+                        claude_token_rotated=v_usage.get("claude_token_rotated", False),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
@@ -1660,6 +1670,7 @@ class AgentWorkflow:
         cache_creation_input_tokens: int = 0,
         call_site: str = "unknown",
         claude_token_error: Optional[str] = None,
+        claude_token_rotated: bool = False,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -1673,6 +1684,7 @@ class AgentWorkflow:
             cache_creation_input_tokens: Tokens written to cache (may cost extra for Anthropic)
             call_site: Label identifying the LLM call source (e.g., plan_loop, execute_loop, verifier_execute)
             claude_token_error: Why the claude token call failed (auth_error, rate_limit, stall, server_error)
+            claude_token_rotated: True when RoseClient swapped tokens inside a successful claudeAuth call.
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -1683,6 +1695,22 @@ class AgentWorkflow:
         # Track actual_model for credit billing
         if actual_model:
             self.actual_model = actual_model
+
+            if self.claude_max_token and actual_model.endswith("-claude") and claude_token_rotated:
+                workflow.logger.info(
+                    "🔁 Claude token rotated inside RoseClient; refreshing workflow cached token"
+                )
+                self.claude_max_token = None
+                self.claude_max_token_fetched_at = None
+                self.claude_max_token_source = None
+                self.claude_max_token_pool_id = None
+                if self.user_id:
+                    try:
+                        await self._refresh_claude_token(self.user_id)
+                    except Exception as refresh_error:
+                        workflow.logger.warning(
+                            f"Rotation refetch failed after successful claudeAuth call: {refresh_error}"
+                        )
 
             # Detect Claude token fallback: we had a token but Rose fell through to the waterfall
             # Only invalidate the token for permanent failures (auth errors, rate limits).

@@ -244,6 +244,19 @@ class RoseClient:
                         if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                             _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
+                            if getattr(claude_auth, "rotated", False):
+                                chunk = StreamChunk(
+                                    kind="usage",
+                                    data={
+                                        **chunk.data,
+                                        "claude_token_rotated": True,
+                                        "claude_token_rotation_reason": getattr(
+                                            claude_auth,
+                                            "last_rotation_reason",
+                                            None,
+                                        ),
+                                    },
+                                )
                             _emit_llm_cache(chunk.data)
                         yield chunk
                     logger.info(

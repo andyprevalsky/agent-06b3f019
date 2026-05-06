@@ -62,7 +62,7 @@ ClaudeTokenSource = Literal["user", "pool"]
 # the existing `mark_claude_token_rate_limited_activity` so we don't
 # re-implement backend-side state.
 MarkRateLimitedFn = Callable[
-    ["ClaudeAuthContext", int],  # (context, cooldown_seconds)
+    ["ClaudeAuthContext", int, Optional[str]],  # (context, cooldown_seconds, rate_limited_until)
     Awaitable[bool],
 ]
 

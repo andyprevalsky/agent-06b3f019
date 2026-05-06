@@ -998,6 +998,132 @@ async def test_claude_auth_401_rotates_and_exhausts():
     assert calls["n"] == 1
 
 
+async def test_claude_auth_429_marks_reset_and_fetches_fresh_token():
+    """429 after in-place retries marks the exact reset time, then uses a fresh token."""
+    reset_at = "2026-05-05T20:15:00Z"
+    seen_tokens: list[str] = []
+    marked: list[tuple[str, int, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None):
+        marked.append((ctx.token, cooldown_seconds, rate_limited_until))
+        return True
+
+    async def fetch_fresh(user_id):
+        assert user_id == "u-1"
+        return ClaudeAuthContext(
+            token="fresh-token",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-2",
+            mark_rate_limited=mark,
+            fetch_fresh=fetch_fresh,
+            max_rotations=1,
+        )
+
+    sse_body = "\n".join(
+        _ev("message_start", {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 3}},
+        })
+        + _ev("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        + _ev("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "ok"},
+        })
+        + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + _ev("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1},
+        })
+        + _ev("message_stop", {"type": "message_stop"})
+    )
+
+    def handler(req):
+        seen_tokens.append(req.headers.get("authorization", ""))
+        if len(seen_tokens) <= 3:
+            return httpx.Response(
+                429,
+                json={"error": {"message": "rate limit"}},
+                headers={"anthropic-ratelimit-unified-reset": reset_at},
+            )
+        return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    auth = ClaudeAuthContext(
+        token="old-token",
+        source="pool",
+        user_id="u-1",
+        pool_token_id="pool-1",
+        mark_rate_limited=mark,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    chunks = await _drain(claude_auth_complete(
+        pool_spec=get_pool("rose-1-lite"),
+        messages=[{"role": "user", "content": "hi"}],
+        auth=auth,
+        request_id="r-rotate-429",
+        max_tokens=16,
+    ))
+
+    assert marked == [("old-token", 300, reset_at)]
+    assert seen_tokens[:3] == ["Bearer old-token", "Bearer old-token", "Bearer old-token"]
+    assert seen_tokens[3] == "Bearer fresh-token"
+    assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks)
+
+
+async def test_claude_auth_403_usage_limit_marks_body_reset_time():
+    """Usage-limit 403 is a rate-limit rotation, not a permanent auth error."""
+    reset_at = "2026-05-05T21:30:00Z"
+    marked: list[tuple[str, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None):
+        marked.append((ctx.token, rate_limited_until))
+        return True
+
+    def handler(req):
+        return httpx.Response(
+            403,
+            json={
+                "error": {
+                    "message": f"Claude Code usage limit reached. Your limit resets at {reset_at}."
+                }
+            },
+        )
+
+    set_mock_handler(handler)
+
+    auth = ClaudeAuthContext(
+        token="limited-token",
+        source="user",
+        user_id="u-1",
+        mark_rate_limited=mark,
+        max_rotations=0,
+    )
+    raised = False
+    try:
+        await _drain(claude_auth_complete(
+            pool_spec=get_pool("rose-1-lite"),
+            messages=[{"role": "user", "content": "hi"}],
+            auth=auth,
+            request_id="r-usage-limit",
+            max_tokens=16,
+        ))
+    except RoseAuthError as exc:
+        raised = True
+        assert "rate_limit" in str(exc)
+
+    assert raised
+    assert marked == [("limited-token", reset_at)]
+
+
 # =====================================================================
 # streaming — Anthropic native SSE parser
 # =====================================================================
@@ -1920,6 +2046,8 @@ async def run_all_tests():
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
+    await r.record_async("claude_auth_429_rotates_with_reset", test_claude_auth_429_marks_reset_and_fetches_fresh_token)
+    await r.record_async("claude_auth_403_usage_limit_reset", test_claude_auth_403_usage_limit_marks_body_reset_time)
 
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
     await r.record_async("anth_sse_tool_use", test_parse_anthropic_sse_tool_use_block)
