@@ -122,6 +122,7 @@ const defaultOrigins = [
   'http://127.0.0.1:8080',
   'http://localhost:5173',
   'http://localhost:5174',
+  'http://localhost:3002',
   'http://localhost:8081',
 ];
 
@@ -142,6 +143,15 @@ app.use(
 
       // Check exact matches
       if (allowedOrigins.indexOf(origin) !== -1) {
+        return callback(null, true);
+      }
+
+      // In development the frontend, mac app, and semantic tests can run on
+      // different localhost ports. Keep production pinned to the explicit list.
+      if (
+        process.env.NODE_ENV !== 'production' &&
+        /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
+      ) {
         return callback(null, true);
       }
 

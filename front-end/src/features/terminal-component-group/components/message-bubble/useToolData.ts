@@ -50,22 +50,26 @@ export function useToolData({
     const rawStatus = metadata.toolStatus;
     const toolStatus: ToolMessageData['status'] =
       rawStatus === 'ERROR' ? 'FINISHED' : rawStatus || 'FINISHED';
+    const toolName = (metadata.toolName as string | undefined) || '';
 
     return {
       toolCallId: (metadata.toolCallId as string | undefined) || '',
-      toolName: (metadata.toolName as string | undefined) || '',
+      toolName,
       title: (metadata.title as string | undefined) || 'Tool',
       status: toolStatus,
-      message: message.text,
+      message: toolName === 'cloud_agent' ? '' : message.text,
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,
       // Countdown fields live on either the root or the attention sub-object.
-      timeout: (metadata.timeout as number | undefined) ?? (attentionMeta.timeout as number | undefined),
+      timeout:
+        (metadata.timeout as number | undefined) ?? (attentionMeta.timeout as number | undefined),
       startTime:
-        (metadata.startTime as string | undefined) ?? (attentionMeta.startTime as string | undefined),
+        (metadata.startTime as string | undefined) ??
+        (attentionMeta.startTime as string | undefined),
       simulated:
-        (metadata.simulated as boolean | undefined) ?? (attentionMeta.simulated as boolean | undefined),
+        (metadata.simulated as boolean | undefined) ??
+        (attentionMeta.simulated as boolean | undefined),
       actionType: metadata.action_type as string | undefined,
     };
   }, [isAssistant, shouldType, isTool, message, isStreaming]);

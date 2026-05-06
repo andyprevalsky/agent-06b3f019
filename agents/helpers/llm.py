@@ -43,6 +43,12 @@ from utils.tool_schemas import (
 
 logger = structlog.get_logger()
 
+CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+
+
+def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
+    return metadata.get("toolName") == CLOUD_AGENT_TOOL_NAME
+
 # Same-machine optimization: passes large LLM context without Temporal serialization.
 # On cross-machine miss, call_llm_activity falls back to fetching from backend API.
 _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
@@ -230,6 +236,9 @@ def build_verifier_context_messages(  # noqa: C901
             continue
 
         if role == "TOOL":
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
+
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
 
@@ -424,6 +433,9 @@ def convert_context_to_messages(  # noqa: C901
             messages.append(assistant_msg)
 
         elif role == "TOOL":
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
+
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
@@ -532,6 +544,9 @@ async def build_llm_messages(  # noqa: C901
         if role == "TOOL":
             tool_status = metadata.get("toolStatus")
             tool_call_id = metadata.get("toolCallId")
+
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
 
             # Skip IN_PROGRESS messages
             if tool_status == "IN_PROGRESS":
@@ -752,6 +767,9 @@ async def build_llm_messages(  # noqa: C901
             # Verifier messages are already mirrored back into context as SYSTEM text.
             # Skip raw verifier TOOL rows to avoid duplicate context.
             if metadata.get("verifierMessage"):
+                continue
+
+            if _is_cloud_agent_lifecycle_tool(metadata):
                 continue
 
             tool_status = metadata.get("toolStatus")

@@ -4,74 +4,85 @@ import UpdateIndicator from './features/update-indicator';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
-import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
 import './fonts.css';
 import '@/index.css';
-import React, { useEffect } from 'react';
-import type { BrowserType, QuickQueryPayload } from '../shared/types/ipc';
+import React from 'react';
+import type { BrowserType } from '../shared/types/ipc';
+import { getElectronApi } from './lib/electron-api';
+import QuickQueryListener from './features/quick-query-listener';
 
 // Electron-specific integration handlers
 const electronHandlers = {
   iMessage: {
-    isAvailable: true,
+    isAvailable: Boolean(getElectronApi()),
     onClick: async () => {
-      const hasAccess = await window.api.checkIMessageAccess();
+      const api = getElectronApi();
+      if (!api) throw new Error('Desktop bridge is not available');
+      const hasAccess = await api.checkIMessageAccess();
       if (!hasAccess) {
         throw new Error(
           'Grant Full Disk Access in System Preferences → Privacy & Security → Full Disk Access'
         );
       }
-      const result = await window.api.startIMessageUpload();
+      const result = await api.startIMessageUpload();
       if (!result.success) {
         throw new Error(result.message ?? 'Upload failed');
       }
     },
   },
   chromeCookies: {
-    isAvailable: true,
+    isAvailable: Boolean(getElectronApi()),
     onClick: async () => {
-      const cookies = await window.api.readChromeCookies();
-      const result = await window.api.uploadCookies(cookies);
+      const api = getElectronApi();
+      if (!api) throw new Error('Desktop bridge is not available');
+      const cookies = await api.readChromeCookies();
+      const result = await api.uploadCookies(cookies);
       if (!result.success) {
         throw new Error(result.message ?? 'Upload failed');
       }
     },
   },
   claudeCode: {
-    isAvailable: true,
-    hasCredentials: () => window.api.claudeCode?.hasCredentials() ?? Promise.resolve(false),
+    isAvailable: Boolean(getElectronApi()),
+    hasCredentials: () => getElectronApi()?.claudeCode?.hasCredentials() ?? Promise.resolve(false),
     syncCredentials: () =>
-      window.api.claudeCode?.syncCredentials() ??
+      getElectronApi()?.claudeCode?.syncCredentials() ??
       Promise.resolve({ success: false, message: 'Not available' }),
   },
   browserCookies: {
-    isAvailable: true,
+    isAvailable: Boolean(getElectronApi()),
     getInstalledBrowsers: async () => {
-      return window.api.getInstalledBrowsers();
+      return getElectronApi()?.getInstalledBrowsers() ?? [];
     },
     syncBrowser: async (browserType: string, keychainPassword?: string) => {
-      const cookies = await window.api.readBrowserCookies(
+      const api = getElectronApi();
+      if (!api) throw new Error('Desktop bridge is not available');
+      const cookies = await api.readBrowserCookies(
         browserType as BrowserType,
         keychainPassword !== undefined && keychainPassword !== '' ? { keychainPassword } : undefined
       );
       if (cookies.length > 0) {
-        const result = await window.api.uploadBrowserCookies(browserType as BrowserType, cookies);
+        const result = await api.uploadBrowserCookies(browserType as BrowserType, cookies);
         if (!result.success) {
           throw new Error(result.message ?? 'Upload failed');
         }
       }
     },
     syncBrowserPasswords: async (browserType: string, config?: { keychainPassword?: string }) => {
-      return window.api.syncBrowserPasswords(browserType as BrowserType, config);
+      return (
+        getElectronApi()?.syncBrowserPasswords(browserType as BrowserType, config) ??
+        Promise.resolve({ success: false })
+      );
     },
     storeAtlasPassword: async (password: string) => {
-      if (window.api.atlas?.storePassword) {
-        return window.api.atlas.storePassword(password);
+      const api = getElectronApi();
+      if (api?.atlas?.storePassword) {
+        return api.atlas.storePassword(password);
       }
       return { success: false, error: 'Atlas password storage not available' };
     },
     openKeychainAccess: async (searchQuery?: string) => {
-      return window.api.openKeychainAccess(searchQuery);
+      return getElectronApi()?.openKeychainAccess(searchQuery) ?? { success: false };
     },
   },
 };
@@ -111,18 +122,6 @@ createRoot(document.getElementById('root')!).render(
     </>
   </IntegrationHandlersProvider>
 );
-
-function QuickQueryListener() {
-  useEffect(() => {
-    const handler = (payload: QuickQueryPayload) => {
-      dispatchQuickQueryEvent(payload);
-    };
-
-    window.api.onQuickQuerySubmit(handler);
-  }, []);
-
-  return null;
-}
 
 // Render toasters outside of root to avoid z-index stacking context issues
 const toasterContainer = document.createElement('div');

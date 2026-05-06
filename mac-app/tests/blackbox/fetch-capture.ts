@@ -28,6 +28,29 @@ export type MockResponder = (req: Request) => Response | Promise<Response>;
 let counter = 0;
 export const fetchCaptures: FetchCapture[] = [];
 
+function escapeMultipartValue(value: string): string {
+  return value.replace(/\r?\n/g, '\r\n');
+}
+
+function serializeFormData(formData: FormData): { body: string; contentType: string } {
+  const boundary = `----rose-test-boundary-${Math.random().toString(16).slice(2)}`;
+  const chunks: string[] = [];
+
+  for (const [name, value] of formData.entries()) {
+    chunks.push(`--${boundary}\r\n`);
+    chunks.push(`Content-Disposition: form-data; name="${name}"\r\n\r\n`);
+    chunks.push(escapeMultipartValue(String(value)));
+    chunks.push('\r\n');
+  }
+
+  chunks.push(`--${boundary}--\r\n`);
+
+  return {
+    body: chunks.join(''),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
 export function clearFetchCaptures(): void {
   fetchCaptures.length = 0;
   counter = 0;
@@ -50,12 +73,18 @@ export function installFetchCapture(responders: Record<string, MockResponder> = 
     });
 
     let body: string | null = null;
-    try {
-      const cloned = request.clone();
-      const text = await cloned.text();
-      body = text.length > 0 ? text : null;
-    } catch {
-      body = null;
+    if (init?.body instanceof FormData) {
+      const serialized = serializeFormData(init.body);
+      body = serialized.body;
+      headers['content-type'] = serialized.contentType;
+    } else {
+      try {
+        const cloned = request.clone();
+        const text = await cloned.text();
+        body = text.length > 0 ? text : null;
+      } catch {
+        body = null;
+      }
     }
 
     const matchedKey = Object.keys(responders).find((pattern) => url.includes(pattern));

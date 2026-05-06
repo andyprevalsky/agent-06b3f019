@@ -76,6 +76,10 @@ with workflow.unsafe.imports_passed_through():
 
 logger = structlog.get_logger()
 
+CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
+CLOUD_AGENT_CREATED_TITLE = "Cloud Agent Created"
+
 # =============================================================================
 # TOOL CONFIGURATION
 # =============================================================================
@@ -471,6 +475,8 @@ class AgentWorkflow:
         self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
+
+        await self._finish_pending_cloud_agent_tool()
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -1132,6 +1138,52 @@ class AgentWorkflow:
             await self._update_tree_state()
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {e}")
+
+    async def _finish_pending_cloud_agent_tool(self) -> None:
+        """Close the chat-mode cloud-agent creation chip once workflow starts."""
+        try:
+            messages = await workflow.execute_activity(
+                poll_new_messages,
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            terminal_tool_call_ids = set()
+            pending_tool_call_id = None
+
+            for msg in messages or []:
+                if (msg.get("role") or "").upper() != "TOOL":
+                    continue
+                metadata = msg.get("metadata") or {}
+                if metadata.get("toolName") != CLOUD_AGENT_TOOL_NAME:
+                    continue
+
+                tool_call_id = metadata.get("toolCallId")
+                if metadata.get("toolStatus") in {"FINISHED", "ERROR"} and tool_call_id:
+                    terminal_tool_call_ids.add(tool_call_id)
+                elif (
+                    metadata.get("toolStatus") == "IN_PROGRESS"
+                    and metadata.get("title") == CREATING_CLOUD_AGENT_TITLE
+                    and tool_call_id
+                ):
+                    pending_tool_call_id = tool_call_id
+
+            if not pending_tool_call_id or pending_tool_call_id in terminal_tool_call_ids:
+                return
+
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": pending_tool_call_id,
+                    "toolName": CLOUD_AGENT_TOOL_NAME,
+                    "toolStatus": "FINISHED",
+                    "title": CLOUD_AGENT_CREATED_TITLE,
+                },
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to finish cloud agent lifecycle tool: {e}")
 
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.
