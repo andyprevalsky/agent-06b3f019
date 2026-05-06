@@ -27,7 +27,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers import (
         check_user_usage,
         fetch_agent_config,
-        fetch_model_pricing,
         generate_completion_summary,
         get_model_context_window,
         get_user_context,
@@ -46,11 +45,12 @@ with workflow.unsafe.imports_passed_through():
         set_response_schema_activity,
     )
     from helpers.messages import update_agent_tree_state
-    from helpers.model_pricing import get_anthropic_pricing
+    from helpers.model_pricing import get_anthropic_pricing, get_default_pricing
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
+    from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from loop.run_agent import run_agent
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
@@ -656,22 +656,14 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
 
-        # Fetch model pricing for cost calculation
-        try:
-            pricing = await workflow.execute_activity(
-                fetch_model_pricing,
-                args=[model],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        # Resolve model pricing in-process so startup is not blocked by the activity queue.
+        pricing = get_in_process_model_pricing(model) or get_default_pricing(model)
+        if pricing:
             self.input_cents_per_1k = pricing["input_cents_per_1k"]
             self.output_cents_per_1k = pricing["output_cents_per_1k"]
             workflow.logger.info(
-                f"💰 Fetched model pricing: input={self.input_cents_per_1k}c/1k, output={self.output_cents_per_1k}c/1k"
+                f"💰 Resolved model pricing: input={self.input_cents_per_1k}c/1k, output={self.output_cents_per_1k}c/1k"
             )
-        except Exception as e:
-            workflow.logger.error(f"Failed to fetch model pricing: {e}")
-            # Cost tracking will be disabled if pricing unavailable
 
         # Broadcast initial tree state with schema (only for sub-agents with bus_id)
         if self.bus_id:
@@ -1572,20 +1564,17 @@ class AgentWorkflow:
         if model in self.model_pricing_cache:
             return self.model_pricing_cache[model]
 
-        # Fetch pricing for this model
-        try:
-            pricing = await workflow.execute_activity(
-                fetch_model_pricing,
-                args=[model],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            self.model_pricing_cache[model] = pricing
-            workflow.logger.info(f"💰 Fetched pricing for {model}: {pricing}")
-            return pricing
-        except Exception as e:
-            workflow.logger.error(f"Failed to fetch pricing for {model}: {e}")
-            return None
+        # Pricing is an in-process constant table. Keep this on the workflow
+        # path so cost accounting cannot stall user-visible tools behind the
+        # activity queue under benchmark load.
+        pricing = get_in_process_model_pricing(model)
+        if pricing is None:
+            pricing = get_default_pricing(model)
+            workflow.logger.warning(f"💰 Using default pricing fallback for {model}: {pricing}")
+        else:
+            workflow.logger.info(f"💰 Resolved pricing for {model}: {pricing}")
+        self.model_pricing_cache[model] = pricing
+        return pricing
 
     # =========================================================================
     # COST LIMIT HELPERS

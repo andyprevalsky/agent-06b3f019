@@ -2537,40 +2537,35 @@ async def test_workflow_refresh_claude_token_exception_logged_no_raise():
         _restore_workflow(original)
 
 
-async def test_workflow_get_model_pricing_fetches_and_caches():
+async def test_workflow_get_model_pricing_resolves_in_process_and_caches():
     wf = _bare_workflow_instance()
     wf.model = "workflow-primary"
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_model_pricing"] = {
-        "input_cents_per_1k": 0.5,
-        "output_cents_per_1k": 2.0,
-    }
     original = _patch_workflow(fake)
     try:
-        pricing = await wf._get_model_pricing("new-model")
-        assert pricing == {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.0}
-        # Second call hits cache (no second activity)
-        pricing2 = await wf._get_model_pricing("new-model")
+        pricing = await wf._get_model_pricing("anthropic/claude-opus-4.7")
+        assert pricing == {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5}
+        pricing2 = await wf._get_model_pricing("anthropic/claude-opus-4.7")
         assert pricing2 == pricing
         fetches = [c for c in fake.activity_calls if c[0] == "fetch_model_pricing"]
-        assert len(fetches) == 1
+        assert fetches == []
     finally:
         _restore_workflow(original)
 
 
-async def test_workflow_get_model_pricing_exception_returns_none():
+async def test_workflow_get_model_pricing_unknown_uses_default():
     wf = _bare_workflow_instance()
     wf.model = "primary"
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
-    fake.activity_fail_for.add("fetch_model_pricing")
     original = _patch_workflow(fake)
     try:
         pricing = await wf._get_model_pricing("unknown-model")
-        assert pricing is None
+        assert pricing == {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.3}
+        assert not fake.activity_calls
     finally:
         _restore_workflow(original)
 
@@ -2816,8 +2811,11 @@ async def run_all_tests():
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async("wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token)
     await r.record_async("wf_refresh_claude_token_exception", test_workflow_refresh_claude_token_exception_logged_no_raise)
-    await r.record_async("wf_get_model_pricing_fetches_caches", test_workflow_get_model_pricing_fetches_and_caches)
-    await r.record_async("wf_get_model_pricing_exception", test_workflow_get_model_pricing_exception_returns_none)
+    await r.record_async(
+        "wf_get_model_pricing_in_process",
+        test_workflow_get_model_pricing_resolves_in_process_and_caches,
+    )
+    await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token)
     await r.record_async("wf_on_tokens_successful_claude_rotation", test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token)

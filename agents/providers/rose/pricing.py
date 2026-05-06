@@ -81,12 +81,17 @@ def get_pool_pricing(pool_name: str) -> Optional[Dict[str, float]]:
 def get_anthropic_pricing(model: str) -> Optional[Dict[str, float]]:
     """Return cents-per-1k pricing for a direct-Anthropic model id."""
     normalized = model.lower().strip()
+    normalized_dashed = normalized.replace(".", "-")
     if normalized in _CLAUDE_AUTH_PRICING:
         return _CLAUDE_AUTH_PRICING[normalized]
+    if normalized_dashed in _CLAUDE_AUTH_PRICING:
+        return _CLAUDE_AUTH_PRICING[normalized_dashed]
     if normalized in ANTHROPIC_MODEL_PRICING:
         return ANTHROPIC_MODEL_PRICING[normalized]
-    for key, pricing in ANTHROPIC_MODEL_PRICING.items():
-        if key in normalized or normalized in key:
+    if normalized_dashed in ANTHROPIC_MODEL_PRICING:
+        return ANTHROPIC_MODEL_PRICING[normalized_dashed]
+    for key, pricing in sorted(ANTHROPIC_MODEL_PRICING.items(), key=lambda item: len(item[0]), reverse=True):
+        if key in normalized_dashed or normalized_dashed in key:
             return pricing
     return None
 
@@ -100,4 +105,10 @@ def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
         normalized = normalized[len("rose-labs/"):]
     if normalized in _POOL_WATERFALLS:
         return _average_pool_pricing(normalized)
+    if normalized in _PROVIDER_PRICING:
+        pricing = _PROVIDER_PRICING[normalized]
+        return {
+            "input_cents_per_1k": pricing["prompt"] * 1000 * 100,
+            "output_cents_per_1k": pricing["completion"] * 1000 * 100,
+        }
     return get_anthropic_pricing(normalized)

@@ -1215,7 +1215,15 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     async def fake_run_agent(**kwargs):
         # exercise on_tokens callback
         on_tokens = kwargs["on_tokens"]
-        await on_tokens(10, 5, "claude-x", 7, 3, "explore_agent")
+        await on_tokens(
+            10,
+            5,
+            "claude-x",
+            7,
+            3,
+            "explore_agent",
+            claude_token_rotated=True,
+        )
         on_tokens_holder["called"] = True
 
         # exercise post_message callback (forwarded to save_explore_message)
