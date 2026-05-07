@@ -5,17 +5,21 @@
  */
 
 import type { UpdateStatusPayload } from './types';
+import { getElectronApi } from '../../lib/electron-api';
 
 export const subscribeToUpdateStatus = (callback: (payload: UpdateStatusPayload) => void): void => {
-  window.api.onUpdateStatus(callback);
+  getElectronApi()?.onUpdateStatus(callback);
 };
 
 export const subscribeToUpdateProgress = (callback: (percent: number) => void): void => {
-  window.api.onUpdateProgress(callback);
+  getElectronApi()?.onUpdateProgress(callback);
 };
 
-export const downloadUpdate = (): Promise<{ success: boolean }> => window.api.downloadUpdate();
+export const downloadUpdate = (): Promise<{ success: boolean }> =>
+  getElectronApi()?.downloadUpdate() ?? Promise.resolve({ success: false });
 
-export const restartToUpdate = (): Promise<{ success: boolean }> => window.api.restartToUpdate();
+export const restartToUpdate = (): Promise<{ success: boolean }> =>
+  getElectronApi()?.restartToUpdate() ?? Promise.resolve({ success: false });
 
-export const checkForUpdates = (): Promise<{ success: boolean }> => window.api.checkForUpdates();
+export const checkForUpdates = (): Promise<{ success: boolean }> =>
+  getElectronApi()?.checkForUpdates() ?? Promise.resolve({ success: false });

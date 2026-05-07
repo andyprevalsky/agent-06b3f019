@@ -26,6 +26,7 @@ export function useToolMessageState(
 ): ToolMessageState {
   const [isExpanded, setIsExpanded] = useState(false);
   const isThought = data.toolName === 'thought';
+  const isCloudAgentLifecycle = data.toolName === 'cloud_agent';
   const [forceExpanded, setForceExpanded] = useState(isThought && data.status === 'IN_PROGRESS');
 
   useEffect(() => {
@@ -48,17 +49,14 @@ export function useToolMessageState(
   const { text: titleText } = useMemo(() => extractEmoji(data.title), [data.title]);
   const hasMessage = useMemo(() => data.message.trim().length > 0, [data.message]);
   const isExpandable = useMemo(
-    () => data.status === 'FINISHED' || data.status === 'ERROR',
-    [data.status],
+    () => !isCloudAgentLifecycle && (data.status === 'FINISHED' || data.status === 'ERROR'),
+    [data.status, isCloudAgentLifecycle],
   );
   const showChevron = useMemo(
     () => hasMessage && isExpandable && !forceExpanded,
     [hasMessage, isExpandable, forceExpanded],
   );
-  const shouldBeExpanded = useMemo(
-    () => forceExpanded || isExpanded,
-    [forceExpanded, isExpanded],
-  );
+  const shouldBeExpanded = useMemo(() => forceExpanded || isExpanded, [forceExpanded, isExpanded]);
 
   const progressPercent = useMemo(() => {
     if (data.progressComplete === undefined) return undefined;

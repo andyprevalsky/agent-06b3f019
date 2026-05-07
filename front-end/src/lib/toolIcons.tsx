@@ -41,6 +41,7 @@ import {
   FileEdit,
   Upload,
   RefreshCw,
+  Cloud,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -96,6 +97,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   check_monitor_events: ListChecks,
   claude_code: Code,
   thought: Lightbulb,
+  cloud_agent: Cloud,
 
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,

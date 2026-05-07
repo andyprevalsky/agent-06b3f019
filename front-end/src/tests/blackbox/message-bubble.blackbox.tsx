@@ -29,9 +29,7 @@ import type { AgentContextValue } from '@/features/agent-context';
 import type { Message } from '@/lib/api';
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<
-    Set<string>
-  >;
+  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
   return {
     agent: null,
     setAgent: () => {},
@@ -53,10 +51,7 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   };
 }
 
-function renderBubble(
-  ui: React.ReactNode,
-  agentCtx: AgentContextValue = makeAgentCtx(),
-) {
+function renderBubble(ui: React.ReactNode, agentCtx: AgentContextValue = makeAgentCtx()) {
   return render(
     <AgentContext.Provider value={agentCtx}>
       <TooltipProvider>{ui}</TooltipProvider>
@@ -113,9 +108,7 @@ describe('MessageBubble', () => {
   it('renders ASSISTANT with shouldType=true as Thinking (IN_PROGRESS)', async () => {
     const msg = baseMessage({ role: 'ASSISTANT', text: 'working' });
     const onComplete = vi.fn();
-    renderBubble(
-      <MessageBubble message={msg} shouldType={true} onTypingComplete={onComplete} />,
-    );
+    renderBubble(<MessageBubble message={msg} shouldType={true} onTypingComplete={onComplete} />);
     await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument());
     await waitFor(() => expect(onComplete).toHaveBeenCalled());
   });
@@ -200,6 +193,27 @@ describe('MessageBubble', () => {
     expect(inner).not.toBeNull();
   });
 
+  it.each([
+    ['Creating Cloud Agent', 'IN_PROGRESS'],
+    ['Preparing Cloud Agent', 'IN_PROGRESS'],
+    ['Starting Reasoning', 'IN_PROGRESS'],
+    ['Cloud Agent Ready', 'FINISHED'],
+  ] as const)('renders %s cloud lifecycle tool without expandable output', async (title, toolStatus) => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: `${title} body should stay hidden.`,
+      metadata: {
+        toolCallId: 'tc-cloud-agent',
+        toolName: 'cloud_agent',
+        title,
+        toolStatus,
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
+    expect(screen.queryByText(`${title} body should stay hidden.`)).not.toBeInTheDocument();
+  });
+
   it('renders TOOL ERROR in red with error title', async () => {
     const msg = baseMessage({
       role: 'TOOL',
@@ -249,9 +263,7 @@ describe('MessageBubble', () => {
       expect(container.textContent).toContain('please');
       expect(container.textContent).toContain('answer');
     });
-    expect(
-      screen.getByText(/Your Rose agent will continue working/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Your Rose agent will continue working/)).toBeInTheDocument();
   });
 
   it('renders signup request as SignupPromptBubble when agentId provided', async () => {
@@ -324,9 +336,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() =>
-      expect(screen.getByText(/Spawning sub-agents/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Spawning sub-agents/)).toBeInTheDocument());
   });
 
   it('renders sub-agent pre-spawn ERROR as failed tree-node', async () => {
@@ -341,9 +351,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() =>
-      expect(screen.getByText(/DAG param failed/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/DAG param failed/)).toBeInTheDocument());
   });
 
   it('renders completion-summary message with CompletionSummaryCard', async () => {
@@ -363,9 +371,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() =>
-      expect(screen.getByText(/Completed the mission/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Completed the mission/)).toBeInTheDocument());
   });
 
   it('renders wait_for tool as WaitForChip', async () => {
@@ -397,9 +403,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() =>
-      expect(screen.getAllByText(/Explore foo/).length).toBeGreaterThan(0),
-    );
+    await waitFor(() => expect(screen.getAllByText(/Explore foo/).length).toBeGreaterThan(0));
   });
 
   it('renders Claude Code tool message as ClaudeCodeChip', async () => {
@@ -454,9 +458,7 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} />);
     // PhoneCallCard renders the target phone number as unique text.
-    await waitFor(() =>
-      expect(screen.getByText('+15551234567')).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText('+15551234567')).toBeInTheDocument());
     // Duration is formatted as m:ss (42s -> 0:42) — confirms FINISHED branch specifically.
     expect(screen.getByText('0:42')).toBeInTheDocument();
   });
@@ -481,9 +483,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(<MessageBubble message={msg} planCharCount={123} />);
-    await waitFor(() =>
-      expect(screen.getByText(/Deploy the thing/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Deploy the thing/)).toBeInTheDocument());
   });
 
   it('renders streaming attention message using StreamingText (isStreaming=true)', async () => {
@@ -551,9 +551,7 @@ describe('MessageBubble', () => {
         created_at: new Date().toISOString(),
       },
     });
-    const { container } = renderBubble(
-      <MessageBubble message={msg} agentId="agent-img" />,
-    );
+    const { container } = renderBubble(<MessageBubble message={msg} agentId="agent-img" />);
     // Image placeholder renders the filename while signed URL loads.
     await waitFor(() => expect(screen.getByText('pic.png')).toBeInTheDocument());
     expect(container.textContent).toContain('look');
@@ -578,9 +576,7 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} />);
     await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: /Send via Mac iMessage/ }),
-      ).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: /Send via Mac iMessage/ })).toBeInTheDocument(),
     );
     expect(screen.getByText(/Howdy/)).toBeInTheDocument();
   });
@@ -641,13 +637,9 @@ describe('MessageBubble', () => {
         },
       },
     });
-    renderBubble(
-      <MessageBubble message={msg} onSubmitFeedback={onSubmitFeedback} />,
-    );
+    renderBubble(<MessageBubble message={msg} onSubmitFeedback={onSubmitFeedback} />);
     // FeedbackBanner's initial rating step prompts "How was this result?".
-    await waitFor(() =>
-      expect(screen.getByText(/How was this result\?/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/How was this result\?/i)).toBeInTheDocument());
   });
 
   it('iMessage action button shows toast when bridge is missing', async () => {
@@ -703,9 +695,7 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} waitForChecks={[]} />);
     // WaitForChip in FINISHED state renders "Waited for {condition}".
-    await waitFor(() =>
-      expect(screen.getByText(/Waited for/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Waited for/i)).toBeInTheDocument());
   });
 
   it('calls onTypingComplete for set_plan IN_PROGRESS when shouldType=true', async () => {
@@ -721,11 +711,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(
-      <MessageBubble
-        message={msg}
-        shouldType={true}
-        onTypingComplete={onTypingComplete}
-      />,
+      <MessageBubble message={msg} shouldType={true} onTypingComplete={onTypingComplete} />,
     );
     await waitFor(() => expect(onTypingComplete).toHaveBeenCalled());
   });
@@ -743,11 +729,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(
-      <MessageBubble
-        message={msg}
-        shouldType={true}
-        onTypingComplete={onTypingComplete}
-      />,
+      <MessageBubble message={msg} shouldType={true} onTypingComplete={onTypingComplete} />,
     );
     await waitFor(() => expect(onTypingComplete).toHaveBeenCalled());
   });
@@ -764,11 +746,7 @@ describe('MessageBubble', () => {
       },
     });
     renderBubble(
-      <MessageBubble
-        message={msg}
-        shouldType={true}
-        onTypingComplete={onTypingComplete}
-      />,
+      <MessageBubble message={msg} shouldType={true} onTypingComplete={onTypingComplete} />,
     );
     await waitFor(() => expect(onTypingComplete).toHaveBeenCalled());
   });
@@ -824,9 +802,7 @@ describe('MessageBubble', () => {
     const { container: defaultContainer } = renderBubble(
       <MessageBubble message={msg} compact={false} />,
     );
-    await waitFor(() =>
-      expect(compactContainer.querySelector('.flex')).not.toBeNull(),
-    );
+    await waitFor(() => expect(compactContainer.querySelector('.flex')).not.toBeNull());
     // The compact outer flex wrapper must NOT contain gap-3.
     const compactFlex = compactContainer.querySelector('.flex') as HTMLElement | null;
     expect(compactFlex).not.toBeNull();

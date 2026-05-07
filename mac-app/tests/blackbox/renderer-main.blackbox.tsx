@@ -119,6 +119,7 @@ vi.mock('../../ui/onboarding/Onboarding', () => ({
 
 import ElectronApp from '../../ui/ElectronApp';
 import UpdateIndicator from '../../ui/UpdateIndicator';
+import QuickQueryListener from '../../ui/features/quick-query-listener';
 import {
   IntegrationHandlersProvider,
   useIntegrationHandlers,
@@ -524,18 +525,6 @@ describe('renderer-main blackbox', () => {
         },
       } as Partial<IPC>);
 
-      // Mirror main.tsx's QuickQueryListener effect in a tiny harness so we
-      // exercise the observable contract (IPC callback → dispatchQuickQueryEvent
-      // → window CustomEvent) without pulling in the createRoot bootstrapping.
-      const QuickQueryListener = () => {
-        React.useEffect(() => {
-          window.api.onQuickQuerySubmit((payload) => {
-            dispatchQuickQueryEvent(payload);
-          });
-        }, []);
-        return null;
-      };
-
       const received: QuickQueryPayload[] = [];
       const listener = (e: Event) => {
         received.push((e as CustomEvent<QuickQueryPayload>).detail);
@@ -551,6 +540,14 @@ describe('renderer-main blackbox', () => {
 
       window.removeEventListener(QUICK_QUERY_EVENT, listener);
       expect(received).toEqual([{ query: 'from-ipc', submittedAt: 99 }]);
+    });
+
+    it('does not crash when quick-query preload bridge is unavailable', () => {
+      clearIpcMock();
+
+      expect(() => {
+        renderWithProviders(<QuickQueryListener />);
+      }).not.toThrow();
     });
   });
 
