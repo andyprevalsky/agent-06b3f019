@@ -992,6 +992,11 @@ async def test_claude_auth_401_rotates_and_exhausts():
     """401 → _RotateToken('auth_error'); with max_rotations=0, raises after one
     rotate attempt."""
     calls = {"n": 0}
+    marked: list[tuple[str, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, failure_reason))
+        return True
 
     def handler(req):
         calls["n"] += 1
@@ -1000,7 +1005,13 @@ async def test_claude_auth_401_rotates_and_exhausts():
     set_mock_handler(handler)
 
     spec = get_pool("rose-1-lite")
-    auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=0)
+    auth = ClaudeAuthContext(
+        token="t",
+        source="user",
+        user_id="",
+        mark_rate_limited=mark,
+        max_rotations=0,
+    )
     raised = False
     try:
         await _drain(claude_auth_complete(
@@ -1014,16 +1025,17 @@ async def test_claude_auth_401_rotates_and_exhausts():
         raised = True
     assert raised
     assert calls["n"] == 1
+    assert marked == [("t", "auth_error")]
 
 
 async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token():
     """Usage-window 429 marks the exact reset time and rotates immediately."""
     reset_at = "2099-05-05T20:15:00Z"
     seen_tokens: list[str] = []
-    marked: list[tuple[str, int, str | None]] = []
+    marked: list[tuple[str, int, str | None, str | None]] = []
 
-    async def mark(ctx, cooldown_seconds, rate_limited_until=None):
-        marked.append((ctx.token, cooldown_seconds, rate_limited_until))
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, cooldown_seconds, rate_limited_until, failure_reason))
         return True
 
     async def fetch_fresh(user_id):
@@ -1095,7 +1107,7 @@ async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token(
         max_tokens=16,
     ))
 
-    assert marked == [("old-token", 300, reset_at)]
+    assert marked == [("old-token", 300, reset_at, "rate_limit")]
     assert seen_tokens == ["Bearer old-token", "Bearer fresh-token"]
     assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks)
 
@@ -1103,10 +1115,10 @@ async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token(
 async def test_claude_auth_429_transient_retries_before_rotating():
     """Transient 429s retry the same token before cooldown/rotation."""
     calls = {"n": 0}
-    marked: list[tuple[str, str | None]] = []
+    marked: list[tuple[str, str | None, str | None]] = []
 
-    async def mark(ctx, cooldown_seconds, rate_limited_until=None):
-        marked.append((ctx.token, rate_limited_until))
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
         return True
 
     def handler(req):
@@ -1139,22 +1151,22 @@ async def test_claude_auth_429_transient_retries_before_rotating():
                 request_id="r-transient-429",
                 max_tokens=16,
             ))
-        except RoseAuthError as exc:
+        except RoseRateLimitError as exc:
             raised = True
             assert "rate_limit" in str(exc)
 
     assert raised
     assert calls["n"] == 3
-    assert marked == [("transient-token", None)]
+    assert marked == [("transient-token", None, "rate_limit")]
 
 
 async def test_claude_auth_403_usage_limit_marks_body_reset_time():
     """Usage-limit 403 is a rate-limit rotation, not a permanent auth error."""
     reset_at = "2099-05-05T21:30:00Z"
-    marked: list[tuple[str, str | None]] = []
+    marked: list[tuple[str, str | None, str | None]] = []
 
-    async def mark(ctx, cooldown_seconds, rate_limited_until=None):
-        marked.append((ctx.token, rate_limited_until))
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
         return True
 
     def handler(req):
@@ -1185,12 +1197,12 @@ async def test_claude_auth_403_usage_limit_marks_body_reset_time():
             request_id="r-usage-limit",
             max_tokens=16,
         ))
-    except RoseAuthError as exc:
+    except RoseRateLimitError as exc:
         raised = True
         assert "rate_limit" in str(exc)
 
     assert raised
-    assert marked == [("limited-token", reset_at)]
+    assert marked == [("limited-token", reset_at, "rate_limit")]
 
 
 # =====================================================================

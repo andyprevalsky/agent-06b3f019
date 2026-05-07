@@ -13,6 +13,10 @@ export interface GptCodeCredentialResult {
   poolTokenId?: string;
 }
 
+export interface GptCodeCredentialEnvelopeResult extends GptCodeCredentialResult {
+  credentials: string;
+}
+
 function decryptIntegrationCredentials(
   integration: { id: string; config: unknown },
   decryptionKey: string
@@ -36,6 +40,10 @@ function parseGptCodeEnvelope(credentialsJson: string) {
   } catch {
     return null;
   }
+}
+
+function hasUsableGptCodeEnvelope(credentialsJson: string): boolean {
+  return parseGptCodeEnvelope(credentialsJson) !== null;
 }
 
 function resolveRateLimitedUntil(rateLimitedUntil?: string | Date | null): Date {
@@ -79,6 +87,81 @@ export async function fetchGptPoolToken(
       userId: poolIntegration.userId,
     });
     return {
+      accessToken: parsed.accessToken,
+      accountId: parsed.accountId,
+      source: 'pool',
+      userId: poolIntegration.userId,
+      poolTokenId: poolIntegration.id,
+    };
+  }
+
+  return null;
+}
+
+export async function fetchGptCodeCredentialsWithMeta(
+  userId: string
+): Promise<GptCodeCredentialEnvelopeResult | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+
+  const now = new Date();
+  const userIntegration = await prisma.integration.findFirst({
+    where: {
+      userId,
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+    orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+  });
+
+  if (userIntegration) {
+    const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
+    const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+    if (decrypted && parsed) {
+      await prisma.integration.update({
+        where: { id: userIntegration.id },
+        data: { lastUsedAt: now },
+      });
+      log.info('Serving user GPT Code credentials', {
+        userId,
+        integrationId: userIntegration.id,
+      });
+      return {
+        credentials: decrypted,
+        accessToken: parsed.accessToken,
+        accountId: parsed.accountId,
+        source: 'user',
+        userId,
+      };
+    }
+  }
+
+  const poolIntegrations = await prisma.integration.findMany({
+    where: {
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      poolingEnabled: true,
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+    orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+  });
+
+  for (const poolIntegration of poolIntegrations) {
+    const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
+    const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+    if (!decrypted || !parsed || !hasUsableGptCodeEnvelope(decrypted)) continue;
+
+    await prisma.integration.update({
+      where: { id: poolIntegration.id },
+      data: { lastUsedAt: now },
+    });
+    log.info('Serving pool GPT Code credentials', {
+      integrationId: poolIntegration.id,
+      userId: poolIntegration.userId,
+    });
+    return {
+      credentials: decrypted,
       accessToken: parsed.accessToken,
       accountId: parsed.accountId,
       source: 'pool',

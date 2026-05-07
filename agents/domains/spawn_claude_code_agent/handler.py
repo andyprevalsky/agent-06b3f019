@@ -66,7 +66,43 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
         try:
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
-            claude_token = getattr(workflow_instance, "claude_max_token", None)
+            active_claude_token = getattr(workflow_instance, "_active_claude_token", None)
+            claude_token = (
+                active_claude_token()
+                if callable(active_claude_token)
+                else getattr(workflow_instance, "claude_max_token", None)
+            )
+            active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
+            gpt_token = (
+                active_gpt_token()
+                if callable(active_gpt_token)
+                else getattr(workflow_instance, "gpt_code_token", None)
+            )
+            active_gpt_account_id = getattr(workflow_instance, "_active_gpt_account_id", None)
+            gpt_account_id = (
+                active_gpt_account_id()
+                if callable(active_gpt_account_id)
+                else getattr(workflow_instance, "gpt_code_account_id", None)
+            )
+            active_gpt_source = getattr(workflow_instance, "_active_gpt_source", None)
+            gpt_token_source = (
+                active_gpt_source()
+                if callable(active_gpt_source)
+                else getattr(workflow_instance, "gpt_code_token_source", None)
+            )
+            active_gpt_pool_id = getattr(workflow_instance, "_active_gpt_pool_id", None)
+            gpt_token_pool_id = (
+                active_gpt_pool_id()
+                if callable(active_gpt_pool_id)
+                else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+            )
+            code_provider = _select_code_provider(workflow_instance, gpt_token)
+            logger.info(
+                "[ClaudeCode] Selected code sandbox provider",
+                agent_id=agent_id,
+                code_provider=code_provider,
+                compute_token_provider=getattr(workflow_instance, "compute_token_provider", None),
+            )
 
             async with span(
                 "claude_code_activity_wait",
@@ -86,6 +122,11 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         model,
                         github_repo_url,
                         claude_token,
+                        code_provider,
+                        gpt_token,
+                        gpt_account_id,
+                        gpt_token_source,
+                        gpt_token_pool_id,
                     ],
                     start_to_close_timeout=timedelta(minutes=50),
                     heartbeat_timeout=timedelta(minutes=5),
@@ -243,6 +284,14 @@ def _resolve_attachments(
         attachments = [_fp_to_dict(fp) for fp in context_attachments]
 
     return attachments
+
+
+def _select_code_provider(workflow_instance: Any, gpt_token: Optional[str]) -> str:
+    """Use Codex for GPT compute tokens; keep Claude Code for Claude tokens."""
+    provider = getattr(workflow_instance, "compute_token_provider", None)
+    if provider == "gpt" and gpt_token:
+        return "codex"
+    return "claude"
 
 
 def _fp_to_dict(fp: Any) -> Dict[str, Any]:

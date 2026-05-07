@@ -396,14 +396,15 @@ async def gpt_auth_complete(
             reason = "auth_error" if isinstance(exc, RoseAuthError) else "rate_limit"
             await _cool_down(current_auth, reason, request_id, agent_id, call_site)
             rotations += 1
+            error_cls = RoseRateLimitError if reason == "rate_limit" else RoseAuthError
             if rotations > current_auth.max_rotations:
-                raise RoseAuthError(
+                raise error_cls(
                     f"gptAuth exhausted after {rotations} rotations ({reason})",
                     status=getattr(exc, "status", None),
                 ) from exc
             fresh = await _fetch_fresh_or_none(current_auth)
             if fresh is None:
-                raise RoseAuthError(
+                raise error_cls(
                     f"gptAuth: no fresh token available after {rotations} rotations ({reason})",
                     status=getattr(exc, "status", None),
                 ) from exc

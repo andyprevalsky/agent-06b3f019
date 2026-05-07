@@ -3844,6 +3844,7 @@ async def mark_gpt_token_rate_limited_activity(
     pool_token_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
+    failure_reason: Optional[str] = None,
 ) -> bool:
     """Mark the current GPT token as rate-limited in the backend."""
     config = load_config()
@@ -3855,6 +3856,8 @@ async def mark_gpt_token_rate_limited_activity(
         "source": source,
         "rateLimitedUntil": effective_rate_limited_until,
     }
+    if failure_reason:
+        body["failureReason"] = failure_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
     if source == "user":

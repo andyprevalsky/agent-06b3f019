@@ -1,0 +1,16 @@
+# This is a config for E2B sandbox template.
+# You can use template ID (50w3d0kheq8m25u5dwle) or template name (codex-code) to create a sandbox:
+
+# Python SDK
+# from e2b import Sandbox, AsyncSandbox
+# sandbox = Sandbox.create("codex-code") # Sync sandbox
+# sandbox = await AsyncSandbox.create("codex-code") # Async sandbox
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create('codex-code')
+
+team_id = "b06df5d1-ace0-41e9-bee8-9f81e23b883a"
+dockerfile = "e2b.Dockerfile"
+template_name = "codex-code"
+template_id = "50w3d0kheq8m25u5dwle"

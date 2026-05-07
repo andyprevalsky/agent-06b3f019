@@ -332,13 +332,15 @@ async def claude_auth_complete(
             )
             rotations += 1
             if rotations > current_auth.max_rotations:
-                raise RoseAuthError(
+                error_cls = RoseRateLimitError if rotate.reason == "rate_limit" else RoseAuthError
+                raise error_cls(
                     f"claudeAuth exhausted after {rotations} rotations ({rotate.reason})",
                     status=rotate.status,
                 )
             fresh = await _fetch_fresh_or_none(current_auth)
             if fresh is None:
-                raise RoseAuthError(
+                error_cls = RoseRateLimitError if rotate.reason == "rate_limit" else RoseAuthError
+                raise error_cls(
                     f"claudeAuth: no fresh token available after {rotations} rotations ({rotate.reason})",
                     status=rotate.status,
                 )

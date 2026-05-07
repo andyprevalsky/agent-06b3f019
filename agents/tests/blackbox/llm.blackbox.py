@@ -668,6 +668,33 @@ async def test_mark_claude_token_rate_limited_pool_success():
     assert "userId" not in body
 
 
+async def test_mark_claude_token_rate_limited_forwards_failure_reason():
+    """Auth-error marks include failureReason so backend can disable pool tokens."""
+    setup_mock({
+        "/api/integrations/claude-code/token/rate-limited": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import mark_claude_token_rate_limited_activity
+
+        result = await mark_claude_token_rate_limited_activity(
+            source="pool",
+            user_id="u-1",
+            pool_token_id="pool-42",
+            failure_reason="auth_error",
+        )
+
+    assert result is True
+    call = get_captured_requests()[0]
+    body = json.loads(call["requestBody"])
+    assert body["source"] == "pool"
+    assert body["poolTokenId"] == "pool-42"
+    assert body["failureReason"] == "auth_error"
+
+
 async def test_mark_claude_token_rate_limited_failure():
     """Non-200 status returns False."""
     setup_mock({
@@ -3593,6 +3620,7 @@ async def run_all_tests():
     await r.record_async("mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success)
     await r.record_async("mark_claude_token_rate_limited_explicit_reset", test_mark_claude_token_rate_limited_uses_explicit_reset_time)
     await r.record_async("mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success)
+    await r.record_async("mark_claude_token_rate_limited_failure_reason", test_mark_claude_token_rate_limited_forwards_failure_reason)
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
     await r.record_async("set_response_schema_activity_uses_internal_auth_only", test_set_response_schema_activity_uses_internal_auth_only)

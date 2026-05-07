@@ -312,6 +312,9 @@ async def mock_mark_compute_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    cooldown_seconds: int = 5 * 60,
+    rate_limited_until: Optional[str] = None,
+    failure_reason: Optional[str] = None,
 ) -> None:
     return None
 
@@ -2666,6 +2669,8 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         # mark activity executed
         activity_names = [c[0] for c in fake.activity_calls]
         assert "mark_compute_token_rate_limited_activity" in activity_names
+        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
+        assert mark_call[1] == ["claude", "pool", "user-1", "pool-id-1", 5 * 60, None, "auth_error"]
     finally:
         _restore_workflow(original)
 
@@ -2765,7 +2770,7 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         activity_names = [c[0] for c in fake.activity_calls]
         assert "mark_compute_token_rate_limited_activity" in activity_names
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1"]
+        assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1", 5 * 60, None, "auth_error"]
     finally:
         _restore_workflow(original)
 

@@ -8,6 +8,10 @@ import {
   fetchClaudeCodeCredentialsWithMeta,
   type ClaudeCodeCredentialResult,
 } from './claudeCredentials';
+import {
+  fetchGptCodeCredentialsWithMeta,
+  type GptCodeCredentialEnvelopeResult,
+} from './gptCredentials';
 
 const log = createLogger('E2B');
 
@@ -26,6 +30,7 @@ const WS_PORT = 3000;
 const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes
 const WS_READY_TIMEOUT_MS = 10000;
 const WS_READY_POLL_INTERVAL_MS = 100;
+const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 
 // Directories for file transfer
 const ATTACHMENTS_DIR = '/home/user/attachments';
@@ -195,6 +200,136 @@ export async function createClaudeCodeSession(
   });
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
+
+  return {
+    wsUrl,
+    taskId,
+    sandboxId: sandbox.sandboxId,
+    uploadedFiles,
+  };
+}
+
+export async function createCodexCodeSession(
+  agentId: string,
+  goal: string,
+  attachments?: FilePointer[],
+  githubRepoUrl?: string,
+  userId?: string
+): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+  log.info(`Creating Codex Code session for agent ${agentId}`);
+
+  if (!process.env.E2B_API_KEY) {
+    throw new Error('E2B Codex environment variables not configured');
+  }
+  if (!userId) {
+    throw new Error('user_id is required to create a Codex Code session');
+  }
+
+  const credentialMeta: GptCodeCredentialEnvelopeResult | null =
+    await fetchGptCodeCredentialsWithMeta(userId);
+  if (!credentialMeta) {
+    throw new Error(
+      'No GPT Code credentials available: no synced user credentials and no available pool tokens'
+    );
+  }
+
+  const envs: Record<string, string> = {
+    CODEX_GOAL: goal,
+    CODEX_AUTH_JSON: credentialMeta.credentials,
+    CODEX_MODEL: process.env.CODEX_CODE_MODEL || 'gpt-5.4',
+  };
+
+  if (githubRepoUrl) {
+    if (!process.env.GITHUB_TOKEN) {
+      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
+    }
+    envs.GITHUB_REPO_URL = githubRepoUrl;
+    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
+  }
+
+  const taskId = uuidv4();
+  const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
+  const sandbox = await Sandbox.create(templateId, {
+    apiKey: process.env.E2B_API_KEY,
+    timeoutMs: SANDBOX_TIMEOUT_MS,
+    envs,
+  });
+
+  log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
+
+  const uploadedFiles: string[] = [];
+  if (attachments && attachments.length > 0) {
+    log.info(`Uploading ${attachments.length} attachments to Codex sandbox`);
+    await sandbox.commands.run(`mkdir -p ${ATTACHMENTS_DIR} ${OUTPUT_DIR}`);
+
+    for (const fp of attachments) {
+      try {
+        const content = await downloadFromStorage(fp.storage_path);
+        const remotePath = `${ATTACHMENTS_DIR}/${fp.original_filename}`;
+        const blob = new Blob([content]);
+        await sandbox.files.write(remotePath, blob);
+        uploadedFiles.push(remotePath);
+        log.info(`Uploaded: ${fp.original_filename} (${content.length} bytes)`);
+      } catch (err) {
+        log.error(`Failed to upload ${fp.original_filename}`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  const wsHost = sandbox.getHost(WS_PORT);
+  const wsUrl = `wss://${wsHost}`;
+
+  sandbox.commands
+    .run('node /home/user/ws-server.mjs', {
+      background: true,
+      timeoutMs: 0,
+    })
+    .catch((err) =>
+      log.error('Failed to start Codex WS server', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    );
+
+  log.info('Waiting for Codex WebSocket server to start');
+  const startTime = Date.now();
+  // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not retry fallback
+  while (Date.now() - startTime < WS_READY_TIMEOUT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, WS_READY_POLL_INTERVAL_MS));
+    try {
+      const result = await sandbox.commands.run(`netstat -tln | grep :${WS_PORT}`, {
+        timeoutMs: 2000,
+      });
+      if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
+        log.info(`Codex WebSocket server ready in ${Date.now() - startTime}ms`);
+        break;
+      }
+    } catch {
+      // Ignore readiness probe failures until timeout.
+    }
+  }
+
+  if (Date.now() - startTime >= WS_READY_TIMEOUT_MS) {
+    log.warn(`Codex WebSocket server readiness check timed out after ${Date.now() - startTime}ms`);
+  }
+
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId,
+      sandboxId: sandbox.sandboxId,
+      streamUrl: wsUrl,
+      goal,
+      status: 'ACTIVE',
+      claudeTokenSource: credentialMeta.source,
+      claudeTokenIntegrationId:
+        credentialMeta.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+    },
+  });
+
+  log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);
 
   return {
     wsUrl,

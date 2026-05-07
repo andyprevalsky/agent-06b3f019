@@ -3750,6 +3750,71 @@ async function testComputeRotation_poolRotatesAcrossProviders() {
   }
 }
 
+async function testRotation_poolAuthErrorDisablesToken() {
+  const caller = await createAnonSession();
+  const poolOwnerA = await createAnonSession();
+  const poolOwnerB = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(poolOwnerA.userId);
+  await completeOnboarding(poolOwnerB.userId);
+  const existing = await existingComputePoolIds();
+  const poolA = await seedClaudeIntegration(poolOwnerA.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+  const poolB = await seedClaudeIntegration(poolOwnerB.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 60_000),
+  });
+
+  const fetchPool = async () => {
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    if (existing.length > 0) headers['X-Exclude-Pool-Tokens'] = existing.join(',');
+    return request(`${BASE_URL}/api/integrations/compute-code/credentials/token`, { headers });
+  };
+
+  try {
+    const first = await fetchPool();
+    assertStatus(first.status, 200, first.data);
+    const firstBody = first.data as { poolTokenId?: string };
+    assert(
+      firstBody.poolTokenId === poolA.id,
+      `Expected first pool token ${poolA.id}, got ${firstBody.poolTokenId}`
+    );
+
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'claude',
+        source: 'pool',
+        poolTokenId: poolA.id,
+        failureReason: 'auth_error',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const disabled = await prisma.integration.findUnique({ where: { id: poolA.id } });
+    assert(disabled !== null, 'Expected disabled pool token row to exist');
+    assert(disabled.poolingEnabled === false, 'auth_error must disable pool selection');
+    assert(disabled.rateLimitedUntil === null, 'auth_error disable must not use a cooldown');
+    assert(disabled.failureReason === 'auth_error', 'auth_error must be recorded');
+
+    const second = await fetchPool();
+    assertStatus(second.status, 200, second.data);
+    const secondBody = second.data as { poolTokenId?: string };
+    assert(
+      secondBody.poolTokenId === poolB.id,
+      `Expected disabled token to be skipped; got ${secondBody.poolTokenId}`
+    );
+  } finally {
+    await prisma.integration.deleteMany({ where: { id: { in: [poolA.id, poolB.id] } } });
+  }
+}
+
 // Test 3: Auto-expiry — a token whose rateLimitedUntil is in the past is available again.
 // Locks in that the filter is `rateLimitedUntil < now`, not a permanent disable flag.
 async function testRotation_autoExpiresAfterCooldown() {
@@ -4881,6 +4946,10 @@ async function runAll() {
       fn: testRotation_userRateLimitedFallsBackToPool,
     },
     { name: 'rotation -- pool rotates on rate-limit', fn: testRotation_poolRotatesOnRateLimit },
+    {
+      name: 'rotation -- pool auth_error disables token',
+      fn: testRotation_poolAuthErrorDisablesToken,
+    },
     {
       name: 'rotation -- compute pool rotates across providers',
       fn: testComputeRotation_poolRotatesAcrossProviders,
