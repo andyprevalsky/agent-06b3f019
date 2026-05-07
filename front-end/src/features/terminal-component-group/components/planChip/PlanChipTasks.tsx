@@ -1,3 +1,11 @@
+/**
+ * STATE MACHINE: PlanChipTasks
+ *
+ * Pure render state derived from props:
+ * [NO_TASKS] -- tasks.length > 0 --> [TASK_LIST]
+ * [TASK_LIST] -- isHypothesis --> diamond markers
+ * [TASK_LIST] -- !isHypothesis --> displayed execution-order step numbers
+ */
 import { formatDeps, formatToolName, type TaskWithDeps } from './helpers';
 
 interface PlanChipTasksProps {
@@ -44,9 +52,7 @@ function PlanTaskRow({ task, displayIndex, isHypothesis }: PlanTaskRowProps) {
       <div className="leading-snug">
         <span className="text-sm text-foreground">
           {task.text}
-          {hasDeps && (
-            <span className="text-muted-foreground ml-1.5">{formatDeps(task.deps)}</span>
-          )}
+          {hasDeps && <span className="text-muted-foreground ml-1.5">{formatDeps(task.deps)}</span>}
         </span>
         {task.toolName && (
           <div className="text-xs text-muted-foreground/60 mt-0.5">

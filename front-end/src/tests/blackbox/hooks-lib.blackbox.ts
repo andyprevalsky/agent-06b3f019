@@ -41,7 +41,12 @@ vi.mock('@/lib/realtime', async (importOriginal) => {
   };
 });
 
-import { useAgentTree, filterTreeBySpawn, getCircleState, getStatusText } from '@/hooks/useAgentTree';
+import {
+  useAgentTree,
+  filterTreeBySpawn,
+  getCircleState,
+  getStatusText,
+} from '@/hooks/useAgentTree';
 
 // Realtime handler pure functions
 import {
@@ -357,8 +362,7 @@ describe('useAgentTree helpers', () => {
 
     it('returns ● when COMPLETED', () =>
       expect(getCircleState(mk({ status: 'COMPLETED' }))).toBe('●'));
-    it('returns ✗ when FAILED', () =>
-      expect(getCircleState(mk({ status: 'FAILED' }))).toBe('✗'));
+    it('returns ✗ when FAILED', () => expect(getCircleState(mk({ status: 'FAILED' }))).toBe('✗'));
     it('returns ⊘ when OUT_OF_CREDITS', () =>
       expect(getCircleState(mk({ status: 'OUT_OF_CREDITS' }))).toBe('⊘'));
     it('returns ◎ when COST_LIMIT_REACHED', () =>
@@ -555,15 +559,13 @@ describe('realtimeHandlers', () => {
     return {
       state,
       setStreamingBubbles: (fn: any) => {
-        state.streamingBubbles =
-          typeof fn === 'function' ? fn(state.streamingBubbles) : fn;
+        state.streamingBubbles = typeof fn === 'function' ? fn(state.streamingBubbles) : fn;
       },
       setStreamingPlan: (fn: any) => {
         state.streamingPlan = typeof fn === 'function' ? fn(state.streamingPlan) : fn;
       },
       setStreamingAttention: (fn: any) => {
-        state.streamingAttention =
-          typeof fn === 'function' ? fn(state.streamingAttention) : fn;
+        state.streamingAttention = typeof fn === 'function' ? fn(state.streamingAttention) : fn;
       },
       setStreamingTools: (fn: any) => {
         state.streamingTools = typeof fn === 'function' ? fn(state.streamingTools) : fn;
@@ -809,11 +811,15 @@ describe('realtimeHandlers', () => {
         tool_call_id: 'tc1',
         tool_name: 'foo',
         title: 't',
+        char_count: 75,
+        is_claude: true,
       } as any,
       'me',
       s.setStreamingTools as any,
     );
     expect(s.state.streamingTools.get('tc1')?.tool_name).toBe('foo');
+    expect(s.state.streamingTools.get('tc1')?.charCount).toBe(75);
+    expect(s.state.streamingTools.get('tc1')?.isClaude).toBe(true);
   });
 
   it('cleanupSubscription: resets refs and clears bubbles', () => {
@@ -821,6 +827,7 @@ describe('realtimeHandlers', () => {
     s.state.streamingBubbles.set('x', { text: '', sequence: 0, done: false, timeoutId: 999 });
     s.state.streamingPlan = { stream_id: 'p' } as any;
     s.state.streamingAttention = { stream_id: 'a' } as any;
+    s.state.streamingTools.set('tc1', { tool_call_id: 'tc1' } as any);
     const isReconnectingRef = { current: true };
     const reconnectTimeoutRef: { current: number | null } = { current: 123 };
     const channelRef: { current: any } = { current: fakeChannel() };
@@ -832,6 +839,7 @@ describe('realtimeHandlers', () => {
       s.setStreamingBubbles as any,
       s.setStreamingPlan as any,
       s.setStreamingAttention as any,
+      s.setStreamingTools as any,
     );
     expect(isReconnectingRef.current).toBe(false);
     expect(reconnectTimeoutRef.current).toBeNull();
@@ -839,6 +847,7 @@ describe('realtimeHandlers', () => {
     expect(s.state.streamingBubbles.size).toBe(0);
     expect(s.state.streamingPlan).toBeNull();
     expect(s.state.streamingAttention).toBeNull();
+    expect(s.state.streamingTools.size).toBe(0);
     clearSpy.mockRestore();
   });
 });
@@ -1162,12 +1171,10 @@ describe('useTerminalMessages', () => {
     viewport.appendChild(endDiv);
     document.body.appendChild(viewport);
 
-    const rafSpy = vi
-      .spyOn(global, 'requestAnimationFrame')
-      .mockImplementation((cb: any) => {
-        cb(0);
-        return 0 as any;
-      });
+    const rafSpy = vi.spyOn(global, 'requestAnimationFrame').mockImplementation((cb: any) => {
+      cb(0);
+      return 0 as any;
+    });
 
     const { result, rerender } = renderHook(
       ({ m }: { m: any[] }) => useTerminalMessages(m, 'a', () => {}),
@@ -1224,9 +1231,7 @@ describe('usePayment', () => {
   });
 
   it('formats expiry MM/YY', () => {
-    const { result } = renderHook(() =>
-      usePayment(initialUserData, vi.fn(), vi.fn()),
-    );
+    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
     act(() => result.current.handleExpiry('1225abc'));
     expect(result.current.paymentData.card_expiry).toBe('12/25');
     act(() => result.current.handleExpiry('1'));
@@ -1234,17 +1239,13 @@ describe('usePayment', () => {
   });
 
   it('limits CVV to 4 digits and strips non-digits', () => {
-    const { result } = renderHook(() =>
-      usePayment(initialUserData, vi.fn(), vi.fn()),
-    );
+    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
     act(() => result.current.handleCVV('12abc34567'));
     expect(result.current.paymentData.card_cvv).toBe('1234');
   });
 
   it('handleAutopayBlur converts dollars to cents', () => {
-    const { result } = renderHook(() =>
-      usePayment(initialUserData, vi.fn(), vi.fn()),
-    );
+    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
     act(() => result.current.setAutopayLimitDisplay('12.34'));
     act(() => result.current.handleAutopayBlur());
     expect(result.current.paymentData.autoagentpaylimit_cents).toBe(1234);
@@ -1314,9 +1315,7 @@ describe('usePayment', () => {
 
   it('savePaymentInfo writes userData on success', async () => {
     const setUser = vi.fn();
-    const { result } = renderHook(() =>
-      usePayment(initialUserData, setUser, vi.fn()),
-    );
+    const { result } = renderHook(() => usePayment(initialUserData, setUser, vi.fn()));
     act(() => {
       // Populate a valid card (Luhn-valid Visa test number), far-future expiry
       result.current.setPaymentData({
@@ -1348,9 +1347,7 @@ describe('usePayment', () => {
       http.patch(`${API_BASE}/user-settings`, () => new HttpResponse(null, { status: 500 })),
     );
     const setErr = vi.fn();
-    const { result } = renderHook(() =>
-      usePayment(initialUserData, vi.fn(), setErr),
-    );
+    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), setErr));
     act(() => {
       result.current.setPaymentData({
         card_number: '4242 4242 4242 4242',
@@ -1503,8 +1500,7 @@ describe('lib/supabase', () => {
 
   it('setRealtimeAuth recognises anon JWT', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const anonToken =
-      'eyJhbGciOiJIUzI1NiJ9.' + btoa(JSON.stringify({ role: 'anon' })) + '.sig';
+    const anonToken = 'eyJhbGciOiJIUzI1NiJ9.' + btoa(JSON.stringify({ role: 'anon' })) + '.sig';
     await setRealtimeAuth(anonToken);
     expect(isRealtimeReady()).toBe(true);
     await setRealtimeAuth(null);
@@ -1569,9 +1565,7 @@ describe('lib/realtime', () => {
     };
     const chanSpy = vi.spyOn(supabase, 'channel').mockReturnValue(channel);
     const rmSpy = vi.spyOn(supabase, 'removeChannel').mockReturnValue('ok' as any);
-    const authSpy = vi
-      .spyOn(supabase.realtime, 'setAuth')
-      .mockResolvedValue(undefined as any);
+    const authSpy = vi.spyOn(supabase.realtime, 'setAuth').mockResolvedValue(undefined as any);
     return { channel, chanSpy, rmSpy, authSpy, listeners };
   }
 

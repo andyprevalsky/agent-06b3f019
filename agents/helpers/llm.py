@@ -3588,7 +3588,14 @@ async def call_llm_activity(  # noqa: C901
                 last_text[0] = text_so_far
 
         # Callback for early tool detection IN_PROGRESS messages
+        latest_raw_chars = [0]
+        current_streaming_tool: List[Optional[str]] = [None, None]  # [tool_name, tool_call_id]
+        last_tool_progress_chars = [0]
+
         async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
+            current_streaming_tool[0] = tool_name
+            current_streaming_tool[1] = tool_call_id
+            last_tool_progress_chars[0] = latest_raw_chars[0]
             if agent_id and stream_id:
                 await stream_tool_event(
                     agent_id=agent_id,
@@ -3596,7 +3603,29 @@ async def call_llm_activity(  # noqa: C901
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     title=f"Starting {tool_name}...",
+                    char_count=latest_raw_chars[0],
+                    is_claude=_is_claude[0],
+                    is_gpt=_is_gpt[0],
                 )
+
+        async def on_raw_progress(total_chars: int):
+            latest_raw_chars[0] = total_chars
+            tool_name, tool_call_id = current_streaming_tool
+            if not (agent_id and stream_id and tool_name and tool_call_id):
+                return
+            if total_chars - last_tool_progress_chars[0] < 50:
+                return
+            last_tool_progress_chars[0] = total_chars
+            await stream_tool_event(
+                agent_id=agent_id,
+                stream_id=stream_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                title=f"Starting {tool_name}...",
+                char_count=total_chars,
+                is_claude=_is_claude[0],
+                is_gpt=_is_gpt[0],
+            )
 
         result, usage, detected_tools_ordered = await call_llm_structured_streaming(
             messages=messages,
@@ -3608,6 +3637,7 @@ async def call_llm_activity(  # noqa: C901
             reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
+            on_raw_progress=on_raw_progress,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
             claude_token_pool_id=claude_token_pool_id,

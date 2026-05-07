@@ -188,6 +188,9 @@ async def stream_tool_event(
     tool_call_id: str,
     tool_name: str,
     title: str,
+    char_count: int = 0,
+    is_claude: bool = False,
+    is_gpt: bool = False,
 ) -> None:
     """
     Broadcast early tool detection as TOOL_STREAM event (ephemeral, no DB insert).
@@ -203,6 +206,9 @@ async def stream_tool_event(
         tool_call_id: The tool_call_id that will be used for the final tool execution
         tool_name: Name of the tool being called
         title: The display title (e.g., "Starting web_search...")
+        char_count: Current raw character count streamed while forming the tool call
+        is_claude: Whether the model is a Claude/Anthropic model
+        is_gpt: Whether the model is direct GPT/Codex
     """
     try:
         config = load_config()
@@ -211,18 +217,25 @@ async def stream_tool_event(
         
         # Broadcast as TOOL_STREAM event (ephemeral, like PLAN_STREAM)
         # Frontend will show this as streaming indicator after thinking bubble
+        record = {
+            "agentId": agent_id,
+            "stream_id": stream_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "title": title,
+            "char_count": char_count,
+        }
+        if is_claude:
+            record["is_claude"] = True
+        if is_gpt:
+            record["is_gpt"] = True
+
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
                 "event": "TOOL_STREAM",
                 "payload": {
-                    "record": {
-                        "agentId": agent_id,
-                        "stream_id": stream_id,
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "title": title,
-                    }
+                    "record": record
                 },
                 "private": _is_production
             }]

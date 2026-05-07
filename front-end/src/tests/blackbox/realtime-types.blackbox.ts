@@ -131,9 +131,7 @@ describe('isToolMessage', () => {
 describe('isSpawnBrowserAgentMessage', () => {
   it('returns true for a TOOL message with toolName=spawn_browser_agent', () => {
     expect(
-      isSpawnBrowserAgentMessage(
-        buildToolMsg('spawn_browser_agent', { task_id: 'task-1' }),
-      ),
+      isSpawnBrowserAgentMessage(buildToolMsg('spawn_browser_agent', { task_id: 'task-1' })),
     ).toBe(true);
   });
 
@@ -152,9 +150,9 @@ describe('isSpawnBrowserAgentMessage', () => {
   });
 
   it('returns false when metadata is undefined', () => {
-    expect(
-      isSpawnBrowserAgentMessage(buildInsertMsg({ role: 'TOOL', metadata: undefined })),
-    ).toBe(false);
+    expect(isSpawnBrowserAgentMessage(buildInsertMsg({ role: 'TOOL', metadata: undefined }))).toBe(
+      false,
+    );
   });
 });
 
@@ -165,9 +163,7 @@ describe('isSpawnBrowserAgentMessage', () => {
 describe('isSpawnClaudeCodeAgentMessage', () => {
   it('returns true for spawn_claude_code_agent tool message', () => {
     expect(
-      isSpawnClaudeCodeAgentMessage(
-        buildToolMsg('spawn_claude_code_agent', { task_id: 'task-2' }),
-      ),
+      isSpawnClaudeCodeAgentMessage(buildToolMsg('spawn_claude_code_agent', { task_id: 'task-2' })),
     ).toBe(true);
   });
 
@@ -180,9 +176,9 @@ describe('isSpawnClaudeCodeAgentMessage', () => {
   });
 
   it('returns false when metadata is null', () => {
-    expect(
-      isSpawnClaudeCodeAgentMessage(buildInsertMsg({ role: 'TOOL', metadata: null })),
-    ).toBe(false);
+    expect(isSpawnClaudeCodeAgentMessage(buildInsertMsg({ role: 'TOOL', metadata: null }))).toBe(
+      false,
+    );
   });
 });
 
@@ -192,9 +188,7 @@ describe('isSpawnClaudeCodeAgentMessage', () => {
 
 describe('isSpawnAgentMessage', () => {
   it('returns true for spawn_agent tool message', () => {
-    expect(isSpawnAgentMessage(buildToolMsg('spawn_agent', { agentType: 'explore' }))).toBe(
-      true,
-    );
+    expect(isSpawnAgentMessage(buildToolMsg('spawn_agent', { agentType: 'explore' }))).toBe(true);
   });
 
   it('returns false for a different toolName', () => {
@@ -216,15 +210,13 @@ describe('isSpawnAgentMessage', () => {
 
 describe('isExploreAgentMessage', () => {
   it('returns true for spawn_agent with agentType=explore', () => {
-    expect(
-      isExploreAgentMessage(buildToolMsg('spawn_agent', { agentType: 'explore' })),
-    ).toBe(true);
+    expect(isExploreAgentMessage(buildToolMsg('spawn_agent', { agentType: 'explore' }))).toBe(true);
   });
 
   it('returns false for spawn_agent with a different agentType', () => {
-    expect(
-      isExploreAgentMessage(buildToolMsg('spawn_agent', { agentType: 'browser' })),
-    ).toBe(false);
+    expect(isExploreAgentMessage(buildToolMsg('spawn_agent', { agentType: 'browser' }))).toBe(
+      false,
+    );
   });
 
   it('returns false for spawn_agent without agentType', () => {
@@ -232,9 +224,7 @@ describe('isExploreAgentMessage', () => {
   });
 
   it('returns false when not a spawn_agent tool message', () => {
-    expect(
-      isExploreAgentMessage(buildToolMsg('web_search', { agentType: 'explore' })),
-    ).toBe(false);
+    expect(isExploreAgentMessage(buildToolMsg('web_search', { agentType: 'explore' }))).toBe(false);
   });
 });
 
@@ -270,9 +260,9 @@ describe('isSendMessageToUserMessage', () => {
   });
 
   it('returns true for send_message_to_user_execute_phase toolName', () => {
-    expect(
-      isSendMessageToUserMessage(buildToolMsg('send_message_to_user_execute_phase')),
-    ).toBe(true);
+    expect(isSendMessageToUserMessage(buildToolMsg('send_message_to_user_execute_phase'))).toBe(
+      true,
+    );
   });
 
   it('returns false for an unrelated tool', () => {
@@ -280,15 +270,15 @@ describe('isSendMessageToUserMessage', () => {
   });
 
   it('returns false when metadata is null', () => {
-    expect(
-      isSendMessageToUserMessage(buildInsertMsg({ role: 'TOOL', metadata: null })),
-    ).toBe(false);
+    expect(isSendMessageToUserMessage(buildInsertMsg({ role: 'TOOL', metadata: null }))).toBe(
+      false,
+    );
   });
 
   it('returns false when metadata is undefined', () => {
-    expect(
-      isSendMessageToUserMessage(buildInsertMsg({ role: 'TOOL', metadata: undefined })),
-    ).toBe(false);
+    expect(isSendMessageToUserMessage(buildInsertMsg({ role: 'TOOL', metadata: undefined }))).toBe(
+      false,
+    );
   });
 
   it('returns false for non-TOOL role', () => {
@@ -314,9 +304,9 @@ describe('isRequestUserSignupMessage', () => {
   });
 
   it('returns false when metadata is null', () => {
-    expect(
-      isRequestUserSignupMessage(buildInsertMsg({ role: 'TOOL', metadata: null })),
-    ).toBe(false);
+    expect(isRequestUserSignupMessage(buildInsertMsg({ role: 'TOOL', metadata: null }))).toBe(
+      false,
+    );
   });
 });
 
@@ -335,9 +325,9 @@ describe('isAssistantFileMessage', () => {
   });
 
   it('returns false for ASSISTANT with null file_pointer', () => {
-    expect(
-      isAssistantFileMessage(buildInsertMsg({ role: 'ASSISTANT', file_pointer: null })),
-    ).toBe(false);
+    expect(isAssistantFileMessage(buildInsertMsg({ role: 'ASSISTANT', file_pointer: null }))).toBe(
+      false,
+    );
   });
 
   it('returns false for ASSISTANT without file_pointer', () => {
@@ -382,9 +372,9 @@ describe('isInsertMessagePayload', () => {
   });
 
   it('returns false when agentId is missing', () => {
-    expect(
-      isInsertMessagePayload({ id: 'i', timestamp: 't', text: 'x', role: 'USER' }),
-    ).toBe(false);
+    expect(isInsertMessagePayload({ id: 'i', timestamp: 't', text: 'x', role: 'USER' })).toBe(
+      false,
+    );
   });
 
   it('returns false when id is not a string', () => {
@@ -501,9 +491,7 @@ describe('isAgentStateChangedPayload', () => {
   });
 
   it('returns false when toolsInUse is not an array', () => {
-    expect(isAgentStateChangedPayload({ ...validPayload, toolsInUse: 'web_search' })).toBe(
-      false,
-    );
+    expect(isAgentStateChangedPayload({ ...validPayload, toolsInUse: 'web_search' })).toBe(false);
   });
 
   it('returns false when progress is not a number', () => {
@@ -564,9 +552,7 @@ describe('extractInsertPayload', () => {
 
   it('returns null when record fails validation (bad role)', () => {
     expect(
-      extractInsertPayload(
-        wrap({ agentId: 'a', id: 'i', timestamp: 't', text: 'x', role: 'BAD' }),
-      ),
+      extractInsertPayload(wrap({ agentId: 'a', id: 'i', timestamp: 't', text: 'x', role: 'BAD' })),
     ).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
@@ -720,9 +706,7 @@ describe('extractAssistantStreamPayload', () => {
   });
 
   it('returns null when fields are missing', () => {
-    expect(
-      extractAssistantStreamPayload(wrap({ agentId: 'a', stream_id: 's' })),
-    ).toBeNull();
+    expect(extractAssistantStreamPayload(wrap({ agentId: 'a', stream_id: 's' }))).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 
@@ -767,19 +751,13 @@ describe('extractPlanStreamPayload', () => {
 
   it('returns null when title is missing', () => {
     expect(
-      extractPlanStreamPayload(
-        wrap({ agentId: 'a', stream_id: 's', tool_call_id: 'tc' }),
-      ),
+      extractPlanStreamPayload(wrap({ agentId: 'a', stream_id: 's', tool_call_id: 'tc' })),
     ).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 
   it('returns null when tool_call_id is missing', () => {
-    expect(
-      extractPlanStreamPayload(
-        wrap({ agentId: 'a', stream_id: 's', title: 'x' }),
-      ),
-    ).toBeNull();
+    expect(extractPlanStreamPayload(wrap({ agentId: 'a', stream_id: 's', title: 'x' }))).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 
@@ -806,6 +784,8 @@ describe('extractToolStreamPayload', () => {
       tool_call_id: 'tc',
       tool_name: 'web_search',
       title: 'Starting web_search...',
+      char_count: 180,
+      is_claude: true,
     };
     expect(extractToolStreamPayload(wrap(record))).toEqual(record);
   });
@@ -935,9 +915,7 @@ describe('extractAgentStateChangedPayload', () => {
   });
 
   it('returns null when progress is not a number', () => {
-    expect(
-      extractAgentStateChangedPayload(wrap({ ...validRecord, progress: 'half' })),
-    ).toBeNull();
+    expect(extractAgentStateChangedPayload(wrap({ ...validRecord, progress: 'half' }))).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 

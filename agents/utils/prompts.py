@@ -80,6 +80,10 @@ CRITICAL_CONSTRAINTS_RULE = """
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
 PLANNER_RESPONSE_CONTENT_DESCRIPTION = "Markdown explanation of the plan."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
+PLANNER_TASK_IDX_DESCRIPTION = (
+    "The 0-based array index of this task, encoded as a string. "
+    "This must equal the task's position in tasks and is included only to make dependency lookups easy."
+)
 PLANNER_TASK_GOAL_DESCRIPTION = (
     "Self-contained task brief for the spawned agent. "
     + SELF_CONTAINED_GOAL_RULE.strip()
@@ -89,12 +93,16 @@ PLANNER_TASK_TOOL_NAME_DESCRIPTION = (
     "one of the planner spawn aliases; raw spawn_agent with no type alias is not allowed."
 )
 PLANNER_TASK_DEPENDS_ON_DESCRIPTION = (
-    "0-based task indices, as strings, that must complete before this task. Empty list means no dependencies."
+    "0-based task indices, as strings, that must complete before this task. "
+    "Use an empty list only when the task can start immediately without another task's output, artifact, "
+    "state, credentials, or decision."
 )
 PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION = "Explicit dependency DAG as list entries that mirror tasks[i].depends_on."
 PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION = "The task index this dependency entry describes, 0-based and encoded as a string."
 PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION = (
-    "0-based task indices, as strings, that must complete before task_idx. Empty list means no dependencies."
+    "0-based task indices, as strings, that must complete before task_idx. "
+    "Use an empty list only when the task can start immediately without another task's output, artifact, "
+    "state, credentials, or decision."
 )
 PLANNER_RESPONSE_JOIN_DESCRIPTION = (
     "How to combine planned task results: all means every task is required, any means alternative hypothesis branches."
@@ -119,6 +127,7 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
 - content: {PLANNER_RESPONSE_CONTENT_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
+- tasks[].task_idx: {PLANNER_TASK_IDX_DESCRIPTION}
 - tasks[].goal: {PLANNER_TASK_GOAL_DESCRIPTION}
 - tasks[].tool_name: {PLANNER_TASK_TOOL_NAME_DESCRIPTION}
 - tasks[].depends_on: {PLANNER_TASK_DEPENDS_ON_DESCRIPTION}
@@ -162,6 +171,8 @@ EXECUTE_PHASE_PROMPT = """
 You are in the EXECUTE phase. You cannot directly request user input in this phase. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
 
 In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
+
+The beginning of your context might have information generated from the RESEARCH phase, do not confuse those actions as being part of your current directive.
 """
 
 MAIN_SYSTEM_PROMPT = """
@@ -169,7 +180,7 @@ You are a Rose Labs Agent. A single agent in a massive network of agents that to
 is to grow it to full fruition using the tools available to you.
 
 Operate with the lowest energy expenditure possible. Each tool invocation consumes
-human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward, MAJOR bias towards action.
+human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward, MAJOR bias towards action. You specialize in real-world, long-horizon task execution. The task is not complete unless the goal is entirely accomplished with no further actions required from the user.
 
 # Using your tools
 
@@ -469,11 +480,14 @@ def build_planner_system_prompt(
 
 MANDATORY DECOMPOSITION INVARIANTS:
 - Each sub-task maps to exactly one tool call
+- tasks[i].task_idx is the 0-based array index encoded as a string and must equal i
 - tasks[i].depends_on lists indices of tasks that must complete first
 - dependencies_graph is a list of objects, each with task_idx and depends_on
 - dependencies_graph must mirror tasks[i].depends_on exactly
 - Use 0-based indices as strings ("0", "1", ...)
 - Graph must be acyclic
+- If one task needs another task's output, state, credentials, artifact, or decision, encode that causal dependency; do not omit dependencies to make work look more parallel.
+- Empty depends_on means the task can start immediately; do not use empty dependencies for causal follow-up work.
 
 ## Plan Guidelines
 
@@ -503,6 +517,7 @@ MANDATORY DECOMPOSITION INVARIANTS:
   Example: Research A, B, C -> Synthesize report
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} (fork then join)
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
+- Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> dependencies_graph [{{"task_idx": "1", "depends_on": ["0"]}}, {{"task_idx": "2", "depends_on": ["1"]}}]
 
 ## Planner Spawn Aliases
 

@@ -72,6 +72,12 @@ export interface ToolStreamPayload {
   tool_name: string;
   /** Display title (e.g., "Starting web_search...") */
   title: string;
+  /** Current raw character count streamed while forming the tool call */
+  char_count?: number;
+  /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
+  is_claude?: boolean;
+  /** True when the streaming model is direct GPT/Codex - used for thinking animation theming */
+  is_gpt?: boolean;
 }
 
 // -----------------------------------------------------------------------------

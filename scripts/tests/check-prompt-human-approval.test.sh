@@ -79,6 +79,17 @@ PY
 git -C "$false_positive_repo" add agents/tests/blackbox/workflow.blackbox.py agents/workflows/agent_workflow.py
 expect_pass "$false_positive_repo" "prompt helper imports and token accounting are not prompt edits"
 
+test_prompt_repo="$(new_repo test-prompt-files)"
+mkdir -p "$test_prompt_repo/agents/tests/blackbox" "$test_prompt_repo/front-end/src/tests"
+cat >"$test_prompt_repo/agents/tests/blackbox/prompt_invariants.blackbox.py" <<'PY'
+PROMPT_ASSERTION = "You are Codex. This is fixture text, not a production prompt."
+PY
+cat >"$test_prompt_repo/front-end/src/tests/system-prompt.spec.ts" <<'TS'
+export const instructions = "Fixture instruction text for a test.";
+TS
+git -C "$test_prompt_repo" add agents/tests/blackbox/prompt_invariants.blackbox.py front-end/src/tests/system-prompt.spec.ts
+expect_pass "$test_prompt_repo" "prompt-looking test files do not require prompt approval"
+
 prompt_path_repo="$(new_repo prompt-path)"
 mkdir -p "$prompt_path_repo/.claude/commands"
 cat >"$prompt_path_repo/.claude/commands/deploy.md" <<'MD'

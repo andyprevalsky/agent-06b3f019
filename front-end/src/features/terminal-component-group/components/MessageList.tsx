@@ -16,7 +16,7 @@
  * ├─ 800ms debounce before showing
  * ├─ Persistence rule (stays visible until selectedAgent changes OR
  * │  ASSISTANT message INSERT arrives)
- * └─ Orange gradient when any streaming bubble has direct Claude/GPT token metadata
+ * └─ Orange gradient when any streaming LLM bubble/tool has direct Claude/GPT token metadata
  *
  * AUTO-SCROLL (see useStreamingAutoScroll):
  * Sub-agent panels only; scrolls to bottom on new messages / streaming.

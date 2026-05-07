@@ -198,21 +198,24 @@ describe('MessageBubble', () => {
     ['Preparing Cloud Agent', 'IN_PROGRESS'],
     ['Starting Reasoning', 'IN_PROGRESS'],
     ['Cloud Agent Ready', 'FINISHED'],
-  ] as const)('renders %s cloud lifecycle tool without expandable output', async (title, toolStatus) => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: `${title} body should stay hidden.`,
-      metadata: {
-        toolCallId: 'tc-cloud-agent',
-        toolName: 'cloud_agent',
-        title,
-        toolStatus,
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
-    expect(screen.queryByText(`${title} body should stay hidden.`)).not.toBeInTheDocument();
-  });
+  ] as const)(
+    'renders %s cloud lifecycle tool without expandable output',
+    async (title, toolStatus) => {
+      const msg = baseMessage({
+        role: 'TOOL',
+        text: `${title} body should stay hidden.`,
+        metadata: {
+          toolCallId: 'tc-cloud-agent',
+          toolName: 'cloud_agent',
+          title,
+          toolStatus,
+        },
+      });
+      renderBubble(<MessageBubble message={msg} />);
+      await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
+      expect(screen.queryByText(`${title} body should stay hidden.`)).not.toBeInTheDocument();
+    },
+  );
 
   it('renders TOOL ERROR in red with error title', async () => {
     const msg = baseMessage({
@@ -475,8 +478,11 @@ describe('MessageBubble', () => {
         data: {
           title: 'Deploy the thing',
           content: 'Ship it',
-          tasks: [{ id: '1', title: 'task 1', status: 'planning' }],
-          dependencies: null,
+          tasks: [
+            { goal: 'Gather release facts', tool_name: 'spawn_explore_agent' },
+            { goal: 'Write deployment notes', tool_name: 'reasoning' },
+          ],
+          dependencies_graph: [{ task_idx: '1', depends_on: ['0'] }],
           join: 'all',
           status: 'planning',
         },
@@ -484,6 +490,65 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} planCharCount={123} />);
     await waitFor(() => expect(screen.getByText(/Deploy the thing/)).toBeInTheDocument());
+    expect(screen.getByText('2 Tasks · Sequential')).toBeInTheDocument();
+    expect(screen.getByText('→ after 1')).toBeInTheDocument();
+  });
+
+  it('renders set_plan dependencies from a dependencies record', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-plan-record',
+        toolName: 'set_plan',
+        toolStatus: 'FINISHED',
+        data: {
+          title: 'Record deps plan',
+          content: 'Ship it',
+          tasks: [
+            { goal: 'Collect facts', tool_name: 'spawn_explore_agent' },
+            { goal: 'Write summary', tool_name: 'reasoning' },
+          ],
+          dependencies: { '1': ['0'] },
+          join: 'all',
+          status: 'planning',
+        },
+      },
+    });
+
+    renderBubble(<MessageBubble message={msg} />);
+
+    await waitFor(() => expect(screen.getByText(/Record deps plan/)).toBeInTheDocument());
+    expect(screen.getByText('2 Tasks · Sequential')).toBeInTheDocument();
+    expect(screen.getByText('→ after 1')).toBeInTheDocument();
+  });
+
+  it('renders set_plan dependencies from task depends_on fields', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-plan-task-deps',
+        toolName: 'set_plan',
+        toolStatus: 'FINISHED',
+        data: {
+          title: 'Task deps plan',
+          content: 'Ship it',
+          tasks: [
+            { goal: 'Collect facts', tool_name: 'spawn_explore_agent', depends_on: [] },
+            { goal: 'Write summary', tool_name: 'reasoning', depends_on: ['0'] },
+          ],
+          join: 'all',
+          status: 'planning',
+        },
+      },
+    });
+
+    renderBubble(<MessageBubble message={msg} />);
+
+    await waitFor(() => expect(screen.getByText(/Task deps plan/)).toBeInTheDocument());
+    expect(screen.getByText('2 Tasks · Sequential')).toBeInTheDocument();
+    expect(screen.getByText('→ after 1')).toBeInTheDocument();
   });
 
   it('renders streaming attention message using StreamingText (isStreaming=true)', async () => {

@@ -310,7 +310,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
             agent_id=agent_id,
             title="Explore agent thinking",
             message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-            status=MessageStatus.IN_PROGRESS,
+            status=MessageStatus.FINISHED,
             task_id=task_id,
         )
 

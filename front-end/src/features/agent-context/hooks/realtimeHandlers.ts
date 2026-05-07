@@ -223,6 +223,9 @@ export function handleToolStream(
       tool_call_id: tool.tool_call_id,
       tool_name: tool.tool_name,
       title: tool.title,
+      charCount: tool.char_count ?? prev.get(tool.tool_call_id)?.charCount ?? 0,
+      isClaude: tool.is_claude ?? prev.get(tool.tool_call_id)?.isClaude ?? false,
+      isGpt: tool.is_gpt ?? prev.get(tool.tool_call_id)?.isGpt ?? false,
     });
     return newMap;
   });
@@ -237,6 +240,7 @@ export function cleanupSubscription(
   setStreamingBubbles: RealtimeSetters['setStreamingBubbles'],
   setStreamingPlan: RealtimeSetters['setStreamingPlan'],
   setStreamingAttention: RealtimeSetters['setStreamingAttention'],
+  setStreamingTools: RealtimeSetters['setStreamingTools'],
 ) {
   isReconnectingRef.current = false;
 
@@ -258,5 +262,6 @@ export function cleanupSubscription(
   });
 
   setStreamingPlan(null);
+  setStreamingTools(() => new Map());
   setStreamingAttention(null);
 }

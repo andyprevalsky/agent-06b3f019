@@ -257,7 +257,15 @@ async def _run_execute_dag(
         events.append({"type": "post_message", "text": text, "role": role, "metadata": metadata})
 
     async def handle_tool_event_fn(event, tool_call_id, tool_name):
-        events.append({"type": "tool_event", "tool_call_id": tool_call_id, "tool_name": tool_name})
+        events.append(
+            {
+                "type": "tool_event",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "status": event.status.value if event.status else None,
+                "message": event.message,
+            }
+        )
 
     if execute_tool_impl is None:
 
@@ -319,6 +327,9 @@ async def test_execute_dag_reasoning_task_succeeds():
     assistant_posts = [e for e in events if e["type"] == "post_message" and e["role"] == "ASSISTANT"]
     assert len(assistant_posts) == 1
     assert assistant_posts[0]["text"] == "Summary text"
+    reasoning_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "reasoning"]
+    assert [e["status"] for e in reasoning_events] == ["IN_PROGRESS", "FINISHED"]
+    assert len({e["tool_call_id"] for e in reasoning_events}) == 1
     assert dag.tasks[0].state.value == "COMPLETED"
 
 

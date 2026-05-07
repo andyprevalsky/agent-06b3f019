@@ -99,8 +99,8 @@ def test_validate_planner_result_valid():
     result = _validate_planner_result(
         {
             "tasks": [
-                {"goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
-                {"goal": "Write", "tool_name": "reasoning", "depends_on": ["0"]},
+                {"task_idx": "0", "goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
+                {"task_idx": "1", "goal": "Write", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
             "dependencies_graph": [
                 {"task_idx": "1", "depends_on": ["0"]},
@@ -135,6 +135,39 @@ def test_validate_planner_result_invalid_join():
     assert err is not None and "join" in err.lower()
 
 
+def test_validate_planner_result_requires_string_task_idx():
+    """Each task must include its own 0-based string index."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result(
+        {
+            "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
+            "dependencies_graph": [],
+            "join": "all",
+        }
+    )
+    assert err is not None
+    assert "task_idx" in err
+    assert "string" in err
+
+
+def test_validate_planner_result_rejects_mismatched_task_idx():
+    """tasks[].task_idx is advisory only, but it must match the array position."""
+    from tools.set_plan import _validate_planner_result
+
+    err = _validate_planner_result(
+        {
+            "tasks": [
+                {"task_idx": "1", "goal": "A", "tool_name": "reasoning", "depends_on": []},
+            ],
+            "dependencies_graph": [],
+            "join": "all",
+        }
+    )
+    assert err is not None
+    assert "0-based array position" in err
+
+
 def test_validate_planner_result_mismatch_depends_on():
     """task.depends_on must match dependencies_graph."""
     from tools.set_plan import _validate_planner_result
@@ -142,8 +175,8 @@ def test_validate_planner_result_mismatch_depends_on():
     err = _validate_planner_result(
         {
             "tasks": [
-                {"goal": "A", "tool_name": "reasoning", "depends_on": []},
-                {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+                {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": []},
+                {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
             "dependencies_graph": [],  # missing entry for task 1
             "join": "all",
@@ -159,8 +192,8 @@ def test_validate_planner_result_propagates_dep_error():
     err = _validate_planner_result(
         {
             "tasks": [
-                {"goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
-                {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+                {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
+                {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
             "dependencies_graph": [
                 {"task_idx": "0", "depends_on": ["1"]},
@@ -553,8 +586,8 @@ async def test_handler_happy_path_first_try():
 
     valid_plan = {
         "tasks": [
-            {"goal": "A", "tool_name": "reasoning", "depends_on": []},
-            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+            {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": []},
+            {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
         ],
         "dependencies_graph": [
             {"task_idx": "1", "depends_on": ["0"]},
@@ -709,6 +742,8 @@ async def run_all_tests():
     r.record("validate_planner_result", test_validate_planner_result_valid)
     r.record("validate_planner_result_no_tasks", test_validate_planner_result_no_tasks)
     r.record("validate_planner_result_invalid_join", test_validate_planner_result_invalid_join)
+    r.record("validate_planner_result_requires_task_idx", test_validate_planner_result_requires_string_task_idx)
+    r.record("validate_planner_result_task_idx_mismatch", test_validate_planner_result_rejects_mismatched_task_idx)
     r.record("validate_planner_result_mismatch", test_validate_planner_result_mismatch_depends_on)
     r.record("validate_planner_result_dep_err", test_validate_planner_result_propagates_dep_error)
     # convert_deps

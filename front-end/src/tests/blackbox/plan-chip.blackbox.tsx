@@ -2,7 +2,8 @@
  * Blackbox tests for PlanChip.
  * Covers title rendering, status variants (planning/executing/complete/error),
  * streaming char counter, sequential/parallel/hypothesis headers,
- * topological sort of tasks, formatDeps, tool-name formatting, expand/collapse.
+ * execution-order sorting, dependency annotation, formatDeps, tool-name formatting,
+ * expand/collapse.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -186,10 +187,9 @@ describe('PlanChip', () => {
 
     // Collapse back — AnimatePresence exit animation removes the node asynchronously.
     await u.click(screen.getByText('Expandable plan'));
-    await waitFor(
-      () => expect(screen.queryByTestId('md')).not.toBeInTheDocument(),
-      { timeout: 2000 },
-    );
+    await waitFor(() => expect(screen.queryByTestId('md')).not.toBeInTheDocument(), {
+      timeout: 2000,
+    });
   });
 
   it('does not toggle expansion when plan has no content', async () => {
@@ -210,7 +210,7 @@ describe('PlanChip', () => {
     expect(screen.queryByTestId('md')).not.toBeInTheDocument();
   });
 
-  it('falls back to original task order when there is a dependency cycle', () => {
+  it('preserves original task order when there is a dependency cycle', () => {
     render(
       <PlanChip
         plan={{
@@ -232,5 +232,26 @@ describe('PlanChip', () => {
     expect(texts[0]).toContain('t0');
     expect(texts[1]).toContain('t1');
     expect(texts[2]).toContain('t2');
+  });
+
+  it('shows tasks in execution order when dependencies are out of order', () => {
+    render(
+      <PlanChip
+        plan={{
+          title: 'Out of order',
+          content: '',
+          tasks: [task('use result from b'), task('produce result b')],
+          dependencies: { '0': ['1'] },
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+
+    const items = Array.from(document.querySelectorAll('ul li'));
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toContain('1.produce result b');
+    expect(items[1].textContent).toContain('2.use result from b');
+    expect(items[1].textContent).toContain('→ after 2');
   });
 });

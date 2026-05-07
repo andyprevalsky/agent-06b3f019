@@ -45,6 +45,11 @@ PROMPT_FILES=""
 while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
+    */tests/*|*/test/*|*/__tests__/*|*/*test*.py|*/*test*.ts|*/*test*.tsx|*/*spec*.ts|*/*spec*.tsx|*.blackbox.py|*.blackbox.ts|*.blackbox.tsx)
+      continue
+      ;;
+  esac
+  case "$file" in
     CLAUDE.md|AGENTS.md|.claude/commands/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
@@ -83,7 +88,7 @@ DIFF_PROMPT_FILES="$(
     }
     /^\+\+\+ b\// {
       file=substr($0, 7)
-      scan=(file !~ /(^|\/)(package-lock\.json|\.gitignore)$/ && file ~ /\.(py|ts|tsx|js|jsx|md|mdc|txt|json|yaml|yml)$/)
+      scan=(file !~ /(^|\/)(package-lock\.json|\.gitignore)$/ && file !~ /(^|\/)(tests|test|__tests__)\// && file !~ /(^|\/)[^\/]*(test|spec|blackbox)[^\/]*\.(py|ts|tsx|js|jsx)$/ && file ~ /\.(py|ts|tsx|js|jsx|md|mdc|txt|json|yaml|yml)$/)
       next
     }
     /^[+-][^+-]/ && file != "" && scan {

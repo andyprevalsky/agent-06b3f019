@@ -89,6 +89,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         setStreamingBubbles,
         setStreamingPlan,
         setStreamingAttention,
+        setStreamingTools,
       );
     };
 

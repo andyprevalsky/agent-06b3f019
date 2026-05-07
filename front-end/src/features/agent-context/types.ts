@@ -34,7 +34,12 @@ export interface StreamingTool {
   tool_call_id: string;
   tool_name: string;
   title: string;
+  charCount?: number;
   subAgentId?: string;
+  /** True when the streaming model is Claude (Anthropic) */
+  isClaude?: boolean;
+  /** True when the streaming model is direct GPT/Codex */
+  isGpt?: boolean;
 }
 
 export type MessageHandler = (message: Message) => void;

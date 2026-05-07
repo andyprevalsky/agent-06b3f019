@@ -52,7 +52,7 @@ interface PlanChipProps {
  * PlanChip - Expandable chip for displaying agent plans inline in the conversation.
  *
  * Shows as a compact chip when collapsed, expands vertically to show full plan content.
- * Displays tasks as a flat numbered list in topological order with inline dependency notation.
+ * Displays tasks as a flat numbered list in topological execution order with inline dependency notation.
  */
 export const PlanChip = memo(function PlanChip({
   plan,
