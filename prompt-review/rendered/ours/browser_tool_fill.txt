@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "fill",
+    "description": "Fill a form field by selector. CLEARS existing value first, then types the new value.\n\nIMPORTANT: Use observe() first to find the input element and get its selector.\n\nUse this for:\n- Login forms (username, password)\n- Search boxes (if you want to replace existing text)\n- Any text input where you want to replace content\n\nExamples:\n- fill(selector=\"input[name='email']\", value=\"user@example.com\")\n- fill(selector=\"#password\", value=\"secret123\")\n- fill(selector=\"//input[@placeholder='Search']\", value=\"query\")\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector or XPath for the input element"
+        },
+        "value": {
+          "type": "string",
+          "description": "Text to fill into the field"
+        }
+      },
+      "required": [
+        "selector",
+        "value"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

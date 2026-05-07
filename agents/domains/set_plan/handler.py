@@ -58,11 +58,35 @@ class SetPlanManager(ToolManager):
         user_context = getattr(workflow_instance, "user_context_section", "")
         response_schema = getattr(workflow_instance, "output_schema", None)
 
-        # Refresh Claude token if expired (5-min TTL)
+        # Refresh compute token if expired (5-min TTL)
         user_id = getattr(workflow_instance, "user_id", None)
         if user_id and hasattr(workflow_instance, "_refresh_claude_token"):
             await workflow_instance._refresh_claude_token(user_id)
-        claude_max_token = getattr(workflow_instance, "claude_max_token", None)
+        claude_max_token = (
+            workflow_instance._active_claude_token()
+            if hasattr(workflow_instance, "_active_claude_token")
+            else getattr(workflow_instance, "claude_max_token", None)
+        )
+        gpt_token = (
+            workflow_instance._active_gpt_token()
+            if hasattr(workflow_instance, "_active_gpt_token")
+            else getattr(workflow_instance, "gpt_code_token", None)
+        )
+        gpt_account_id = (
+            workflow_instance._active_gpt_account_id()
+            if hasattr(workflow_instance, "_active_gpt_account_id")
+            else getattr(workflow_instance, "gpt_code_account_id", None)
+        )
+        gpt_token_source = (
+            workflow_instance._active_gpt_source()
+            if hasattr(workflow_instance, "_active_gpt_source")
+            else getattr(workflow_instance, "gpt_code_token_source", None)
+        )
+        gpt_token_pool_id = (
+            workflow_instance._active_gpt_pool_id()
+            if hasattr(workflow_instance, "_active_gpt_pool_id")
+            else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+        )
 
         context_elapsed = (workflow.now() - context_start).total_seconds()
         workflow.logger.info(
@@ -93,6 +117,10 @@ class SetPlanManager(ToolManager):
                     user_context=user_context,
                     response_schema=response_schema,
                     claude_max_token=claude_max_token,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
                     user_messages=user_messages,
                     tool_call_id=tool_call_id,
                     attempt=attempt,

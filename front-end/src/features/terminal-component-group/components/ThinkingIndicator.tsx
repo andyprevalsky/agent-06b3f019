@@ -5,15 +5,15 @@
  * Visibility is controlled by parent (thinkingVisible flag).
  *
  * PROPS:
- *   isClaudeStreaming --> swap blue gradient for Claude orange
+ *   isClaudeStreaming --> swap blue gradient for direct-token orange
  *   streamingCharCount --> drives animated tab-num counter
  */
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { ArrowDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-// Claude orange gradient palette for thinking animation SVG recoloring.
-// Warm terracotta tones centered on Claude's brand orange.
+// Direct-token orange gradient palette for thinking animation SVG recoloring.
+// Warm terracotta tones match the existing Claude-auth side effect.
 const CLAUDE_GRADIENT = ['#F5C4A1', '#E8976A', '#D97757', '#CC5B33', '#B84A22', '#9E3A18'];
 
 interface ThinkingIndicatorProps {

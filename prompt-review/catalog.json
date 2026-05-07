@@ -1,0 +1,2316 @@
+{
+  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
+  "ours": [
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "VERIFICATION_RULES = ",
+      "id": "VERIFICATION_RULES",
+      "category": "instruction_block",
+      "summary": "Canonical verification rules \u2014 how the automated grader scores agent work.",
+      "keywords": [
+        "verification",
+        "grader",
+        "evidence",
+        "scoring",
+        "rules"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "SELF_CONTAINED_GOAL_RULE = ",
+      "id": "SELF_CONTAINED_GOAL_RULE",
+      "category": "instruction_block",
+      "summary": "Rules for self-contained goals in spawned agents.",
+      "keywords": [
+        "spawn",
+        "goal",
+        "agent",
+        "self-contained",
+        "context"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "EPHEMERAL_SESSION_RULE = ",
+      "id": "EPHEMERAL_SESSION_RULE",
+      "category": "instruction_block",
+      "summary": "Ephemeral session semantics for browser/code agents.",
+      "keywords": [
+        "ephemeral",
+        "session",
+        "browser",
+        "sandbox",
+        "lifecycle"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "CONTEXT_POINTERS_RULE = ",
+      "id": "CONTEXT_POINTERS_RULE",
+      "category": "instruction_block",
+      "summary": "Use @ref:message pointers to reference content without rewriting.",
+      "keywords": [
+        "context",
+        "pointers",
+        "references",
+        "memory",
+        "compaction"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "FILE_HANDLING_RULE = ",
+      "id": "FILE_HANDLING_RULE",
+      "category": "instruction_block",
+      "summary": "File output types and attachment handling across agents.",
+      "keywords": [
+        "file",
+        "attachment",
+        "output",
+        "handoff"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "CRITICAL_CONSTRAINTS_RULE = ",
+      "id": "CRITICAL_CONSTRAINTS_RULE",
+      "category": "instruction_block",
+      "summary": "Critical constraints on parallel execution and ephemeral sessions.",
+      "keywords": [
+        "constraints",
+        "parallel",
+        "execution",
+        "ephemeral"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "def build_system_prompt",
+      "id": "build_system_prompt",
+      "category": "system_prompt",
+      "summary": "Main agent system prompt \u2014 modular, cached static section + dynamic per-call.",
+      "keywords": [
+        "system",
+        "prompt",
+        "agent",
+        "main",
+        "loop",
+        "execute",
+        "plan"
+      ],
+      "matches": {
+        "claude": "claude_getSystemPrompt",
+        "openclaw": "openclaw_buildAgentSystemPrompt",
+        "hermes": "hermes_default_agent_identity"
+      }
+    },
+    {
+      "path": "agents/helpers/get_user_context.py",
+      "anchor": "def _format_user_context",
+      "id": "user_generated_context_system_prompt_block",
+      "category": "system_prompt",
+      "summary": "User-generated context block injected into the main agent system prompt.",
+      "keywords": [
+        "user",
+        "context",
+        "profile",
+        "network",
+        "integrations",
+        "system"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "RESEARCH_PHASE_PROMPT = ",
+      "id": "RESEARCH_PHASE_PROMPT",
+      "category": "system_prompt",
+      "summary": "RESEARCH phase prompt \u2014 research, set_plan, ask-question, and exit state machine.",
+      "keywords": [
+        "plan",
+        "phase",
+        "state",
+        "research",
+        "set_plan"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "EXECUTE_PHASE_PROMPT = ",
+      "id": "EXECUTE_PHASE_PROMPT",
+      "category": "system_prompt",
+      "summary": "EXECUTE phase prompt \u2014 follow the approved plan and complete with evidence.",
+      "keywords": [
+        "execute",
+        "phase",
+        "approved",
+        "plan",
+        "completion"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "_VERIFIER_STATIC_PROMPT = ",
+      "id": "_VERIFIER_STATIC_PROMPT",
+      "category": "system_prompt",
+      "summary": "Verifier system prompt \u2014 scores agent work against grounded evidence.",
+      "keywords": [
+        "verifier",
+        "verify",
+        "grade",
+        "evidence",
+        "score"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "def build_verifier_prompt",
+      "id": "build_verifier_prompt",
+      "category": "template",
+      "summary": "Builds verifier system prompt with optional output schema directives.",
+      "keywords": [
+        "verifier",
+        "build",
+        "prompt",
+        "schema"
+      ]
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "def build_planner_system_prompt",
+      "id": "build_planner_system_prompt",
+      "category": "system_prompt",
+      "summary": "Planner system prompt \u2014 generates execution plan as DAG.",
+      "keywords": [
+        "planner",
+        "plan",
+        "dag",
+        "execution",
+        "system"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/utils/prompts.py",
+      "anchor": "EXPLORE_AGENT_SYSTEM_PROMPT = ",
+      "id": "EXPLORE_AGENT_SYSTEM_PROMPT",
+      "category": "system_prompt",
+      "summary": "Explore sub-agent system prompt \u2014 web research via web_search/web_fetch/grep.",
+      "keywords": [
+        "explore",
+        "research",
+        "web",
+        "search",
+        "fetch",
+        "subagent"
+      ],
+      "matches": {
+        "claude": "claude_builtin_explore_agent",
+        "openclaw": "openclaw_subagent_system_prompt",
+        "hermes": "hermes_explore_reference"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/attempt_completion.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_attempt_completion",
+      "category": "tool_description",
+      "summary": "Tool: signal task completion and trigger verification.",
+      "keywords": [
+        "completion",
+        "complete",
+        "done",
+        "finish",
+        "verify"
+      ],
+      "matches": {
+        "claude": "claude_tool_exit_plan_mode",
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/tools/prompts/call_phone_number.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_call_phone_number",
+      "category": "tool_description",
+      "summary": "Tool: place outbound phone call with voice agent extraction.",
+      "keywords": [
+        "phone",
+        "call",
+        "voice",
+        "outbound",
+        "vapi"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/tools/prompts/grep.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_grep",
+      "category": "tool_description",
+      "summary": "Tool: search local data \u2014 messages and contact network.",
+      "keywords": [
+        "grep",
+        "search",
+        "local",
+        "messages",
+        "contacts"
+      ],
+      "matches": {
+        "claude": "claude_tool_grep",
+        "openclaw": null,
+        "hermes": "hermes_search_files_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/message_person.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_message_person",
+      "category": "tool_description",
+      "summary": "Tool: draft and send messages via iMessage or email.",
+      "keywords": [
+        "message",
+        "send",
+        "imessage",
+        "email",
+        "person",
+        "draft"
+      ],
+      "matches": {
+        "claude": "claude_tool_brief",
+        "openclaw": "openclaw_message_tool",
+        "hermes": "hermes_send_message_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/reasoning.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_reasoning",
+      "category": "tool_description",
+      "summary": "Tool: pure thinking step \u2014 synthesis without side effects.",
+      "keywords": [
+        "reasoning",
+        "think",
+        "synthesis",
+        "thinking"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/tools/prompts/send_message_to_user.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_send_message_to_user",
+      "category": "tool_description",
+      "summary": "Tool: send message to user during PLAN phase, optionally blocking.",
+      "keywords": [
+        "user",
+        "message",
+        "send",
+        "plan",
+        "block",
+        "ask"
+      ],
+      "matches": {
+        "claude": "claude_tool_brief",
+        "openclaw": "openclaw_message_tool",
+        "hermes": "hermes_send_message_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/send_message_to_user_execute_phase.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_send_message_to_user_execute",
+      "category": "tool_description",
+      "summary": "Tool: informational message to user during EXECUTE phase, non-blocking.",
+      "keywords": [
+        "user",
+        "message",
+        "execute",
+        "info",
+        "update"
+      ],
+      "matches": {
+        "claude": "claude_tool_brief",
+        "openclaw": "openclaw_message_tool",
+        "hermes": "hermes_send_message_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/set_plan.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_set_plan",
+      "category": "tool_description",
+      "summary": "Tool: hand off to planner LLM to generate execution plan as DAG.",
+      "keywords": [
+        "plan",
+        "set",
+        "planner",
+        "dag",
+        "execution"
+      ],
+      "matches": {
+        "claude": "claude_tool_enter_plan_mode",
+        "openclaw": "openclaw_update_plan",
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_agent.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_agent",
+      "category": "tool_description",
+      "summary": "Tool: spawn autonomous sub-agent (explore, browser, code, sub_agent, for_each).",
+      "keywords": [
+        "spawn",
+        "subagent",
+        "delegate",
+        "child",
+        "agent",
+        "task"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_browser_agent.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_browser_agent",
+      "category": "tool_description",
+      "summary": "Tool: spawn browser sub-agent for stateful web trajectories (25-step limit).",
+      "keywords": [
+        "spawn",
+        "browser",
+        "subagent",
+        "web",
+        "trajectory",
+        "stateful"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_code_agent.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_code_agent",
+      "category": "tool_description",
+      "summary": "Tool: spawn coding sub-agent in ephemeral E2B sandbox.",
+      "keywords": [
+        "spawn",
+        "code",
+        "subagent",
+        "sandbox",
+        "e2b",
+        "execution"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_explore_agent.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_explore_agent",
+      "category": "tool_description",
+      "summary": "Tool: spawn research sub-agent for web search and information gathering.",
+      "keywords": [
+        "spawn",
+        "explore",
+        "research",
+        "subagent",
+        "web",
+        "search"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_sub_agent.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_sub_agent",
+      "category": "tool_description",
+      "summary": "Tool: delegate complex multi-step task to child agent with own planning cycle.",
+      "keywords": [
+        "spawn",
+        "subagent",
+        "delegate",
+        "task",
+        "multi-step"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/spawn_sub_agent_for_each.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_spawn_sub_agent_for_each",
+      "category": "tool_description",
+      "summary": "Tool: spawn one sub-agent per item from list/CSV with shared goal.",
+      "keywords": [
+        "spawn",
+        "subagent",
+        "for_each",
+        "list",
+        "parallel",
+        "fanout"
+      ],
+      "matches": {
+        "claude": "claude_tool_agent",
+        "openclaw": "openclaw_sessions_spawn",
+        "hermes": "hermes_delegate_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/wait_for.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_wait_for",
+      "category": "tool_description",
+      "summary": "Tool: pause execution until timestamp or condition is met.",
+      "keywords": [
+        "wait",
+        "pause",
+        "sleep",
+        "condition",
+        "timestamp"
+      ],
+      "matches": {
+        "claude": "claude_tool_sleep",
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/tools/prompts/web_fetch.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_web_fetch",
+      "category": "tool_description",
+      "summary": "Tool: fetch specific URL with JS rendering and focused content extraction.",
+      "keywords": [
+        "web",
+        "fetch",
+        "url",
+        "html",
+        "content",
+        "render"
+      ],
+      "matches": {
+        "claude": "claude_tool_web_fetch",
+        "openclaw": "openclaw_web_fetch",
+        "hermes": "hermes_web_extract_tool"
+      }
+    },
+    {
+      "path": "agents/tools/prompts/web_search.py",
+      "anchor": "PROMPT = ",
+      "id": "tool_web_search",
+      "category": "tool_description",
+      "summary": "Tool: search web for real-time public info with source citations.",
+      "keywords": [
+        "web",
+        "search",
+        "internet",
+        "results",
+        "citations",
+        "sources"
+      ],
+      "matches": {
+        "claude": "claude_tool_web_search",
+        "openclaw": "openclaw_web_search",
+        "hermes": "hermes_web_search_tool"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "def get_system_prompt",
+      "id": "browser_get_system_prompt",
+      "category": "system_prompt",
+      "summary": "Browser automation agent system prompt with workflow rules.",
+      "keywords": [
+        "browser",
+        "automation",
+        "system",
+        "selectors",
+        "playwright"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"observe\"",
+      "id": "browser_tool_observe",
+      "category": "tool_description",
+      "summary": "Browser tool: find actionable page elements with selectors.",
+      "keywords": [
+        "browser",
+        "observe",
+        "elements",
+        "selectors",
+        "page"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_snapshot",
+        "hermes": "hermes_browser_snapshot"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"extract\"",
+      "id": "browser_tool_extract",
+      "category": "tool_description",
+      "summary": "Browser tool: structured data extraction from current page.",
+      "keywords": [
+        "browser",
+        "extract",
+        "data",
+        "page",
+        "schema"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"click\"",
+      "id": "browser_tool_click",
+      "category": "tool_description",
+      "summary": "Browser tool: click element by CSS or XPath selector.",
+      "keywords": [
+        "browser",
+        "click",
+        "element",
+        "selector",
+        "css",
+        "xpath"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_act_click",
+        "hermes": "hermes_browser_click"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"fill\"",
+      "id": "browser_tool_fill",
+      "category": "tool_description",
+      "summary": "Browser tool: clear and fill form field by selector.",
+      "keywords": [
+        "browser",
+        "fill",
+        "form",
+        "input",
+        "field"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_act_fill",
+        "hermes": "hermes_browser_type"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"type\"",
+      "id": "browser_tool_type",
+      "category": "tool_description",
+      "summary": "Browser tool: character-by-character text input without clearing.",
+      "keywords": [
+        "browser",
+        "type",
+        "keys",
+        "input",
+        "text"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_act_type",
+        "hermes": "hermes_browser_type"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"pressKey\"",
+      "id": "browser_tool_press_key",
+      "category": "tool_description",
+      "summary": "Browser tool: press keyboard keys / shortcuts.",
+      "keywords": [
+        "browser",
+        "press",
+        "key",
+        "keyboard",
+        "shortcut"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_act_press",
+        "hermes": "hermes_browser_press"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"goto\"",
+      "id": "browser_tool_goto",
+      "category": "tool_description",
+      "summary": "Browser tool: navigate to URL.",
+      "keywords": [
+        "browser",
+        "goto",
+        "navigate",
+        "url"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_navigate",
+        "hermes": "hermes_browser_navigate"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"scroll\"",
+      "id": "browser_tool_scroll",
+      "category": "tool_description",
+      "summary": "Browser tool: scroll page up or down.",
+      "keywords": [
+        "browser",
+        "scroll",
+        "page"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": "hermes_browser_scroll"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"wait\"",
+      "id": "browser_tool_wait",
+      "category": "tool_description",
+      "summary": "Browser tool: pause specified time in milliseconds.",
+      "keywords": [
+        "browser",
+        "wait",
+        "pause",
+        "ms"
+      ],
+      "matches": {
+        "claude": "claude_tool_sleep",
+        "openclaw": "openclaw_browser_action_act_wait",
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"attempt_completion\"",
+      "id": "browser_tool_attempt_completion",
+      "category": "tool_description",
+      "summary": "Browser tool: signal browser task completion.",
+      "keywords": [
+        "browser",
+        "complete",
+        "done",
+        "finish"
+      ],
+      "matches": {
+        "claude": "claude_tool_exit_plan_mode",
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"screenshot\"",
+      "id": "browser_tool_screenshot",
+      "category": "tool_description",
+      "summary": "Browser tool: visual confirmation of page state.",
+      "keywords": [
+        "browser",
+        "screenshot",
+        "image",
+        "page"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_screenshot",
+        "hermes": "hermes_browser_vision"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"ariaTree\"",
+      "id": "browser_tool_aria_tree",
+      "category": "tool_description",
+      "summary": "Browser tool: get accessibility tree from current page.",
+      "keywords": [
+        "browser",
+        "aria",
+        "accessibility",
+        "tree",
+        "page"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_snapshot_aria",
+        "hermes": "hermes_browser_snapshot"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"navback\"",
+      "id": "browser_tool_navback",
+      "category": "tool_description",
+      "summary": "Browser tool: navigate back in history.",
+      "keywords": [
+        "browser",
+        "back",
+        "history",
+        "navigate"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": "hermes_browser_back"
+      }
+    },
+    {
+      "path": "agents/browser_tools/tool_definitions.py",
+      "anchor": "\"name\": \"clickAtCoordinates\"",
+      "id": "browser_tool_click_at_coordinates",
+      "category": "tool_description",
+      "summary": "Browser tool: pixel-based click fallback.",
+      "keywords": [
+        "browser",
+        "click",
+        "coordinates",
+        "pixel"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": "openclaw_browser_action_act_clickCoords",
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/reasoning/config.py",
+      "anchor": "REASONING_SYSTEM_PROMPT_TEMPLATE = ",
+      "id": "REASONING_SYSTEM_PROMPT_TEMPLATE",
+      "category": "system_prompt",
+      "summary": "Reasoning task system prompt template with goal substitution.",
+      "keywords": [
+        "reasoning",
+        "system",
+        "template",
+        "goal"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/providers/rose/browser_use.py",
+      "anchor": "def build_browser_use_system_prompt",
+      "id": "build_browser_use_system_prompt",
+      "category": "system_prompt",
+      "summary": "Browser-use system prompt for Rose pool.",
+      "keywords": [
+        "browser",
+        "use",
+        "rose",
+        "system",
+        "automation"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/spawn_browser_agent_v3/service.py",
+      "anchor": "def get_browser_system_prompt",
+      "id": "spawn_browser_agent_v3_system_prompt",
+      "category": "system_prompt",
+      "summary": "V3 browser spawner system prompt wrapper with goal, available files, and custom instructions.",
+      "keywords": [
+        "browser",
+        "spawn",
+        "v3",
+        "system",
+        "goal",
+        "files"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/spawn_claude_code_agent/service.py",
+      "anchor": "static_system = (",
+      "id": "spawn_claude_code_monitor_system_prompt",
+      "category": "system_prompt",
+      "summary": "Parent monitor system prompt for supervising Claude Code terminal sessions.",
+      "keywords": [
+        "claude",
+        "code",
+        "monitor",
+        "terminal",
+        "system",
+        "completion"
+      ],
+      "matches": {
+        "claude": "claude_getSystemPrompt",
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/message_person/repo.py",
+      "anchor": "static_prefix = (",
+      "id": "message_person_generation_prompt",
+      "category": "system_prompt",
+      "summary": "Ghostwriter prompts that generate iMessage/email content in the user's voice.",
+      "keywords": [
+        "message",
+        "person",
+        "ghostwriter",
+        "voice",
+        "email",
+        "imessage"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/wait_for/service.py",
+      "anchor": "system_prompt = (",
+      "id": "wait_for_condition_evaluator_prompt",
+      "category": "system_prompt",
+      "summary": "Yes/no classifier prompt for wait_for condition polling.",
+      "keywords": [
+        "wait",
+        "condition",
+        "classifier",
+        "evidence",
+        "polling"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/spawn_browser_agent_v3/repo.py",
+      "anchor": "system_prompt = \"\"\"You are a data extraction assistant",
+      "id": "browser_extract_llm_prompt",
+      "category": "system_prompt",
+      "summary": "Internal LLM extraction prompt used by the browser extract action.",
+      "keywords": [
+        "browser",
+        "extract",
+        "llm",
+        "page",
+        "content"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/param_populator/service.py",
+      "anchor": "def build_agent_system_prompt",
+      "id": "param_populator_build_agent_system_prompt",
+      "category": "system_prompt",
+      "summary": "Parameter population system prompt with spawn-type-specific requirements.",
+      "keywords": [
+        "param",
+        "populator",
+        "spawn",
+        "system"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/domains/param_populator/config.py",
+      "anchor": "SPAWN_PARAM_REQUIREMENTS: dict",
+      "id": "SPAWN_PARAM_REQUIREMENTS",
+      "category": "instruction_block",
+      "summary": "Type-specific parameter requirements for each spawn_* tool.",
+      "keywords": [
+        "spawn",
+        "param",
+        "requirements",
+        "config"
+      ]
+    },
+    {
+      "path": "agents/helpers/knowledge_base.py",
+      "anchor": "BLUEPRINT_COMPRESSION_PROMPT = ",
+      "id": "BLUEPRINT_COMPRESSION_PROMPT",
+      "category": "system_prompt",
+      "summary": "Compress conversation history into concise blueprints preserving structure.",
+      "keywords": [
+        "blueprint",
+        "compression",
+        "history",
+        "memory",
+        "compact"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/helpers/summarize.py",
+      "anchor": "prompt = f\"\"\"You are analyzing an autonomous AI agent",
+      "id": "context_compression_prompt",
+      "category": "system_prompt",
+      "summary": "Compresses long agent execution history into key learnings for continued work.",
+      "keywords": [
+        "context",
+        "compression",
+        "summary",
+        "learnings",
+        "history"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/helpers/summarize.py",
+      "anchor": "system_prompt = f\"\"\"You are summarizing",
+      "id": "completion_summary_prompt",
+      "category": "system_prompt",
+      "summary": "Summarizes completed agent work for concise user-facing completion text.",
+      "keywords": [
+        "completion",
+        "summary",
+        "agent",
+        "outcome",
+        "user"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "agents/helpers/gepa_v3_strategy_override.txt",
+      "anchor": null,
+      "id": "GEPA_V3_PLANNING_INSTRUCTION",
+      "category": "instruction_block",
+      "summary": "GEPA V3 planning override \u2014 authoritative-first, MECE.",
+      "keywords": [
+        "gepa",
+        "planning",
+        "v3",
+        "override",
+        "mece"
+      ]
+    },
+    {
+      "path": "agents/helpers/planner_strategy_override_v3.txt",
+      "anchor": null,
+      "id": "PLANNER_V3_STRATEGY_OVERRIDE",
+      "category": "instruction_block",
+      "summary": "Planner V3 override \u2014 authoritative-first, executable, MECE; spawn_sub_agent normalization.",
+      "keywords": [
+        "planner",
+        "v3",
+        "override",
+        "mece",
+        "strategy"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/setResponseSchema.ts",
+      "anchor": "const SYSTEM_PROMPT = `You are an expert at analyzing agent goals",
+      "id": "schema_gen_system_prompt",
+      "category": "system_prompt",
+      "summary": "Generates minimal output schemas for agent goal verification.",
+      "keywords": [
+        "schema",
+        "verify",
+        "system",
+        "output",
+        "goal"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/chat/chatPrompts.ts",
+      "anchor": "ROUTER_SYSTEM_PROMPT",
+      "id": "router_system_prompt",
+      "category": "system_prompt",
+      "summary": "Router LLM \u2014 direct_answer / web_search / start_superintelligence.",
+      "keywords": [
+        "router",
+        "chat",
+        "system",
+        "decision",
+        "route"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/chat/chatPrompts.ts",
+      "anchor": "GENERATOR_SYSTEM_PROMPT",
+      "id": "generator_system_prompt",
+      "category": "system_prompt",
+      "summary": "Generator LLM \u2014 produces user-facing chat responses.",
+      "keywords": [
+        "generator",
+        "chat",
+        "response",
+        "system"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/domains/vapi/config.ts",
+      "anchor": "BASE_SYSTEM_PROMPT = `You are making an outbound phone call",
+      "id": "vapi_base_system_prompt",
+      "category": "system_prompt",
+      "summary": "Outbound phone-call system prompt via Vapi.",
+      "keywords": [
+        "vapi",
+        "phone",
+        "call",
+        "system",
+        "voice"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
+      "anchor": "let prompt = `You are Rose - a nurturer",
+      "id": "sms_supervisor_system_prompt",
+      "category": "system_prompt",
+      "summary": "SMS Supervisor \u2014 agent network orchestration, attention, low-energy tools.",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "system",
+        "agent",
+        "orchestrate"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
+      "anchor": "function assembleContextUserMessage",
+      "id": "sms_supervisor_context_user_message",
+      "category": "system_prompt",
+      "summary": "Per-SMS dynamic current-state user message with hierarchy, pending requests, recent activity, and datetime.",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "current",
+        "state",
+        "dynamic",
+        "context"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
+      "anchor": "prompt += `\\n\\n# User's Custom Instructions",
+      "id": "sms_supervisor_custom_instructions_block",
+      "category": "system_prompt",
+      "summary": "Optional SMS supervisor append block for the user's custom system instructions.",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "custom",
+        "instructions",
+        "system"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    },
+    {
+      "path": "back-end/src/providers/openrouter.ts",
+      "anchor": "const systemPrompt = `You are an expert at creating LLM judge",
+      "id": "llm_judge_prompt_generator_system",
+      "category": "system_prompt",
+      "summary": "Generates strict LLM judge prompts evaluating autonomous-agent goals.",
+      "keywords": [
+        "llm",
+        "judge",
+        "evaluate",
+        "system",
+        "verify"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      }
+    }
+  ],
+  "claude-code-src": [
+    {
+      "path": "claude-code-src/src/constants/prompts.ts",
+      "anchor": "function getSystemPrompt",
+      "id": "claude_getSystemPrompt",
+      "category": "system_prompt",
+      "summary": "Main Claude Code system prompt \u2014 assembles guidance, tools, environment, etc.",
+      "keywords": [
+        "system",
+        "main",
+        "agent",
+        "loop",
+        "guidance",
+        "execute",
+        "plan"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/constants/system.ts",
+      "anchor": "getCLISyspromptPrefix",
+      "id": "claude_getCLISyspromptPrefix",
+      "category": "system_prompt",
+      "summary": "CLI system-prompt prefix for different execution contexts.",
+      "keywords": [
+        "cli",
+        "prefix",
+        "system",
+        "context",
+        "interactive"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/BashTool/prompt.ts",
+      "anchor": "function getSimplePrompt",
+      "id": "claude_tool_bash",
+      "category": "tool_description",
+      "summary": "Bash tool \u2014 shell commands, git, sandbox.",
+      "keywords": [
+        "bash",
+        "shell",
+        "command",
+        "execute",
+        "git"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/FileReadTool/prompt.ts",
+      "anchor": "renderPromptTemplate",
+      "id": "claude_tool_read",
+      "category": "tool_description",
+      "summary": "Read tool \u2014 file access, paths, line limits, images/PDF.",
+      "keywords": [
+        "read",
+        "file",
+        "content",
+        "path",
+        "image",
+        "pdf"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/FileEditTool/prompt.ts",
+      "anchor": "getDefaultEditDescription",
+      "id": "claude_tool_edit",
+      "category": "tool_description",
+      "summary": "Edit tool \u2014 exact string replacement, indentation, uniqueness.",
+      "keywords": [
+        "edit",
+        "replace",
+        "string",
+        "file",
+        "indent"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/FileWriteTool/prompt.ts",
+      "anchor": "getWriteToolDescription",
+      "id": "claude_tool_write",
+      "category": "tool_description",
+      "summary": "Write tool \u2014 file creation, complete rewrite.",
+      "keywords": [
+        "write",
+        "create",
+        "file",
+        "overwrite"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/GlobTool/prompt.ts",
+      "anchor": "export const DESCRIPTION = ",
+      "id": "claude_tool_glob",
+      "category": "tool_description",
+      "summary": "Glob tool \u2014 fast file pattern matching.",
+      "keywords": [
+        "glob",
+        "find",
+        "pattern",
+        "files"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/GrepTool/prompt.ts",
+      "anchor": "getDescription",
+      "id": "claude_tool_grep",
+      "category": "tool_description",
+      "summary": "Grep tool \u2014 regex search via ripgrep.",
+      "keywords": [
+        "grep",
+        "search",
+        "regex",
+        "ripgrep",
+        "content"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/WebSearchTool/prompt.ts",
+      "anchor": "getWebSearchPrompt",
+      "id": "claude_tool_web_search",
+      "category": "tool_description",
+      "summary": "WebSearch tool \u2014 current sources in markdown.",
+      "keywords": [
+        "web",
+        "search",
+        "internet",
+        "sources",
+        "results"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/WebFetchTool/prompt.ts",
+      "anchor": "DESCRIPTION",
+      "id": "claude_tool_web_fetch",
+      "category": "tool_description",
+      "summary": "WebFetch tool \u2014 retrieve URLs, HTML\u2192markdown, cache.",
+      "keywords": [
+        "web",
+        "fetch",
+        "url",
+        "html",
+        "markdown"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/AgentTool/prompt.ts",
+      "anchor": "export async function getPrompt",
+      "id": "claude_tool_agent",
+      "category": "tool_description",
+      "summary": "Agent tool \u2014 spawn specialized sub-agents (forks vs subagents, parallelism).",
+      "keywords": [
+        "agent",
+        "subagent",
+        "spawn",
+        "fork",
+        "task",
+        "delegate"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/AgentTool/built-in/exploreAgent.ts",
+      "anchor": "function getExploreSystemPrompt",
+      "id": "claude_builtin_explore_agent",
+      "category": "system_prompt",
+      "summary": "Claude Code built-in Explore agent \u2014 read-only codebase search specialist.",
+      "keywords": [
+        "explore",
+        "agent",
+        "search",
+        "codebase",
+        "read-only",
+        "subagent"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/TodoWriteTool/prompt.ts",
+      "anchor": "PROMPT",
+      "id": "claude_tool_todo_write",
+      "category": "tool_description",
+      "summary": "Todo list tool \u2014 multi-step task tracking.",
+      "keywords": [
+        "todo",
+        "task",
+        "list",
+        "tracking",
+        "progress"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/AskUserQuestionTool/prompt.ts",
+      "anchor": "ASK_USER_QUESTION_TOOL_PROMPT",
+      "id": "claude_tool_ask_user_question",
+      "category": "tool_description",
+      "summary": "AskUserQuestion tool \u2014 clarify with optional choices/preview.",
+      "keywords": [
+        "question",
+        "ask",
+        "user",
+        "clarify",
+        "choice"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/NotebookEditTool/prompt.ts",
+      "anchor": "PROMPT",
+      "id": "claude_tool_notebook_edit",
+      "category": "tool_description",
+      "summary": "NotebookEdit tool \u2014 replace cell contents, insert, delete.",
+      "keywords": [
+        "notebook",
+        "jupyter",
+        "cell",
+        "edit"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/EnterPlanModeTool/prompt.ts",
+      "anchor": "EnterPlanModeToolPrompt",
+      "id": "claude_tool_enter_plan_mode",
+      "category": "tool_description",
+      "summary": "EnterPlanMode tool \u2014 design implementation, request approval.",
+      "keywords": [
+        "plan",
+        "mode",
+        "design",
+        "approval"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/ExitPlanModeTool/prompt.ts",
+      "anchor": "EXIT_PLAN_MODE_V2_TOOL_PROMPT",
+      "id": "claude_tool_exit_plan_mode",
+      "category": "tool_description",
+      "summary": "ExitPlanMode tool \u2014 finish planning, get user approval.",
+      "keywords": [
+        "plan",
+        "exit",
+        "approval",
+        "complete"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/EnterWorktreeTool/prompt.ts",
+      "anchor": "getEnterWorktreeToolPrompt",
+      "id": "claude_tool_enter_worktree",
+      "category": "tool_description",
+      "summary": "EnterWorktree tool \u2014 create isolated git worktree.",
+      "keywords": [
+        "worktree",
+        "git",
+        "branch",
+        "isolation"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/ExitWorktreeTool/prompt.ts",
+      "anchor": "getExitWorktreeToolPrompt",
+      "id": "claude_tool_exit_worktree",
+      "category": "tool_description",
+      "summary": "ExitWorktree tool \u2014 leave worktree session.",
+      "keywords": [
+        "worktree",
+        "exit",
+        "git"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/SkillTool/prompt.ts",
+      "anchor": "getPrompt",
+      "id": "claude_tool_skill",
+      "category": "tool_description",
+      "summary": "Skill tool \u2014 invoke user-defined skills/slash commands.",
+      "keywords": [
+        "skill",
+        "slash",
+        "invoke",
+        "command"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/TaskCreateTool/prompt.ts",
+      "anchor": "getPrompt",
+      "id": "claude_tool_task_create",
+      "category": "tool_description",
+      "summary": "TaskCreate tool \u2014 track multi-step coding tasks.",
+      "keywords": [
+        "task",
+        "create",
+        "tracking",
+        "todo"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/TaskListTool/prompt.ts",
+      "anchor": "getPrompt",
+      "id": "claude_tool_task_list",
+      "category": "tool_description",
+      "summary": "TaskList tool \u2014 view tasks, dependencies.",
+      "keywords": [
+        "task",
+        "list",
+        "view",
+        "dependencies"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/TaskGetTool/prompt.ts",
+      "anchor": "PROMPT",
+      "id": "claude_tool_task_get",
+      "category": "tool_description",
+      "summary": "TaskGet tool \u2014 full task details.",
+      "keywords": [
+        "task",
+        "get",
+        "details"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/TaskStopTool/prompt.ts",
+      "anchor": "DESCRIPTION",
+      "id": "claude_tool_task_stop",
+      "category": "tool_description",
+      "summary": "TaskStop tool \u2014 terminate background tasks.",
+      "keywords": [
+        "task",
+        "stop",
+        "terminate",
+        "background"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/BriefTool/prompt.ts",
+      "anchor": "BRIEF_PROACTIVE_SECTION",
+      "id": "claude_tool_brief",
+      "category": "tool_description",
+      "summary": "Brief / SendUserMessage tool \u2014 proactive + normal modes.",
+      "keywords": [
+        "message",
+        "user",
+        "send",
+        "proactive",
+        "brief"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/PowerShellTool/prompt.ts",
+      "anchor": "getPrompt",
+      "id": "claude_tool_powershell",
+      "category": "tool_description",
+      "summary": "PowerShell tool \u2014 Windows shell, edition-specific.",
+      "keywords": [
+        "powershell",
+        "windows",
+        "shell",
+        "command"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/SleepTool/prompt.ts",
+      "anchor": "SLEEP_TOOL_PROMPT",
+      "id": "claude_tool_sleep",
+      "category": "tool_description",
+      "summary": "Sleep tool \u2014 wait, cache-aware.",
+      "keywords": [
+        "sleep",
+        "wait",
+        "duration",
+        "cache"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/tools/ListMcpResourcesTool/prompt.ts",
+      "anchor": "PROMPT",
+      "id": "claude_tool_list_mcp_resources",
+      "category": "tool_description",
+      "summary": "ListMcpResources tool \u2014 discover MCP server resources.",
+      "keywords": [
+        "mcp",
+        "resources",
+        "list",
+        "server"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/services/SessionMemory/prompts.ts",
+      "anchor": "getDefaultUpdatePrompt",
+      "id": "claude_session_memory_update",
+      "category": "instruction_block",
+      "summary": "Session memory updater \u2014 structured notes about ongoing work.",
+      "keywords": [
+        "memory",
+        "session",
+        "notes",
+        "update",
+        "context"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/services/extractMemories/prompts.ts",
+      "anchor": "buildExtractAutoOnlyPrompt",
+      "id": "claude_extract_memories",
+      "category": "instruction_block",
+      "summary": "Persistent memory extractor \u2014 save learnings across conversations.",
+      "keywords": [
+        "memory",
+        "extract",
+        "persist",
+        "learning"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/services/compact/prompt.ts",
+      "anchor": "getCompactPrompt",
+      "id": "claude_compact",
+      "category": "instruction_block",
+      "summary": "Context compactor \u2014 summarize history near token limits.",
+      "keywords": [
+        "compact",
+        "summary",
+        "context",
+        "history",
+        "tokens"
+      ]
+    },
+    {
+      "path": "claude-code-src/src/services/MagicDocs/prompts.ts",
+      "anchor": "buildMagicDocsUpdatePrompt",
+      "id": "claude_magic_docs",
+      "category": "instruction_block",
+      "summary": "Magic Docs updater \u2014 keep dynamic docs synchronized.",
+      "keywords": [
+        "docs",
+        "documentation",
+        "magic",
+        "update"
+      ]
+    }
+  ],
+  "openclaw": [
+    {
+      "path": "openclaw/src/agents/system-prompt.ts",
+      "anchor": "buildAgentSystemPrompt",
+      "id": "openclaw_buildAgentSystemPrompt",
+      "category": "system_prompt",
+      "summary": "Main system prompt builder \u2014 assembles identity, context, capabilities.",
+      "keywords": [
+        "system",
+        "prompt",
+        "main",
+        "agent",
+        "build",
+        "identity"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/gpt5-prompt-overlay.ts",
+      "anchor": "GPT5_FRIENDLY_CHAT_PROMPT_OVERLAY",
+      "id": "openclaw_gpt5_friendly_chat",
+      "category": "system_prompt",
+      "summary": "GPT-5 chat-style overlay \u2014 warm, collaborative communication.",
+      "keywords": [
+        "gpt5",
+        "chat",
+        "style",
+        "interaction",
+        "overlay"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/gpt5-prompt-overlay.ts",
+      "anchor": "GPT5_HEARTBEAT_PROMPT_OVERLAY",
+      "id": "openclaw_gpt5_heartbeat",
+      "category": "system_prompt",
+      "summary": "GPT-5 heartbeat overlay \u2014 proactive action behavior.",
+      "keywords": [
+        "gpt5",
+        "heartbeat",
+        "proactive",
+        "action",
+        "wakeup"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/gpt5-prompt-overlay.ts",
+      "anchor": "GPT5_BEHAVIOR_CONTRACT",
+      "id": "openclaw_gpt5_behavior_contract",
+      "category": "system_prompt",
+      "summary": "GPT-5 execution contract \u2014 persona, tool discipline, completion.",
+      "keywords": [
+        "behavior",
+        "contract",
+        "execution",
+        "tool",
+        "discipline"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/bootstrap-prompt.ts",
+      "anchor": "buildFullBootstrapPromptLines",
+      "id": "openclaw_bootstrap_prompt",
+      "category": "instruction_block",
+      "summary": "Bootstrap prompt \u2014 initial workspace orientation, files, runtime.",
+      "keywords": [
+        "bootstrap",
+        "workspace",
+        "orientation",
+        "context"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/tools/web-search.ts",
+      "anchor": "WebSearchSchema",
+      "id": "openclaw_web_search",
+      "category": "tool_param_description",
+      "summary": "Web search tool \u2014 query, country, language, freshness, dates.",
+      "keywords": [
+        "web",
+        "search",
+        "query",
+        "country",
+        "language",
+        "freshness"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/tools/web-fetch.ts",
+      "anchor": "WebFetchSchema",
+      "id": "openclaw_web_fetch",
+      "category": "tool_param_description",
+      "summary": "Web fetch tool \u2014 URL \u2192 markdown/text with limits.",
+      "keywords": [
+        "web",
+        "fetch",
+        "url",
+        "markdown",
+        "text",
+        "extract"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/tools/message-tool.ts",
+      "anchor": "function buildMessageToolDescription",
+      "id": "openclaw_message_tool",
+      "category": "tool_description",
+      "summary": "Message tool \u2014 send, reply, thread-reply, broadcast, read.",
+      "keywords": [
+        "message",
+        "send",
+        "reply",
+        "channel",
+        "thread"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/tools/update-plan-tool.ts",
+      "anchor": "createUpdatePlanTool",
+      "id": "openclaw_update_plan",
+      "category": "tool_description",
+      "summary": "OpenClaw update_plan tool schema.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/tools/sessions-spawn-tool.ts",
+      "anchor": "createSessionsSpawnTool",
+      "id": "openclaw_sessions_spawn",
+      "category": "tool_description",
+      "summary": "OpenClaw sessions_spawn tool schema.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/src/agents/subagent-system-prompt.ts",
+      "anchor": "buildSubagentSystemPrompt",
+      "id": "openclaw_subagent_system_prompt",
+      "category": "system_prompt",
+      "summary": "OpenClaw generic subagent prompt \u2014 focused ephemeral child task runner.",
+      "keywords": [
+        "subagent",
+        "explore",
+        "spawn",
+        "focused",
+        "ephemeral",
+        "child"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.ts",
+      "anchor": "name: \"browser\"",
+      "id": "openclaw_browser_action_snapshot",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=snapshot.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.ts",
+      "anchor": "name: \"browser\"",
+      "id": "openclaw_browser_action_screenshot",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=screenshot.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.ts",
+      "anchor": "name: \"browser\"",
+      "id": "openclaw_browser_action_navigate",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=navigate.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_click",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=click.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_fill",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=fill.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_type",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=type.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_press",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=press.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_wait",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=wait.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_ACT_KINDS",
+      "id": "openclaw_browser_action_act_clickCoords",
+      "category": "tool_param_description",
+      "summary": "OpenClaw browser tool focused on action=act kind=clickCoords.",
+      "keywords": [
+        "browser",
+        "openclaw",
+        "tool",
+        "schema"
+      ]
+    },
+    {
+      "path": "openclaw/extensions/browser/src/browser-tool.schema.ts",
+      "anchor": "BROWSER_TOOL_ACTIONS",
+      "id": "openclaw_browser_action_snapshot_aria",
+      "category": "tool_description",
+      "summary": "OpenClaw browser tool snapshot action variant with aria snapshot format.",
+      "keywords": [
+        "browser",
+        "snapshot",
+        "aria",
+        "tree"
+      ]
+    }
+  ],
+  "hermes-agent": [
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "DEFAULT_AGENT_IDENTITY",
+      "id": "hermes_default_agent_identity",
+      "category": "system_prompt",
+      "summary": "Default Hermes Agent identity \u2014 Nous Research helpful AI.",
+      "keywords": [
+        "identity",
+        "agent",
+        "default",
+        "system",
+        "nous"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "MEMORY_GUIDANCE",
+      "id": "hermes_memory_guidance",
+      "category": "instruction_block",
+      "summary": "Persistent memory guidance \u2014 facts, preferences across sessions.",
+      "keywords": [
+        "memory",
+        "persist",
+        "facts",
+        "preferences",
+        "session"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "SESSION_SEARCH_GUIDANCE",
+      "id": "hermes_session_search_guidance",
+      "category": "instruction_block",
+      "summary": "Session search \u2014 recall cross-session context.",
+      "keywords": [
+        "session",
+        "search",
+        "recall",
+        "context"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "SKILLS_GUIDANCE",
+      "id": "hermes_skills_guidance",
+      "category": "instruction_block",
+      "summary": "Skills creation \u2014 reusable skills from complex tasks.",
+      "keywords": [
+        "skills",
+        "create",
+        "reuse",
+        "tasks"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "KANBAN_GUIDANCE",
+      "id": "hermes_kanban_guidance",
+      "category": "instruction_block",
+      "summary": "Kanban board protocol \u2014 coordinate isolated subagents.",
+      "keywords": [
+        "kanban",
+        "task",
+        "board",
+        "coordinate",
+        "subagent"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "TOOL_USE_ENFORCEMENT_GUIDANCE",
+      "id": "hermes_tool_use_enforcement",
+      "category": "instruction_block",
+      "summary": "Tool use enforcement \u2014 actually use tools, don't describe.",
+      "keywords": [
+        "tool",
+        "use",
+        "enforce",
+        "action",
+        "execute"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "OPENAI_MODEL_EXECUTION_GUIDANCE",
+      "id": "hermes_openai_execution",
+      "category": "instruction_block",
+      "summary": "OpenAI/GPT execution discipline \u2014 tool persistence, mandatory use.",
+      "keywords": [
+        "openai",
+        "gpt",
+        "execution",
+        "discipline",
+        "tool"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "GOOGLE_MODEL_OPERATIONAL_GUIDANCE",
+      "id": "hermes_google_operational",
+      "category": "instruction_block",
+      "summary": "Gemini/Gemma directives \u2014 paths, verification, autonomy.",
+      "keywords": [
+        "google",
+        "gemini",
+        "gemma",
+        "operational",
+        "verification"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "PLATFORM_HINTS",
+      "id": "hermes_platform_hints",
+      "category": "system_prompt",
+      "summary": "Platform hints \u2014 formatting/media for many messaging channels.",
+      "keywords": [
+        "platform",
+        "messaging",
+        "telegram",
+        "discord",
+        "slack",
+        "whatsapp"
+      ]
+    },
+    {
+      "path": "hermes-agent/agent/prompt_builder.py",
+      "anchor": "WSL_ENVIRONMENT_HINT",
+      "id": "hermes_wsl_environment_hint",
+      "category": "system_prompt",
+      "summary": "WSL filesystem paths and Windows integration hint.",
+      "keywords": [
+        "wsl",
+        "windows",
+        "filesystem",
+        "environment"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/web_tools.py",
+      "anchor": "WEB_SEARCH_SCHEMA = {",
+      "id": "hermes_web_search_tool",
+      "category": "tool_description",
+      "summary": "Web search tool schema \u2014 multi-backend (Firecrawl, Exa, Tavily).",
+      "keywords": [
+        "web",
+        "search",
+        "query",
+        "results"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/web_tools.py",
+      "anchor": "WEB_EXTRACT_SCHEMA = {",
+      "id": "hermes_web_extract_tool",
+      "category": "tool_description",
+      "summary": "Web extract tool schema \u2014 content from URL in markdown.",
+      "keywords": [
+        "web",
+        "fetch",
+        "extract",
+        "url",
+        "content"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/terminal_tool.py",
+      "anchor": "TERMINAL_SCHEMA = {",
+      "id": "hermes_terminal_tool",
+      "category": "tool_description",
+      "summary": "Terminal tool schema \u2014 shell commands with approval, sudo.",
+      "keywords": [
+        "terminal",
+        "shell",
+        "command",
+        "execute",
+        "approval"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/delegate_tool.py",
+      "anchor": "DELEGATE_TASK_SCHEMA = {",
+      "id": "hermes_delegate_tool",
+      "category": "tool_description",
+      "summary": "Delegate tool schema \u2014 spawn isolated subagent for task.",
+      "keywords": [
+        "delegate",
+        "spawn",
+        "subagent",
+        "task"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/delegate_tool.py",
+      "anchor": "_build_child_system_prompt",
+      "id": "hermes_explore_reference",
+      "category": "system_prompt",
+      "summary": "Hermes explore-adjacent references \u2014 delegated child prompt plus optional GitNexus explorer skill.",
+      "keywords": [
+        "explore",
+        "delegate",
+        "subagent",
+        "gitnexus",
+        "research",
+        "child"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/clarify_tool.py",
+      "anchor": "CLARIFY_SCHEMA = {",
+      "id": "hermes_clarify_tool",
+      "category": "tool_description",
+      "summary": "Clarify tool schema \u2014 ask user for clarification (multi-choice or open).",
+      "keywords": [
+        "clarify",
+        "ask",
+        "user",
+        "question"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_navigate\"",
+      "id": "hermes_browser_navigate",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_navigate.",
+      "keywords": [
+        "browser",
+        "navigate",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_snapshot\"",
+      "id": "hermes_browser_snapshot",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_snapshot.",
+      "keywords": [
+        "browser",
+        "snapshot",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_click\"",
+      "id": "hermes_browser_click",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_click.",
+      "keywords": [
+        "browser",
+        "click",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_type\"",
+      "id": "hermes_browser_type",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_type.",
+      "keywords": [
+        "browser",
+        "type",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_scroll\"",
+      "id": "hermes_browser_scroll",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_scroll.",
+      "keywords": [
+        "browser",
+        "scroll",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_back\"",
+      "id": "hermes_browser_back",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_back.",
+      "keywords": [
+        "browser",
+        "back",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_press\"",
+      "id": "hermes_browser_press",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_press.",
+      "keywords": [
+        "browser",
+        "press",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/browser_tool.py",
+      "anchor": "\"name\": \"browser_vision\"",
+      "id": "hermes_browser_vision",
+      "category": "tool_description",
+      "summary": "Hermes browser tool schema for browser_vision.",
+      "keywords": [
+        "browser",
+        "vision",
+        "schema",
+        "automation"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/send_message_tool.py",
+      "anchor": "SEND_MESSAGE_SCHEMA",
+      "id": "hermes_send_message_tool",
+      "category": "tool_description",
+      "summary": "Hermes send_message tool schema for cross-platform outbound messaging.",
+      "keywords": [
+        "send",
+        "message",
+        "notify",
+        "chat",
+        "platform"
+      ]
+    },
+    {
+      "path": "hermes-agent/tools/file_tools.py",
+      "anchor": "SEARCH_FILES_SCHEMA",
+      "id": "hermes_search_files_tool",
+      "category": "tool_description",
+      "summary": "Hermes search_files tool schema for content/file search.",
+      "keywords": [
+        "search",
+        "files",
+        "grep",
+        "rg",
+        "content"
+      ]
+    }
+  ]
+}

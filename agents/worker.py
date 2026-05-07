@@ -73,7 +73,11 @@ from helpers.attachments import fetch_parent_attachments_activity, resolve_attac
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
+    fetch_compute_token_activity,
+    fetch_gpt_code_token_activity,
     mark_claude_token_rate_limited_activity,
+    mark_compute_token_rate_limited_activity,
+    mark_gpt_token_rate_limited_activity,
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
@@ -546,7 +550,11 @@ async def main():
             call_planner_llm_activity,
             set_response_schema_activity,
             fetch_claude_max_token_activity,
+            fetch_compute_token_activity,
+            fetch_gpt_code_token_activity,
             mark_claude_token_rate_limited_activity,
+            mark_compute_token_rate_limited_activity,
+            mark_gpt_token_rate_limited_activity,
             update_agent_status,
             compress_context,
             generate_completion_summary,

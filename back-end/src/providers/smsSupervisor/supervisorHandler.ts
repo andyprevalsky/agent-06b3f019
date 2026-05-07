@@ -21,7 +21,7 @@ import { createStreamingCompletion, CompletionMessage, markCacheable } from '../
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
 import { executeToolCall, ToolCall, ToolResult } from './supervisorTools';
-import { fetchClaudeCodeAccessToken, fetchPoolToken } from '../claudeCredentials';
+import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('SmsSupervisor');
@@ -120,7 +120,7 @@ export async function handleSmsSupervisorMessage(config: {
   });
 
   // 3. Fetch Claude token for direct Anthropic passthrough
-  const claudeToken = await getClaudeToken(userId);
+  const computeToken = await getComputeToken(userId);
 
   // 4. Build messages array for LLM. The volatile per-SMS state is injected as
   // a `user`-role message right before the inbound user message — keeping it
@@ -152,7 +152,7 @@ export async function handleSmsSupervisorMessage(config: {
 
     // Call LLM
     const llmStart = Date.now();
-    const llmResponse = await callSupervisorLlm(messages, claudeToken);
+    const llmResponse = await callSupervisorLlm(messages, computeToken);
 
     log.info('[SmsSupervisor] LLM response received', {
       round,
@@ -300,32 +300,36 @@ export async function handleSmsSupervisorMessage(config: {
 }
 
 // ============================================
-// Claude Token Fetching
+// Compute Token Fetching
 // ============================================
 
-async function getClaudeToken(userId: string): Promise<string | null> {
+interface SupervisorComputeToken {
+  type: 'claude' | 'gpt';
+  accessToken: string;
+  accountId?: string;
+}
+
+async function getComputeToken(userId: string): Promise<SupervisorComputeToken | null> {
   try {
-    // Try user's own token first
-    const userToken = await fetchClaudeCodeAccessToken(userId);
-    if (userToken) {
-      log.info('[SmsSupervisor] Using user Claude token', { userId });
-      return userToken;
-    }
-
-    // Fall back to pool
-    const poolResult = await fetchPoolToken();
-    if (poolResult) {
-      log.info('[SmsSupervisor] Using pool Claude token', {
+    const computeToken = await fetchComputeTokenForUser(userId);
+    if (computeToken) {
+      log.info('[SmsSupervisor] Using compute token', {
         userId,
-        poolTokenId: poolResult.poolTokenId,
+        type: computeToken.type,
+        source: computeToken.source,
+        poolTokenId: computeToken.poolTokenId,
       });
-      return poolResult.accessToken;
+      return {
+        type: computeToken.type,
+        accessToken: computeToken.accessToken,
+        accountId: computeToken.accountId,
+      };
     }
 
-    log.info('[SmsSupervisor] No Claude token available, will use waterfall', { userId });
+    log.info('[SmsSupervisor] No compute token available, will use waterfall', { userId });
     return null;
   } catch (error) {
-    log.warn('[SmsSupervisor] Failed to fetch Claude token, falling back to waterfall', {
+    log.warn('[SmsSupervisor] Failed to fetch compute token, falling back to waterfall', {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -339,15 +343,19 @@ async function getClaudeToken(userId: string): Promise<string | null> {
 
 async function callSupervisorLlm(
   messages: CompletionMessage[],
-  claudeToken: string | null
+  computeToken: SupervisorComputeToken | null
 ): Promise<SupervisorResponse> {
   const startTime = Date.now();
+  const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
+  const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
+  const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
 
   // Log the full request
   log.info('[SmsSupervisorLLM] Request', {
     model: SMS_SUPERVISOR_MODEL,
     messageCount: messages.length,
     hasClaudeToken: !!claudeToken,
+    hasGptToken: !!gptToken,
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -368,6 +376,7 @@ async function callSupervisorLlm(
     temperature: 0.3,
     response_format: SUPERVISOR_RESPONSE_SCHEMA,
     ...(claudeToken ? { claude_token: claudeToken } : {}),
+    ...(gptToken ? { gpt_token: gptToken, gpt_account_id: gptAccountId } : {}),
   });
 
   let accumulatedContent = '';

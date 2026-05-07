@@ -1,49 +1,28 @@
 """Prompt for spawn_agent tool."""
 
-# Examples retained because the bad/good pattern (stateful-vs-stateless browser
-# flows) is a high-frequency model failure mode that the validator cannot
-# catch. Removing the example causes the model to chain browser spawns
-# expecting cart/auth state to persist; the explicit BAD/GOOD pairing is
-# what teaches the partition.
-from utils.prompts import EPHEMERAL_SESSION_RULE
+PROMPT = """Use this tool to launch a new agent to handle complex, multi-step tasks autonomously. Each sub-agent gets its own isolated context, toolset, and runtime container.
 
-PROMPT = (
-    """Spawns an autonomous sub-agent whose capabilities are determined by the type field.
+Each agent type has specific capabilities and tools available to it.
+
+Available agent types and the tools they have access to:
+- sub_agent: A general-purpose agent for executing multi-step, cross-domain tasks. This agent is constructed in the exact same way you are, and can be spawned in either the RESEARCH or the EXECUTE phase. A sub_agent can spawn more agents underneath it, which is a unique privilege for this agent type alone.
+- explore: A read-only agent specialized in extracting information from the environment you are in. When you need concrete facts or load-bearing pieces of information, use this agent type to retrieve that information. It has tools to search the internet, user data, and more. This is the default choice for information gathering tasks.
+- browser: An agent specialized for browser use. It should primarily be used for stateful web trajectories, or for reading data that cannot be obtained from an explore agent due to authorization requirements.
+- code: An agent specialized in executing code commands. It lives in an ephemeral E2B sandbox and uses Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after completion. Sandboxes are short-lived, so the task should be tightly scoped and self-sufficient.
+- for_each: An agent orchestrator that fans out one templated sub_agent per item from a list or CSV. If you need to spawn more than 5 sub_agents in one turn, strongly consider using for_each; it is optimized for spawning many agents at once.
+
+## Writing the agent's goal
+
+Brief the agent like a smart colleague who just walked into the room; it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+- Explain what you're trying to accomplish and why.
+- Describe what you've already learned or ruled out.
+- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
+- If you need a short response, say so ("report in under 200 words").
+- Terse command-style prompts produce shallow, generic work.
+
+Cost Structure:
+- explore << code < browser < sub_agent < for_each
+If you can accomplish a task with a single instance of a cheaper agent, you should.
 
 Usage:
-- type="explore" for read-only research and one-shot information lookups (facts, numbers, names, URLs).
-  Uses web_search/web_fetch/grep + LLM summarization. Returns a free-form summary; no output_schema.
-  This is the DEFAULT choice for "find/look up/research X" goals; it is faster and cheaper than browser.
-- type="browser" ONLY for stateful web trajectories where session state must persist across steps:
-  authenticated flows (login -> action), forms with multi-step submission, cart/checkout, JS-heavy SPAs
-  whose data is not in static HTML. 25-step limit, requires start_url and output_schema. Do NOT pick
-  browser for "find a public fact on the web"; explore handles that with one search call.
-- type="code" for ephemeral E2B sandbox tasks (code, data processing, file generation); one focused task under 10 minutes.
-- type="sub_agent" delegates a complex multi-step job that runs its own planning cycle.
-- type="for_each" fans out one sub-agent per item from a list or CSV.
-- Goals must be at least 50 characters for browser/code/sub_agent/for_each (validator-enforced); explore is exempt.
-- IMPORTANT: keep stateful multi-step web flows in ONE type="browser" call; see Session Semantics below.
-- Multiple spawn_agent calls in one response execute in parallel.
-
-# Choosing explore vs browser
-
-If the answer would appear on a public web page or in search results without
-needing to click, log in, or maintain session state, use explore. Browser is
-strictly slower and reserved for cases where explore cannot work because the
-data is gated behind interaction.
-
-GOOD explore: "Find the current population of Tokyo and return the numeric value with source URL."
-GOOD browser: "Log in to acme.com with the saved credentials, navigate to billing, download the latest invoice PDF."
-BAD browser:  "Search the web for the current population of Tokyo." (use explore)
-
-# Examples
-BAD (state lost between browser calls):
-  spawn_agent(type="browser", goal="Login to site")
-  spawn_agent(type="browser", goal="Add item to cart")
-GOOD (one call covers the full stateful flow):
-  spawn_agent(type="browser", start_url="https://x.com", goal="Login, post tweet, logout", output_schema=...)
-
-# Session Semantics
-"""
-    + EPHEMERAL_SESSION_RULE.strip()
-)
+- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses or the for_each agent type."""

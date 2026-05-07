@@ -355,6 +355,8 @@ export async function callRouterLlm(params: {
   messages: ChatMessage[];
   model: string;
   claudeToken: string | null;
+  gptToken?: string | null;
+  gptAccountId?: string;
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
 
@@ -431,10 +433,13 @@ export async function callRouterLlm(params: {
       },
     },
     claude_token: params.claudeToken ?? undefined,
+    gpt_token: params.gptToken ?? undefined,
+    gpt_account_id: params.gptAccountId,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
+  let isGpt = false;
 
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
@@ -481,6 +486,10 @@ export async function callRouterLlm(params: {
       isClaude = true;
       log.info('[RouterLLM] User Claude token detected', { actualModel });
     }
+    if (!isGpt && actualModel?.endsWith('-gpt')) {
+      isGpt = true;
+      log.info('[RouterLLM] User GPT token detected', { actualModel });
+    }
 
     // Get delta from chunk
     const delta = chunk.choices[0]?.delta;
@@ -512,7 +521,8 @@ export async function callRouterLlm(params: {
           newText,
           false,
           sequence++,
-          isClaude
+          isClaude,
+          isGpt
         );
       }
     }
@@ -560,7 +570,7 @@ export async function callRouterLlm(params: {
   const fullJson = accumulatedJson;
 
   // Broadcast final "done" signal for reasoning stream
-  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude);
+  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude, isGpt);
 
   const streamDuration = Date.now() - startTime;
   log.info('[RouterLLM] Streaming complete', {
@@ -584,6 +594,7 @@ export async function callRouterLlm(params: {
       agent_id: params.agentId,
       actual_model: actualModel,
       is_claude: isClaude,
+      is_gpt: isGpt,
       prompt_tokens: promptTokens,
       completion_tokens: usageData.completion_tokens ?? 0,
       cache_read: cacheRead,

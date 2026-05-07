@@ -180,8 +180,8 @@ async def test_assistant_tool_call_ids_match_execution_and_context_results():
 
 async def test_attempt_completion_skip_verification_returns_completed():
     """When attempt_completion fires with skip_verification, status is 'completed'.
-    AttemptCompletionTool takes no args; final_response now derives from the
-    agent's narration (response_text). Helper sends "" so final_response is "".
+    Without an explicit result, final_response falls back to assistant narration.
+    Helper sends "" so final_response is "".
     """
     tool_calls = [
         {"tool": "attempt_completion"},
@@ -199,9 +199,28 @@ async def test_attempt_completion_skip_verification_returns_completed():
     )
 
     assert result["status"] == "completed"
-    # response_text is "" in the mock, and AttemptCompletionTool has no args,
-    # so final_response is the empty string fallback.
     assert result["final_response"] == ""
+
+
+async def test_attempt_completion_result_used_when_skip_verification():
+    """skip_verification returns attempt_completion.result as final_response."""
+    tool_calls = [
+        {"tool": "attempt_completion", "result": "final handoff payload"},
+    ]
+    detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ac done"}
+
+    result, posted, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        execute_tool_override=mock_execute_tool,
+    )
+
+    assert result["status"] == "completed"
+    assert result["final_response"] == "final handoff payload"
 
 
 async def test_attempt_completion_plan_loop_requires_set_plan():
@@ -409,11 +428,17 @@ async def test_compress_context_calls_execute_activity_and_returns_single_system
         tokens_recorded.append((in_, out_, model, kwargs))
 
     context = [{"role": "USER", "text": "hi"}]
-    result = await _compress_context(mock_execute_activity, context, "rose-lite", on_tokens=on_tokens)
+    result = await _compress_context(
+        mock_execute_activity,
+        context,
+        "rose-lite",
+        on_tokens=on_tokens,
+    )
 
     assert len(result) == 1
     assert result[0]["role"] == "SYSTEM"
     assert result[0]["text"] == "key insights"
+    assert captured_args[0][1] == [context, len(context), "rose-lite"]
     assert len(tokens_recorded) == 1
     assert tokens_recorded[0][0] == 3
     assert tokens_recorded[0][1] == 2
@@ -532,6 +557,7 @@ async def run_all_tests():
     await r.record_async("tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls)
     await r.record_async("assistant_tool_call_ids_match_execution_and_context_results", test_assistant_tool_call_ids_match_execution_and_context_results)
     await r.record_async("attempt_completion_skip_verification_returns_completed", test_attempt_completion_skip_verification_returns_completed)
+    await r.record_async("attempt_completion_result_used_when_skip_verification", test_attempt_completion_result_used_when_skip_verification)
     await r.record_async("attempt_completion_plan_loop_requires_set_plan", test_attempt_completion_plan_loop_requires_set_plan)
     await r.record_async("plan_loop_completes_when_set_plan_then_attempt_completion", test_plan_loop_completes_when_set_plan_then_attempt_completion)
     await r.record_async("no_tool_calls_nudges_then_errors_after_3_consecutive", test_no_tool_calls_nudges_then_errors_after_3_consecutive)

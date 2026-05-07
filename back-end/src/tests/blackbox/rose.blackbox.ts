@@ -38,14 +38,24 @@ import {
   POOL_REGISTRY,
   poolForModel,
   RoseAllFailed,
+  RoseInvalidRequest,
   RoseStallError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type CompletionChunk,
 } from '../../providers/rose';
-import { parseAnthropicSSE, parseOpenAISSE } from '../../providers/rose/streaming';
+import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
+import {
+  parseAnthropicSSE,
+  parseOpenAISSE,
+  parseResponsesSSE,
+} from '../../providers/rose/streaming';
 import { transformSchemaForAnthropic } from '../../providers/rose/transforms';
 import type { RoseStreamChunk } from '../../providers/rose/types';
-import { ANTHROPIC_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import {
+  ANTHROPIC_API_URL,
+  CODEX_API_URL,
+  OPENROUTER_API_URL,
+} from '../../providers/rose/transport';
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -147,6 +157,20 @@ const OPENROUTER_OK_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"Hi"}}]}',
   '',
   'data: {"choices":[{"index":0,"delta":{"content":" there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}',
+  '',
+  'data: [DONE]',
+  '',
+];
+
+const RESPONSES_OK_SSE = [
+  'event: response.output_text.delta',
+  'data: {"type":"response.output_text.delta","delta":"Hello"}',
+  '',
+  'event: response.output_text.delta',
+  'data: {"type":"response.output_text.delta","delta":" GPT"}',
+  '',
+  'event: response.completed',
+  'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2}}}}',
   '',
   'data: [DONE]',
   '',
@@ -261,6 +285,273 @@ async function testClaudeAuth_happyPath() {
   } finally {
     restoreFetch();
   }
+}
+
+async function testGptAuth_happyPathUsesCodexResponses() {
+  let codexCalls = 0;
+  let openrouterCalls = 0;
+  let capturedHeaders: Headers | undefined;
+  let capturedBody: Record<string, unknown> | undefined;
+  installFetchStub((url, init) => {
+    if (url === CODEX_API_URL) {
+      codexCalls++;
+      capturedHeaders = new Headers(init?.headers);
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [
+        { role: 'system', content: 'be exact' },
+        { role: 'user', content: 'hi' },
+      ],
+      gpt_token: 'gpt-token',
+      gpt_account_id: 'acct_123',
+      max_tokens: 123,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'unit_test',
+          strict: true,
+          schema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      },
+    });
+    const chunks = await collect(stream);
+
+    assertEqual(codexCalls, 1, 'codex call count');
+    assertEqual(openrouterCalls, 0, 'openrouter call count');
+    assertEqual(capturedHeaders?.get('Authorization'), 'Bearer gpt-token', 'authorization header');
+    assertEqual(capturedHeaders?.get('originator'), 'codex_cli_rs', 'originator header');
+    assertEqual(capturedHeaders?.get('ChatGPT-Account-ID'), 'acct_123', 'account header');
+    assertEqual(
+      capturedHeaders?.get('session_id'),
+      capturedBody?.prompt_cache_key as string,
+      'session_id mirrors prompt cache key'
+    );
+    assertEqual(
+      capturedHeaders?.get('x-client-request-id'),
+      capturedBody?.prompt_cache_key as string,
+      'x-client-request-id mirrors prompt cache key'
+    );
+    assertEqual(capturedBody?.model, getPool('rose-1-lite').gptAuthModel, 'codex model');
+    assertEqual(capturedBody?.stream, true, 'stream true');
+    assertEqual(capturedBody?.store, false, 'store false');
+    assert(!('max_tokens' in (capturedBody ?? {})), 'max_tokens omitted');
+    assert(!('max_output_tokens' in (capturedBody ?? {})), 'max_output_tokens omitted');
+    assert(!('temperature' in (capturedBody ?? {})), 'temperature omitted for Codex backend');
+    assertEqual(
+      (capturedBody?.reasoning as Record<string, unknown>)?.effort,
+      'medium',
+      'default reasoning effort'
+    );
+    assert(
+      typeof capturedBody?.prompt_cache_key === 'string' &&
+        capturedBody.prompt_cache_key.startsWith('rose:'),
+      'stable prompt cache key present'
+    );
+    const samePromptDifferentRequest = buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-lite'),
+      messages: [
+        { role: 'system', content: 'be exact' },
+        { role: 'user', content: 'different live input' },
+      ],
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'unit_test',
+          strict: true,
+          schema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      },
+      requestId: 'different-request-id',
+    });
+    assertEqual(
+      capturedBody?.prompt_cache_key,
+      samePromptDifferentRequest.prompt_cache_key,
+      'prompt cache key stable across request ids and live input'
+    );
+    const noSystemBody = buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-lite'),
+      messages: [{ role: 'user', content: 'hi' }],
+      requestId: 'no-system',
+    });
+    assertEqual(
+      noSystemBody.instructions,
+      'You are a helpful assistant.',
+      'Codex instructions default present'
+    );
+    const maxEffortBody = buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-lite'),
+      messages: [{ role: 'user', content: 'hi' }],
+      effort: 'max',
+      requestId: 'max-effort',
+    });
+    assertEqual(
+      (maxEffortBody.reasoning as Record<string, unknown>).effort,
+      'xhigh',
+      'max effort normalized'
+    );
+    assertEqual(
+      ((capturedBody?.text as Record<string, unknown>)?.format as Record<string, unknown>)?.name,
+      'unit_test',
+      'json schema name'
+    );
+    assertEqual(chunks[0].pool_name, 'gpt-token', 'pool_name=gpt-token');
+    assert(chunks[0].actual_model.endsWith('-gpt'), 'actual_model ends -gpt');
+    assertEqual(
+      chunks.map((c) => c.choices[0]?.delta?.content ?? '').join(''),
+      'Hello GPT',
+      'text'
+    );
+    assertEqual(chunks[chunks.length - 1].usage?.cache_read_input_tokens, 2, 'cache reads');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testGptAuth_buildBodyPreservesToolHistoryAndMultimodal() {
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [
+      { role: 'system', content: 'be exact' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'inspect' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,abc', detail: 'high' } },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: 'calling',
+        codex_reasoning_items: [{ id: 'rs_1', encrypted_content: 'secret', summary: [] }],
+        codex_message_items: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            id: 'msg_1',
+            phase: 'final',
+            content: [{ type: 'output_text', text: 'prior' }],
+          },
+        ],
+        tool_calls: [{ id: 'call_lookup', function: { name: 'lookup', arguments: { q: 'x' } } }],
+      },
+      { role: 'tool', tool_call_id: 'call_lookup', content: '{"ok":true}' },
+      { role: 'user', content: 'continue' },
+    ] as never,
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'lookup',
+          description: 'Search',
+          parameters: { type: 'object', properties: { q: { type: 'string' } } },
+        },
+      },
+    ],
+    temperature: 0.2,
+    requestId: 'rid-tool-history',
+  });
+  const input = body.input as Array<Record<string, unknown>>;
+  const firstContent = input[0].content as Array<Record<string, unknown>>;
+  assertEqual(firstContent[1].type, 'input_image', 'image part type');
+  assertEqual(firstContent[1].detail, 'high', 'image detail preserved');
+  assert(
+    input.some((item) => item.type === 'reasoning' && item.encrypted_content === 'secret'),
+    'reasoning replayed'
+  );
+  assert(
+    input.some((item) => item.type === 'message' && item.id === 'msg_1'),
+    'assistant message item replayed'
+  );
+  assert(
+    input.some((item) => item.type === 'function_call' && item.call_id === 'call_lookup'),
+    'function call replayed'
+  );
+  assert(
+    input.some((item) => item.type === 'function_call_output' && item.call_id === 'call_lookup'),
+    'function output replayed'
+  );
+  assertEqual((body.tools as Array<Record<string, unknown>>)[0].name, 'lookup', 'tool converted');
+  assert(!('temperature' in body), 'temperature omitted');
+}
+
+async function testGptAuth_buildBodyConvertsOrphanToolRowsToContext() {
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [
+      { role: 'system', content: 'be exact' },
+      { role: 'user', content: 'summarize prior tool output' },
+      { role: 'tool', tool_call_id: 'missing_call', content: 'population: 123' },
+    ] as never,
+    requestId: 'rid-orphan-tool',
+  });
+  const input = body.input as Array<Record<string, unknown>>;
+  assert(
+    !input.some((item) => item.type === 'function_call_output'),
+    'orphan tool rows are not sent as function_call_output'
+  );
+  const last = input[input.length - 1] as {
+    role?: string;
+    content?: Array<Record<string, unknown>>;
+  };
+  assertEqual(last.role, 'user', 'orphan tool row converted to user context');
+  assertEqual(last.content?.[0]?.text, '[TOOL]: population: 123', 'orphan tool text preserved');
+}
+
+async function testStreaming_responsesFunctionCallItem() {
+  const chunks: RoseStreamChunk[] = [];
+  for await (const chunk of parseResponsesSSE(
+    sseResponse([
+      'event: response.output_item.done',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+      '',
+      'data: [DONE]',
+      '',
+    ]).body!,
+    { actualModel: 'gpt-5.4-gpt', poolName: 'gpt-token', requestId: 'r-tool' }
+  )) {
+    chunks.push(chunk);
+  }
+  const tool = chunks.find((chunk) => chunk.kind === 'tool_call');
+  assertEqual(tool?.data.id, 'call_1', 'tool call id');
+  assertEqual(tool?.data.name, 'lookup', 'tool call name');
+  assertEqual(tool?.data.arguments, '{"q":"x"}', 'tool call args');
+  assertEqual(chunks.find((chunk) => chunk.kind === 'usage')?.data.total_tokens, 5, 'usage total');
+}
+
+async function testStreaming_responsesFailedContextLengthIsInvalidRequest() {
+  let raised = false;
+  try {
+    await collect(
+      parseResponsesSSE(
+        sseResponse([
+          'event: response.failed',
+          'data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too many tokens"}}}',
+          '',
+          'data: [DONE]',
+          '',
+        ]).body!,
+        { actualModel: 'gpt-5.5-gpt', poolName: 'gpt-token', requestId: 'r-context' }
+      )
+    );
+  } catch (err) {
+    raised = err instanceof RoseInvalidRequest;
+  }
+  assert(raised, 'context_length_exceeded raises RoseInvalidRequest');
 }
 
 async function testClaudeAuth_401FallsThroughToWaterfall() {
@@ -1503,6 +1794,22 @@ async function main(): Promise<void> {
     { name: 'pool / unknown model throws', fn: testPool_unknownModelThrows },
     { name: 'claudeAuth / happy path', fn: testClaudeAuth_happyPath },
     {
+      name: 'gptAuth / happy path uses Codex Responses',
+      fn: testGptAuth_happyPathUsesCodexResponses,
+    },
+    {
+      name: 'gptAuth / body preserves tool history and multimodal input',
+      fn: testGptAuth_buildBodyPreservesToolHistoryAndMultimodal,
+    },
+    {
+      name: 'gptAuth / body converts orphan tool rows to context',
+      fn: testGptAuth_buildBodyConvertsOrphanToolRowsToContext,
+    },
+    {
+      name: 'streaming / Responses failed context length is invalid request',
+      fn: testStreaming_responsesFailedContextLengthIsInvalidRequest,
+    },
+    {
       name: 'claudeAuth / 401 falls through to waterfall',
       fn: testClaudeAuth_401FallsThroughToWaterfall,
     },
@@ -1584,6 +1891,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / openai usage with cache tokens',
       fn: testStreaming_openai_usageWithCacheTokens,
+    },
+    {
+      name: 'streaming / responses function_call item → tool_call',
+      fn: testStreaming_responsesFunctionCallItem,
     },
     {
       name: 'client / reasoning chunk → CompletionChunk.delta.reasoning',

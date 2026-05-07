@@ -15,6 +15,12 @@ from utils.error_utils import extract_error_message
 logger = structlog.get_logger()
 
 
+def _session_base_path(code_provider: str = "claude") -> str:
+    if code_provider == "codex":
+        return "/api/codex-code-session"
+    return "/api/claude-code-session"
+
+
 async def save_claude_code_message(
     agent_id: str,
     title: str,
@@ -99,6 +105,7 @@ async def create_e2b_session(
     user_id: str,
     attachments: Optional[list[dict[str, Any]]] = None,
     github_repo_url: Optional[str] = None,
+    code_provider: str = "claude",
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -119,7 +126,7 @@ async def create_e2b_session(
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
-            f"{config.backend.api_url}/api/claude-code-session/create",
+            f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
             headers={
                 "x-api-key": config.backend.api_key or "",
                 "Content-Type": "application/json",
@@ -143,13 +150,14 @@ async def persist_terminal_output(
     task_id: str,
     output: str,
     agent_id: str,
+    code_provider: str = "claude",
 ) -> None:
     """Persist filtered terminal output to DB."""
     config = load_config()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             output_response = await client.post(
-                f"{config.backend.api_url}/api/claude-code-session/{task_id}/output",
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/output",
                 headers={"x-api-key": config.backend.api_key or ""},
                 json={"output": output},
             )
@@ -174,6 +182,7 @@ async def close_e2b_session(
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     additional_paths: Optional[list[str]] = None,
+    code_provider: str = "claude",
 ) -> dict[str, Any]:
     """Close the E2B sandbox session and extract output files.
 
@@ -191,7 +200,7 @@ async def close_e2b_session(
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             close_response = await client.post(
-                f"{config.backend.api_url}/api/claude-code-session/close",
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/close",
                 headers={"x-api-key": config.backend.api_key or ""},
                 json=payload,
             )
@@ -215,13 +224,14 @@ async def close_e2b_session(
 async def check_sandbox_health(
     sandbox_id: str,
     agent_id: str,
+    code_provider: str = "claude",
 ) -> Optional[dict[str, Any]]:
     """Check E2B sandbox health. Returns health dict or None on failure."""
     config = load_config()
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             health_resp = await client.get(
-                f"{config.backend.api_url}/api/claude-code-session/{sandbox_id}/health",
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/{sandbox_id}/health",
                 headers={"x-api-key": config.backend.api_key or ""},
             )
             if health_resp.status_code == 200:

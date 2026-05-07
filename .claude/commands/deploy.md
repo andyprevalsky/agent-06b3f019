@@ -70,10 +70,31 @@ CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
 ```
 
+## Step 0p: Prompt human-approval guard (no skip — always runs)
+
+Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
+
+Run the guard without the approval flag first:
+
+```bash
+bash scripts/check-prompt-human-approval.sh
+```
+
+If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
+
+If it fails, stop and ask the human to review the listed prompt modifications. Do not infer approval from silence, prior discussion, or the fact that the branch exists. After the human explicitly approves the prompt changes, rerun the guard with the mandatory flag:
+
+```bash
+bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
+```
+
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
+
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
-2. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
+1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`.
+2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
+3. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)

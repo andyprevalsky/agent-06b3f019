@@ -6,11 +6,13 @@ One entry point, `RoseClient.complete()`, that:
      buffering the metadata chunk so a pre-first-content failure can fall
      through to the waterfall without the caller ever seeing `claude-token`
      metadata it'll never receive content for.
-  2. Falls through to the pool's waterfall on any typed claudeAuth error
+  2. Tries the gptAuth path (if a `GptAuthContext` was supplied) under the
+     same pre-first-content fall-through contract.
+  3. Falls through to the pool's waterfall on any typed direct-token error
      (`RoseInvalidRequest`, `RoseStallError`, `RoseServerError`,
      `RoseAuthError`, `RoseRateLimitError`) **before first content**.
-  3. Enforces a top-level deadline (default 120s).
-  4. Heartbeats every 10s so a long stream doesn't drop its Temporal
+  4. Enforces a top-level deadline (default 120s).
+  5. Heartbeats every 10s so a long stream doesn't drop its Temporal
      activity.
 
 All business logic lives in `claude_auth.py` and `waterfall.py`; this
@@ -23,9 +25,10 @@ import asyncio
 import contextlib
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Type
 
 import structlog
+from pydantic import BaseModel
 
 from config import load_config
 from providers.rose.browser_use import build_browser_use_messages, normalize_browser_use_response
@@ -39,9 +42,15 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.legacy_adapter import classify_claude_token_error
+from providers.rose.gpt_auth import gpt_auth_complete
+from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.pools import PoolName, get_pool
-from providers.rose.types import ChunkKind, ClaudeAuthContext, RoseResponse, StreamChunk
+from providers.rose.schema import (
+    build_anthropic_tools_from_response_model,
+    build_openai_response_format,
+    tool_requires_forced_choice,
+)
+from providers.rose.types import ChunkKind, ClaudeAuthContext, GptAuthContext, RoseResponse, StreamChunk
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -90,14 +99,13 @@ class RoseClient:
         *,
         pool: PoolName,
         messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Any = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        response_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
         skip_cache_write: bool = False,
         claude_auth: Optional[ClaudeAuthContext] = None,
+        gpt_auth: Optional[GptAuthContext] = None,
         agent_id: Optional[str] = None,
         request_id: Optional[str] = None,
         call_site: str = "unspecified",
@@ -116,6 +124,32 @@ class RoseClient:
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
 
+        openrouter_response_format = (
+            build_openai_response_format(response_model)
+            if response_model is not None
+            else None
+        )
+        claude_auth_tools = None
+        claude_auth_tool_choice = None
+        gpt_auth_tools = None
+        gpt_auth_tool_choice = None
+        direct_auth_tools = None
+        if response_model is not None and (claude_auth is not None or gpt_auth is not None):
+            direct_auth_tools = build_anthropic_tools_from_response_model(
+                response_model,
+                model=pool_spec.claude_auth_model,
+            )
+        if claude_auth is not None:
+            claude_auth_tools = direct_auth_tools
+            if claude_auth_tools and any(
+                tool_requires_forced_choice(tool) for tool in claude_auth_tools
+            ):
+                claude_auth_tool_choice = "any"
+        if gpt_auth is not None:
+            gpt_auth_tools = direct_auth_tools
+            if gpt_auth_tools:
+                gpt_auth_tool_choice = "any"
+
         logger.info(
             "rose.complete.start",
             request_id=rid,
@@ -123,7 +157,8 @@ class RoseClient:
             call_site=call_site,
             pool=pool,
             claude_auth_present=claude_auth is not None,
-            tool_count=len(tools or []),
+            gpt_auth_present=gpt_auth is not None,
+            claude_auth_tool_count=len(claude_auth_tools or []),
             deadline_s=deadline_s,
         )
 
@@ -165,6 +200,7 @@ class RoseClient:
         # workflow's rotation logic (which only sees the final usage dict) can
         # tell *why* we ended up on a non-claude model.
         claude_token_error: Optional[str] = None
+        gpt_token_error: Optional[str] = None
 
         # Per-call state for cache-event emission. We emit one `llm.cache`
         # event per RoseClient.complete invocation so every caller (structured
@@ -193,6 +229,7 @@ class RoseClient:
                 agent_id=agent_id,
                 actual_model=_seen_actual_model,
                 is_claude=_seen_actual_model.endswith("-claude"),
+                is_gpt=_seen_actual_model.endswith("-gpt"),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cache_read=cache_read,
@@ -207,9 +244,9 @@ class RoseClient:
                     async for chunk in _guarded(_try_claude_auth(
                         pool_spec=pool_spec,
                         messages=messages,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        response_format=response_format,
+                        tools=claude_auth_tools,
+                        tool_choice=claude_auth_tool_choice,
+                        response_format=None,
                         max_tokens=max_tokens,
                         skip_cache_write=skip_cache_write,
                         auth=claude_auth,
@@ -222,6 +259,19 @@ class RoseClient:
                         if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                             _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
+                            if getattr(claude_auth, "rotated", False):
+                                chunk = StreamChunk(
+                                    kind="usage",
+                                    data={
+                                        **chunk.data,
+                                        "claude_token_rotated": True,
+                                        "claude_token_rotation_reason": getattr(
+                                            claude_auth,
+                                            "last_rotation_reason",
+                                            None,
+                                        ),
+                                    },
+                                )
                             _emit_llm_cache(chunk.data)
                         yield chunk
                     logger.info(
@@ -247,12 +297,56 @@ class RoseClient:
                         claude_token_error=claude_token_error,
                     )
 
+            if gpt_auth is not None:
+                try:
+                    async for chunk in _guarded(_try_gpt_auth(
+                        pool_spec=pool_spec,
+                        messages=messages,
+                        tools=gpt_auth_tools,
+                        tool_choice=gpt_auth_tool_choice,
+                        response_format=None if gpt_auth_tools else openrouter_response_format,
+                        temperature=temperature,
+                        effort=effort,
+                        auth=gpt_auth,
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                    )):
+                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                            _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                        yield chunk
+                    logger.info(
+                        "rose.complete.gpt_auth.done",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        elapsed_s=round(time.monotonic() - started, 3),
+                        claude_token_error=claude_token_error,
+                    )
+                    return
+                except _FallThrough as ft:
+                    cause = ft.__cause__
+                    if isinstance(cause, RoseError):
+                        gpt_token_error = classify_gpt_token_error(cause)
+                    else:
+                        gpt_token_error = "server_error"
+                    logger.info(
+                        "rose.complete.fall_through_from_gpt_auth",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else "unknown",
+                        gpt_token_error=gpt_token_error,
+                    )
+
             async for chunk in _guarded(waterfall_complete(
                 pool_spec=pool_spec,
                 messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                response_format=response_format,
+                tools=None,
+                tool_choice=None,
+                response_format=openrouter_response_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
@@ -265,6 +359,11 @@ class RoseClient:
                     chunk = StreamChunk(
                         kind="metadata",
                         data={**chunk.data, "claude_token_error": claude_token_error},
+                    )
+                if gpt_token_error is not None and chunk.kind == "metadata":
+                    chunk = StreamChunk(
+                        kind="metadata",
+                        data={**chunk.data, "gpt_token_error": gpt_token_error},
                     )
                 if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                     _seen_actual_model = chunk.data["actual_model"]
@@ -299,6 +398,7 @@ class RoseClient:
         available_actions: List[str],
         include_screenshot: bool = True,
         claude_auth: Optional[ClaudeAuthContext] = None,
+        gpt_auth: Optional[GptAuthContext] = None,
         agent_id: Optional[str] = None,
         request_id: Optional[str] = None,
         call_site: str = "browser_use",
@@ -342,6 +442,7 @@ class RoseClient:
             max_tokens=16000,
             temperature=1.0,
             claude_auth=claude_auth,
+            gpt_auth=gpt_auth,
             agent_id=agent_id,
             request_id=request_id,
             call_site=call_site,
@@ -362,7 +463,8 @@ class RoseClient:
             "request_id": response.request_id,
             "usage": response.usage,
             "claude_token_error": response.claude_token_error,
-            "mode": "claude" if is_claude else "waterfall",
+            "gpt_token_error": response.gpt_token_error,
+            "mode": "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall"),
         }
 
     async def collect(
@@ -370,14 +472,13 @@ class RoseClient:
         *,
         pool: PoolName,
         messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Any = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        response_model: Optional[Type[BaseModel]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
         skip_cache_write: bool = False,
         claude_auth: Optional[ClaudeAuthContext] = None,
+        gpt_auth: Optional[GptAuthContext] = None,
         agent_id: Optional[str] = None,
         request_id: Optional[str] = None,
         call_site: str = "unspecified",
@@ -389,14 +490,13 @@ class RoseClient:
         async for chunk in self.complete(
             pool=pool,
             messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            response_format=response_format,
+            response_model=response_model,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,
             skip_cache_write=skip_cache_write,
             claude_auth=claude_auth,
+            gpt_auth=gpt_auth,
             agent_id=agent_id,
             request_id=request_id,
             call_site=call_site,
@@ -416,6 +516,8 @@ def _fold(result: RoseResponse, chunk: StreamChunk) -> None:
         # Only present when claudeAuth fell through — see client.complete().
         if "claude_token_error" in chunk.data:
             result.claude_token_error = chunk.data["claude_token_error"]
+        if "gpt_token_error" in chunk.data:
+            result.gpt_token_error = chunk.data["gpt_token_error"]
     elif kind == "content":
         result.content += chunk.data.get("text", "")
     elif kind == "reasoning":
@@ -482,4 +584,50 @@ async def _try_claude_auth(
             # never sees a `claude-token` event we won't deliver content for.
             raise _FallThrough() from exc
         # Already flushed content to caller — can't silently switch providers.
+        raise
+
+
+async def _try_gpt_auth(
+    *,
+    pool_spec: Any,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    tool_choice: Any,
+    response_format: Optional[Dict[str, Any]],
+    temperature: Optional[float],
+    effort: Optional[str],
+    auth: GptAuthContext,
+    request_id: str,
+    agent_id: Optional[str],
+    call_site: Optional[str],
+) -> AsyncIterator[StreamChunk]:
+    """Yield from gptAuth, buffering metadata for pre-content fall-through."""
+    buffered: Optional[StreamChunk] = None
+    yielded_any = False
+    gen = gpt_auth_complete(
+        pool_spec=pool_spec,
+        messages=messages,
+        response_format=response_format,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        effort=effort,
+        auth=auth,
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+    )
+    try:
+        async for chunk in gen:
+            if chunk.kind == "metadata" and buffered is None and not yielded_any:
+                buffered = chunk
+                continue
+            if buffered is not None:
+                yield buffered
+                buffered = None
+            yield chunk
+            yielded_any = True
+    except _FALL_THROUGH_ERRORS as exc:
+        if not yielded_any:
+            raise _FallThrough() from exc
         raise

@@ -43,4 +43,5 @@ export interface IntegrationHandlers {
   chromeCookies?: IntegrationHandler;
   browserCookies?: BrowserCookiesHandler;
   claudeCode?: ClaudeCodeHandler;
+  gptCode?: ClaudeCodeHandler;
 }

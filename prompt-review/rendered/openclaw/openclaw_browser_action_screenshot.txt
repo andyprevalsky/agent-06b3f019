@@ -1,0 +1,115 @@
+{
+  "name": "browser",
+  "description": "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions). Browser choice: omit profile by default for the isolated OpenClaw-managed browser (`openclaw`). user user node When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc). For tab operations, targetId also accepts tabId handles (t1) and labels from action=tabs. For multi-step browser work, login checks, stale refs, duplicate tabs, or Google Meet flows, use the bundled browser-automation skill when it is available. aria role Use snapshot+act for UI automation. Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.\n\nFocus: browser(action='screenshot').",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "doctor",
+          "status",
+          "start",
+          "stop",
+          "profiles",
+          "tabs",
+          "open",
+          "focus",
+          "close",
+          "snapshot",
+          "screenshot",
+          "navigate",
+          "console",
+          "pdf",
+          "upload",
+          "dialog",
+          "act"
+        ],
+        "description": "Browser command family."
+      },
+      "target": {
+        "type": "string",
+        "enum": [
+          "sandbox",
+          "host",
+          "node"
+        ],
+        "description": "Where to run browser control."
+      },
+      "profile": {
+        "type": "string",
+        "description": "Browser profile (e.g., openclaw, user)."
+      },
+      "targetUrl": {
+        "type": "string",
+        "description": "URL for open/navigate actions."
+      },
+      "targetId": {
+        "type": "string",
+        "description": "Tab target identifier."
+      },
+      "snapshotFormat": {
+        "type": "string",
+        "enum": [
+          "aria",
+          "ai"
+        ],
+        "description": "Snapshot output format."
+      },
+      "request": {
+        "type": "object",
+        "description": "Action request for action='act'.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "click",
+              "clickCoords",
+              "type",
+              "press",
+              "hover",
+              "drag",
+              "select",
+              "fill",
+              "resize",
+              "wait",
+              "evaluate",
+              "close"
+            ],
+            "description": "Act action kind."
+          },
+          "ref": {
+            "type": "string",
+            "description": "Element ref for ref-based actions."
+          },
+          "text": {
+            "type": "string",
+            "description": "Input text for type/fill actions."
+          },
+          "key": {
+            "type": "string",
+            "description": "Key for press action."
+          },
+          "x": {
+            "type": "number",
+            "description": "X coordinate for clickCoords."
+          },
+          "y": {
+            "type": "number",
+            "description": "Y coordinate for clickCoords."
+          },
+          "timeMs": {
+            "type": "number",
+            "description": "Wait duration for kind='wait'."
+          }
+        }
+      }
+    },
+    "required": [
+      "action"
+    ]
+  },
+  "fixed_example": {
+    "action": "screenshot"
+  }
+}

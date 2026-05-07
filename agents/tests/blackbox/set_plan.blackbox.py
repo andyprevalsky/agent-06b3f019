@@ -96,18 +96,20 @@ def test_validate_planner_result_valid():
     """validate_planner_result returns None for a well-formed plan."""
     from tools.set_plan import _validate_planner_result
 
-    result = _validate_planner_result({
-        "tasks": [
-            {"goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
-            {"goal": "Write", "tool_name": "reasoning", "depends_on": ["0"]},
-        ],
-        "dependencies_graph": [
-            {"task_idx": "1", "depends_on": ["0"]},
-        ],
-        "join": "all",
-        "title": "Test Plan",
-        "content": "A plan",
-    })
+    result = _validate_planner_result(
+        {
+            "tasks": [
+                {"goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
+                {"goal": "Write", "tool_name": "reasoning", "depends_on": ["0"]},
+            ],
+            "dependencies_graph": [
+                {"task_idx": "1", "depends_on": ["0"]},
+            ],
+            "join": "all",
+            "title": "Test Plan",
+            "content": "A plan",
+        }
+    )
     assert result is None
 
 
@@ -123,11 +125,13 @@ def test_validate_planner_result_invalid_join():
     """validate_planner_result errors on invalid join value."""
     from tools.set_plan import _validate_planner_result
 
-    err = _validate_planner_result({
-        "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
-        "join": "invalid",
-        "dependencies_graph": [],
-    })
+    err = _validate_planner_result(
+        {
+            "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
+            "join": "invalid",
+            "dependencies_graph": [],
+        }
+    )
     assert err is not None and "join" in err.lower()
 
 
@@ -135,14 +139,16 @@ def test_validate_planner_result_mismatch_depends_on():
     """task.depends_on must match dependencies_graph."""
     from tools.set_plan import _validate_planner_result
 
-    err = _validate_planner_result({
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning", "depends_on": []},
-            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
-        ],
-        "dependencies_graph": [],  # missing entry for task 1
-        "join": "all",
-    })
+    err = _validate_planner_result(
+        {
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning", "depends_on": []},
+                {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+            ],
+            "dependencies_graph": [],  # missing entry for task 1
+            "join": "all",
+        }
+    )
     assert err is not None
 
 
@@ -150,17 +156,19 @@ def test_validate_planner_result_propagates_dep_error():
     """validate_planner_result returns dependency-validation error."""
     from tools.set_plan import _validate_planner_result
 
-    err = _validate_planner_result({
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
-            {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
-        ],
-        "dependencies_graph": [
-            {"task_idx": "0", "depends_on": ["1"]},
-            {"task_idx": "1", "depends_on": ["0"]},
-        ],
-        "join": "all",
-    })
+    err = _validate_planner_result(
+        {
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
+                {"goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
+            ],
+            "dependencies_graph": [
+                {"task_idx": "0", "depends_on": ["1"]},
+                {"task_idx": "1", "depends_on": ["0"]},
+            ],
+            "join": "all",
+        }
+    )
     # cycle detected
     assert err is not None and "cycle" in err.lower()
 
@@ -172,10 +180,12 @@ def test_convert_deps_list_to_dict():
     """Conversion from list format to dict format."""
     from domains.set_plan.service import convert_dependencies_list_to_dict
 
-    result = convert_dependencies_list_to_dict([
-        {"task_idx": "0", "depends_on": []},
-        {"task_idx": "1", "depends_on": ["0"]},
-    ])
+    result = convert_dependencies_list_to_dict(
+        [
+            {"task_idx": "0", "depends_on": []},
+            {"task_idx": "1", "depends_on": ["0"]},
+        ]
+    )
     assert result == {"0": [], "1": ["0"]}
 
 
@@ -190,10 +200,12 @@ def test_convert_deps_skips_missing_task_idx():
     """Entries without task_idx are skipped."""
     from domains.set_plan.service import convert_dependencies_list_to_dict
 
-    result = convert_dependencies_list_to_dict([
-        {"task_idx": "", "depends_on": []},
-        {"task_idx": "0", "depends_on": []},
-    ])
+    result = convert_dependencies_list_to_dict(
+        [
+            {"task_idx": "", "depends_on": []},
+            {"task_idx": "0", "depends_on": []},
+        ]
+    )
     assert result == {"0": []}
 
 
@@ -204,16 +216,18 @@ def test_build_plan_data_maps_fields():
     """build_plan_data returns PlanData TypedDict with all fields."""
     from domains.set_plan.service import build_plan_data
 
-    plan_data = build_plan_data({
-        "tasks": [
-            {"goal": "Research", "tool_name": "spawn_explore_agent"},
-            {"goal": "Synthesize", "tool_name": "reasoning"},
-        ],
-        "dependencies_graph": [{"task_idx": "1", "depends_on": ["0"]}],
-        "title": "Plan A",
-        "content": "Detailed plan content",
-        "join": "all",
-    })
+    plan_data = build_plan_data(
+        {
+            "tasks": [
+                {"goal": "Research", "tool_name": "spawn_explore_agent"},
+                {"goal": "Synthesize", "tool_name": "reasoning"},
+            ],
+            "dependencies_graph": [{"task_idx": "1", "depends_on": ["0"]}],
+            "title": "Plan A",
+            "content": "Detailed plan content",
+            "join": "all",
+        }
+    )
     assert plan_data["type"] == "plan_artifact"
     assert plan_data["title"] == "Plan A"
     assert plan_data["content"] == "Detailed plan content"
@@ -229,18 +243,20 @@ def test_build_plan_message_join_any():
     """join='any' yields hypothesis message."""
     from domains.set_plan.service import build_plan_message
 
-    msg = build_plan_message({
-        "type": "plan_artifact",
-        "title": "Explore",
-        "content": "",
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning"},
-            {"goal": "B", "tool_name": "reasoning"},
-        ],
-        "dependencies": {},
-        "join": "any",
-        "status": "planning",
-    })
+    msg = build_plan_message(
+        {
+            "type": "plan_artifact",
+            "title": "Explore",
+            "content": "",
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning"},
+                {"goal": "B", "tool_name": "reasoning"},
+            ],
+            "dependencies": {},
+            "join": "any",
+            "status": "planning",
+        }
+    )
     assert "hypotheses" in msg
     assert "2" in msg
 
@@ -249,19 +265,21 @@ def test_build_plan_message_parallel_no_deps():
     """With no dependencies, tasks execute in parallel."""
     from domains.set_plan.service import build_plan_message
 
-    msg = build_plan_message({
-        "type": "plan_artifact",
-        "title": "Parallel",
-        "content": "",
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning"},
-            {"goal": "B", "tool_name": "reasoning"},
-            {"goal": "C", "tool_name": "reasoning"},
-        ],
-        "dependencies": {},
-        "join": "all",
-        "status": "planning",
-    })
+    msg = build_plan_message(
+        {
+            "type": "plan_artifact",
+            "title": "Parallel",
+            "content": "",
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning"},
+                {"goal": "B", "tool_name": "reasoning"},
+                {"goal": "C", "tool_name": "reasoning"},
+            ],
+            "dependencies": {},
+            "join": "all",
+            "status": "planning",
+        }
+    )
     assert "parallel" in msg.lower()
 
 
@@ -269,19 +287,21 @@ def test_build_plan_message_sequential():
     """Linear chain is labelled sequential."""
     from domains.set_plan.service import build_plan_message
 
-    msg = build_plan_message({
-        "type": "plan_artifact",
-        "title": "Sequential Plan",
-        "content": "",
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning"},
-            {"goal": "B", "tool_name": "reasoning"},
-            {"goal": "C", "tool_name": "reasoning"},
-        ],
-        "dependencies": {"1": ["0"], "2": ["1"]},
-        "join": "all",
-        "status": "planning",
-    })
+    msg = build_plan_message(
+        {
+            "type": "plan_artifact",
+            "title": "Sequential Plan",
+            "content": "",
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning"},
+                {"goal": "B", "tool_name": "reasoning"},
+                {"goal": "C", "tool_name": "reasoning"},
+            ],
+            "dependencies": {"1": ["0"], "2": ["1"]},
+            "join": "all",
+            "status": "planning",
+        }
+    )
     assert "sequential" in msg.lower()
 
 
@@ -289,19 +309,21 @@ def test_build_plan_message_dag():
     """Non-linear graph is labelled staged/DAG."""
     from domains.set_plan.service import build_plan_message
 
-    msg = build_plan_message({
-        "type": "plan_artifact",
-        "title": "Staged Plan",
-        "content": "",
-        "tasks": [
-            {"goal": "A", "tool_name": "reasoning"},
-            {"goal": "B", "tool_name": "reasoning"},
-            {"goal": "C", "tool_name": "reasoning"},
-        ],
-        "dependencies": {"2": ["0", "1"]},
-        "join": "all",
-        "status": "planning",
-    })
+    msg = build_plan_message(
+        {
+            "type": "plan_artifact",
+            "title": "Staged Plan",
+            "content": "",
+            "tasks": [
+                {"goal": "A", "tool_name": "reasoning"},
+                {"goal": "B", "tool_name": "reasoning"},
+                {"goal": "C", "tool_name": "reasoning"},
+            ],
+            "dependencies": {"2": ["0", "1"]},
+            "join": "all",
+            "status": "planning",
+        }
+    )
     assert "staged" in msg.lower() or "dependencies" in msg.lower()
 
 
@@ -315,8 +337,11 @@ def test_get_planner_tools_description_non_empty():
     desc = get_planner_tools_description()
     assert isinstance(desc, str)
     assert len(desc) > 0
-    # Should mention at least one well-known planner-assignable tool
-    assert "reasoning" in desc or "spawn_explore_agent" in desc
+    # Should mention at least one well-known execute-phase tool
+    assert "spawn_agent" in desc
+    assert "### spawn_agent" in desc
+    assert '"properties"' not in desc
+    assert "$defs" not in desc
 
 
 # ── build_planner_messages ──────────────────────────────────────────────
@@ -370,6 +395,55 @@ def test_build_planner_messages_tool_and_system_roles():
     assert system_msg["role"] == "user"
 
 
+def test_build_planner_messages_compacts_long_tool_context():
+    """Long raw tool outputs are bounded before planner LLM input."""
+    from domains.set_plan.service import (
+        PLANNER_CONTEXT_FULL_TEXT_LIMIT,
+        build_planner_messages,
+    )
+
+    message_id = "abcdef01-2345-6789-abcd-ef0123456789"
+    long_text = "A" * 7000 + " important middle " + "Z" * 7000
+    context = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "message_id": message_id,
+            "text": f"{long_text}\n\nReference: @ref:message:{message_id}",
+        },
+    ]
+
+    base_messages, _ = build_planner_messages(context)
+    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
+
+    assert len(tool_msg["content"]) < len(long_text)
+    assert len(tool_msg["content"]) < PLANNER_CONTEXT_FULL_TEXT_LIMIT
+    assert "Planner context shortened" in tool_msg["content"]
+    assert "@ref:message:" not in tool_msg["content"]
+    assert "important middle" not in tool_msg["content"]
+    assert "A" * 100 in tool_msg["content"]
+    assert "Z" * 100 in tool_msg["content"]
+
+
+def test_build_planner_messages_compacts_large_tool_outputs():
+    """Raw tool output must not blow up planner context on replans."""
+    from domains.set_plan.service import PLANNER_CONTEXT_CHAR_BUDGET, build_planner_messages
+
+    large_result = "alpha " + ("tool-output " * 20_000) + " omega"
+    context = [{"role": "USER", "text": "Compare cities"}]
+    for i in range(80):
+        context.append({"role": "TOOL", "text": f"Result {i}: {large_result}"})
+
+    base_messages, user_messages = build_planner_messages(context)
+
+    total_chars = sum(len(m["content"]) for m in base_messages)
+    assert total_chars <= PLANNER_CONTEXT_CHAR_BUDGET
+    assert base_messages[0]["content"].startswith("GOAL: Compare cities")
+    assert user_messages == ["Compare cities"]
+    assert any("planner context compacted" in m["content"].lower() for m in base_messages)
+    assert any("omega" in m["content"] for m in base_messages)
+
+
 def test_build_planner_messages_skips_empty_text():
     """Messages with empty text are skipped."""
     from domains.set_plan.service import build_planner_messages
@@ -411,9 +485,7 @@ class _FakeWorkflowModule:
     """Minimal stand-in for temporalio.workflow used by handler."""
 
     def __init__(self):
-        self.logger = type(
-            "L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None}
-        )()
+        self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
 
     def now(self):
         return datetime.now(timezone.utc)
@@ -446,10 +518,29 @@ class _FakeWFInstance:
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.claude_max_token = None
+        self.gpt_code_token = "gpt-token-1"
+        self.gpt_code_account_id = "acct-1"
+        self.gpt_code_token_source = "pool"
+        self.gpt_code_token_pool_id = "pool-token-1"
         self.refreshes = 0
 
     async def _refresh_claude_token(self, user_id):
         self.refreshes += 1
+
+    def _active_claude_token(self):
+        return None
+
+    def _active_gpt_token(self):
+        return self.gpt_code_token
+
+    def _active_gpt_account_id(self):
+        return self.gpt_code_account_id
+
+    def _active_gpt_source(self):
+        return self.gpt_code_token_source
+
+    def _active_gpt_pool_id(self):
+        return self.gpt_code_token_pool_id
 
     async def _track_usage(self, *a, **kw):
         pass
@@ -480,7 +571,8 @@ async def test_handler_happy_path_first_try():
     import domains.set_plan.handler as h
 
     original_runner = h.run_planner_attempt
-    h.run_planner_attempt = AsyncMock(return_value=valid_plan)
+    runner_mock = AsyncMock(return_value=valid_plan)
+    h.run_planner_attempt = runner_mock
     try:
         wf = _FakeWFInstance()
         events = await _collect_events(
@@ -492,6 +584,13 @@ async def test_handler_happy_path_first_try():
 
     statuses = [e.status for e in events]
     assert MessageStatus.FINISHED in statuses
+    runner_mock.assert_awaited_once()
+    planner_kwargs = runner_mock.await_args.kwargs
+    assert planner_kwargs["claude_max_token"] is None
+    assert planner_kwargs["gpt_token"] == "gpt-token-1"
+    assert planner_kwargs["gpt_account_id"] == "acct-1"
+    assert planner_kwargs["gpt_token_source"] == "pool"
+    assert planner_kwargs["gpt_token_pool_id"] == "pool-token-1"
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert finished.title == "Test Plan"
     assert finished.data["type"] == "plan_artifact"
@@ -628,6 +727,10 @@ async def run_all_tests():
     r.record("build_planner_messages_basic", test_build_planner_messages_basic)
     r.record("build_planner_messages_empty", test_build_planner_messages_empty_context)
     r.record("build_planner_messages_tool_system", test_build_planner_messages_tool_and_system_roles)
+    r.record(
+        "build_planner_messages_compacts_long_tool_context", test_build_planner_messages_compacts_long_tool_context
+    )
+    r.record("build_planner_messages_compacts_tool_outputs", test_build_planner_messages_compacts_large_tool_outputs)
     r.record("build_planner_messages_empty_text", test_build_planner_messages_skips_empty_text)
     r.record("build_planner_messages_no_http", test_build_planner_messages_no_outbound_http)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)

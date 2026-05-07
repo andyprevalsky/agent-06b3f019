@@ -319,6 +319,7 @@ async def test_stream_assistant_chunk_happy_path():
         sequence=1,
         sub_agent_id="sub-1",
         is_claude=True,
+        is_gpt=True,
     )
 
     captures = get_captured_requests()
@@ -329,6 +330,7 @@ async def test_stream_assistant_chunk_happy_path():
     assert record["delta"] == "Hello "
     assert record["subAgentId"] == "sub-1"
     assert record["is_claude"] is True
+    assert record["is_gpt"] is True
     assert body["messages"][0]["event"] == "ASSISTANT_STREAM"
 
 

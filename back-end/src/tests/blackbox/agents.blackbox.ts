@@ -3050,6 +3050,18 @@ test('POST / — with response_schema parameter', async () => {
     fields: [
       { name: 'result', type: 'str', required: true, description: 'The result string' },
       { name: 'confidence', type: 'float', required: false, description: 'Confidence score' },
+      {
+        name: 'rows',
+        type: 'list[object]',
+        required: true,
+        description: 'Rows with label and count',
+      },
+      {
+        name: 'session_file',
+        type: 'session_file_pointer',
+        required: false,
+        description: 'Remote session artifact',
+      },
     ],
   };
   const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {

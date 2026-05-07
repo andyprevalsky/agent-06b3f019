@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "scroll",
+    "description": "Scroll the page",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pixels": {
+          "type": "number",
+          "description": "Number of pixels to scroll"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "Direction to scroll"
+        }
+      },
+      "required": [
+        "pixels",
+        "direction"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

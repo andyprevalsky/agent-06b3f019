@@ -13,6 +13,7 @@ interface IntegrationSyncState {
   applePasswordsSynced: boolean;
   atlasPasswordsSynced: boolean;
   claudeCodeSynced: boolean;
+  gptCodeSynced: boolean;
   iMessageSynced: boolean;
   whatsAppConnected: boolean;
   telegramConnected: boolean;
@@ -37,6 +38,7 @@ function deriveStateFromIntegrations(integrations: ConnectedIntegration[]): Inte
     applePasswordsSynced: find('apple_passwords'),
     atlasPasswordsSynced: find('atlas_passwords'),
     claudeCodeSynced: find('claude_code'),
+    gptCodeSynced: find('gpt_code'),
     iMessageSynced: find('imessage'),
     whatsAppConnected: find('whatsapp'),
     telegramConnected: find('telegram'),
@@ -52,6 +54,7 @@ export function useIntegrationData() {
     applePasswordsSynced: false,
     atlasPasswordsSynced: false,
     claudeCodeSynced: false,
+    gptCodeSynced: false,
     iMessageSynced: false,
     whatsAppConnected: false,
     telegramConnected: false,

@@ -23,7 +23,44 @@ from domains.set_plan.config import (
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from tools.prompts import TOOL_PROMPTS
-from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
+
+PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
+PLANNER_CONTEXT_HEAD_CHARS = 3000
+PLANNER_CONTEXT_TAIL_CHARS = 1500
+
+
+def _strip_reference_annotation(text: str, message_id: str | None) -> str:
+    if not message_id:
+        return text
+    ref_suffix = f"\n\nReference: @ref:message:{message_id}"
+    if text.endswith(ref_suffix):
+        return text[: -len(ref_suffix)]
+    return text
+
+
+def _compact_planner_context_text(text: str) -> str:
+    """Keep planner context bounded while preserving both ends of long outputs."""
+    if len(text) <= PLANNER_CONTEXT_FULL_TEXT_LIMIT:
+        return text
+
+    omitted = len(text) - PLANNER_CONTEXT_HEAD_CHARS - PLANNER_CONTEXT_TAIL_CHARS
+    if omitted <= 0:
+        return text
+
+    return (
+        text[:PLANNER_CONTEXT_HEAD_CHARS]
+        + f"\n\n[Planner context shortened: {omitted} chars omitted from middle of {len(text)} total chars.]\n\n"
+        + text[-PLANNER_CONTEXT_TAIL_CHARS:]
+    )
+
+PLANNER_MESSAGE_CHAR_LIMITS = {
+    "USER": 16_000,
+    "ASSISTANT": 12_000,
+    "TOOL": 3_000,
+    "SYSTEM": 3_000,
+}
+PLANNER_CONTEXT_CHAR_BUDGET = 200_000
 
 
 def _validate_dep_indices(deps: dict[str, list[str]], n: int) -> str | None:
@@ -112,20 +149,22 @@ def convert_dependencies_list_to_dict(deps_list: list[dict[str, Any]]) -> dict[s
 
 
 def get_planner_tools_description() -> str:
-    """Get description of tools the planner can assign to tasks.
+    """Get execute-tool descriptions for the planner.
 
-    Single source of truth: TOOL_PROMPTS (per-tool prompt files).
-    Falls back to Pydantic docstrings for any tool not in TOOL_PROMPTS.
+    Single source of truth: execute-phase tools and their prompt fragments.
+    Planner-only spawn aliases are documented in the planner prompt itself.
     """
-    lines = []
-    for name in PLANNER_ASSIGNABLE_TOOLS:
+    sections = []
+    for name in EXECUTE_PHASE_TOOLS:
         if name in TOOL_PROMPTS:
-            lines.append(f"- {name}: {TOOL_PROMPTS[name]}")
+            description = TOOL_PROMPTS[name].strip()
         elif name in TOOL_MODELS:
             model = TOOL_MODELS[name]
-            doc = (model.__doc__ or "").strip()
-            lines.append(f"- {name}: {doc if doc else 'No description'}")
-    return "\n".join(lines) if lines else "Standard execution tools available."
+            description = (model.__doc__ or "").strip() or "No description"
+        else:
+            continue
+        sections.append(f"### {name}\n{description}")
+    return "\n\n".join(sections) if sections else "Standard execution tools available."
 
 
 def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
@@ -211,6 +250,53 @@ def build_plan_message(plan_data: PlanData) -> str:
 # ========================================
 
 
+def _compact_planner_text(role: str, text: str) -> str:
+    """Bound individual messages before they enter the planner prompt."""
+    limit = PLANNER_MESSAGE_CHAR_LIMITS.get(role, 6_000)
+    if len(text) <= limit:
+        return text
+
+    head_len = max(1, int(limit * 0.75))
+    tail_len = max(1, limit - head_len)
+    omitted = len(text) - head_len - tail_len
+    return (
+        f"{text[:head_len]}\n\n"
+        f"[... planner context compacted {omitted} chars ...]\n\n"
+        f"{text[-tail_len:]}"
+    )
+
+
+def _enforce_planner_context_budget(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep planner context under a hard char budget, preserving goal + recency."""
+    if sum(len(m.get("content", "")) for m in messages) <= PLANNER_CONTEXT_CHAR_BUDGET:
+        return messages
+    if not messages:
+        return messages
+
+    goal = messages[0]
+    budget = max(0, PLANNER_CONTEXT_CHAR_BUDGET - len(goal.get("content", "")))
+    kept_reversed: list[dict[str, Any]] = []
+    used = 0
+
+    for msg in reversed(messages[1:]):
+        content_len = len(msg.get("content", ""))
+        if used + content_len > budget:
+            continue
+        kept_reversed.append(msg)
+        used += content_len
+
+    kept_reversed.reverse()
+    dropped = len(messages) - 1 - len(kept_reversed)
+    if dropped <= 0:
+        return [goal] + kept_reversed
+
+    notice = {
+        "role": "user",
+        "content": f"[SYSTEM]: Planner context compacted: omitted {dropped} older message(s) to stay under budget.",
+    }
+    return [goal, notice] + kept_reversed
+
+
 def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract conversation context and user messages for the planner.
 
@@ -226,6 +312,8 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     for msg in context:
         role = msg.get("role", "").upper()
         text = msg.get("text", "")
+        message_id = msg.get("message_id")
+        text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -245,17 +333,18 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         if not text:
             continue
         if role == "USER":
-            base_messages.append({"role": "user", "content": text})
+            base_messages.append({"role": "user", "content": _compact_planner_text(role, text)})
         elif role == "ASSISTANT":
-            base_messages.append({"role": "assistant", "content": text})
+            base_messages.append({"role": "assistant", "content": _compact_planner_text(role, text)})
         elif role in ("TOOL", "SYSTEM"):
+            text = _compact_planner_context_text(text)
             base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
 
     # Prepend goal message
     goal = user_messages[0] if user_messages else DEFAULT_GOAL
     base_messages.insert(0, {"role": "user", "content": f"GOAL: {goal}\n\nPlan this goal into tasks."})
 
-    return base_messages, user_messages
+    return _enforce_planner_context_budget(base_messages), user_messages
 
 
 async def run_planner_attempt(
@@ -266,6 +355,10 @@ async def run_planner_attempt(
     user_context: str,
     response_schema: dict[str, Any] | None,
     claude_max_token: str | None,
+    gpt_token: str | None,
+    gpt_account_id: str | None,
+    gpt_token_source: str | None,
+    gpt_token_pool_id: str | None,
     user_messages: list[str],
     tool_call_id: str,
     attempt: int,
@@ -286,6 +379,14 @@ async def run_planner_attempt(
         claude_max_token,
         agent_id,
         tool_call_id,
+        getattr(workflow_instance, "claude_max_token_source", None),
+        getattr(workflow_instance, "claude_max_token_pool_id", None),
+        getattr(workflow_instance, "user_id", None),
+        gpt_token,
+        gpt_account_id,
+        gpt_token_source,
+        gpt_token_pool_id,
+        getattr(workflow_instance, "user_id", None),
     ]
 
     # Schema generation is now done synchronously at workflow startup so the

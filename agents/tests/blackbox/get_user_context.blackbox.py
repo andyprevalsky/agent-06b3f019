@@ -86,10 +86,9 @@ async def test_get_user_context_happy_path():
 
     assert isinstance(result, str)
     assert "Alice Test" in result
-    assert "USER CONTEXT:" in result
     # Verify sections present
-    assert "USER PROFILE" in result
-    assert "CONNECTED INTEGRATIONS" in result
+    assert "## User Profile" in result
+    assert "## Connected Integrations" in result
 
 
 async def test_get_user_context_uses_cache_on_second_call():
@@ -299,10 +298,10 @@ async def test_get_user_context_partial_gates():
         )
 
     # User profile present
-    assert "USER PROFILE" in result
+    assert "## User Profile" in result
     # Other sections should NOT be present
-    assert "CONNECTED INTEGRATIONS" not in result
-    assert "AUTHENTICATED BROWSER SESSIONS" not in result
+    assert "## Connected Integrations" not in result
+    assert "## Authenticated Browser Sessions" not in result
 
 
 async def test_get_user_context_error_returns_empty():
@@ -423,7 +422,7 @@ def test_format_user_context_integration_no_creds():
         ],
     )
     assert "Calendar" in result
-    assert "CONNECTED INTEGRATIONS" in result
+    assert "## Connected Integrations" in result
 
 
 def test_format_user_context_skips_disconnected_no_creds():
@@ -455,7 +454,7 @@ def test_format_user_context_bad_timestamp():
         ],
         frequent_contacts=[],
     )
-    assert "RECENT COMMUNICATIONS" in result
+    assert "## Recent Communications" in result
 
 
 def test_format_user_context_recent_message_truncation():
@@ -530,7 +529,7 @@ def test_format_user_context_contacts_variants():
         recent_messages=[],
         frequent_contacts=contacts,
     )
-    assert "YOUR NETWORK" in result
+    assert "## User Network" in result
     assert "A B" in result
     assert "friend" in result
     assert "Acme" in result

@@ -39,6 +39,24 @@ def _setup():
             "status": 200,
             "json": {"status": "healthy", "sandbox_id": "sandbox-abc", "alive": True},
         },
+        "/api/codex-code-session/create": {
+            "status": 200,
+            "json": {
+                "sandbox_id": "codex-sandbox-abc",
+                "task_id": "codex-task-123",
+                "ws_url": "wss://example/codex-ws",
+                "status": "running",
+                "uploaded_files": [],
+            },
+        },
+        "/api/codex-code-session/close": {
+            "status": 200,
+            "json": {"output_files": [], "usage": {}},
+        },
+        "/api/codex-code-session/": {
+            "status": 200,
+            "json": {"status": "healthy", "sandbox_id": "codex-sandbox-abc", "alive": True},
+        },
         "/api/agents/": {
             "status": 200,
             "json": {"saved": True},
@@ -121,6 +139,26 @@ def test_check_fatal_errors_login_request():
     assert msg is not None
 
 
+def test_check_fatal_errors_credit_balance():
+    """Claude Code API billing banner aborts immediately instead of looping."""
+    from domains.spawn_claude_code_agent.service import check_fatal_errors
+
+    msg = check_fatal_errors("Credit balance too low · Add funds: https://platform.claude.com/settings/billing")
+    assert msg is not None
+    assert "billing" in msg.lower()
+
+
+def test_check_fatal_errors_rate_limit_options():
+    """Claude Code rate-limit prompts abort so the exhausted token can rotate."""
+    from domains.spawn_claude_code_agent.service import check_fatal_errors
+
+    output = "You've hit your limit - resets 10pm (UTC)\n> /rate-limit-options\n1. Stop and wait for limit to reset"
+    msg = check_fatal_errors(output)
+
+    assert msg is not None
+    assert "rate-limited" in msg
+
+
 # ── safe_time ────────────────────────────────────────────────────────
 
 
@@ -181,6 +219,104 @@ def test_terminal_truncation_handles_empty_output():
 
     assert _terminal_output_is_truncated("") is False
     assert _terminal_output_is_truncated(None) is False
+
+
+# ── _build_codex_evidence_summary ───────────────────────────────────
+
+
+def test_codex_evidence_summary_extracts_paths_and_commands():
+    """Codex verifier summary exposes full paths even when the recent tail is noisy."""
+    from domains.spawn_claude_code_agent.service import _build_codex_evidence_summary
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command completed] /bin/bash -lc 'python3 /home/user/collatz_27.py'\n"
+        "[Codex command output]\n27\n82\n1\nTotal steps: 111\n"
+        "[Codex exit_code] 0\n"
+    )
+
+    summary = _build_codex_evidence_summary(sample)
+    assert "/home/user/collatz_27.py" in summary
+    assert "python3 /home/user/collatz_27.py" in summary
+    assert "Codex command exit codes: 0" in summary
+
+
+def test_codex_structured_response_synthesizes_all_fields():
+    """Codex verifier fallback only succeeds when terminal evidence covers the schema."""
+    from domains.spawn_claude_code_agent.service import _synthesize_codex_structured_response
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command completed] /bin/bash -lc 'python3 /home/user/collatz_27.py'\n"
+        "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\nTotal steps: 7\n"
+        "[Codex exit_code] 0\n"
+    )
+    schema = {
+        "fields": [
+            {"name": "collatz_sequence", "type": "list[integer]", "description": "Collatz sequence"},
+            {"name": "total_steps", "type": "integer", "description": "total step count"},
+            {"name": "python_script", "type": "file_pointer", "description": "created script file"},
+        ]
+    }
+
+    structured = _synthesize_codex_structured_response(sample, schema)
+    assert structured == {
+        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+        "total_steps": 7,
+        "python_script": {"path": "/home/user/collatz_27.py"},
+    }
+
+
+def test_codex_structured_response_uses_json_step_field():
+    """Codex fallback handles final answers that include total_steps as JSON text."""
+    from domains.spawn_claude_code_agent.service import _synthesize_codex_structured_response
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\n7\n[Codex exit_code] 0\n"
+        '[Codex] {"total_steps": 7, "python_script": "[collatz_27.py](/home/user/collatz_27.py)"}\n'
+    )
+    schema = {
+        "fields": [
+            {"name": "collatz_sequence", "type": "list[integer]", "description": "Collatz sequence"},
+            {"name": "total_steps", "type": "integer", "description": "total step count"},
+            {"name": "python_script", "type": "file_pointer", "description": "created script file"},
+        ]
+    }
+
+    structured = _synthesize_codex_structured_response(sample, schema)
+    assert structured["collatz_sequence"] == [3, 10, 5, 16, 8, 4, 2, 1]
+    assert structured["total_steps"] == 7
+    assert structured["python_script"] == {"path": "/home/user/collatz_27.py"}
+
+
+def test_codex_structured_response_prefers_unwrapped_final_sequence():
+    """Codex fallback should not split terminal-wrapped sequence values."""
+    from domains.spawn_claude_code_agent.service import _synthesize_codex_structured_response
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command output]\n"
+        "377\n113\n2\n566\n283\n1\nTotal steps: 111\n[Codex exit_code] 0\n"
+        "[Codex] Exact full sequence:\n"
+        "```python\n"
+        "[27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1]\n"
+        "```\n"
+        "Total steps: `111`\n"
+    )
+    schema = {
+        "fields": [
+            {"name": "collatz_sequence", "type": "list[int]", "description": "Exact Collatz sequence"},
+            {"name": "total_steps", "type": "int", "description": "total step count"},
+            {"name": "python_script_path", "type": "file_pointer", "description": "created script file"},
+        ]
+    }
+
+    structured = _synthesize_codex_structured_response(sample, schema)
+    assert structured is not None
+    assert structured["collatz_sequence"][49:53] == [377, 1132, 566, 283]
+    assert structured["total_steps"] == 111
+    assert structured["python_script_path"] == {"path": "/home/user/collatz_27.py"}
 
 
 # ── build_context_summary ────────────────────────────────────────────
@@ -561,6 +697,25 @@ async def test_repo_create_e2b_session_happy():
     assert body["attachments"][0]["original_filename"] == "a.txt"
 
 
+async def test_repo_create_e2b_session_codex_provider():
+    """create_e2b_session targets the Codex session endpoint when requested."""
+    _setup()
+    from domains.spawn_claude_code_agent.repo import create_e2b_session
+
+    data = await create_e2b_session(
+        agent_id="agent-1",
+        goal="fix",
+        user_id="u1",
+        code_provider="codex",
+    )
+
+    assert data["task_id"] == "codex-task-123"
+    call = assert_captured_call(url_contains="/api/codex-code-session/create", method="POST")
+    body = json.loads(call["requestBody"])
+    assert body["agent_id"] == "agent-1"
+    assert body["user_id"] == "u1"
+
+
 async def test_repo_create_e2b_session_raises_on_error():
     """create_e2b_session raises on non-2xx."""
     setup_mock({
@@ -776,6 +931,22 @@ def test_handler_get_manager_singleton():
     b = get_manager()
     assert a is b
     assert a.tool_name == "spawn_claude_code_agent"
+
+
+def test_handler_select_code_provider_uses_codex_for_gpt_compute():
+    """GPT compute token means code tasks should use Codex, not Claude Code."""
+    from domains.spawn_claude_code_agent.handler import _select_code_provider
+
+    wf = SimpleNamespace(compute_token_provider="gpt")
+    assert _select_code_provider(wf, "gpt-token") == "codex"
+
+
+def test_handler_select_code_provider_keeps_claude_without_gpt_token():
+    """Missing GPT token keeps the existing Claude Code path."""
+    from domains.spawn_claude_code_agent.handler import _select_code_provider
+
+    wf = SimpleNamespace(compute_token_provider="gpt")
+    assert _select_code_provider(wf, None) == "claude"
 
 
 # ── _handle_reconnect_exhausted ─────────────────────────────────────
@@ -1670,12 +1841,17 @@ async def run_all_tests():
     r.record("check_fatal_auth", test_check_fatal_errors_auth_error)
     r.record("check_fatal_401", test_check_fatal_errors_api_401)
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
+    r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
+    r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
     r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)
     r.record("trunc_detect_high_count", test_terminal_truncation_detects_high_line_count)
     r.record("trunc_no_marker", test_terminal_truncation_no_marker_returns_false)
     r.record("trunc_handles_empty", test_terminal_truncation_handles_empty_output)
+    r.record("codex_evidence_summary", test_codex_evidence_summary_extracts_paths_and_commands)
+    r.record("codex_structured_fallback", test_codex_structured_response_synthesizes_all_fields)
+    r.record("codex_structured_json_steps", test_codex_structured_response_uses_json_step_field)
     r.record("context_summary_success", test_build_context_summary_success)
     r.record("context_summary_failure", test_build_context_summary_failure_with_error)
     r.record("context_summary_truncates", test_build_context_summary_truncates_actions)
@@ -1701,6 +1877,7 @@ async def run_all_tests():
     await r.record_async("repo_save_msg_error", test_repo_save_message_error_flag)
     await r.record_async("repo_save_msg_swallows", test_repo_save_message_swallows_http_errors)
     await r.record_async("repo_create_session_happy", test_repo_create_e2b_session_happy)
+    await r.record_async("repo_create_session_codex", test_repo_create_e2b_session_codex_provider)
     await r.record_async("repo_create_session_raises", test_repo_create_e2b_session_raises_on_error)
     await r.record_async("repo_persist_output_happy", test_repo_persist_terminal_output_happy)
     await r.record_async("repo_persist_output_swallows", test_repo_persist_terminal_output_swallows_errors)
@@ -1717,6 +1894,8 @@ async def run_all_tests():
     r.record("handler_resolve_fallback_all", test_handler_resolve_attachments_auto_forward_when_none_match)
     r.record("handler_resolve_match_by_id", test_handler_resolve_attachments_match_by_id)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
+    r.record("handler_select_codex_for_gpt", test_handler_select_code_provider_uses_codex_for_gpt_compute)
+    r.record("handler_select_claude_without_gpt", test_handler_select_code_provider_keeps_claude_without_gpt_token)
     # _handle_reconnect_exhausted
     await r.record_async("handle_reconnect_alive", test_handle_reconnect_exhausted_alive_sandbox)
     await r.record_async("handle_reconnect_dead", test_handle_reconnect_exhausted_dead_sandbox)

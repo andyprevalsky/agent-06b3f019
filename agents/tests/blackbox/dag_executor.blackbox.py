@@ -238,7 +238,13 @@ def test_build_param_population_message_non_spawn_no_extra():
     assert "SPAWN TYPE" not in msg
 
 
-async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=None):
+async def _run_execute_dag(
+    plan_data,
+    execute_tool_impl=None,
+    reasoning_result=None,
+    execute_activity_calls=None,
+    **execute_dag_kwargs,
+):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
     from helpers.llm import _pending_llm_context
     from loop.dag_executor import TaskDAG, execute_dag
@@ -261,6 +267,8 @@ async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=N
         execute_tool_impl = execute_tool
 
     async def execute_activity(fn, args=None, **_kwargs):
+        if execute_activity_calls is not None:
+            execute_activity_calls.append({"fn": getattr(fn, "__name__", "") or str(fn), "args": args})
         fn_name = getattr(fn, "__name__", "") or str(fn)
         if "reasoning" in fn_name:
             return reasoning_result or {"content": "reasoning output", "usage": {}}
@@ -288,6 +296,7 @@ async def _run_execute_dag(plan_data, execute_tool_impl=None, reasoning_result=N
             handle_tool_event_fn=handle_tool_event_fn,
             system_prompt_text="test system prompt",
             tool_names=["web_search", "spawn_agent", "attempt_completion"],
+            **execute_dag_kwargs,
         )
 
     _pending_llm_context.pop("agent-1", None)
@@ -311,6 +320,33 @@ async def test_execute_dag_reasoning_task_succeeds():
     assert len(assistant_posts) == 1
     assert assistant_posts[0]["text"] == "Summary text"
     assert dag.tasks[0].state.value == "COMPLETED"
+
+
+async def test_execute_dag_reasoning_forwards_gpt_token():
+    """execute_dag forwards the selected GPT compute token into reasoning activity."""
+    plan_data = {
+        "tasks": [{"goal": "Summarize findings", "tool_name": "reasoning"}],
+        "dependencies": {},
+    }
+    calls = []
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data,
+        reasoning_result={"content": "Summary text", "usage": {}},
+        execute_activity_calls=calls,
+        gpt_token="gpt-access",
+        gpt_account_id="acct-1",
+        gpt_token_source="user",
+        gpt_token_pool_id=None,
+    )
+
+    assert result["status"] == "completed"
+    reasoning_call = next(c for c in calls if "reasoning" in c["fn"])
+    args = reasoning_call["args"]
+    assert args[9] == "gpt-access"
+    assert args[10] == "acct-1"
+    assert args[11] == "user"
+    assert args[13] == "user-1"
 
 
 async def test_execute_dag_tool_task_succeeds():
@@ -429,6 +465,7 @@ async def run_all_tests():
     r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
+    await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)

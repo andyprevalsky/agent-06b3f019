@@ -66,8 +66,10 @@ def validate_spawn_params(tool_call: dict) -> None:
 
     if agent_type in ("sub_agent", "for_each"):
         start_phase = tool_call.get("start_phase")
-        if start_phase is not None and str(start_phase).strip().lower() not in ("plan", "execute"):
-            raise ValueError("spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'plan' or 'execute'.")
+        if start_phase is not None and str(start_phase).strip().upper() not in ("RESEARCH", "EXECUTE"):
+            raise ValueError(
+                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'RESEARCH' or 'EXECUTE'."
+            )
 
     if agent_type == "for_each":
         has_items = isinstance(tool_call.get("items"), list) and len(tool_call.get("items")) > 0
@@ -81,16 +83,12 @@ def validate_spawn_params(tool_call: dict) -> None:
                 "spawn_agent(type='explore') does not use 'output_schema'. "
                 "Explore agents return free-form research summaries."
             )
-        if tool_call.get("verifier"):
-            raise ValueError(
-                "spawn_agent(type='explore') does not support 'verifier'. Only type='sub_agent' supports verification."
-            )
 
 
 def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
-    """Resolve strict start_phase for sub-agents (plan|execute only)."""
-    phase = str(tool_call.get("start_phase", "plan")).strip().lower()
-    return "execute" if phase == "execute" else "plan"
+    """Resolve public start_phase names to internal phase names."""
+    phase = str(tool_call.get("start_phase", "RESEARCH")).strip().upper()
+    return "execute" if phase == "EXECUTE" else "plan"
 
 
 def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
@@ -164,6 +162,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
     task_id: str = "",
     init_tool_call_id: str = "",
     claude_token: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
     attachment_texts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
@@ -201,6 +203,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
         cache_creation_input_tokens: int = 0,
         call_site: str = "explore_agent",
         claude_token_error: Optional[str] = None,
+        gpt_token_error: Optional[str] = None,
+        claude_token_rotated: bool = False,
+        gpt_token_rotated: bool = False,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(
@@ -337,15 +342,18 @@ async def spawn_explore_agent_activity(  # noqa: C901
         skip_blueprint_query=True,
         skip_status_updates=True,
         claude_token=claude_token,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        get_gpt_token_source=(lambda: gpt_token_source),
+        get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
         on_tokens=on_tokens,
         call_site_override="explore_agent",
     )
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
-    # but emitted no preceding assistant text (Claude often issues just the tool_use
-    # block), final_response is empty and the parent receives no evidence. Synthesize
-    # a payload from the accumulated tool results so the parent always has grounded
-    # data to act on instead of hallucinating or re-spawning sub-agents.
+    # but leaves result empty, the parent receives no evidence. Synthesize a
+    # payload from accumulated tool results so the parent always has grounded data
+    # to act on instead of hallucinating or re-spawning sub-agents.
     final_response = result.get("final_response", "") or ""
     if not final_response.strip() and tool_call_results:
         # Cap the synthesized payload so we don't ship 100 KB+ back through the

@@ -328,7 +328,7 @@ def transform_messages_for_anthropic(
     if system_text and SYSTEM_PROMPT_DYNAMIC_BOUNDARY in system_text:
         parts = system_text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 1)
         static_system = parts[0].strip() or None
-        dynamic_system = parts[1].strip() or None
+        dynamic_system = parts[1] if parts[1].strip() else None
     else:
         static_system = system_text
 
@@ -498,6 +498,7 @@ def apply_anthropic_tool_config(
                 {
                     "name": t.get("name"),
                     "description": t.get("description"),
+                    **({"strict": t.get("strict")} if "strict" in t else {}),
                     "input_schema": t.get("input_schema"),
                 }
                 for t in tools
@@ -719,9 +720,24 @@ def _add_openrouter_cache_breakpoint(msg: Dict[str, Any]) -> None:
     """
     content = msg.get("content")
     if isinstance(content, str):
-        msg["content"] = [
-            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-        ]
+        from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+        if SYSTEM_PROMPT_DYNAMIC_BOUNDARY in content:
+            parts = content.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            cache_all_parts = len(parts) > 2 or content.endswith(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+            blocks = []
+            for idx, part in enumerate(parts):
+                text = part.strip()
+                if not text:
+                    continue
+                block: Dict[str, Any] = {"type": "text", "text": text}
+                if cache_all_parts or idx == 0:
+                    block["cache_control"] = {"type": "ephemeral"}
+                blocks.append(block)
+            msg["content"] = blocks
+            return
+
+        msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
     elif isinstance(content, list) and content:
         target = content[-1]
         if isinstance(target, dict):

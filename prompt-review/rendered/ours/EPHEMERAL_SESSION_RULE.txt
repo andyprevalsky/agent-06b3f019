@@ -1,0 +1,5 @@
+
+spawn_agent(type=browser/code) sessions are ephemeral. Each call starts fresh.
+Browser: cookies for the start_url's registrable domain are restored at session
+start, but in-session state (cart, JS state, post-login navigation) is lost
+between separate calls. Do NOT split a stateful flow across multiple calls.

@@ -25,11 +25,16 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
 }
 
 
-# claudeAuth pricing — bypassed (user pays Anthropic directly). Detected via
-# the `-claude` suffix actual_model carries on the claudeAuth path.
-_CLAUDE_AUTH_PRICING: Dict[str, Dict[str, float]] = {
+# Direct token pricing — bypassed (user pays via their provider account).
+# Detected via the `-claude` / `-gpt` suffix actual_model carries on direct
+# auth paths.
+_DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "claude-opus-4-7-claude":   {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "claude-sonnet-4-6-claude": {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.4-gpt":              {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.5-gpt":              {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.4-mini-gpt":         {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.3-codex-gpt":        {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
 
@@ -81,12 +86,17 @@ def get_pool_pricing(pool_name: str) -> Optional[Dict[str, float]]:
 def get_anthropic_pricing(model: str) -> Optional[Dict[str, float]]:
     """Return cents-per-1k pricing for a direct-Anthropic model id."""
     normalized = model.lower().strip()
-    if normalized in _CLAUDE_AUTH_PRICING:
-        return _CLAUDE_AUTH_PRICING[normalized]
+    normalized_dashed = normalized.replace(".", "-")
+    if normalized in _DIRECT_TOKEN_PRICING:
+        return _DIRECT_TOKEN_PRICING[normalized]
+    if normalized_dashed in _DIRECT_TOKEN_PRICING:
+        return _DIRECT_TOKEN_PRICING[normalized_dashed]
     if normalized in ANTHROPIC_MODEL_PRICING:
         return ANTHROPIC_MODEL_PRICING[normalized]
-    for key, pricing in ANTHROPIC_MODEL_PRICING.items():
-        if key in normalized or normalized in key:
+    if normalized_dashed in ANTHROPIC_MODEL_PRICING:
+        return ANTHROPIC_MODEL_PRICING[normalized_dashed]
+    for key, pricing in sorted(ANTHROPIC_MODEL_PRICING.items(), key=lambda item: len(item[0]), reverse=True):
+        if key in normalized_dashed or normalized_dashed in key:
             return pricing
     return None
 
@@ -100,4 +110,10 @@ def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
         normalized = normalized[len("rose-labs/"):]
     if normalized in _POOL_WATERFALLS:
         return _average_pool_pricing(normalized)
+    if normalized in _PROVIDER_PRICING:
+        pricing = _PROVIDER_PRICING[normalized]
+        return {
+            "input_cents_per_1k": pricing["prompt"] * 1000 * 100,
+            "output_cents_per_1k": pricing["completion"] * 1000 * 100,
+        }
     return get_anthropic_pricing(normalized)

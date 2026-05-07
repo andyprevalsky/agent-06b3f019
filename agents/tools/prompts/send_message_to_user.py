@@ -1,10 +1,9 @@
-"""Prompt for send_message_to_user tool (PLAN phase)."""
+"""Prompt for send_message_to_user tool."""
 
-PROMPT = """Sends a message to the user during PLAN phase, optionally blocking until they reply.
+PROMPT = """Use this tool to send a message to the user, optionally blocking until they reply.
 
-Usage:
-- Use is_question=true to ask a clarification; the workflow blocks until the user responds.
-- Use is_question=false to share the plan or an FYI without blocking.
-- Do not use during EXECUTE phase - use send_message_to_user_execute_phase.
-- Do not dump raw tool results; synthesize findings first.
-- MUST be the only tool in that turn; do not batch with other tool calls."""
+Text outside this tool is visible if the user expands the detail view, but most won't; assume unread. Anything you want them to actually see goes through this tool. A user message earns its place by carrying information.
+
+Keep messages tight.
+
+MANDATORY: Must be the only tool in the turn it is called in; do not batch with other tool calls."""

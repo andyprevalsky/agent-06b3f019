@@ -23,7 +23,7 @@ from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 
 import httpx
 
-from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool
+from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool, gpt_auth_from_token
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
     _normalize_action_params,
@@ -503,6 +503,58 @@ async def test_complete_browser_use_claude_path_succeeds():
     assert result["claude_token_error"] is None
 
 
+async def test_complete_browser_use_gpt_path_succeeds():
+    """Valid gptAuth -> Codex Responses returns JSON in text -> mode=gpt."""
+    sse_lines = []
+    sse_lines += _ev("response.output_text.delta", {
+        "type": "response.output_text.delta",
+        "delta": _ACTION_TEXT,
+    })
+    sse_lines += _ev("response.completed", {
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 8,
+                "total_tokens": 20,
+            }
+        },
+    })
+    sse_body = "\n".join(sse_lines)
+
+    captured: list[str] = []
+
+    def handler(req):
+        url = str(req.url)
+        captured.append(url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="should not hit waterfall")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+
+    result = await client.complete_browser_use(
+        task="click submit",
+        browser_state=_browser_state(),
+        action_history=[],
+        available_actions=["click"],
+        include_screenshot=False,
+        gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+        call_site="test-bu-gpt",
+    )
+
+    assert result["mode"] == "gpt"
+    assert result["actual_model"] == "gpt-5.5-gpt"
+    assert result["action"]["action"] == "click"
+    assert result["gpt_token_error"] is None
+    assert result["usage"]["total_tokens"] == 20
+    assert any("chatgpt.com/backend-api/codex/responses" in u for u in captured)
+    assert all("openrouter.ai" not in u for u in captured)
+
+
 async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
     """Anthropic 401 → fall through to openrouter; claude_token_error=auth_error."""
     sse_body = _openai_sse([
@@ -588,6 +640,7 @@ async def run_all_tests():
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
+    await r.record_async("complete_browser_use_gpt_path", test_complete_browser_use_gpt_path_succeeds)
     await r.record_async("complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall)
 
     teardown_mock()

@@ -114,6 +114,8 @@ async def test_compress_context_happy():
     import helpers.llm as llm_mod
 
     async def fake_llm(messages, **kwargs):
+        assert "claude_token" not in kwargs
+        assert "gpt_token" not in kwargs
         return {"content": "## Learnings\n- worked well", "usage": {"total_tokens": 100}}
 
     with patch("temporalio.activity.heartbeat"):
@@ -149,7 +151,12 @@ async def test_generate_completion_summary_happy():
     from helpers import summarize
     import helpers.llm as llm_mod
 
+    observed_local_context = []
+
     async def fake_llm(messages, **kwargs):
+        observed_local_context.append(kwargs.get("local_context"))
+        assert "claude_token" not in kwargs
+        assert "gpt_token" not in kwargs
         return {
             "content": "Completed all research tasks successfully.",
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
@@ -176,6 +183,7 @@ async def test_generate_completion_summary_happy():
     assert "Completed all research tasks" in out["summary"]
     assert out["tool_counts"]["web_search"] == 4  # 1 own + 3 sub
     assert out["tool_counts"]["wait_for"] == 1
+    assert observed_local_context == [context]
 
 
 async def test_generate_completion_summary_on_error():

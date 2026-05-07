@@ -7,7 +7,19 @@ from typing import Any, Dict, List, Literal, Optional, Type, Union
 import structlog
 from pydantic import BaseModel, Field, create_model, model_validator
 
-from utils.prompts import SELF_CONTAINED_GOAL_RULE
+from utils.prompts import (
+    PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION,
+    PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION,
+    PLANNER_RESPONSE_CONTENT_DESCRIPTION,
+    PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION,
+    PLANNER_RESPONSE_JOIN_DESCRIPTION,
+    PLANNER_RESPONSE_TASKS_DESCRIPTION,
+    PLANNER_RESPONSE_TITLE_DESCRIPTION,
+    PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
+    PLANNER_TASK_GOAL_DESCRIPTION,
+    PLANNER_TASK_TOOL_NAME_DESCRIPTION,
+    SELF_CONTAINED_GOAL_RULE,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -91,46 +103,31 @@ assert _plan_tool_values == _expected_tools, (
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
 
-    goal: str = Field(
-        description=(
-            "Self-contained task brief for the spawned agent. "
-            f"{SELF_CONTAINED_GOAL_RULE.strip()}"
-        )
-    )
-    tool_name: PlanToolName
-    depends_on: List[int] = Field(
-        default_factory=list, description="Indices of tasks this depends on (empty = no deps)."
-    )
+    goal: str = Field(description=PLANNER_TASK_GOAL_DESCRIPTION)
+    tool_name: PlanToolName = Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)
+    depends_on: List[str] = Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION)
 
 
 class DependencyEntry(BaseModel):
     """A single entry in the dependencies graph."""
 
-    task_idx: str = Field(description="The task index (0-based, as string)")
-    depends_on: List[str] = Field(default_factory=list, description="List of task indices this task depends on")
+    task_idx: str = Field(description=PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION)
+    depends_on: List[str] = Field(default_factory=list, description=PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION)
 
 
 class PlannerResponse(BaseModel):
     """Structured output from the planner LLM."""
 
-    title: str = Field(description="Short plan title")
-    content: str = Field(description="Markdown explanation of the plan")
-    tasks: List[PlannerTask] = Field(description="List of tasks with dependencies")
-    dependencies_graph: List[DependencyEntry] = Field(description="Explicit dependency DAG as list of entries")
-    join: Literal["all", "any"] = Field(description="How to combine results: 'all' (AND) or 'any' (OR)")
+    title: str = Field(description=PLANNER_RESPONSE_TITLE_DESCRIPTION)
+    content: str = Field(description=PLANNER_RESPONSE_CONTENT_DESCRIPTION)
+    tasks: List[PlannerTask] = Field(description=PLANNER_RESPONSE_TASKS_DESCRIPTION)
+    dependencies_graph: List[DependencyEntry] = Field(description=PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION)
+    join: Literal["all", "any"] = Field(description=PLANNER_RESPONSE_JOIN_DESCRIPTION)
 
 
 # ============================================================================
 # Individual Tool Pydantic Models
 # ============================================================================
-
-
-class VerifierConfig(BaseModel):
-    """Verifier configuration. The verifier is now schema-driven: the agent's
-    response_schema is the only per-agent signal, so VerifierConfig only
-    carries the fixed type literal."""
-
-    type: Literal["FLOAT_LLM_JUDGE"] = Field(description="Must be 'FLOAT_LLM_JUDGE'")
 
 
 class ResponseSchemaFieldConfig(BaseModel):
@@ -200,7 +197,7 @@ class WaitForTool(BaseModel):
     )
     condition: Optional[str] = Field(
         default=None,
-        description="Natural language condition for an explore agent to poll periodically.",
+        description="Natural language condition for an explore agent to check on periodically.",
     )
     check_interval_seconds: int = Field(
         default=900,
@@ -214,14 +211,6 @@ class WaitForTool(BaseModel):
         le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
-    context_gates: Optional[Dict[str, bool]] = Field(
-        default=None,
-        description=(
-            "Optional gates controlling which user-context chunks are included. "
-            "Allowed keys: 'network', 'recent_communications'."
-        ),
-    )
-
     @model_validator(mode="after")
     def check_mutual_exclusion(self) -> "WaitForTool":
         if self.until_timestamp and self.condition:
@@ -242,7 +231,7 @@ class WebFetchTool(BaseModel):
     """Fetch and extract content from a URL with JavaScript rendering."""
 
     tool: Literal["web_fetch"]
-    url: str = Field(description="URL to fetch and extract content from.")
+    url: str = Field(description="A fully-formed valid URL to fetch and extract content from.")
     objective: str = Field(description="What content to focus on extracting from the page.")
     excerpts: bool = Field(
         default=True,
@@ -278,13 +267,28 @@ class GrepTool(BaseModel):
 
     tool: Literal["grep"]
     pattern: str = Field(
-        description="Substring to match. Case-insensitive. Pass empty string to return all records up to limit.",
+        description=(
+            "Substring to match. Case-insensitive. Pass empty string to return all records up to limit. "
+            "Matches across any column in the database for the given data source."
+        ),
     )
     source: str = Field(
         default="messages",
         description=(
-            "Data source to search. One of 'messages', 'network', "
-            "'agent_network_user_messages', 'agent_network_tool_results'."
+            "Data source to search. One of: "
+            "messages: iMessage/email records. Searches only message body text by case-insensitive substring. "
+            "Results are grouped by person/thread and include surrounding messages with channel, from, to, "
+            "timestamp, message, and is_match. Supports person_id and since. "
+            "network: Contact database. Searches firstName, lastName, email, phoneNumber, company, title, "
+            "relation, and communicationFrequency by case-insensitive substring. Results include person_id, "
+            "first_name, last_name, phone_number, email, company, title, relation, communication_frequency, "
+            "and messages_exchanged. Empty pattern returns top contacts by message volume. "
+            "agent_network_user_messages: User messages across all agents in this workflow tree. Searches "
+            "Message.text for messages with role='USER'. Results include agent_id, message_id, role, text, "
+            "timestamp, and pointer. "
+            "agent_network_tool_results: Finished tool-result messages across all agents in this workflow tree. "
+            "Searches Message.text for messages with role='TOOL' and metadata.toolStatus='FINISHED'. Results "
+            "include agent_id, message_id, role, text, timestamp, and pointer."
         ),
     )
     person_id: Optional[str] = Field(
@@ -304,7 +308,7 @@ class GrepTool(BaseModel):
 
 
 class SendMessageToUserTool(BaseModel):
-    """Message the user during PLAN phase; optionally block for a reply."""
+    """Message the user during RESEARCH phase; optionally block for a reply."""
 
     tool: Literal["send_message_to_user"]
     message: str = Field(description="User-visible markdown text explaining the question, blocker, or FYI.")
@@ -360,10 +364,18 @@ class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields."""
 
     tool: Literal["spawn_agent"]
-    type: Literal["browser", "code", "sub_agent", "explore", "for_each"]
+    type: Literal["browser", "code", "sub_agent", "explore", "for_each"] = Field(
+        description=(
+            "The type of specialized agent you are spawning; this parameter affects what other "
+            "parameters are expected. Allowed: 'browser', 'code', 'sub_agent', 'explore', 'for_each'."
+        )
+    )
     goal: str = Field(
         description=(
-            "Self-contained task brief for the spawned agent. "
+            "The self-contained task/prompt and description for the spawned agent. "
+            "Spawned agents have no access to ANY of your context by default. "
+            "The goal and attachments parameters are their ONLY source of information. "
+            "Include all relevant pieces of information. "
             f"{SELF_CONTAINED_GOAL_RULE.strip()}"
         )
     )
@@ -371,8 +383,9 @@ class SpawnAgentTool(BaseModel):
     output_schema: Optional[ResponseSchemaConfig] = Field(
         default=None,
         description=(
-            "Structured data the agent returns. Required for type=browser, code, sub_agent, for_each. "
-            "Must not be provided for type=explore."
+            "Structured data the agent returns and validates against. The agent will not stop running "
+            "until this output_schema is met. Required for type='browser', type='code', "
+            "type='sub_agent', and type='for_each'. Ignored for type='explore'."
         ),
     )
     attachments: Optional[List[str]] = Field(
@@ -391,42 +404,46 @@ class SpawnAgentTool(BaseModel):
     # code only - GitHub repo to clone into sandbox
     github_repo_link: Optional[str] = Field(
         default=None,
-        description="GitHub repository URL to clone (type=code only).",
+        description=(
+            "The GitHub repository URL to clone and sync to. Required for type='code'. "
+            "Ignored for any other type. If omitted, the GitHub repo defaults to a repo "
+            "automatically created for this agent tree."
+        ),
     )
-    # sub_agent only
-    read_only: Optional[bool] = Field(
-        default=None,
-        description="(sub_agent/for_each) True if sub-agent must stay read-only (plan-phase spawn).",
-    )
-    verifier: Optional[VerifierConfig] = Field(
-        default=None,
-        description="(sub_agent/for_each) Verification config for evaluating agent success.",
-    )
-    start_phase: Optional[Literal["plan", "execute"]] = Field(
+    start_phase: Optional[Literal["RESEARCH", "EXECUTE"]] = Field(
         default=None,
         description=(
-            "(sub_agent/for_each) Child agent start phase. "
-            "Use 'execute' for direct tasks needing 1-2 tool calls; use 'plan' for complex tasks needing research, "
-            "comparison, or multi-step coordination. Prefer 'plan' when uncertain."
+            "Required for type='sub_agent' and type='for_each'. Ignored for any other type. "
+            "The phase that the agent should spawn in as, either 'RESEARCH' or 'EXECUTE'. "
+            "For complex tasks that require planning and more than a few tool calls, use 'RESEARCH'. "
+            "For straightforward tasks that are simple to complete, use 'EXECUTE'. "
+            "Prefer 'RESEARCH' when uncertain."
         ),
     )
     items: Optional[List[Any]] = Field(
         default=None,
         description=(
-            "(for_each) List of items. The shared goal is reused per item; one child sub-agent is spawned per item."
+            "Required for type='for_each'. Ignored for any other type. For each item in the array, "
+            "a sub-agent will be spawned with the given goal and the item attached to its context."
         ),
     )
     items_csv: Optional[str] = Field(
         default=None,
         description=(
-            "(for_each) CSV string input. The shared goal is reused per parsed row; one child sub-agent per row."
+            "Required for type='for_each'. Ignored for any other type. CSV string input. "
+            "For each row in the CSV, a sub-agent will be spawned with the given goal and "
+            "the item attached to its context."
         ),
     )
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
         description=(
-            "Optional context-inclusion gates per spawned agent. Allowed keys vary by type. "
-            "See SELF_CONTAINED_GOAL_RULE for context-isolation rationale."
+            "Optional context-inclusion gates per spawned agent. Missing keys default to true, "
+            "which means that context flows through to the agent. For 'explore', applicable keys "
+            "are 'network' and 'recent_communications'. For 'sub_agent' and 'for_each', keys are "
+            "'user_profile', 'authenticated_sessions', 'integrations', 'recent_communications', "
+            "'network', 'custom_system_prompt', and 'shared_files'. Set a key to false only when "
+            "that context is clearly unnecessary."
         ),
     )
 
@@ -448,11 +465,6 @@ class SpawnAgentTool(BaseModel):
         # than failing validation — rejecting forces a costly LLM retry loop.
         if self.type == "explore" and self.output_schema:
             self.output_schema = None
-        if self.type in ("browser", "code", "sub_agent", "for_each") and len(self.goal) < 50:
-            raise ValueError(
-                f"goal must be >=50 chars for type='{self.type}' "
-                f"(got {len(self.goal)}); see SELF_CONTAINED_GOAL_RULE."
-            )
         return self
 
 
@@ -474,9 +486,21 @@ class SetPlanTool(BaseModel):
 
 
 class AttemptCompletionTool(BaseModel):
-    """Trigger that takes no arguments. Calling it asks the verifier to score the current goal against tool-call results."""
+    """Trigger completion for verified agent loops."""
 
     tool: Literal["attempt_completion"]
+
+
+class AttemptCompletionWithResultTool(BaseModel):
+    """Trigger completion for unverified loops that need a final handoff payload."""
+
+    tool: Literal["attempt_completion"]
+    result: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional final response payload for skip_verification=true loops, such as explore-agent handoffs."
+        ),
+    )
 
 
 # SpawnSubAgentTool removed - unified into SpawnAgentTool above
@@ -597,6 +621,7 @@ def render_tool_list(
 def create_agent_action_model(
     available_tool_names: List[str],
     tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
+    include_attempt_completion_result: bool = False,
 ) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
@@ -613,6 +638,8 @@ def create_agent_action_model(
     Args:
         available_tool_names: List of tool names this agent can use
         tool_registry: Optional custom registry (defaults to TOOL_MODELS)
+        include_attempt_completion_result: If true, expose the optional
+            attempt_completion.result handoff payload for unverified loops.
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
@@ -623,7 +650,14 @@ def create_agent_action_model(
     tool_types = []
     for name in available_tool_names:
         if name in registry:
-            tool_types.append(registry[name])
+            model = registry[name]
+            if (
+                include_attempt_completion_result
+                and name == "attempt_completion"
+                and model is AttemptCompletionTool
+            ):
+                model = AttemptCompletionWithResultTool
+            tool_types.append(model)
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 
@@ -682,7 +716,6 @@ class ProgressScore(BaseModel):
 
 
 __all__ = [
-    "VerifierConfig",
     "WaitForTool",
     "WebSearchTool",
     "WebFetchTool",
@@ -692,6 +725,7 @@ __all__ = [
     "SpawnAgentTool",
     "SetPlanTool",
     "AttemptCompletionTool",
+    "AttemptCompletionWithResultTool",
     "CallPhoneNumberTool",
     "GrepTool",
     "TOOL_MODELS",

@@ -260,6 +260,7 @@ Just write plain text describing what was done."""
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
             skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="completion_summary",
+            local_context=context,
         )
 
         summary = result.get("content", "")

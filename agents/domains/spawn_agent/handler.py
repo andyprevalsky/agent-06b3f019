@@ -195,7 +195,31 @@ class SpawnAgentManager(ToolManager):
 
             # Run explore agent activity with pause polling
             model = getattr(workflow_instance, "model", EXPLORE_DEFAULT_MODEL)
-            claude_token = getattr(workflow_instance, "claude_max_token", None)
+            claude_token = (
+                workflow_instance._active_claude_token()
+                if hasattr(workflow_instance, "_active_claude_token")
+                else getattr(workflow_instance, "claude_max_token", None)
+            )
+            gpt_token = (
+                workflow_instance._active_gpt_token()
+                if hasattr(workflow_instance, "_active_gpt_token")
+                else getattr(workflow_instance, "gpt_code_token", None)
+            )
+            gpt_account_id = (
+                workflow_instance._active_gpt_account_id()
+                if hasattr(workflow_instance, "_active_gpt_account_id")
+                else getattr(workflow_instance, "gpt_code_account_id", None)
+            )
+            gpt_token_source = (
+                workflow_instance._active_gpt_source()
+                if hasattr(workflow_instance, "_active_gpt_source")
+                else getattr(workflow_instance, "gpt_code_token_source", None)
+            )
+            gpt_token_pool_id = (
+                workflow_instance._active_gpt_pool_id()
+                if hasattr(workflow_instance, "_active_gpt_pool_id")
+                else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+            )
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -215,6 +239,10 @@ class SpawnAgentManager(ToolManager):
                         task_id,
                         tool_call_id,
                         claude_token,
+                        gpt_token,
+                        gpt_account_id,
+                        gpt_token_source,
+                        gpt_token_pool_id,
                         attachment_texts,
                     ],
                     start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,
@@ -353,16 +381,11 @@ class SpawnAgentManager(ToolManager):
         sub_agent_config = {
             "goal": tool_call.get("goal"),
             "output_schema": tool_call.get("output_schema"),
-            "read_only": tool_call.get("read_only", False),
             "start_phase": resolve_start_phase(tool_call),
             "attachments": tool_call.get("attachments"),
         }
         if tool_call.get("context_gates"):
             sub_agent_config["context_gates"] = tool_call["context_gates"]
-        if tool_call.get("verifier"):
-            sub_agent_config["verifier"] = tool_call["verifier"]
-        else:
-            sub_agent_config["verifier"] = {"type": "FLOAT_LLM_JUDGE"}
 
         sub_agent_tool_call = {
             "tool": "spawn_sub_agent",
@@ -408,7 +431,6 @@ class SpawnAgentManager(ToolManager):
 
         base_goal = tool_call.get("goal", "")
         start_phase = resolve_start_phase(tool_call)
-        verifier = tool_call.get("verifier") or {"type": "FLOAT_LLM_JUDGE"}
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
         context_gates = tool_call.get("context_gates")
@@ -434,9 +456,7 @@ class SpawnAgentManager(ToolManager):
             cfg: Dict[str, Any] = {
                 "goal": build_for_each_goal(base_goal, item),
                 "output_schema": output_schema,
-                "verifier": verifier,
                 "attachments": attachments,
-                "read_only": tool_call.get("read_only", False),
                 "start_phase": start_phase,
             }
             if context_gates:

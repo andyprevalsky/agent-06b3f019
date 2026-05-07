@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "navback",
+    "description": "Navigate back to the previous page",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "reasoning": {
+          "type": "string",
+          "description": "Why you're going back"
+        }
+      },
+      "required": [
+        "reasoning"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

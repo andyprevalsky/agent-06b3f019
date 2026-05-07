@@ -5,7 +5,8 @@
  *
  * Sub-items:
  *   Claude: [IDLE] --click--> [SYNCING] --done--> [SYNCED]  (Desktop only)
- *   ChatGPT, Gemini: [COMING_SOON] (static)
+ *   ChatGPT: [IDLE] --click--> [SYNCING] --done--> [SYNCED]  (Desktop only)
+ *   Gemini: [COMING_SOON] (static)
  */
 
 import { Loader2 } from 'lucide-react';
@@ -21,10 +22,14 @@ interface ComputeSectionProps {
   expanded: boolean;
   onToggle: () => void;
   isClaudeCodeAvailable: boolean;
+  isGptCodeAvailable: boolean;
   claudeCodeSynced: boolean;
+  gptCodeSynced: boolean;
   claudeCodeSyncLoading: boolean;
+  gptCodeSyncLoading: boolean;
   claudeCodeStatus: string | null;
   onClaudeCodeSync: () => void;
+  onGptCodeSync: () => void;
 }
 
 function ComputeIcon() {
@@ -98,14 +103,60 @@ function ClaudeRow({
   );
 }
 
+function GptRow({
+  isAvailable,
+  synced,
+  loading,
+  onSync,
+}: {
+  isAvailable: boolean;
+  synced: boolean;
+  loading: boolean;
+  onSync: () => void;
+}) {
+  if (isAvailable) {
+    return (
+      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+        <div className="flex items-center gap-3">
+          <ChatGPTIcon />
+          <span className="text-sm">ChatGPT Subscription</span>
+        </div>
+        <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
+      </div>
+    );
+  }
+  return (
+    <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
+      <div className="flex items-center gap-3">
+        <ChatGPTIcon />
+        <div className="flex items-center gap-2">
+          <span className="text-sm">ChatGPT Subscription</span>
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+            Desktop Only
+          </span>
+        </div>
+      </div>
+      <Button size="sm" variant="ghost" asChild className="h-8 px-2">
+        <a href="/download" className="text-xs">
+          Get App
+        </a>
+      </Button>
+    </div>
+  );
+}
+
 export default function ComputeSection({
   expanded,
   onToggle,
   isClaudeCodeAvailable,
+  isGptCodeAvailable,
   claudeCodeSynced,
+  gptCodeSynced,
   claudeCodeSyncLoading,
+  gptCodeSyncLoading,
   claudeCodeStatus,
   onClaudeCodeSync,
+  onGptCodeSync,
 }: ComputeSectionProps) {
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
@@ -119,7 +170,7 @@ export default function ComputeSection({
             <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={claudeCodeSynced} onClick={onToggle} />
+        <SectionToggleButton isConnected={claudeCodeSynced || gptCodeSynced} onClick={onToggle} />
       </div>
       {claudeCodeSyncLoading && claudeCodeStatus && (
         <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
@@ -135,15 +186,12 @@ export default function ComputeSection({
             loading={claudeCodeSyncLoading}
             onSync={onClaudeCodeSync}
           />
-          <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-            <div className="flex items-center gap-3">
-              <ChatGPTIcon />
-              <span className="text-sm">ChatGPT Subscription</span>
-            </div>
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-              Coming Soon
-            </span>
-          </div>
+          <GptRow
+            isAvailable={isGptCodeAvailable}
+            synced={gptCodeSynced}
+            loading={gptCodeSyncLoading}
+            onSync={onGptCodeSync}
+          />
           <div className="px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />

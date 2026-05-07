@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "extract",
+    "description": "Extract structured data from the current page based on a provided schema.\n\nUSAGE GUIDELINES:\n- Keep schemas MINIMAL - only include fields essential for the task\n- Only use this if explicitly asked for structured output\n- For general page understanding, use ariaTree instead\n\nEXAMPLES:\n1. Extract a single value:\n   instruction: \"extract the product price\"\n   schema: \"z.object({ price: z.number()})\"\n\n2. Extract multiple fields:\n   instruction: \"extract product name and price\"\n   schema: \"z.object({ name: z.string(), price: z.number() })\"\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "instruction": {
+          "type": "string",
+          "description": "Clear instruction describing what data to extract"
+        },
+        "schema": {
+          "type": "string",
+          "description": "Zod schema as a string (e.g., \"z.object({ price: z.number() })\")"
+        }
+      },
+      "required": [
+        "instruction",
+        "schema"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

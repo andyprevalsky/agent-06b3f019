@@ -302,6 +302,8 @@ export async function callGeneratorLlm(params: {
   messages: ChatMessage[];
   model: string;
   claudeToken: string | null;
+  gptToken?: string | null;
+  gptAccountId?: string;
 }): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
@@ -395,10 +397,13 @@ export async function callGeneratorLlm(params: {
       },
     },
     claude_token: params.claudeToken ?? undefined,
+    gpt_token: params.gptToken ?? undefined,
+    gpt_account_id: params.gptAccountId,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
+  let isGpt = false;
 
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
@@ -435,6 +440,9 @@ export async function callGeneratorLlm(params: {
     if (!isClaude && actualModel?.endsWith('-claude')) {
       isClaude = true;
     }
+    if (!isGpt && actualModel?.endsWith('-gpt')) {
+      isGpt = true;
+    }
 
     // Get delta from chunk
     const delta = chunk.choices[0]?.delta;
@@ -466,7 +474,8 @@ export async function callGeneratorLlm(params: {
           newText,
           false,
           sequence++,
-          isClaude
+          isClaude,
+          isGpt
         );
       }
     }
@@ -494,7 +503,7 @@ export async function callGeneratorLlm(params: {
   const fullJson = accumulatedJson;
 
   // Broadcast final "done" signal
-  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude);
+  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude, isGpt);
 
   const streamDuration = Date.now() - startTime;
   log.info('[GeneratorLLM] Streaming complete', {
@@ -518,6 +527,7 @@ export async function callGeneratorLlm(params: {
       agent_id: params.agentId,
       actual_model: actualModel,
       is_claude: isClaude,
+      is_gpt: isGpt,
       prompt_tokens: promptTokens,
       completion_tokens: usageData.completion_tokens ?? 0,
       cache_read: cacheRead,

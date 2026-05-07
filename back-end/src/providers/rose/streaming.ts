@@ -8,7 +8,13 @@
  */
 
 import { createLogger } from '../logger';
-import { RoseStallError } from './errors';
+import {
+  RoseAuthError,
+  RoseInvalidRequest,
+  RoseRateLimitError,
+  RoseServerError,
+  RoseStallError,
+} from './errors';
 import type { RoseStreamChunk } from './types';
 
 const log = createLogger('RoseStreaming');
@@ -22,6 +28,27 @@ interface ParseOptions {
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+
+function responsesErrorToException(errorPayload: unknown, requestId: string): Error {
+  const payload =
+    typeof errorPayload === 'object' && errorPayload !== null
+      ? (errorPayload as Record<string, unknown>)
+      : {};
+  const code = String(payload.code ?? payload.type ?? '').toLowerCase();
+  const message =
+    typeof payload.message === 'string' ? payload.message : JSON.stringify(errorPayload ?? {});
+  const details = `Responses stream failed (request_id=${requestId}, code=${code || 'unknown'}): ${message.substring(0, 1000)}`;
+  if (['invalid_request_error', 'context_length_exceeded', 'bad_request'].includes(code)) {
+    return new RoseInvalidRequest(details);
+  }
+  if (['rate_limit_exceeded', 'rate_limit_error', 'too_many_requests'].includes(code)) {
+    return new RoseRateLimitError(details);
+  }
+  if (['authentication_error', 'permission_error', 'unauthorized', 'forbidden'].includes(code)) {
+    return new RoseAuthError(details);
+  }
+  return new RoseServerError(details);
+}
 
 /**
  * Anthropic native SSE → normalized chunks.
@@ -224,6 +251,160 @@ export async function* parseOpenAISSE(
     },
   };
   yield { kind: 'done', data: {} };
+}
+
+/**
+ * OpenAI Responses API SSE → normalized chunks.
+ *
+ * Codex's ChatGPT-account backend streams Responses events, not Chat
+ * Completions chunks. We accept the public Responses event names plus a few
+ * conservative aliases because the Codex backend can expose newer event
+ * variants before the public docs settle.
+ */
+export async function* parseResponsesSSE(
+  body: ReadableStream<Uint8Array>,
+  options: ParseOptions
+): AsyncIterable<RoseStreamChunk> {
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+
+  yield {
+    kind: 'metadata',
+    data: {
+      actual_model: options.actualModel,
+      pool_name: options.poolName,
+      request_id: options.requestId,
+    },
+  };
+
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let cacheReadTokens = 0;
+  let finishReason = '';
+  let emittedContentOrTool = false;
+  let sawDone = false;
+
+  const applyUsage = (usage: Record<string, unknown> | undefined): void => {
+    if (!usage) return;
+    promptTokens = numberValue(usage.input_tokens) ?? promptTokens;
+    completionTokens = numberValue(usage.output_tokens) ?? completionTokens;
+    totalTokens = numberValue(usage.total_tokens) ?? totalTokens;
+    const details = usage.input_tokens_details as Record<string, unknown> | undefined;
+    cacheReadTokens = numberValue(details?.cached_tokens) ?? cacheReadTokens;
+  };
+
+  for await (const line of iterLinesWithIdleTimeout(body, idleTimeoutMs, options.requestId)) {
+    if (!line) continue;
+    if (line.startsWith('event: ')) continue;
+    if (!line.startsWith('data: ')) continue;
+    const dataStr = line.slice(6);
+    if (dataStr === '[DONE]') {
+      sawDone = true;
+      break;
+    }
+
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(dataStr) as Record<string, unknown>;
+    } catch {
+      log.warn('parse_error.responses', {
+        request_id: options.requestId,
+        snippet: dataStr.substring(0, 200),
+      });
+      continue;
+    }
+
+    const type = String(event.type ?? '');
+    const delta = stringValue(event.delta) ?? stringValue(event.text);
+    if (
+      delta &&
+      (type.endsWith('.output_text.delta') ||
+        type.endsWith('.text.delta') ||
+        type === 'response.output_item.delta')
+    ) {
+      emittedContentOrTool = true;
+      yield { kind: 'content', data: { text: delta } };
+      continue;
+    }
+
+    const reasoningDelta = stringValue(event.summary_text) ?? stringValue(event.reasoning);
+    if (reasoningDelta && type.includes('reasoning')) {
+      emittedContentOrTool = true;
+      yield { kind: 'reasoning', data: { text: reasoningDelta } };
+      continue;
+    }
+
+    if (type === 'response.output_item.done') {
+      const item = event.item as Record<string, unknown> | undefined;
+      if (item?.type === 'function_call') {
+        emittedContentOrTool = true;
+        yield {
+          kind: 'tool_call',
+          data: {
+            id: stringValue(item.call_id) ?? stringValue(item.id) ?? '',
+            name: stringValue(item.name) ?? '',
+            arguments: stringValue(item.arguments) ?? '',
+          },
+        };
+        continue;
+      }
+    }
+
+    if (type === 'response.completed') {
+      const response = event.response as Record<string, unknown> | undefined;
+      applyUsage(response?.usage as Record<string, unknown> | undefined);
+      finishReason = 'stop';
+      continue;
+    }
+
+    if (type === 'response.incomplete') {
+      const response = event.response as Record<string, unknown> | undefined;
+      applyUsage(response?.usage as Record<string, unknown> | undefined);
+      finishReason = 'length';
+      continue;
+    }
+
+    if (type === 'error' || type === 'response.failed') {
+      let errorPayload = event.error;
+      if (!errorPayload && typeof event.response === 'object' && event.response !== null) {
+        errorPayload = (event.response as Record<string, unknown>).error;
+      }
+      log.warn('provider_error.responses', {
+        request_id: options.requestId,
+        type,
+        error_payload: JSON.stringify(errorPayload ?? {}).substring(0, 1000),
+      });
+      throw responsesErrorToException(errorPayload, options.requestId);
+    }
+  }
+
+  if (!emittedContentOrTool) {
+    throw new RoseStallError(
+      `Responses stream closed without content or tool_call ` +
+        `(request_id=${options.requestId}, saw_done=${sawDone})`
+    );
+  }
+
+  yield {
+    kind: 'usage',
+    data: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: totalTokens || promptTokens + completionTokens,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: cacheReadTokens,
+      finish_reason: finishReason || 'stop',
+    },
+  };
+  yield { kind: 'done', data: {} };
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 /**

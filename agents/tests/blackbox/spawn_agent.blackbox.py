@@ -199,16 +199,6 @@ def test_validate_spawn_explore_rejects_schema():
     )
 
 
-def test_validate_spawn_explore_rejects_verifier():
-    """explore type rejects verifier."""
-    from domains.spawn_agent.service import validate_spawn_params
-
-    _assert_raises(
-        lambda: validate_spawn_params({"type": "explore", "goal": "g", "verifier": {"type": "X"}}),
-        "verifier",
-    )
-
-
 def test_validate_spawn_explore_happy():
     """Valid explore params accepted."""
     from domains.spawn_agent.service import validate_spawn_params
@@ -725,8 +715,8 @@ async def test_handler_code_delegates():
     assert fake_mgr.last_call["tool_call"]["attachments"] == ["file.txt"]
 
 
-async def test_handler_sub_agent_delegates_with_default_verifier():
-    """sub_agent without verifier injects FLOAT_LLM_JUDGE default."""
+async def test_handler_sub_agent_delegates_without_verifier_arg():
+    """sub_agent delegation does not expose verifier as a tool-controlled arg."""
     from tools.base import EventType, MessageStatus, ToolEvent
     import domains.spawn_agent.handler as h
 
@@ -752,37 +742,8 @@ async def test_handler_sub_agent_delegates_with_default_verifier():
         h.get_sub_agent_manager = original
     assert any(e.status == MessageStatus.FINISHED for e in events)
     cfg = fake_mgr.last_call["tool_call"]["sub_agent"]
-    assert cfg["verifier"]["type"] == "FLOAT_LLM_JUDGE"
+    assert "verifier" not in cfg
     assert cfg["context_gates"] == {"network": False}
-
-
-async def test_handler_sub_agent_uses_provided_verifier():
-    """sub_agent with verifier uses caller-provided verifier."""
-    from tools.base import EventType, MessageStatus, ToolEvent
-    import domains.spawn_agent.handler as h
-
-    fake_mgr = _FakeDelegateManager(
-        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
-    )
-    original = h.get_sub_agent_manager
-    h.get_sub_agent_manager = lambda: fake_mgr
-    try:
-        await _collect(
-            h.SpawnAgentManager().execute_tool(
-                workflow_instance=_FakeWFInstance(),
-                tool_call={
-                    "type": "sub_agent",
-                    "goal": "g",
-                    "output_schema": {"fields": []},
-                    "verifier": {"type": "BOOLEAN", "prompt": "done?"},
-                },
-                tool_call_id="tc",
-            )
-        )
-    finally:
-        h.get_sub_agent_manager = original
-    cfg = fake_mgr.last_call["tool_call"]["sub_agent"]
-    assert cfg["verifier"]["type"] == "BOOLEAN"
 
 
 async def test_handler_for_each_depth_exceeded_raises():
@@ -1254,7 +1215,15 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     async def fake_run_agent(**kwargs):
         # exercise on_tokens callback
         on_tokens = kwargs["on_tokens"]
-        await on_tokens(10, 5, "claude-x", 7, 3, "explore_agent")
+        await on_tokens(
+            10,
+            5,
+            "claude-x",
+            7,
+            3,
+            "explore_agent",
+            claude_token_rotated=True,
+        )
         on_tokens_holder["called"] = True
 
         # exercise post_message callback (forwarded to save_explore_message)
@@ -1600,7 +1569,6 @@ async def run_all_tests():
     r.record("validate_for_each_items", test_validate_spawn_for_each_with_items)
     r.record("validate_for_each_csv", test_validate_spawn_for_each_with_csv)
     r.record("validate_explore_no_schema", test_validate_spawn_explore_rejects_schema)
-    r.record("validate_explore_no_verifier", test_validate_spawn_explore_rejects_verifier)
     r.record("validate_explore_happy", test_validate_spawn_explore_happy)
     # resolve_start_phase
     r.record("resolve_phase_default", test_resolve_start_phase_default)
@@ -1625,8 +1593,7 @@ async def run_all_tests():
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
     await r.record_async("handler_code_delegates", test_handler_code_delegates)
-    await r.record_async("handler_sub_agent_default_verifier", test_handler_sub_agent_delegates_with_default_verifier)
-    await r.record_async("handler_sub_agent_uses_verifier", test_handler_sub_agent_uses_provided_verifier)
+    await r.record_async("handler_sub_agent_no_verifier_arg", test_handler_sub_agent_delegates_without_verifier_arg)
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)
     await r.record_async("handler_for_each_happy", test_handler_for_each_happy_path_all_succeed)

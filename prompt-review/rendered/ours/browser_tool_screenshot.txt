@@ -1,0 +1,12 @@
+{
+  "type": "function",
+  "function": {
+    "name": "screenshot",
+    "description": "Take a screenshot of the current page. Use this for visual confirmation of page state.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

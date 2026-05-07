@@ -1341,6 +1341,154 @@ def test_build_state_line_empty_url():
 
 
 # ========================================
+# handler: browser-use auth selection / rotation
+# ========================================
+
+
+class _FakeRoseClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def complete_browser_use(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+async def test_call_browser_use_with_rotation_uses_gpt_auth():
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    client = _FakeRoseClient([{"actions": [{"type": "wait"}]}])
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    result = await _call_browser_use_with_rotation(
+        rose_client=client,
+        task="do it",
+        browser_state={"url": "https://example.com"},
+        action_entries=[],
+        config=_fake_config(),
+        user_id="u1",
+        agent_id="a1",
+        iteration=3,
+        token_state=token_state,
+        gpt_token="gpt-token",
+        gpt_account_id="acct-1",
+        gpt_token_source="pool",
+        gpt_token_pool_id="pool-gpt",
+        browser_use_mode="gpt",
+    )
+
+    assert result == {"actions": [{"type": "wait"}]}
+    assert client.calls[0]["claude_auth"] is None
+    assert client.calls[0]["gpt_auth"].token == "gpt-token"
+    assert client.calls[0]["gpt_auth"].account_id == "acct-1"
+    assert client.calls[0]["gpt_auth"].pool_token_id == "pool-gpt"
+
+
+async def test_call_browser_use_with_rotation_rotates_claude_token():
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    client = _FakeRoseClient(
+        [
+            {
+                "claude_token_error": "rate_limit",
+                "rateLimitedUntil": "2026-01-01T00:00:00Z",
+            },
+            {"actions": [{"type": "done"}]},
+        ]
+    )
+    token_state = ClaudeTokenState()
+    token_state.access_token = "old-token"
+    token_state.source = "pool"
+    token_state.pool_token_id = "pool-old"
+
+    with patch.object(handler.activity, "heartbeat"), patch.object(
+        handler,
+        "report_claude_token_rate_limited",
+        new=AsyncMock(),
+    ) as mark_limited, patch.object(
+        handler,
+        "fetch_claude_token",
+        new=AsyncMock(
+            return_value={
+                "accessToken": "new-token",
+                "source": "pool",
+                "poolTokenId": "pool-new",
+            }
+        ),
+    ) as fetch_token:
+        result = await _call_browser_use_with_rotation(
+            rose_client=client,
+            task="do it",
+            browser_state={"url": "https://example.com"},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="u1",
+            agent_id="a1",
+            iteration=4,
+            token_state=token_state,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="claude",
+        )
+
+    assert result == {"actions": [{"type": "done"}]}
+    assert len(client.calls) == 2
+    assert client.calls[0]["claude_auth"].token == "old-token"
+    assert client.calls[1]["claude_auth"].token == "new-token"
+    mark_limited.assert_awaited_once()
+    fetch_token.assert_awaited_once()
+    assert token_state.excluded_pool_ids == ["pool-old"]
+    assert token_state.access_token == "new-token"
+    assert token_state.pool_token_id == "pool-new"
+
+
+async def test_call_browser_use_with_rotation_stops_when_no_replacement():
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    first_result = {"claude_token_error": "auth_error"}
+    client = _FakeRoseClient([first_result])
+    token_state = ClaudeTokenState()
+    token_state.access_token = "bad-token"
+    token_state.source = "user"
+
+    with patch.object(handler.activity, "heartbeat"), patch.object(
+        handler,
+        "report_claude_token_rate_limited",
+        new=AsyncMock(),
+    ), patch.object(handler, "fetch_claude_token", new=AsyncMock(return_value=None)):
+        result = await _call_browser_use_with_rotation(
+            rose_client=client,
+            task="do it",
+            browser_state={},
+            action_entries=[],
+            config=_fake_config(),
+            user_id="u1",
+            agent_id="a1",
+            iteration=5,
+            token_state=token_state,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="claude",
+        )
+
+    assert result is first_result
+    assert len(client.calls) == 1
+    assert token_state.access_token is None
+
+
+# ========================================
 # service: build_action_titles
 # ========================================
 
@@ -3302,6 +3450,15 @@ async def run_all_tests():
     # handler statics
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)
+    await r.record_async("call_browser_use_gpt_auth", test_call_browser_use_with_rotation_uses_gpt_auth)
+    await r.record_async(
+        "call_browser_use_rotates_claude",
+        test_call_browser_use_with_rotation_rotates_claude_token,
+    )
+    await r.record_async(
+        "call_browser_use_no_replacement",
+        test_call_browser_use_with_rotation_stops_when_no_replacement,
+    )
     r.record("get_manager_singleton", test_get_manager_singleton)
 
     teardown_mock()

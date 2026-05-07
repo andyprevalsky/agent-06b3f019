@@ -33,6 +33,7 @@ import {
   attachRecorder,
   createAgent,
   deleteAgent,
+  expectProdSessionRecognized,
   hasUncaughtErrors,
   injectProdSession,
   loadBenchmarkTask,
@@ -65,18 +66,7 @@ async function waitForDevLogin(
   rec: ReturnType<typeof attachRecorder>,
 ) {
   if (IS_PROD) {
-    await injectProdSession(page);
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect
-      .poll(
-        () =>
-          rec.console.some(
-            (m) =>
-              m.text.includes('[Auth] State changed') && m.text.includes('isFullySignedIn: true'),
-          ),
-        { timeout: 15_000, message: 'Prod session not recognised' },
-      )
-      .toBe(true);
+    await expectProdSessionRecognized(page);
   } else {
     await expect
       .poll(() => rec.console.some((m) => m.text.includes('[Auth] Dev auto-login complete')), {
@@ -92,6 +82,9 @@ async function waitForDevLogin(
 test.describe('mobile-layout', () => {
   test('landing screen — header and query input fit within 390 px viewport', async ({ page }) => {
     const rec = attachRecorder(page);
+    if (IS_PROD) {
+      await injectProdSession(page);
+    }
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     await waitForDevLogin(page, rec);
     // Let opening animation settle so all elements reach their resting position.
@@ -120,6 +113,9 @@ test.describe('mobile-layout', () => {
     const agentId = await createAgent(task.prompt);
 
     try {
+      if (IS_PROD) {
+        await injectProdSession(page);
+      }
       await page.goto(`${FRONTEND_URL}/?agent-id=${agentId}`, { waitUntil: 'domcontentloaded' });
       await waitForDevLogin(page, rec);
 
@@ -193,6 +189,9 @@ test.describe('mobile-layout', () => {
 
   test('header is centered and never wider than the 390 px viewport', async ({ page }) => {
     const rec = attachRecorder(page);
+    if (IS_PROD) {
+      await injectProdSession(page);
+    }
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     await waitForDevLogin(page, rec);
     await page.waitForTimeout(1_000);

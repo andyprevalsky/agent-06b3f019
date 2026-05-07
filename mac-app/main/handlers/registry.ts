@@ -15,6 +15,7 @@ import { CookieSync } from '../services/cookieSync';
 import { BrowserStateSync } from '../services/browserStateSync';
 import { AtlasCredentialStore } from '../services/atlasCredentialStore';
 import { ClaudeCredentialSync } from '../services/claudeCredentialSync';
+import { GptCredentialSync } from '../services/gptCredentialSync';
 import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppSync';
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
@@ -519,6 +520,26 @@ export function registerHandlers() {
     ClaudeCredentialSync.setMockNoClaudeCode(mock);
     logIpc('OUT', 'claude:setMockNoClaudeCode', { success: true });
     return { success: true };
+  });
+
+  ipcMain.handle('gpt:hasCredentials', () => {
+    logIpc('IN', 'gpt:hasCredentials');
+    const hasCredentials = GptCredentialSync.hasCredentials();
+    logIpc('OUT', 'gpt:hasCredentials', { hasCredentials });
+    return hasCredentials;
+  });
+
+  ipcMain.handle('gpt:syncCredentials', async () => {
+    logIpc('IN', 'gpt:syncCredentials');
+    try {
+      const result = await GptCredentialSync.syncCredentials();
+      logIpc('OUT', 'gpt:syncCredentials', result);
+      return result;
+    } catch (error) {
+      logConsoleError('GptCredentialSync', 'Sync failed', error);
+      logIpc('OUT', 'gpt:syncCredentials', { success: false, message: getErrorMessage(error) });
+      return { success: false, message: getErrorMessage(error) };
+    }
   });
 
   // WhatsApp handlers

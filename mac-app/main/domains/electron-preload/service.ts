@@ -82,6 +82,17 @@ function buildClaudeCodeBridge(ipcRenderer: IpcRenderer): IPC['claudeCode'] {
   };
 }
 
+function buildGptCodeBridge(ipcRenderer: IpcRenderer): IPC['gptCode'] {
+  return {
+    hasCredentials: () => ipcRenderer.invoke('gpt:hasCredentials') as Promise<boolean>,
+    syncCredentials: () =>
+      ipcRenderer.invoke('gpt:syncCredentials') as Promise<{
+        success: boolean;
+        message?: string;
+      }>,
+  };
+}
+
 function buildAtlasBridge(ipcRenderer: IpcRenderer): IPC['atlas'] {
   return {
     storePassword: (password: string) =>
@@ -242,6 +253,7 @@ export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
     shortcut: buildShortcutBridge(ipcRenderer),
     onboarding: buildOnboardingBridge(ipcRenderer),
     claudeCode: buildClaudeCodeBridge(ipcRenderer),
+    gptCode: buildGptCodeBridge(ipcRenderer),
     atlas: buildAtlasBridge(ipcRenderer),
     whatsapp: buildWhatsAppBridge(ipcRenderer),
     telegram: buildTelegramBridge(ipcRenderer),

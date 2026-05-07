@@ -17,11 +17,6 @@ from tools.prompts.send_message_to_user_execute_phase import (
 )
 from tools.prompts.set_plan import PROMPT as set_plan_prompt
 from tools.prompts.spawn_agent import PROMPT as spawn_agent_prompt
-from tools.prompts.spawn_browser_agent import PROMPT as spawn_browser_agent_prompt
-from tools.prompts.spawn_code_agent import PROMPT as spawn_code_agent_prompt
-from tools.prompts.spawn_explore_agent import PROMPT as spawn_explore_agent_prompt
-from tools.prompts.spawn_sub_agent import PROMPT as spawn_sub_agent_prompt
-from tools.prompts.spawn_sub_agent_for_each import PROMPT as spawn_sub_agent_for_each_prompt
 from tools.prompts.wait_for import PROMPT as wait_for_prompt
 from tools.prompts.web_fetch import PROMPT as web_fetch_prompt
 from tools.prompts.web_search import PROMPT as web_search_prompt
@@ -29,12 +24,6 @@ from tools.prompts.web_search import PROMPT as web_search_prompt
 TOOL_PROMPTS: dict[str, str] = {
     # Agent tools
     "spawn_agent": spawn_agent_prompt,
-    # Planner aliases (decomposed spawn_agent types)
-    "spawn_explore_agent": spawn_explore_agent_prompt,
-    "spawn_browser_agent": spawn_browser_agent_prompt,
-    "spawn_code_agent": spawn_code_agent_prompt,
-    "spawn_sub_agent": spawn_sub_agent_prompt,
-    "spawn_sub_agent_for_each": spawn_sub_agent_for_each_prompt,
     "reasoning": reasoning_prompt,
     # Communication
     "send_message_to_user": send_message_to_user_prompt,

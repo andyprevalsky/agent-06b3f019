@@ -10,6 +10,8 @@ set -euo pipefail
 #   bash scripts/test.sh                              # offline + smoke + semantic (auto-port from CONDUCTOR_PORT)
 #   bash scripts/test.sh --port=3001                   # explicit port
 #   bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + semantic)
+#   bash scripts/test.sh --mandatory-human-approval-retrieved=true
+#                                                       # required when prompt edits are present
 #   bash scripts/test.sh agents                        # single repo
 #   bash scripts/test.sh agents web-search             # single domain
 #   bash scripts/test.sh back-end                      # backend tests only
@@ -34,6 +36,7 @@ SMOKE=true
 PORT=""
 LIST=false
 VERBOSE=false
+PROMPT_HUMAN_APPROVAL_RETRIEVED=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -41,9 +44,15 @@ for arg in "$@"; do
     --port=*) PORT="${arg#--port=}" ;;
     --list) LIST=true ;;
     -v|--verbose) VERBOSE=true ;;
+    mandatory-human-approval-retrieved=true|--mandatory-human-approval-retrieved=true)
+      PROMPT_HUMAN_APPROVAL_RETRIEVED=true
+      ;;
+    mandatory-human-approval-retrieved=false|--mandatory-human-approval-retrieved=false)
+      PROMPT_HUMAN_APPROVAL_RETRIEVED=false
+      ;;
     -*)
       echo "Unknown flag: $arg"
-      echo "Usage: bash scripts/test.sh [repo] [domain] [--no-smoke] [--port=N] [--list] [-v]"
+      echo "Usage: bash scripts/test.sh [repo] [domain] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true]"
       exit 1
       ;;
     *)
@@ -186,6 +195,12 @@ collect_bg_suites() {
 should_run() {
   [ -z "$REPO" ] || [ "$REPO" = "$1" ]
 }
+
+if $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
+  run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
+else
+  run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
+fi
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

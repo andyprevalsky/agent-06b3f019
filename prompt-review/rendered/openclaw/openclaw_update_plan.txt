@@ -1,0 +1,43 @@
+{
+  "name": "update_plan",
+  "description": "Update the current structured work plan for this run. Use this for non-trivial multi-step work so the plan stays current while execution continues. Keep steps short, mark at most one step as in_progress, and skip this tool for simple one-step tasks.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "explanation": {
+        "type": "string",
+        "description": "Optional short note explaining what changed in the plan."
+      },
+      "plan": {
+        "type": "array",
+        "description": "Ordered list of plan steps. At most one step may be in_progress.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "string",
+              "description": "Short plan step."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ],
+              "description": "One of pending, in_progress, or completed."
+            }
+          },
+          "required": [
+            "step",
+            "status"
+          ]
+        },
+        "minItems": 1
+      }
+    },
+    "required": [
+      "plan"
+    ]
+  }
+}

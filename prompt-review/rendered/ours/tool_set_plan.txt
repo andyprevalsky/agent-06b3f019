@@ -1,0 +1,6 @@
+Use this tool to hand off to a dedicated decomposition LLM that generates an execution plan as a DAG of tasks with dependencies.
+
+MANDATORY: Must be the only tool in that turn; do not batch with other tool calls.
+
+Usage:
+- Call this tool if and only if the task at hand is unambiguous.

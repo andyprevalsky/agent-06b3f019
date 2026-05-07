@@ -235,6 +235,42 @@ async def test_resolve_pointers_in_text_db_fetch():
     assert "Fetched from DB" in result
 
 
+async def test_resolve_pointers_db_fetch_sends_user_scope():
+    """DB fetch includes user scope when pointer resolution has user_id."""
+    _clear_cache()
+    captured = {}
+
+    def handler(req):
+        if "/api/agents/messages/batch" in str(req.url):
+            import json as _json
+
+            body = _json.loads(req.content.decode("utf-8"))
+            captured["x_user_id"] = req.headers.get("x-user-id")
+            captured["body_user_id"] = body.get("user_id")
+            return httpx.Response(200, json={
+                "messages": [
+                    {
+                        "id": "aaaa0003-0000-0000-0000-000000000000",
+                        "text": "Fetched with user scope",
+                        "role": "USER",
+                    }
+                ]
+            })
+        return httpx.Response(404)
+
+    setup_mock_fn(handler)
+
+    from helpers.context_pointers import resolve_pointers_in_text
+
+    text = "Ref: @ref:message:aaaa0003-0000-0000-0000-000000000000"
+    result = await resolve_pointers_in_text(text, user_id="user-123")
+
+    assert "<resolved-ref" in result
+    assert "Fetched with user scope" in result
+    assert captured["x_user_id"] == "user-123"
+    assert captured["body_user_id"] == "user-123"
+
+
 async def test_resolve_pointers_in_text_db_missing():
     """resolve_pointers_in_text leaves pointer untouched when DB returns no match."""
     _clear_cache()
@@ -510,6 +546,7 @@ async def run_all_tests():
     await r.record_async("resolve_in_text_from_local", test_resolve_pointers_in_text_from_local_context)
     await r.record_async("resolve_in_text_skips_assistant_local", test_resolve_pointers_in_text_skips_non_user_tool_role)
     await r.record_async("resolve_in_text_db_fetch", test_resolve_pointers_in_text_db_fetch)
+    await r.record_async("resolve_in_text_db_fetch_user_scope", test_resolve_pointers_db_fetch_sends_user_scope)
     await r.record_async("resolve_in_text_db_missing", test_resolve_pointers_in_text_db_missing)
     await r.record_async("resolve_db_failure_no_neg_cache", test_resolve_pointers_db_failure_no_negative_cache)
     await r.record_async("resolve_db_exception_no_neg_cache", test_resolve_pointers_db_exception_no_negative_cache)

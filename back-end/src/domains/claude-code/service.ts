@@ -239,6 +239,8 @@ const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
+  /Credit balance too low/i,
+  /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
 ];
 
 /**

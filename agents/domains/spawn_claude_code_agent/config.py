@@ -30,6 +30,24 @@ FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [
         "Please run /login",
         "Claude Code is requesting interactive login, which cannot be completed in a sandbox.",
     ),
+    (
+        "You've hit your limit",
+        "Claude Code OAuth credentials are rate-limited. The credential must be rotated until the reset time.",
+    ),
+    (
+        "/rate-limit-options",
+        "Claude Code OAuth credentials are rate-limited. The credential must be rotated instead of waiting in the sandbox.",
+    ),
+    (
+        "Credit balance too low",
+        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
+        "or refill the shared Anthropic API billing account.",
+    ),
+    (
+        "Add funds: https://platform.claude.com/settings/billing",
+        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
+        "or refill the shared Anthropic API billing account.",
+    ),
 ]
 
 # Suppress PTY echo from triggering silence detection for this window

@@ -103,6 +103,11 @@ class AgentNotFoundError(Exception):
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
 
 
+def _ci_should_fail(summary: dict) -> bool:
+    """CI must fail on both failed and skipped benchmark tasks."""
+    return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+
+
 # ============================================================
 # API helpers
 # ============================================================
@@ -1140,9 +1145,9 @@ def _verify_worker_queue_alignment():
     expected_queue = f"navi-agent-tasks-{workspace}"
 
     result = subprocess.run(
-        ["pgrep", "-f", "python worker.py"], capture_output=True, text=True
+        ["ps", "-axo", "pid=,command="], capture_output=True, text=True
     )
-    pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+    pids = _extract_worker_pids_from_ps(result.stdout)
     if not pids:
         print(f"  ❌ No worker process found (expected on queue {expected_queue})")
         print(f"     Start it: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
@@ -1169,6 +1174,23 @@ def _verify_worker_queue_alignment():
             pass
 
     print(f"  ⚠ Worker running but could not verify queue alignment (expected {expected_queue})")
+
+
+def _extract_worker_pids_from_ps(ps_output: str) -> list[str]:
+    """Extract Python worker PIDs from portable ps output."""
+    pids = []
+    for line in ps_output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, command = parts
+        command_lower = command.lower()
+        if "worker.py" in command_lower and "python" in command_lower:
+            pids.append(pid)
+    return pids
 
 
 async def _terminate_stale_workflows():
@@ -1557,8 +1579,9 @@ async def main_async(args):
         )
         sys.exit(1)
 
-    # CI mode: exit non-zero if any task failed
-    if args.ci and s["failed"] > 0:
+    # CI mode: exit non-zero if any task failed or was skipped. A skipped
+    # required benchmark means the deploy gate did not actually run.
+    if args.ci and _ci_should_fail(s):
         sys.exit(1)
 
 

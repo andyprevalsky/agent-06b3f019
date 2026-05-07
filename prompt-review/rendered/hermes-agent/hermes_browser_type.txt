@@ -1,0 +1,21 @@
+{
+  "name": "browser_type",
+  "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "ref": {
+        "type": "string",
+        "description": "The element reference from the snapshot (e.g., '@e3')"
+      },
+      "text": {
+        "type": "string",
+        "description": "The text to type into the field"
+      }
+    },
+    "required": [
+      "ref",
+      "text"
+    ]
+  }
+}

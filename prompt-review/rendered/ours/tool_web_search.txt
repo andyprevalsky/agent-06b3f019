@@ -1,0 +1,1 @@
+Searches the web for real-time public information and returns snippet results with source URLs for review.

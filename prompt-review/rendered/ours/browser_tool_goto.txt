@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "goto",
+    "description": "Navigate to a URL in the browser. You MUST provide the FULL URL including the protocol (https://).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The FULL URL to navigate to, including protocol (e.g., 'https://www.example.com'). Do NOT use partial URLs like 'example.com'."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -97,7 +97,10 @@ def _apply_slice(text: str, start: Optional[str], end: Optional[str]) -> str:
     return text[start_idx : end_idx + len(end)]
 
 
-async def _fetch_messages_batch(message_ids: List[str]) -> Dict[str, Optional[tuple]]:
+async def _fetch_messages_batch(
+    message_ids: List[str],
+    user_id: Optional[str] = None,
+) -> Dict[str, Optional[tuple]]:
     """Fetch messages by IDs from backend, returns {id: (text, role) or None}.
 
     Chunks requests into batches of 50 (backend limit).
@@ -114,13 +117,19 @@ async def _fetch_messages_batch(message_ids: List[str]) -> Dict[str, Optional[tu
             chunk = uncached[i : i + BATCH_SIZE]
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
+                    headers = {
+                        "X-API-Key": config.backend.api_key or "",
+                        "Content-Type": "application/json",
+                    }
+                    body: Dict[str, Any] = {"ids": chunk}
+                    if user_id:
+                        headers["X-User-Id"] = user_id
+                        body["user_id"] = user_id
+
                     response = await client.post(
                         f"{config.backend.api_url}/api/agents/messages/batch",
-                        headers={
-                            "X-API-Key": config.backend.api_key or "",
-                            "Content-Type": "application/json",
-                        },
-                        json={"ids": chunk},
+                        headers=headers,
+                        json=body,
                     )
                     if response.status_code == 200:
                         data = response.json()
@@ -156,6 +165,7 @@ def _resolve_from_local_context(message_id: str, local_context: Optional[List[Di
 async def resolve_pointers_in_text(
     text: str,
     local_context: Optional[List[Dict]] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     """Resolve all @ref:message: pointers in text to <resolved-ref> blocks.
 
@@ -179,7 +189,7 @@ async def resolve_pointers_in_text(
 
     # Batch fetch from DB
     if ids_to_fetch:
-        fetched = await _fetch_messages_batch(ids_to_fetch)
+        fetched = await _fetch_messages_batch(ids_to_fetch, user_id=user_id)
         for mid, result in fetched.items():
             if result is not None:
                 msg_text, msg_role = result
@@ -222,6 +232,7 @@ async def resolve_pointers_in_text(
 async def resolve_pointers_in_messages(
     messages: List[Dict[str, Any]],
     local_context: Optional[List[Dict]] = None,
+    user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve pointers in a list of OpenAI-format messages.
 
@@ -236,7 +247,11 @@ async def resolve_pointers_in_messages(
             continue
 
         if isinstance(content, str):
-            new_content = await resolve_pointers_in_text(content, local_context)
+            new_content = await resolve_pointers_in_text(
+                content,
+                local_context,
+                user_id=user_id,
+            )
             if new_content != content:
                 resolved.append({**msg, "content": new_content})
             else:
@@ -246,7 +261,11 @@ async def resolve_pointers_in_messages(
             changed = False
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    new_text = await resolve_pointers_in_text(block.get("text", ""), local_context)
+                    new_text = await resolve_pointers_in_text(
+                        block.get("text", ""),
+                        local_context,
+                        user_id=user_id,
+                    )
                     if new_text != block.get("text", ""):
                         new_blocks.append({**block, "text": new_text})
                         changed = True

@@ -91,3 +91,13 @@ moltbot/
 
 # Claude Code per-session scheduler lock
 .claude/scheduled_tasks.lock
+
+# Read-only reference repos (cloned locally for prompt research; not committed to avoid repo bloat)
+/openclaw/
+/hermes-agent/
+
+# Prompt review tool — generated artifacts (regenerable via `bash prompt-review/run.sh`)
+prompt-review/data.json
+prompt-review/extracts/
+prompt-review/checkpoints/
+prompt-review/.cache/
