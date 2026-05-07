@@ -367,6 +367,16 @@ async def mock_generate_completion_summary(
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
     sub_agent_tool_counts: Dict[str, int] = None,
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {"summary": "Test summary", "usage": {}, "tool_counts": {}}
 
@@ -2334,8 +2344,11 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             for c in fake.activity_calls
             if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"
         ]
-        assert init_posts
+        assert len(init_posts) == 2
         assert init_posts[0][1][3]["toolCallId"] == "tc-agent-init"
+        assert init_posts[0][1][3]["toolStatus"] == "IN_PROGRESS"
+        assert init_posts[1][1][3]["toolCallId"] == "tc-agent-init"
+        assert init_posts[1][1][3]["toolStatus"] == "FINISHED"
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)

@@ -503,6 +503,7 @@ class AgentWorkflow:
         # `tree stalled` before any LLM call has happened. The row is purely
         # a liveness signal — UI renders it as a thin "Initializing" chip
         # and the row becomes irrelevant once a real tool message arrives.
+        init_message_posted = False
         with contextlib.suppress(Exception):
             await workflow.execute_activity(
                 post_agent_message,
@@ -521,6 +522,7 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            init_message_posted = True
 
         # Fetch model context window
         if self.max_context_tokens is None:
@@ -717,6 +719,26 @@ class AgentWorkflow:
         # Determine whether to skip PLAN phase and/or DAG
         skip_plan = start_phase in ("execute", "execute_continued")
         skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
+
+        if init_message_posted:
+            with contextlib.suppress(Exception):
+                await workflow.execute_activity(
+                    post_agent_message,
+                    args=[
+                        agent_id,
+                        "Agent initialization complete.",
+                        "TOOL",
+                        {
+                            "toolCallId": "tc-agent-init",
+                            "toolName": "agent_init",
+                            "toolStatus": "FINISHED",
+                            "title": "Initialized",
+                        },
+                        None,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
@@ -2637,7 +2659,24 @@ class AgentWorkflow:
             # Generate summary - pass structured_response, output_schema, and child_tool_counts
             summary_result = await workflow.execute_activity(
                 generate_completion_summary,
-                args=[context, self.goal, self.model, structured_response, self.output_schema, self.child_tool_counts],
+                args=[
+                    context,
+                    self.goal,
+                    self.model,
+                    structured_response,
+                    self.output_schema,
+                    self.child_tool_counts,
+                    self._active_claude_token(),
+                    self._active_claude_source(),
+                    self._active_claude_pool_id(),
+                    self.user_id,
+                    self._active_gpt_token(),
+                    self._active_gpt_account_id(),
+                    self._active_gpt_source(),
+                    self._active_gpt_pool_id(),
+                    self.user_id,
+                    self.agent_id,
+                ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

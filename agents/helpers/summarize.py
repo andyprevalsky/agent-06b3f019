@@ -217,6 +217,16 @@ async def generate_completion_summary(
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
     sub_agent_tool_counts: Dict[str, int] = None,
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a summary of what the agent accomplished.
@@ -283,8 +293,19 @@ Just write plain text describing what was done."""
             model=model,
             temperature=0.3,
             max_tokens=200,  # Brief summary only needs ~50-100 tokens
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
             skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="completion_summary",
+            agent_id=agent_id,
+            user_id=claude_token_user_id or gpt_token_user_id,
             local_context=context,
         )
 
