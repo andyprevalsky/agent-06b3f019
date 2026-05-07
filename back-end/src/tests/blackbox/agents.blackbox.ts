@@ -394,9 +394,9 @@ async function createAnonymousSession(label: string): Promise<AnonymousSessionDa
 }
 
 /**
- * Create an agent via API key auth (no Temporal, no chat handler).
- * Uses API key auth which means chatHandler and GitHub repo creation still fire
- * but we don't wait for them. The agent is created in chat mode (no start_phase).
+ * Create an agent via API key auth. Root agents are created in chat mode
+ * (no start_phase), so chatHandler and GitHub repo creation still fire in the
+ * background and these tests do not wait for them.
  *
  * Retries on:
  *  - Network errors (fetch throws): connection refused, DNS failures
@@ -1261,18 +1261,24 @@ test('POST /:id/resume — not found → 404', async () => {
 test('POST /:id/resume — happy path: status changes to ACTIVE', async () => {
   const session = await createAnonymousSession('resume-happy');
 
-  // Create agent via HTTP, then set to PAUSED via internal status update
-  const agentId = await createTestAgent(session.user.id, 'Resume test');
-  await request(`${BASE_URL}/api/agents/${agentId}/status`, {
-    method: 'PATCH',
-    headers: apiKeyHeaders(),
-    body: JSON.stringify({
-      status: 'PAUSED',
-      progress: 0,
-      tokenCount: 0,
-      contextSize: 0,
-      messageCount: 0,
-    }),
+  // Seed the route precondition directly. Creating a chat-mode root via HTTP
+  // starts a background chat handler, which can independently fail and overwrite
+  // the status while this route-level assertion is reading it.
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-resume-happy', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Resume test',
+        status: 'PAUSED',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
   });
 
   // Resume
@@ -1290,7 +1296,9 @@ test('POST /:id/resume — happy path: status changes to ACTIVE', async () => {
   const status = assertSchema(StatusResponse, statusRes.data, 'resume verify');
   assert(status.status === 'ACTIVE', `Expected ACTIVE after resume, got ${status.status}`);
 
-  await deleteTestAgent(agentId, session.user.id);
+  await withTransientDbRetry('cleanup-resume-happy', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
 });
 
 test('POST /:id/resume — child with paused parent → 400', async () => {
