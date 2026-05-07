@@ -70,7 +70,15 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Push schema + sync data
+# Reset local schema, push schema, then sync data. This must be a true reset,
+# not an upsert-only refresh, so removed/disabled remote rows disappear locally.
+echo "🧹 Resetting local database..."
+docker exec "$DB_CONTAINER" psql -U postgres -d victoria \
+    -v ON_ERROR_STOP=1 \
+    -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' \
+    -c 'GRANT ALL ON SCHEMA public TO postgres;' \
+    -c 'GRANT ALL ON SCHEMA public TO public;' >/dev/null
+
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
 

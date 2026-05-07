@@ -31,6 +31,7 @@ from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     ClaudeAuthContext,
+    ComputeAuthContext,
     GptAuthContext,
     RoseClient,
     RoseError,
@@ -86,7 +87,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 0,
+    max_rotations: int = 3,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
     if not claude_token:
@@ -111,17 +112,11 @@ def _build_claude_auth_context(
             failure_reason=failure_reason,
         )
 
-    async def _fetch_fresh(fetch_user_id: str) -> Optional[ClaudeAuthContext]:
-        result = await fetch_claude_max_token_activity(fetch_user_id)
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
+        result = await fetch_compute_token_activity(fetch_user_id)
         if not result or not result.get("accessToken"):
             return None
-        return _build_claude_auth_context(
-            result.get("accessToken"),
-            source=result.get("source"),
-            user_id=fetch_user_id,
-            pool_token_id=result.get("poolTokenId"),
-            max_rotations=max_rotations,
-        )
+        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -141,7 +136,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 0,
+    max_rotations: int = 3,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
     if not gpt_token:
@@ -166,18 +161,11 @@ def _build_gpt_auth_context(
             failure_reason=failure_reason,
         )
 
-    async def _fetch_fresh(fetch_user_id: str) -> Optional[GptAuthContext]:
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
         result = await fetch_compute_token_activity(fetch_user_id)
-        if not result or result.get("type") != "gpt" or not result.get("accessToken"):
+        if not result or not result.get("accessToken"):
             return None
-        return _build_gpt_auth_context(
-            result.get("accessToken"),
-            account_id=result.get("accountId"),
-            source=result.get("source"),
-            user_id=fetch_user_id,
-            pool_token_id=result.get("poolTokenId"),
-            max_rotations=max_rotations,
-        )
+        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
 
     return GptAuthContext(
         token=gpt_token,
@@ -185,8 +173,37 @@ def _build_gpt_auth_context(
         user_id=user_id,
         account_id=account_id,
         pool_token_id=pool_token_id if source == "pool" else None,
-        mark_rate_limited=_mark_rate_limited if max_rotations > 0 else None,
-        fetch_fresh=_fetch_fresh if max_rotations > 0 else None,
+        mark_rate_limited=_mark_rate_limited,
+        fetch_fresh=_fetch_fresh,
+        max_rotations=max_rotations,
+    )
+
+
+def _build_compute_auth_context(
+    result: Dict[str, Any],
+    user_id: str,
+    *,
+    max_rotations: int = 3,
+) -> Optional[ComputeAuthContext]:
+    """Build a direct auth context from the unified compute-token endpoint."""
+    token = result.get("accessToken")
+    provider_type = result.get("type")
+    if not token or provider_type not in ("claude", "gpt"):
+        return None
+    if provider_type == "claude":
+        return _build_claude_auth_context(
+            token,
+            source=result.get("source"),
+            user_id=user_id,
+            pool_token_id=result.get("poolTokenId"),
+            max_rotations=max_rotations,
+        )
+    return _build_gpt_auth_context(
+        token,
+        account_id=result.get("accountId"),
+        source=result.get("source"),
+        user_id=user_id,
+        pool_token_id=result.get("poolTokenId"),
         max_rotations=max_rotations,
     )
 
@@ -1661,6 +1678,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "claude_token_error": claude_token_error,
                     "gpt_token_error": gpt_token_error,
                     "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
+                    "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
+                    "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
+                    "compute_token_used": stream_usage.get("compute_token_used"),
                     "cancelled": True,
                 }
             else:
@@ -1674,6 +1694,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "claude_token_error": claude_token_error,
                     "gpt_token_error": gpt_token_error,
                     "claude_token_rotated": False,
+                    "gpt_token_rotated": False,
+                    "compute_token_rotated": False,
+                    "compute_token_used": None,
                     "cancelled": True,
                 }
             return empty_response, usage, detected_tools_ordered
@@ -1943,6 +1966,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "claude_token_error": claude_token_error,
                 "gpt_token_error": gpt_token_error,
                 "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
+                "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
+                "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
+                "compute_token_used": stream_usage.get("compute_token_used"),
                 "cancelled": False,
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
@@ -1959,6 +1985,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "claude_token_error": claude_token_error,
                 "gpt_token_error": gpt_token_error,
                 "claude_token_rotated": False,
+                "gpt_token_rotated": False,
+                "compute_token_rotated": False,
+                "compute_token_used": None,
                 "cancelled": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -2405,6 +2434,10 @@ async def call_llm(
                     "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
                     "claude_token_error": rose_response.claude_token_error,
                     "gpt_token_error": rose_response.gpt_token_error,
+                    "claude_token_rotated": usage.get("claude_token_rotated", False),
+                    "gpt_token_rotated": usage.get("gpt_token_rotated", False),
+                    "compute_token_rotated": usage.get("compute_token_rotated", False),
+                    "compute_token_used": usage.get("compute_token_used"),
                 },
             }
 
@@ -2687,6 +2720,9 @@ async def _call_llm_verifier(  # noqa: C901
         "claude_token_error": claude_token_error,
         "gpt_token_error": gpt_token_error,
         "claude_token_rotated": stream_usage.get("claude_token_rotated", False) if stream_usage else False,
+        "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False) if stream_usage else False,
+        "compute_token_rotated": stream_usage.get("compute_token_rotated", False) if stream_usage else False,
+        "compute_token_used": stream_usage.get("compute_token_used") if stream_usage else None,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }

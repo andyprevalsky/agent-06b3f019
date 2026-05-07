@@ -2725,6 +2725,32 @@ async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
         _restore_workflow(original)
 
 
+async def test_workflow_refresh_compute_token_accepts_initial_gpt_token():
+    wf = _bare_workflow_instance()
+    wf.compute_token_provider = None
+    wf.gpt_code_token = None
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "gpt",
+        "accessToken": "gpt-initial",
+        "accountId": "acct-initial",
+        "source": "pool",
+        "poolTokenId": "pool-gpt-initial",
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._refresh_compute_token("user-1")
+        assert wf.compute_token_provider == "gpt"
+        assert wf.gpt_code_token == "gpt-initial"
+        assert wf.gpt_code_account_id == "acct-initial"
+        assert wf.gpt_code_token_source == "pool"
+        assert wf.gpt_code_token_pool_id == "pool-gpt-initial"
+        assert wf.claude_max_token is None
+        assert wf.compute_token_fetched_at == fake.now_value
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_refresh_claude_token_result_none_clears_token():
     wf = _bare_workflow_instance()
     wf.claude_max_token = "old-tok"
@@ -2854,7 +2880,7 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
         _restore_workflow(original)
 
 
-async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token():
+async def test_workflow_on_tokens_successful_rotation_uses_returned_compute_token():
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
@@ -2866,26 +2892,29 @@ async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_to
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_compute_token_activity"] = {
-        "type": "claude",
-        "accessToken": "fresh-token",
-        "source": "pool",
-        "poolTokenId": "pool-fresh",
-    }
     original = _patch_workflow(fake)
     try:
         await wf._on_tokens(
             tokens_in_delta=5,
             tokens_out_delta=2,
-            actual_model="claude-sonnet-4-6-claude",
+            actual_model="gpt-5.4-mini-gpt",
             call_site="test",
-            claude_token_rotated=True,
+            gpt_token_rotated=True,
+            compute_token_used={
+                "type": "gpt",
+                "accessToken": "fresh-gpt-token",
+                "accountId": "acct-fresh",
+                "source": "pool",
+                "poolTokenId": "pool-gpt-fresh",
+            },
         )
-        assert wf.claude_max_token == "fresh-token"
-        assert wf.claude_max_token_source == "pool"
-        assert wf.claude_max_token_pool_id == "pool-fresh"
+        assert wf.compute_token_provider == "gpt"
+        assert wf.gpt_code_token == "fresh-gpt-token"
+        assert wf.gpt_code_account_id == "acct-fresh"
+        assert wf.gpt_code_token_source == "pool"
+        assert wf.gpt_code_token_pool_id == "pool-gpt-fresh"
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "fetch_compute_token_activity" in activity_names
+        assert "fetch_compute_token_activity" not in activity_names
         assert "mark_compute_token_rate_limited_activity" not in activity_names
     finally:
         _restore_workflow(original)
@@ -3110,6 +3139,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(
+        "wf_refresh_compute_token_initial_gpt",
+        test_workflow_refresh_compute_token_accepts_initial_gpt_token,
+    )
+    await r.record_async(
         "wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token
     )
     await r.record_async(
@@ -3126,7 +3159,7 @@ async def run_all_tests():
     )
     await r.record_async(
         "wf_on_tokens_successful_claude_rotation",
-        test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token,
+        test_workflow_on_tokens_successful_rotation_uses_returned_compute_token,
     )
     await r.record_async("wf_on_tokens_rotates_gpt", test_workflow_on_tokens_rotates_gpt_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)

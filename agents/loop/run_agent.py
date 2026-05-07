@@ -598,6 +598,8 @@ async def run_agent(  # noqa: C901
                         claude_token_error=usage.get("claude_token_error"),
                         gpt_token_error=usage.get("gpt_token_error"),
                         claude_token_rotated=usage.get("claude_token_rotated", False),
+                        gpt_token_rotated=usage.get("gpt_token_rotated", False),
+                        compute_token_used=usage.get("compute_token_used"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
@@ -1132,6 +1134,8 @@ async def run_agent(  # noqa: C901
                             claude_token_error=v_usage.get("claude_token_error"),
                             gpt_token_error=v_usage.get("gpt_token_error"),
                             claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                            gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                            compute_token_used=v_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -1302,6 +1306,8 @@ async def run_agent(  # noqa: C901
                         claude_token_error=v_usage.get("claude_token_error"),
                         gpt_token_error=v_usage.get("gpt_token_error"),
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                        gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                        compute_token_used=v_usage.get("compute_token_used"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -1382,6 +1388,7 @@ async def _compress_context(
                     claude_token_rotated=usage.get("claude_token_rotated", False),
                     gpt_token_error=usage.get("gpt_token_error"),
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
+                    compute_token_used=usage.get("compute_token_used"),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")

@@ -2174,6 +2174,121 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     assert metadata.data.get("claude_token_error") == "auth_error"
 
 
+async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
+    """If Claude direct auth fails, a separate supplied GPT auth is not fallback.
+
+    Cross-provider retry must happen only through the compute-token fetch callback.
+    """
+    waterfall_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "waterfall"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    calls: list[str] = []
+
+    def handler(req):
+        url = str(req.url)
+        calls.append(url)
+        if "api.anthropic.com" in url:
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(200, text="gpt fallback should not run")
+        return httpx.Response(200, text=waterfall_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    response = await client.collect(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        claude_auth=claude_auth_from_token("expired-token"),
+        gpt_auth=gpt_auth_from_token("valid-gpt-token", "acct_123"),
+        call_site="test-no-gpt-fallback",
+    )
+
+    assert response.content == "waterfall"
+    assert response.claude_token_error == "auth_error"
+    assert any("api.anthropic.com" in call for call in calls)
+    assert not any("chatgpt.com/backend-api/codex/responses" in call for call in calls)
+    assert any("openrouter.ai" in call for call in calls)
+
+
+async def test_client_rotates_compute_token_across_providers_before_waterfall():
+    """A failed Claude compute token can rotate to GPT in the same Rose call."""
+    gpt_lines = []
+    gpt_lines += _ev(
+        "response.output_text.delta",
+        {"type": "response.output_text.delta", "delta": "rotated"},
+    )
+    gpt_lines += _ev(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}},
+        },
+    )
+    gpt_body = "\n".join(gpt_lines)
+    calls: list[str] = []
+    marked: list[tuple[str, str]] = []
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token_type, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id):
+        return GptAuthContext(
+            token="fresh-gpt",
+            account_id="acct-fresh",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-gpt",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=3,
+        )
+
+    def handler(req):
+        url = str(req.url)
+        calls.append(url)
+        if "api.anthropic.com" in url:
+            return httpx.Response(401, json={"error": {"message": "expired"}})
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(200, text=gpt_body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        claude_auth=ClaudeAuthContext(
+            token="expired-claude",
+            source="pool",
+            user_id="user-1",
+            pool_token_id="pool-claude",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=fetch_fresh,
+            max_rotations=3,
+        ),
+        call_site="test-compute-rotation",
+    ):
+        chunks.append(chunk)
+
+    assert marked == [("claude", "auth_error")]
+    assert any("api.anthropic.com" in call for call in calls)
+    assert any("chatgpt.com/backend-api/codex/responses" in call for call in calls)
+    assert not any("openrouter.ai" in call for call in calls)
+    assert "".join(c.data.get("text", "") for c in chunks if c.kind == "content") == "rotated"
+    usage = next(c for c in chunks if c.kind == "usage").data
+    assert usage["gpt_token_rotated"] is True
+    assert usage["compute_token_rotated"] is True
+    assert usage["compute_token_used"]["type"] == "gpt"
+    assert usage["compute_token_used"]["accessToken"] == "fresh-gpt"
+
+
 async def test_client_splits_pydantic_model_to_claude_native_tools():
     AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
 
@@ -2807,6 +2922,11 @@ async def run_all_tests():
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async("client_no_supplied_gpt_fallback", test_client_does_not_use_supplied_gpt_auth_as_fallback)
+    await r.record_async(
+        "client_compute_rotates_across_providers",
+        test_client_rotates_compute_token_across_providers_before_waterfall,
+    )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools

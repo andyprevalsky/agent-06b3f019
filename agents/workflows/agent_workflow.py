@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import json as _json
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import structlog
 import structlog.contextvars
@@ -996,6 +996,8 @@ class AgentWorkflow:
                         claude_token_error=v_usage.get("claude_token_error"),
                         gpt_token_error=v_usage.get("gpt_token_error"),
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                        gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                        compute_token_used=v_usage.get("compute_token_used"),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
@@ -1143,6 +1145,25 @@ class AgentWorkflow:
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
+    def _remember_compute_token(self, token: Optional[Dict[str, Any]]) -> bool:
+        if not token or token.get("type") not in ("claude", "gpt") or not token.get("accessToken"):
+            return False
+        now = workflow.now()
+        self._clear_compute_token()
+        self.compute_token_provider = token.get("type")
+        if self.compute_token_provider == "claude":
+            self.claude_max_token = token.get("accessToken")
+            self.claude_max_token_source = token.get("source")
+            self.claude_max_token_pool_id = token.get("poolTokenId")
+            self.claude_max_token_fetched_at = now
+        else:
+            self.gpt_code_token = token.get("accessToken")
+            self.gpt_code_account_id = token.get("accountId")
+            self.gpt_code_token_source = token.get("source")
+            self.gpt_code_token_pool_id = token.get("poolTokenId")
+        self.compute_token_fetched_at = now
+        return True
+
     async def _refresh_compute_token(self, user_id: str) -> None:
         """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
@@ -1163,19 +1184,7 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             if result and result.get("accessToken") and result.get("type") in ("claude", "gpt"):
-                self._clear_compute_token()
-                self.compute_token_provider = result.get("type")
-                if self.compute_token_provider == "claude":
-                    self.claude_max_token = result.get("accessToken")
-                    self.claude_max_token_source = result.get("source")
-                    self.claude_max_token_pool_id = result.get("poolTokenId")
-                    self.claude_max_token_fetched_at = now
-                else:
-                    self.gpt_code_token = result.get("accessToken")
-                    self.gpt_code_account_id = result.get("accountId")
-                    self.gpt_code_token_source = result.get("source")
-                    self.gpt_code_token_pool_id = result.get("poolTokenId")
-                self.compute_token_fetched_at = now
+                self._remember_compute_token(result)
                 workflow.logger.info(
                     f"🔑 Compute token selected (type={self.compute_token_provider}, source={result.get('source')})"
                 )
@@ -1837,6 +1846,7 @@ class AgentWorkflow:
         gpt_token_error: Optional[str] = None,
         claude_token_rotated: bool = False,
         gpt_token_rotated: bool = False,
+        compute_token_used: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -1864,11 +1874,23 @@ class AgentWorkflow:
         if actual_model:
             self.actual_model = actual_model
 
+            token_used_type = compute_token_used.get("type") if compute_token_used else None
+            if compute_token_used and (
+                (token_used_type == "claude" and actual_model.endswith("-claude"))
+                or (token_used_type == "gpt" and actual_model.endswith("-gpt"))
+            ):
+                if self._remember_compute_token(compute_token_used):
+                    workflow.logger.info(
+                        f"🔑 Workflow cached compute token updated from successful call "
+                        f"(type={self.compute_token_provider}, source={compute_token_used.get('source')})"
+                    )
+
             if (
                 self.compute_token_provider == "claude"
                 and self.claude_max_token
                 and actual_model.endswith("-claude")
                 and claude_token_rotated
+                and not compute_token_used
             ):
                 workflow.logger.info(
                     "🔁 Claude token rotated inside RoseClient; refreshing workflow cached token"
@@ -1942,6 +1964,7 @@ class AgentWorkflow:
                 and self.gpt_code_token
                 and actual_model.endswith("-gpt")
                 and gpt_token_rotated
+                and not compute_token_used
             ):
                 workflow.logger.info(
                     "🔁 GPT token rotated inside RoseClient; refreshing workflow cached token"

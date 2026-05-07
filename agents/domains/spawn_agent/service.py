@@ -206,6 +206,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         gpt_token_error: Optional[str] = None,
         claude_token_rotated: bool = False,
         gpt_token_rotated: bool = False,
+        compute_token_used: Optional[Dict[str, Any]] = None,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(

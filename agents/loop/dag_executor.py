@@ -587,6 +587,8 @@ async def _execute_single_task(
                             claude_token_rotated=reasoning_usage.get("claude_token_rotated", False),
                             claude_token_error=reasoning_usage.get("claude_token_error"),
                             gpt_token_error=reasoning_usage.get("gpt_token_error"),
+                            gpt_token_rotated=reasoning_usage.get("gpt_token_rotated", False),
+                            compute_token_used=reasoning_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
@@ -701,6 +703,8 @@ async def _execute_single_task(
                             claude_token_rotated=param_usage.get("claude_token_rotated", False),
                             claude_token_error=param_usage.get("claude_token_error"),
                             gpt_token_error=param_usage.get("gpt_token_error"),
+                            gpt_token_rotated=param_usage.get("gpt_token_rotated", False),
+                            compute_token_used=param_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")

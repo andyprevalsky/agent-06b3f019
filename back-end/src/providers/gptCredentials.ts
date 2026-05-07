@@ -200,8 +200,22 @@ export async function markGptPoolTokenRateLimited(
 
 export async function markGptUserTokenRateLimited(
   userId: string,
-  options?: { rateLimitedUntil?: string | Date | null }
+  options?: { rateLimitedUntil?: string | Date | null; failureReason?: string | null }
 ): Promise<void> {
+  if (options?.failureReason === 'auth_error') {
+    await prisma.integration.updateMany({
+      where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+      data: {
+        status: 'EXPIRED',
+        isActive: false,
+        rateLimitedUntil: null,
+        failureReason: 'auth_error',
+      },
+    });
+    log.info(`GPT user token for ${userId} disabled after auth_error`);
+    return;
+  }
+
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
   await prisma.integration.updateMany({
     where: { userId, name: 'gpt_code', status: 'CONNECTED' },

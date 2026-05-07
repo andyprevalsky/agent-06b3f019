@@ -442,7 +442,10 @@ export async function markTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    await markUserTokenRateLimited(params.userId, { rateLimitedUntil: params.rateLimitedUntil });
+    await markUserTokenRateLimited(params.userId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
+    });
     return {
       ok: true,
       source,
@@ -501,7 +504,10 @@ export async function markGptTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    await markGptUserTokenRateLimited(params.userId, { rateLimitedUntil: params.rateLimitedUntil });
+    await markGptUserTokenRateLimited(params.userId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
+    });
     return {
       ok: true,
       source,

@@ -25,7 +25,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional, Type
+from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -50,7 +50,14 @@ from providers.rose.schema import (
     build_openai_response_format,
     tool_requires_forced_choice,
 )
-from providers.rose.types import ChunkKind, ClaudeAuthContext, GptAuthContext, RoseResponse, StreamChunk
+from providers.rose.types import (
+    ChunkKind,
+    ClaudeAuthContext,
+    ComputeAuthContext,
+    GptAuthContext,
+    RoseResponse,
+    StreamChunk,
+)
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -71,6 +78,45 @@ _FALL_THROUGH_ERRORS = (
 
 class _FallThrough(Exception):
     """Internal signal — claudeAuth failed cleanly before emitting content."""
+
+
+def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
+    """Clone a direct-token auth context for exactly one provider attempt.
+
+    Provider modules still own HTTP retry and DB marking for the current token.
+    RoseClient owns cross-provider compute rotation, so provider-internal fresh
+    fetch is disabled on this clone.
+    """
+    if auth.token_type == "claude":
+        return ClaudeAuthContext(
+            token=auth.token,
+            source=auth.source,
+            user_id=auth.user_id,
+            pool_token_id=auth.pool_token_id,
+            mark_rate_limited=auth.mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=0,
+        )
+    return GptAuthContext(
+        token=auth.token,
+        source=auth.source,
+        user_id=auth.user_id,
+        account_id=auth.account_id,
+        pool_token_id=auth.pool_token_id,
+        mark_rate_limited=auth.mark_rate_limited,
+        fetch_fresh=None,
+        max_rotations=0,
+    )
+
+
+def _compute_token_payload(auth: ComputeAuthContext) -> Dict[str, Any]:
+    return {
+        "type": auth.token_type,
+        "accessToken": auth.token,
+        "accountId": auth.account_id,
+        "source": auth.source,
+        "poolTokenId": auth.pool_token_id,
+    }
 
 
 def _safe_heartbeat(message: str) -> None:
@@ -147,6 +193,8 @@ class RoseClient:
             if gpt_auth_tools:
                 gpt_auth_tool_choice = "any"
 
+        direct_auth: Optional[ComputeAuthContext] = claude_auth or gpt_auth
+
         logger.info(
             "rose.complete.start",
             request_id=rid,
@@ -155,6 +203,7 @@ class RoseClient:
             pool=pool,
             claude_auth_present=claude_auth is not None,
             gpt_auth_present=gpt_auth is not None,
+            direct_auth_type=direct_auth.token_type if direct_auth is not None else None,
             claude_auth_tool_count=len(claude_auth_tools or []),
             deadline_s=deadline_s,
         )
@@ -230,10 +279,13 @@ class RoseClient:
             )
 
         try:
-            if claude_auth is not None:
+            direct_rotations = 0
+            direct_token_errors: Dict[str, str] = {}
+            while direct_auth is not None:
+                attempt_auth = _single_attempt_auth(direct_auth)
                 try:
-                    async for chunk in _guarded(
-                        _try_claude_auth(
+                    if direct_auth.token_type == "claude":
+                        source = _try_claude_auth(
                             pool_spec=pool_spec,
                             messages=messages,
                             tools=claude_auth_tools,
@@ -241,59 +293,15 @@ class RoseClient:
                             response_format=None,
                             max_tokens=max_tokens,
                             skip_cache_write=skip_cache_write,
-                            auth=claude_auth,
+                            auth=cast(ClaudeAuthContext, attempt_auth),
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
                             thinking=thinking,
                             effort=effort,
                         )
-                    ):
-                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
-                            _seen_actual_model = chunk.data["actual_model"]
-                        elif chunk.kind == "usage":
-                            if getattr(claude_auth, "rotated", False):
-                                chunk = StreamChunk(
-                                    kind="usage",
-                                    data={
-                                        **chunk.data,
-                                        "claude_token_rotated": True,
-                                        "claude_token_rotation_reason": getattr(
-                                            claude_auth,
-                                            "last_rotation_reason",
-                                            None,
-                                        ),
-                                    },
-                                )
-                            _emit_llm_cache(chunk.data)
-                        yield chunk
-                    logger.info(
-                        "rose.complete.claude_auth.done",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        elapsed_s=round(time.monotonic() - started, 3),
-                    )
-                    return
-                except _FallThrough as ft:
-                    cause = ft.__cause__
-                    if isinstance(cause, RoseError):
-                        claude_token_error = classify_claude_token_error(cause)
                     else:
-                        claude_token_error = "server_error"
-                    logger.info(
-                        "rose.complete.fall_through_to_waterfall",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        reason=type(cause).__name__ if cause else "unknown",
-                        claude_token_error=claude_token_error,
-                    )
-
-            if gpt_auth is not None:
-                try:
-                    async for chunk in _guarded(
-                        _try_gpt_auth(
+                        source = _try_gpt_auth(
                             pool_spec=pool_spec,
                             messages=messages,
                             tools=gpt_auth_tools,
@@ -301,40 +309,92 @@ class RoseClient:
                             response_format=None if gpt_auth_tools else openrouter_response_format,
                             temperature=temperature,
                             effort=effort,
-                            auth=gpt_auth,
+                            auth=cast(GptAuthContext, attempt_auth),
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
                         )
-                    ):
+
+                    async for chunk in _guarded(source):
                         if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                             _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
+                            token_used = _compute_token_payload(direct_auth)
+                            usage_data = {
+                                **chunk.data,
+                                "compute_token_used": token_used,
+                                "compute_token_rotated": direct_rotations > 0,
+                            }
+                            if direct_auth.token_type == "claude":
+                                usage_data["claude_token_rotated"] = direct_rotations > 0
+                            else:
+                                usage_data["gpt_token_rotated"] = direct_rotations > 0
+                            chunk = StreamChunk(kind="usage", data=usage_data)
                             _emit_llm_cache(chunk.data)
                         yield chunk
                     logger.info(
-                        "rose.complete.gpt_auth.done",
+                        "rose.complete.direct_auth.done",
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
+                        token_type=direct_auth.token_type,
+                        rotations=direct_rotations,
                         elapsed_s=round(time.monotonic() - started, 3),
-                        claude_token_error=claude_token_error,
                     )
                     return
                 except _FallThrough as ft:
                     cause = ft.__cause__
-                    if isinstance(cause, RoseError):
-                        gpt_token_error = classify_gpt_token_error(cause)
+                    if direct_auth.token_type == "claude":
+                        token_error = (
+                            classify_claude_token_error(cause)
+                            if isinstance(cause, RoseError)
+                            else "server_error"
+                        )
+                        claude_token_error = token_error
                     else:
-                        gpt_token_error = "server_error"
+                        token_error = (
+                            classify_gpt_token_error(cause)
+                            if isinstance(cause, RoseError)
+                            else "server_error"
+                        )
+                        gpt_token_error = token_error
+                    direct_token_errors[direct_auth.token_type] = token_error
                     logger.info(
-                        "rose.complete.fall_through_from_gpt_auth",
+                        "rose.complete.direct_auth.failed",
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
+                        token_type=direct_auth.token_type,
                         reason=type(cause).__name__ if cause else "unknown",
-                        gpt_token_error=gpt_token_error,
+                        token_error=token_error,
+                        rotations=direct_rotations,
                     )
+
+                    can_rotate = (
+                        token_error in ("auth_error", "rate_limit")
+                        and direct_rotations < direct_auth.max_rotations
+                        and direct_auth.fetch_fresh is not None
+                    )
+                    if not can_rotate:
+                        break
+                    fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                    if fresh is None:
+                        break
+                    direct_rotations += 1
+                    direct_auth = fresh
+                    logger.info(
+                        "rose.complete.direct_auth.rotated",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        next_token_type=direct_auth.token_type,
+                        next_source=direct_auth.source,
+                        rotations=direct_rotations,
+                    )
+
+            if direct_token_errors:
+                claude_token_error = direct_token_errors.get("claude", claude_token_error)
+                gpt_token_error = direct_token_errors.get("gpt", gpt_token_error)
 
             async for chunk in _guarded(
                 waterfall_complete(
