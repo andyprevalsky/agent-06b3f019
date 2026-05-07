@@ -60,7 +60,7 @@ vi.mock('../../main/handlers/registry', () => ({
   getOnboardingComplete: vi.fn(() => onboardingCompleteFlag),
 }));
 
-vi.mock('../../main/services/iMessageReader', () => ({
+vi.mock('../../main/domains/i-message-reader/runtime', () => ({
   IMessageReader: { checkAccess: vi.fn(() => ({ hasAccess: true })) },
 }));
 
@@ -71,7 +71,7 @@ const restartToUpdateMock = vi.fn();
 const isUpdateDownloadedMock = vi.fn(() => false);
 const registerUpdateIpcMock = vi.fn();
 
-vi.mock('../../main/services/autoUpdater', () => ({
+vi.mock('../../main/domains/auto-updater/runtime', () => ({
   initAutoUpdater: initAutoUpdaterMock,
   setAutoUpdaterWindow: setAutoUpdaterWindowMock,
   manualCheckForUpdates: manualCheckForUpdatesMock,

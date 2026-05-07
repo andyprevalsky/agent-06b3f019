@@ -18,6 +18,7 @@ import {
   UPLOAD_PROGRESS_DONE_PERCENT,
   UPLOAD_PROGRESS_START_PERCENT,
 } from './config';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import { dispatchUpload, resolveStrategy } from './service';
 import type { UploadResult } from './types';
 
@@ -57,7 +58,7 @@ export class Uploader {
     } catch (error) {
       return {
         success: false,
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message: getErrorMessageOrFallback(error),
       };
     }
   }

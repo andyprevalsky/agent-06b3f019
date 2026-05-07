@@ -1,0 +1,359 @@
+/**
+ * Blackbox test for the compiled Electron startup path.
+ *
+ * The regular Vitest suite imports TypeScript source through Vite. This test
+ * exercises the path Electron actually runs: tsc emits CommonJS files, the
+ * compiled main entry creates BrowserWindows, and the compiled preload file
+ * installs window.api before renderer code can call it.
+ */
+
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const ROOT = path.resolve(__dirname, '../..');
+const TSC_BIN = path.join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
+const STARTUP_MARKER = '@@ROSE_COMPILED_STARTUP@@';
+
+interface StartupProbe {
+  windowCount: number;
+  preloadPath: string;
+  sandboxValues: Array<boolean | null>;
+  exposedKey: string | null;
+  hasApi: boolean;
+  hasUpdateStatus: boolean;
+  hasQuickQuerySubmit: boolean;
+  ipcHandleCount: number;
+}
+
+function compileMain(outDir: string): void {
+  execFileSync(
+    process.execPath,
+    [TSC_BIN, '-p', path.join(ROOT, 'tsconfig.main.json'), '--outDir', outDir, '--pretty', 'false'],
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        VITE_SUPABASE_URL: 'https://test.supabase.co',
+        VITE_SUPABASE_ANON_KEY: 'test-anon-key',
+      },
+      encoding: 'utf8',
+    }
+  );
+}
+
+function buildStartupProbe(mainEntry: string): string {
+  return `
+const Module = require('node:module');
+const path = require('node:path');
+
+process.stdin.resume = function noopResume() {};
+process.stdin.on = function noopOn() { return process.stdin; };
+
+const mainEntry = ${JSON.stringify(mainEntry)};
+const marker = ${JSON.stringify(STARTUP_MARKER)};
+const rootRequire = Module.createRequire(${JSON.stringify(path.join(ROOT, 'package.json'))});
+const windows = [];
+const ipcHandles = [];
+let exposed = null;
+
+function makeWebContents() {
+  return {
+    send() {},
+    on() {},
+    once() {},
+    isLoading() { return false; },
+    setWindowOpenHandler() {},
+    openDevTools() {},
+    focus() {},
+    sendInputEvent() {},
+    executeJavaScript() { return Promise.resolve(); },
+  };
+}
+
+function BrowserWindow(options) {
+  const win = {
+    options,
+    webContents: makeWebContents(),
+    on() {},
+    show() {},
+    hide() {},
+    close() {},
+    focus() {},
+    focusOnWebView() {},
+    moveTop() {},
+    isDestroyed() { return false; },
+    isVisible() { return false; },
+    isMaximized() { return false; },
+    maximize() {},
+    getBounds() { return { x: 0, y: 0, width: 1800, height: 800 }; },
+    getSize() { return [1800, 800]; },
+    getContentSize() { return [1800, 800]; },
+    setContentSize() {},
+    setPosition() {},
+    setVisibleOnAllWorkspaces() {},
+    setAlwaysOnTop() {},
+    setWindowButtonVisibility() {},
+    loadURL() { return Promise.resolve(); },
+    loadFile() { return Promise.resolve(); },
+  };
+  windows.push(win);
+  return win;
+}
+
+BrowserWindow.fromWebContents = function fromWebContents() {
+  return windows[0] || null;
+};
+
+class Store {
+  constructor(options) {
+    this.storage = new Map(Object.entries((options && options.defaults) || {}));
+  }
+  get(key, fallback) {
+    return this.storage.has(key) ? this.storage.get(key) : fallback;
+  }
+  set(key, value) {
+    this.storage.set(key, value);
+  }
+  delete(key) {
+    this.storage.delete(key);
+  }
+  clear() {
+    this.storage.clear();
+  }
+  has(key) {
+    return this.storage.has(key);
+  }
+}
+
+function BetterSqlite3() {
+  return {
+    prepare() {
+      return {
+        all() { return []; },
+        get() { return undefined; },
+        run() { return { changes: 0 }; },
+      };
+    },
+    exec() {},
+    close() {},
+    pragma() {},
+  };
+}
+
+class ClassicLevel {
+  constructor() {
+    this.storage = new Map();
+  }
+  get(key) {
+    if (this.storage.has(key)) return Promise.resolve(this.storage.get(key));
+    const error = new Error('Not found');
+    error.code = 'LEVEL_NOT_FOUND';
+    return Promise.reject(error);
+  }
+  put(key, value) {
+    this.storage.set(key, value);
+    return Promise.resolve();
+  }
+  del(key) {
+    this.storage.delete(key);
+    return Promise.resolve();
+  }
+  close() {
+    return Promise.resolve();
+  }
+}
+
+const electronStub = {
+  app: {
+    name: '',
+    isPackaged: false,
+    getPath() { return '/tmp/mac-app-compiled-startup'; },
+    getName() { return 'rose-desktop-test'; },
+    getVersion() { return '0.0.0-test'; },
+    on() {},
+    whenReady() { return Promise.resolve(); },
+    quit() {},
+    isReady() { return true; },
+    setAsDefaultProtocolClient() { return true; },
+    focus() {},
+    dock: {
+      show() {},
+      setIcon() {},
+    },
+  },
+  BrowserWindow,
+  ipcMain: {
+    handle(channel) { ipcHandles.push(channel); },
+    on() {},
+    removeHandler() {},
+  },
+  ipcRenderer: {
+    invoke() { return Promise.resolve(); },
+    send() {},
+    on() {},
+    removeAllListeners() {},
+    removeListener() {},
+  },
+  contextBridge: {
+    exposeInMainWorld(key, api) {
+      exposed = { key, api };
+    },
+  },
+  safeStorage: {
+    isEncryptionAvailable() { return true; },
+    encryptString(value) { return Buffer.from(value); },
+    decryptString(value) { return Buffer.from(value).toString(); },
+  },
+  shell: { openExternal() { return Promise.resolve(); } },
+  dialog: { showMessageBox() { return Promise.resolve(); }, showErrorBox() {} },
+  Menu: { setApplicationMenu() {}, buildFromTemplate() { return {}; } },
+  Tray: function Tray() {},
+  nativeImage: { createFromPath() { return {}; } },
+  globalShortcut: {
+    register() { return true; },
+    unregister() {},
+    unregisterAll() {},
+    isRegistered() { return false; },
+  },
+  screen: {
+    getCursorScreenPoint() { return { x: 0, y: 0 }; },
+    getDisplayNearestPoint() {
+      return { workArea: { x: 0, y: 0, width: 1920, height: 1080 }, bounds: { x: 0, y: 0, width: 1920, height: 1080 } };
+    },
+    getPrimaryDisplay() {
+      return { workArea: { x: 0, y: 0, width: 1920, height: 1080 }, bounds: { x: 0, y: 0, width: 1920, height: 1080 } };
+    },
+    getAllDisplays() { return []; },
+  },
+};
+
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, parent, isMain) {
+  if (request === 'electron') return electronStub;
+  if (request === 'electron-store') return { __esModule: true, default: Store };
+  if (request === 'electron-updater') {
+    return {
+      autoUpdater: {
+        checkForUpdatesAndNotify() { return Promise.resolve(); },
+        checkForUpdates() { return Promise.resolve(); },
+        on() {},
+        setFeedURL() {},
+      },
+    };
+  }
+  if (request === 'better-sqlite3') return BetterSqlite3;
+  if (request === 'classic-level') return { ClassicLevel };
+  if (request === 'node-mac-contacts') {
+    return {
+      authorizationStatus() { return 'authorized'; },
+      getAllContacts() { return []; },
+    };
+  }
+  try {
+    return originalLoad.apply(this, arguments);
+  } catch (error) {
+    if (!request.startsWith('.') && !path.isAbsolute(request)) {
+      return rootRequire(request);
+    }
+    throw error;
+  }
+};
+
+require(mainEntry);
+
+function finish() {
+  try {
+    const mainWindow = windows[0];
+    if (!mainWindow) throw new Error('Compiled main entry did not create BrowserWindow');
+
+    const preloadPath = mainWindow.options && mainWindow.options.webPreferences && mainWindow.options.webPreferences.preload;
+    if (typeof preloadPath !== 'string' || preloadPath.length === 0) {
+      throw new Error('Compiled main BrowserWindow has no preload path');
+    }
+
+    require(preloadPath);
+    const api = exposed && exposed.api;
+    const sandboxValues = windows.map((win) => {
+      const preferences = win.options && win.options.webPreferences;
+      return preferences && typeof preferences.sandbox === 'boolean' ? preferences.sandbox : null;
+    });
+
+    console.log(marker + JSON.stringify({
+      windowCount: windows.length,
+      preloadPath,
+      sandboxValues,
+      exposedKey: exposed && exposed.key,
+      hasApi: Boolean(api),
+      hasUpdateStatus: Boolean(api && typeof api.onUpdateStatus === 'function'),
+      hasQuickQuerySubmit: Boolean(api && typeof api.onQuickQuerySubmit === 'function'),
+      ipcHandleCount: ipcHandles.length,
+    }));
+    process.exit(0);
+  } catch (error) {
+    console.error(error && error.stack ? error.stack : error);
+    process.exit(1);
+  }
+}
+
+setImmediate(() => setImmediate(finish));
+`;
+}
+
+function runStartupProbe(outDir: string): StartupProbe {
+  const output = execFileSync(
+    process.execPath,
+    ['-e', buildStartupProbe(path.join(outDir, 'main', 'index.js'))],
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        VITE_SUPABASE_URL: 'https://test.supabase.co',
+        VITE_SUPABASE_ANON_KEY: 'test-anon-key',
+        VITE_BACKEND_API_URL: 'http://localhost:3001',
+        MAC_APP_PORT: '59999',
+      },
+      encoding: 'utf8',
+    }
+  );
+  const markerLine = output.split('\n').find((line) => line.startsWith(STARTUP_MARKER));
+  if (markerLine === undefined) {
+    throw new Error(`Compiled startup probe did not emit marker. Output:\n${output}`);
+  }
+  return JSON.parse(markerLine.slice(STARTUP_MARKER.length)) as StartupProbe;
+}
+
+describe('compiled Electron startup blackbox', () => {
+  it('compiles main/preload output and starts with window.api installed', () => {
+    const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-compiled-startup-'));
+    try {
+      compileMain(outDir);
+
+      const preloadPath = path.join(outDir, 'main', 'preload.js');
+      const preloadRuntimePath = path.join(
+        outDir,
+        'main',
+        'domains',
+        'electron-preload',
+        'runtime.js'
+      );
+      expect(fs.existsSync(path.join(outDir, 'main', 'index.js'))).toBe(true);
+      expect(fs.existsSync(preloadPath)).toBe(true);
+      expect(fs.existsSync(preloadRuntimePath)).toBe(true);
+
+      const probe = runStartupProbe(outDir);
+      expect(probe.windowCount).toBeGreaterThanOrEqual(2);
+      expect(fs.realpathSync(probe.preloadPath)).toBe(fs.realpathSync(preloadPath));
+      expect(probe.sandboxValues.every((value) => value === false)).toBe(true);
+      expect(probe.exposedKey).toBe('api');
+      expect(probe.hasApi).toBe(true);
+      expect(probe.hasUpdateStatus).toBe(true);
+      expect(probe.hasQuickQuerySubmit).toBe(true);
+      expect(probe.ipcHandleCount).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+});

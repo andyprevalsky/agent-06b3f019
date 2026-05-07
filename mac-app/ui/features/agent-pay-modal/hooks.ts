@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getSession } from '@/lib/supabase';
 import { type EncryptedPaymentEnvelope, type PaymentData } from '@/lib/encryption';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 
 import { fetchUserSettings, patchUserSettings } from './api';
 import {
@@ -195,7 +196,7 @@ const buildHandleSave = (
       onSuccess();
     } catch (err) {
       console.error('Failed to save agent pay:', err);
-      state.setError(err instanceof Error ? err.message : GENERIC_SAVE_FAILURE_FALLBACK);
+      state.setError(getErrorMessageOrFallback(err, GENERIC_SAVE_FAILURE_FALLBACK));
     } finally {
       state.setSaving(false);
     }

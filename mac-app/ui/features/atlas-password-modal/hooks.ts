@@ -7,6 +7,7 @@
  */
 
 import { useState } from 'react';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import { openAtlasKeychainEntry } from './api';
 import type { AtlasPasswordSyncType, UseAtlasPasswordModalResult } from './types';
 
@@ -51,7 +52,7 @@ export const useAtlasPasswordModal = ({
       await onSync(password);
       // Success - modal will be closed by parent
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to sync ${syncType}`);
+      setError(getErrorMessageOrFallback(err, `Failed to sync ${syncType}`));
       setLoading(false);
     }
   };

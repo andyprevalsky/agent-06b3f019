@@ -1,7 +1,7 @@
 import os from 'os';
 import path from 'path';
 
-export { RSA_PUBLIC_KEY_PEM } from '../claude-credential-sync/config';
+export { RSA_PUBLIC_KEY_PEM } from '../../base/credentialEncryption';
 
 /** Codex CLI auth file written by `codex login` for ChatGPT accounts. */
 export const CODEX_AUTH_PATH = path.join(os.homedir(), '.codex', 'auth.json');

@@ -16,13 +16,15 @@
 import { useState, useEffect } from 'react';
 import { Loader2, ArrowRight, Sparkles } from 'lucide-react';
 import { SystemCustomization, type CustomizationData } from '@/features/customization';
-import { fetchCustomization, saveCustomization } from '../api';
+import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
+import { useOnboardingCustomizationApi } from '../hooks';
 
 interface OnboardingCustomizationProps {
   onComplete: () => void;
 }
 
 const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): JSX.Element => {
+  const customizationApi = useOnboardingCustomizationApi();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,21 +35,21 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
   });
 
   useEffect(() => {
-    void fetchCustomization().then((loaded) => {
+    void customizationApi.fetchCustomization().then((loaded) => {
       if (loaded !== null) setCustomization(loaded);
       setLoading(false);
     });
-  }, []);
+  }, [customizationApi]);
 
   const handleContinue = async (): Promise<void> => {
     setSaving(true);
     setError(null);
     try {
-      await saveCustomization(customization);
+      await customizationApi.saveCustomization(customization);
       onComplete();
     } catch (err) {
       console.error('Failed to save customization:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setError(getErrorMessageOrFallback(err, 'Failed to save'));
       setSaving(false);
     }
   };

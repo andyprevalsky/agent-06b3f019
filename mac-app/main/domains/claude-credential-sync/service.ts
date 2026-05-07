@@ -15,6 +15,7 @@
 import crypto from 'crypto';
 import { Crypto } from '../../base/crypto';
 import { config } from '../../base/config';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
@@ -223,7 +224,7 @@ export async function syncCredentials(opts: SyncCredentialsOptions): Promise<Syn
       credentialsJson = await ensureCredentialsAfterOAuth(sendStatus, mockNoClaudeCode);
     } catch (error) {
       if (error instanceof SyncFailure) return error.result;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       logConsoleError(LOG_COMPONENT, 'Install/auth flow failed', error);
       sendStatus('');
       return { success: false, message };
@@ -243,7 +244,7 @@ export async function syncCredentials(opts: SyncCredentialsOptions): Promise<Syn
     logConsole(LOG_COMPONENT, 'Credentials synced successfully');
     return { success: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     logConsoleError(LOG_COMPONENT, 'Upload failed', error);
     sendStatus('');
     return { success: false, message };

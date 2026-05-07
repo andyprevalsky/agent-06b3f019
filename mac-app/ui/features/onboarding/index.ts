@@ -7,5 +7,6 @@
  * components → barrel.
  */
 
-export { default as Onboarding } from './components/Onboarding';
+export { default, default as Onboarding } from './components/Onboarding';
+export { default as OnboardingAuth } from './components/OnboardingAuth';
 export type { OnboardingStep } from './types';

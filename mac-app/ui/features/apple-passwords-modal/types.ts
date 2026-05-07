@@ -29,4 +29,5 @@ export interface UseApplePasswordsModalResult {
   onDrop: (e: React.DragEvent) => void;
   onSyncClick: () => Promise<void>;
   onCloseClick: () => void;
+  onOpenPasswordsClick: () => void;
 }

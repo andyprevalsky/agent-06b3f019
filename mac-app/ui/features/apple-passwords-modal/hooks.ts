@@ -1,4 +1,6 @@
 import { useRef, useState } from 'react';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
+import { openPasswordsApp } from './api';
 import { ACCEPTED_EXTENSION, CSV_REQUIRED_MESSAGE, GENERIC_IMPORT_FAILURE } from './config';
 import type { UseApplePasswordsModalResult } from './types';
 
@@ -66,7 +68,7 @@ export const useApplePasswordsModal = (
     try {
       await onSync(file);
     } catch (err) {
-      setError(err instanceof Error ? err.message : GENERIC_IMPORT_FAILURE);
+      setError(getErrorMessageOrFallback(err, GENERIC_IMPORT_FAILURE));
       setLoading(false);
     }
   };
@@ -76,6 +78,10 @@ export const useApplePasswordsModal = (
     setFile(null);
     setError(null);
     onClose();
+  };
+
+  const onOpenPasswordsClick = (): void => {
+    void openPasswordsApp();
   };
 
   return {
@@ -92,5 +98,6 @@ export const useApplePasswordsModal = (
     onDrop,
     onSyncClick,
     onCloseClick,
+    onOpenPasswordsClick,
   };
 };

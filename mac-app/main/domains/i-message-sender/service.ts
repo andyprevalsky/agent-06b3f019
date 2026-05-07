@@ -19,6 +19,7 @@ import {
   buildFallbackScript,
   buildPrimaryScript,
 } from './config';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { runOsascript } from './repo';
 import type { IMessagePayload } from './types';
 
@@ -57,7 +58,7 @@ export async function sendIMessage(payload: IMessagePayload): Promise<void> {
     try {
       await runOsascript(fallbackScript);
     } catch {
-      throw new Error(`${SEND_FAILURE_PREFIX}: ${String(primaryError)}`);
+      throw new Error(`${SEND_FAILURE_PREFIX}: ${getErrorMessage(primaryError)}`);
     }
   }
 }

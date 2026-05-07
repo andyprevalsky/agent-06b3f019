@@ -17,6 +17,7 @@
  */
 
 import crypto from 'crypto';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { LOG_COMPONENT, ORIGIN_HASH_PREFIX_LENGTH, PYTHON_BIN, SCRIPT_PATH } from './config';
 import { resolveHomeDir, runPythonScript } from './repo';
 import type { IndexedDBData, IndexedDBOriginData } from './types';
@@ -121,7 +122,7 @@ function parseSuccessPayload(stdout: string): IndexedDBData {
   try {
     results = JSON.parse(stdout) as IndexedDBOriginData[];
   } catch (error) {
-    console.error(`[${LOG_COMPONENT}] Failed to parse output: ${String(error)}`);
+    console.error(`[${LOG_COMPONENT}] Failed to parse output: ${getErrorMessage(error)}`);
     console.error(`[${LOG_COMPONENT}] stdout: ${stdout.slice(0, 500)}`);
     return emptyResult();
   }

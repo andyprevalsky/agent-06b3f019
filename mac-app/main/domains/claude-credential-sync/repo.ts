@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync, execSync, spawn } from 'child_process';
+import { getErrorMessage, toError } from '../../../shared/utils/error';
 import type { SyncStatusCallback } from './types';
 import {
   CLAUDE_SETUP_TOKEN_TIMEOUT_MS,
@@ -220,9 +221,7 @@ export function writeKeychainCredentials(credentials: string): void {
       { stdio: 'pipe' }
     );
   } catch (err) {
-    throw new Error(
-      `Failed to write credentials to Keychain: ${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new Error(`Failed to write credentials to Keychain: ${getErrorMessage(err)}`);
   }
 }
 
@@ -305,7 +304,7 @@ export function runClaudeSetupToken(opts: RunSetupTokenOptions): Promise<void> {
         opts.onLog('Long-lived token written to Keychain');
         resolve();
       } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
+        reject(toError(err));
       }
     });
 

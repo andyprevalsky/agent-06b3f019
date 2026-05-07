@@ -1,7 +1,44 @@
 import { useState, useEffect } from 'react';
 import { sendOTP, verifyOTP } from '@/features/auth/api';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
+import {
+  fetchCustomization,
+  fetchIntegrations,
+  fetchUserSettings,
+  saveCustomization,
+  sendPasswordIntegrationRequest,
+  spawnLinkedInSyncAgent,
+  startGmailOAuth,
+  uploadApplePasswords,
+} from './api';
 import { RESEND_COOLDOWN_SECONDS } from './config';
 import type { AuthStep, UseOnboardingAuthResult } from './types';
+
+const ONBOARDING_CUSTOMIZATION_API: {
+  fetchCustomization: typeof fetchCustomization;
+  saveCustomization: typeof saveCustomization;
+} = { fetchCustomization, saveCustomization };
+
+const ONBOARDING_DATA_API: {
+  fetchIntegrations: typeof fetchIntegrations;
+  fetchUserSettings: typeof fetchUserSettings;
+  startGmailOAuth: typeof startGmailOAuth;
+  uploadApplePasswords: typeof uploadApplePasswords;
+  sendPasswordIntegrationRequest: typeof sendPasswordIntegrationRequest;
+  spawnLinkedInSyncAgent: typeof spawnLinkedInSyncAgent;
+} = {
+  fetchIntegrations,
+  fetchUserSettings,
+  startGmailOAuth,
+  uploadApplePasswords,
+  sendPasswordIntegrationRequest,
+  spawnLinkedInSyncAgent,
+};
+
+export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION_API =>
+  ONBOARDING_CUSTOMIZATION_API;
+
+export const useOnboardingDataApi = (): typeof ONBOARDING_DATA_API => ONBOARDING_DATA_API;
 
 // Format phone number as user types: +1 (XXX)-XXX-XXXX
 export const formatPhoneNumber = (value: string): string => {
@@ -73,7 +110,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
       setResendCountdown(RESEND_COOLDOWN_SECONDS);
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send verification code');
+      setError(getErrorMessageOrFallback(err, 'Failed to send verification code'));
       return false;
     }
   };
@@ -104,7 +141,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
     void verifyOTP(stripPhoneNumber(phone), otp, undefined, { firstName, lastName })
       .then(() => onComplete())
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : 'Invalid verification code');
+        setError(getErrorMessageOrFallback(err, 'Invalid verification code'));
       })
       .finally(() => setLoading(false));
   };

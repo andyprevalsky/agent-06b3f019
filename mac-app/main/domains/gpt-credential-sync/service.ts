@@ -9,6 +9,7 @@
 import crypto from 'crypto';
 import { Crypto } from '../../base/crypto';
 import { config } from '../../base/config';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
@@ -62,7 +63,12 @@ function validateCredentials(credentialsJson: string): SyncResult | null {
     return { success: false, message: 'Codex is not logged in with a ChatGPT account' };
   }
 
-  if (!parsed.tokens?.access_token || !parsed.tokens.refresh_token) {
+  if (
+    parsed.tokens?.access_token === undefined ||
+    parsed.tokens.refresh_token === undefined ||
+    parsed.tokens.access_token.length === 0 ||
+    parsed.tokens.refresh_token.length === 0
+  ) {
     return {
       success: false,
       message: 'Codex credentials missing access or refresh token. Please run codex login.',
@@ -115,7 +121,7 @@ export async function syncCredentials(): Promise<SyncResult> {
     logConsole(LOG_COMPONENT, 'Credentials synced successfully');
     return { success: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     logConsoleError(LOG_COMPONENT, 'Upload failed', error);
     return { success: false, message };
   }

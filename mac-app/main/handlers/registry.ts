@@ -20,7 +20,8 @@ import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppS
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
 import { IntegrationCache } from '../services/sync/IntegrationCache';
-import { logIpc, logConsole, logConsoleError, getErrorMessage } from '../base/logger';
+import { getErrorMessage } from '../../shared/utils/error';
+import { logIpc, logConsole, logConsoleError } from '../base/logger';
 import { config } from '../base/config';
 import type { ShortcutConfig, ReadBrowserCookiesConfig } from '../../shared/types/ipc';
 

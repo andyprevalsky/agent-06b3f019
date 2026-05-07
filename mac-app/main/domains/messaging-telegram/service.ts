@@ -11,6 +11,7 @@ import { TelegramClient as GramClient } from 'telegram';
 import type { StringSession } from 'telegram/sessions';
 import { NewMessage, type NewMessageEvent } from 'telegram/events';
 import { Api } from 'telegram/tl';
+import { getErrorMessage } from '../../../shared/utils/error';
 import {
   API_HASH,
   API_ID,
@@ -100,7 +101,7 @@ export class TelegramClient extends EventEmitter {
       console.error('[TelegramClient] Failed to start auth:', error);
       this.isConnecting = false;
       this.setConnectionState('error');
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      return { success: false, error: getErrorMessage(error) };
     }
   }
 

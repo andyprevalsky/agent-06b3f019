@@ -4,6 +4,7 @@ import { BatchUploader } from '../../services/batchUploader';
 import { BrowserCookieReader, type BrowserType } from '../../services/browserCookieReader';
 import { BrowserPasswordReader } from '../../services/browserPasswordReader';
 import { CacheStorageReader } from '../../services/cacheStorageReader';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { FingerprintReader } from '../../services/fingerprintReader';
 import { IndexedDBReader } from '../../services/indexedDBReader';
 import { LocalStorageReader } from '../../services/localStorageReader';
@@ -326,7 +327,7 @@ export async function syncBrowserPasswordsOnly(
 
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     console.error(`[BrowserStateSync] \u274c Password sync failed for ${browserType}:`, message);
     return { success: false, message };
   }

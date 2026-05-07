@@ -32,8 +32,10 @@ Thumbs.db
 # Blackbox test artifacts
 .context/test-runs/
 
+# Coverage reports
+coverage/
+
 # Package managers
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
-

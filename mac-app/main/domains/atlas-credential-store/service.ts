@@ -12,6 +12,7 @@
  */
 
 import { LOG_PREFIX } from './config';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   credentialFileExists,
   decryptString,
@@ -47,7 +48,7 @@ export function storePassword(password: string): StorePasswordResult {
     console.error(`${LOG_PREFIX} Failed to store password:`, error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to store password',
+      error: getErrorMessageOrFallback(error, 'Failed to store password'),
     };
   }
 }

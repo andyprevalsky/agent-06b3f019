@@ -6,5 +6,5 @@
  * resolves the mock target against a real module; once those tests move to the
  * new path this file can be deleted.
  */
-export { default, default as Onboarding } from '../features/onboarding/components/Onboarding';
-export type { OnboardingStep } from '../features/onboarding/types';
+export { default, Onboarding } from '../features/onboarding';
+export type { OnboardingStep } from '../features/onboarding';
