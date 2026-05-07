@@ -54,9 +54,7 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
 }
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<
-    Set<string>
-  >;
+  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
   return {
     agent: null,
     setAgent: () => {},
@@ -78,10 +76,7 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   };
 }
 
-function renderList(
-  ctx: AgentContextValue,
-  props: React.ComponentProps<typeof MessageList> = {},
-) {
+function renderList(ctx: AgentContextValue, props: React.ComponentProps<typeof MessageList> = {}) {
   return render(
     <AgentContext.Provider value={ctx}>
       <TooltipProvider>
@@ -113,7 +108,11 @@ describe('MessageList', () => {
     const ctx = makeAgentCtx({
       messages: [
         msg('u1', { role: 'USER', text: 'question?' }),
-        msg('a1', { role: 'ASSISTANT', text: 'my answer', timestamp: new Date(Date.now() + 1000).toISOString() }),
+        msg('a1', {
+          role: 'ASSISTANT',
+          text: 'my answer',
+          timestamp: new Date(Date.now() + 1000).toISOString(),
+        }),
       ],
     });
     renderList(ctx);
@@ -224,9 +223,7 @@ describe('MessageList', () => {
     });
     renderList(ctx, { onIncreaseCostLimit: () => {} });
     expect(screen.getByText(/agent cost limit reached/)).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /Increase Cost Limit/ }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Increase Cost Limit/ })).toBeInTheDocument();
   });
 
   it('shows WEB Preview banner when agent source is WEB', () => {
@@ -263,19 +260,12 @@ describe('MessageList', () => {
       ]),
     });
     renderList(ctx);
-    await waitFor(() =>
-      expect(screen.getByText(/Live searching/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/Live searching/)).toBeInTheDocument());
   });
 
   it('renders streaming attention message', async () => {
     const ctx = makeAgentCtx({
-      streamingBubbles: new Map([
-        [
-          'sb-1',
-          { text: 'streaming...', sequence: 1, done: false },
-        ],
-      ]),
+      streamingBubbles: new Map([['sb-1', { text: 'streaming...', sequence: 1, done: false }]]),
       streamingAttention: {
         stream_id: 'str-a',
         tool_call_id: 'sa-1',
@@ -354,9 +344,7 @@ describe('MessageList', () => {
     renderList(ctx);
     // Only ONE explore chip should render for taskId=task-X — confirm a single
     // "Explore thing" title node rather than two separate rows.
-    await waitFor(() =>
-      expect(screen.getAllByText(/Explore thing/)).toHaveLength(1),
-    );
+    await waitFor(() => expect(screen.getAllByText(/Explore thing/)).toHaveLength(1));
     // The internal web_search step must NOT render as its own chip — the grouping
     // collapses it inside the explore agent bubble.
     expect(screen.queryByText('Searching')).not.toBeInTheDocument();
@@ -533,9 +521,7 @@ describe('MessageList', () => {
   it('does not show thinking indicator when showThinkingIndicator=false', () => {
     const ctx = makeAgentCtx({
       agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([
-        ['sb-1', { text: 'thinking now', sequence: 1, done: false }],
-      ]),
+      streamingBubbles: new Map([['sb-1', { text: 'thinking now', sequence: 1, done: false }]]),
     });
     renderList(ctx, { showThinkingIndicator: false });
     // No "Thinking" word from the MessageList-level thinking banner

@@ -51,6 +51,12 @@ from utils.tool_schemas import (
 
 logger = structlog.get_logger()
 
+CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+
+
+def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
+    return metadata.get("toolName") == CLOUD_AGENT_TOOL_NAME
+
 # Same-machine optimization: passes large LLM context without Temporal serialization.
 # On cross-machine miss, call_llm_activity falls back to fetching from backend API.
 _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
@@ -349,6 +355,9 @@ def build_verifier_context_messages(  # noqa: C901
             continue
 
         if role == "TOOL":
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
+
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
 
@@ -543,6 +552,9 @@ def convert_context_to_messages(  # noqa: C901
             messages.append(assistant_msg)
 
         elif role == "TOOL":
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
+
             # Skip IN_PROGRESS messages - only send FINISHED results to LLM
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
@@ -684,6 +696,9 @@ async def build_llm_messages(  # noqa: C901
         if role == "TOOL":
             tool_status = metadata.get("toolStatus")
             tool_call_id = metadata.get("toolCallId")
+
+            if _is_cloud_agent_lifecycle_tool(metadata):
+                continue
 
             # Skip IN_PROGRESS messages
             if tool_status == "IN_PROGRESS":
@@ -904,6 +919,9 @@ async def build_llm_messages(  # noqa: C901
             # Verifier messages are already mirrored back into context as SYSTEM text.
             # Skip raw verifier TOOL rows to avoid duplicate context.
             if metadata.get("verifierMessage"):
+                continue
+
+            if _is_cloud_agent_lifecycle_tool(metadata):
                 continue
 
             tool_status = metadata.get("toolStatus")
@@ -3570,7 +3588,14 @@ async def call_llm_activity(  # noqa: C901
                 last_text[0] = text_so_far
 
         # Callback for early tool detection IN_PROGRESS messages
+        latest_raw_chars = [0]
+        current_streaming_tool: List[Optional[str]] = [None, None]  # [tool_name, tool_call_id]
+        last_tool_progress_chars = [0]
+
         async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
+            current_streaming_tool[0] = tool_name
+            current_streaming_tool[1] = tool_call_id
+            last_tool_progress_chars[0] = latest_raw_chars[0]
             if agent_id and stream_id:
                 await stream_tool_event(
                     agent_id=agent_id,
@@ -3578,7 +3603,29 @@ async def call_llm_activity(  # noqa: C901
                     tool_call_id=tool_call_id,
                     tool_name=tool_name,
                     title=f"Starting {tool_name}...",
+                    char_count=latest_raw_chars[0],
+                    is_claude=_is_claude[0],
+                    is_gpt=_is_gpt[0],
                 )
+
+        async def on_raw_progress(total_chars: int):
+            latest_raw_chars[0] = total_chars
+            tool_name, tool_call_id = current_streaming_tool
+            if not (agent_id and stream_id and tool_name and tool_call_id):
+                return
+            if total_chars - last_tool_progress_chars[0] < 50:
+                return
+            last_tool_progress_chars[0] = total_chars
+            await stream_tool_event(
+                agent_id=agent_id,
+                stream_id=stream_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                title=f"Starting {tool_name}...",
+                char_count=total_chars,
+                is_claude=_is_claude[0],
+                is_gpt=_is_gpt[0],
+            )
 
         result, usage, detected_tools_ordered = await call_llm_structured_streaming(
             messages=messages,
@@ -3590,6 +3637,7 @@ async def call_llm_activity(  # noqa: C901
             reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
+            on_raw_progress=on_raw_progress,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
             claude_token_pool_id=claude_token_pool_id,

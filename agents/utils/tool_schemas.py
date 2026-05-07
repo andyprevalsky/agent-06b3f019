@@ -17,6 +17,7 @@ from utils.prompts import (
     PLANNER_RESPONSE_TITLE_DESCRIPTION,
     PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
     PLANNER_TASK_GOAL_DESCRIPTION,
+    PLANNER_TASK_IDX_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
 )
@@ -103,6 +104,7 @@ assert _plan_tool_values == _expected_tools, (
 class PlannerTask(BaseModel):
     """A single task in the planner output."""
 
+    task_idx: str = Field(description=PLANNER_TASK_IDX_DESCRIPTION)
     goal: str = Field(description=PLANNER_TASK_GOAL_DESCRIPTION)
     tool_name: PlanToolName = Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)
     depends_on: List[str] = Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION)

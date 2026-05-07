@@ -587,6 +587,17 @@ async def _execute_single_task(
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
 
+            await handle_tool_event_fn(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Reasoning",
+                    message=reasoning_content,
+                    status=MessageStatus.FINISHED,
+                ),
+                tool_call_id,
+                "reasoning",
+            )
+
             # Post reasoning to DB as ASSISTANT message
             await post_message(reasoning_content, "ASSISTANT", {"reasoning": True, "dagTaskIndex": task.index})
 

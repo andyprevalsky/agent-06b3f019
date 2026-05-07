@@ -17,10 +17,7 @@ import type { ExploreStep, WaitForCheck } from '../types';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
-function filterMessagesForSubAgent(
-  messages: Message[],
-  subAgentId: string | undefined,
-): Message[] {
+function filterMessagesForSubAgent(messages: Message[], subAgentId: string | undefined): Message[] {
   const target = subAgentId ?? null;
   return messages.filter((m) => {
     const msgSub = m.metadata?.subAgentId ?? null;
@@ -85,9 +82,7 @@ export function useFilteredStreaming({
     const bubbles = new Map(
       [...streamingBubbles].filter(([, b]) => (b.subAgentId ?? null) === target),
     );
-    const tools = new Map(
-      [...streamingTools].filter(([, t]) => (t.subAgentId ?? null) === target),
-    );
+    const tools = new Map([...streamingTools].filter(([, t]) => (t.subAgentId ?? null) === target));
     const plan =
       streamingPlan && (streamingPlan.subAgentId ?? null) === target ? streamingPlan : null;
     const attention =
@@ -102,6 +97,11 @@ export function useFilteredStreaming({
       charCount += b.text.length;
       if (b.isClaude) isClaude = true;
       if (b.isGpt) isGpt = true;
+    });
+    tools.forEach((t) => {
+      charCount += t.charCount ?? 0;
+      if (t.isClaude) isClaude = true;
+      if (t.isGpt) isGpt = true;
     });
 
     return { bubbles, plan, attention, tools, charCount, isClaude, isGpt };

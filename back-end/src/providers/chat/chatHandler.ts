@@ -23,6 +23,7 @@ import {
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
+import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
 
@@ -140,6 +141,19 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'ASSISTANT',
       text: decision.reasoning,
+    });
+
+    const cloudAgentToolCallId = uuidv4();
+    await createMessage({
+      agentId: config.agentId,
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: cloudAgentToolCallId,
+        toolName: CLOUD_AGENT_TOOL_NAME,
+        toolStatus: 'IN_PROGRESS',
+        title: CREATING_CLOUD_AGENT_TITLE,
+      },
     });
 
     // Start Temporal workflow immediately - NO more LLM calls

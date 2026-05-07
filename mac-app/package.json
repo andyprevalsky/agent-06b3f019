@@ -26,6 +26,7 @@
     "test:structural": "tsx tests/structural/layer-deps.test.ts",
     "test:coverage": "vitest run --coverage",
     "test:coverage:report": "vitest run --coverage --reporter=verbose",
+    "test:e2e": "playwright test",
     "test:watch": "vitest",
     "test:blackbox": "bash scripts/run-blackbox-tests.sh"
   },

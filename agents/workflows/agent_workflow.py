@@ -61,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
+    from tools.prompts import TOOL_PROMPTS
     from tools.request_user_approval import UserRejectedError, request_user_approval_direct
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
@@ -70,11 +71,21 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_search import web_search
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
-    from tools.prompts import TOOL_PROMPTS
     from utils.prompts import build_system_prompt, build_verifier_prompt
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
+
+CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
+PREPARING_CLOUD_AGENT_TITLE = "Preparing Cloud Agent"
+STARTING_REASONING_TITLE = "Starting Reasoning"
+CLOUD_AGENT_READY_TITLE = "Cloud Agent Ready"
+CLOUD_AGENT_IN_PROGRESS_TITLES = {
+    CREATING_CLOUD_AGENT_TITLE,
+    PREPARING_CLOUD_AGENT_TITLE,
+    STARTING_REASONING_TITLE,
+}
 
 # =============================================================================
 # TOOL CONFIGURATION
@@ -141,6 +152,9 @@ class AgentWorkflow:
 
         # Context - kept in sync with run_agent for tools that check it
         self.context: List[Dict] = []
+        self._cloud_agent_lifecycle_tool_call_id: Optional[str] = None
+        self._cloud_agent_lifecycle_updates_sent: Set[str] = set()
+        self._cloud_agent_lifecycle_finished: bool = False
 
         # Sub-agent tracking
         self.parent_workflow_id: Optional[str] = None
@@ -477,6 +491,8 @@ class AgentWorkflow:
         self.start_time = workflow.now()  # Track start time for duration calculation
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
+
+        await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -1019,6 +1035,7 @@ class AgentWorkflow:
 
         Called by run_agent before each LLM call.
         """
+        await self._advance_cloud_agent_lifecycle(STARTING_REASONING_TITLE, "IN_PROGRESS")
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,
@@ -1206,6 +1223,77 @@ class AgentWorkflow:
             await self._update_tree_state()
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {e}")
+
+    async def _find_cloud_agent_lifecycle_tool_call_id(self) -> Optional[str]:
+        """Find the chat-mode cloud-agent tool call that this workflow should update."""
+        if self._cloud_agent_lifecycle_tool_call_id:
+            return self._cloud_agent_lifecycle_tool_call_id
+
+        messages = await workflow.execute_activity(
+            poll_new_messages,
+            args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        terminal_tool_call_ids = set()
+        pending_tool_call_id = None
+
+        for msg in messages or []:
+            if (msg.get("role") or "").upper() != "TOOL":
+                continue
+            metadata = msg.get("metadata") or {}
+            if metadata.get("toolName") != CLOUD_AGENT_TOOL_NAME:
+                continue
+
+            tool_call_id = metadata.get("toolCallId")
+            if metadata.get("toolStatus") in {"FINISHED", "ERROR"} and tool_call_id:
+                terminal_tool_call_ids.add(tool_call_id)
+            elif (
+                metadata.get("toolStatus") == "IN_PROGRESS"
+                and metadata.get("title") in CLOUD_AGENT_IN_PROGRESS_TITLES
+                and tool_call_id
+            ):
+                pending_tool_call_id = tool_call_id
+
+        if pending_tool_call_id and pending_tool_call_id not in terminal_tool_call_ids:
+            self._cloud_agent_lifecycle_tool_call_id = pending_tool_call_id
+            return pending_tool_call_id
+
+        if pending_tool_call_id in terminal_tool_call_ids:
+            self._cloud_agent_lifecycle_finished = True
+
+        return None
+
+    async def _advance_cloud_agent_lifecycle(self, title: str, tool_status: str) -> None:
+        """Advance the chat-mode cloud-agent chip without exposing it to LLM context."""
+        if self._cloud_agent_lifecycle_finished:
+            return
+
+        update_key = f"{tool_status}:{title}"
+        if update_key in self._cloud_agent_lifecycle_updates_sent:
+            return
+
+        try:
+            tool_call_id = await self._find_cloud_agent_lifecycle_tool_call_id()
+            if not tool_call_id:
+                return
+
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": tool_call_id,
+                    "toolName": CLOUD_AGENT_TOOL_NAME,
+                    "toolStatus": tool_status,
+                    "title": title,
+                },
+            )
+            self._cloud_agent_lifecycle_updates_sent.add(update_key)
+            if tool_status in {"FINISHED", "ERROR"}:
+                self._cloud_agent_lifecycle_finished = True
+        except Exception as e:
+            workflow.logger.warning(f"Failed to advance cloud agent lifecycle tool: {e}")
 
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.
@@ -1767,6 +1855,7 @@ class AgentWorkflow:
         self.tokens_out += tokens_out_delta
         self.token_count += tokens_in_delta + tokens_out_delta
         self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
+        await self._advance_cloud_agent_lifecycle(CLOUD_AGENT_READY_TITLE, "FINISHED")
 
         # Track actual_model for credit billing
         if actual_model:

@@ -45,6 +45,11 @@ PROMPT_FILES=""
 while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
+    */tests/*|*/test/*|*/__tests__/*|*/*test*.py|*/*test*.ts|*/*test*.tsx|*/*spec*.ts|*/*spec*.tsx|*.blackbox.py|*.blackbox.ts|*.blackbox.tsx)
+      continue
+      ;;
+  esac
+  case "$file" in
     CLAUDE.md|AGENTS.md|.claude/commands/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
@@ -60,14 +65,34 @@ DIFF_PROMPT_FILES="$(
     git diff --unified=0 HEAD -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**' 2>/dev/null || true
     git diff --cached --unified=0 -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**' 2>/dev/null || true
   } | awk '
+    function is_prompt_content(line) {
+      sub(/^[+-]/, "", line)
+
+      # Imports and token accounting fields reference prompt-related symbols
+      # without changing LLM instructions.
+      if (line ~ /^[[:space:]]*(import|from)[[:space:]]/) return 0
+      if (line ~ /^[[:space:]]*(prompt_tokens|completion_tokens|total_tokens)[[:space:]]*[:=]/) return 0
+
+      # Explicit prompt constants/properties. Use identifier boundaries so
+      # helper names like build_system_prompt/get_user_custom_system_prompt do
+      # not trip the guard by themselves.
+      if (line ~ /(^|[^A-Za-z0-9_])(SYSTEM_PROMPT|systemPrompt|system_prompt|TOOL_PROMPTS|toolPrompts)([^A-Za-z0-9_]|$)/) return 1
+
+      # Prompt-bearing fields usually assign string content to these names.
+      if (line ~ /(^|[^A-Za-z0-9_])(prompt|instructions|rubric|persona)([^A-Za-z0-9_]|$)/ && line ~ /[:=][[:space:]]*[`"'"'"']/) return 1
+
+      # Direct prompt text edits embedded in code.
+      if (line ~ /(You are an AI|You are ChatGPT|You are Codex|You are a |System prompt|system prompt)/) return 1
+
+      return 0
+    }
     /^\+\+\+ b\// {
       file=substr($0, 7)
-      scan=(file !~ /(^|\/)(package-lock\.json|\.gitignore)$/ && file ~ /\.(py|ts|tsx|js|jsx|md|mdc|txt|json|yaml|yml)$/)
+      scan=(file !~ /(^|\/)(package-lock\.json|\.gitignore)$/ && file !~ /(^|\/)(tests|test|__tests__)\// && file !~ /(^|\/)[^\/]*(test|spec|blackbox)[^\/]*\.(py|ts|tsx|js|jsx)$/ && file ~ /\.(py|ts|tsx|js|jsx|md|mdc|txt|json|yaml|yml)$/)
       next
     }
     /^[+-][^+-]/ && file != "" && scan {
-      line=$0
-      if (line ~ /(SYSTEM_PROMPT|System prompt|system prompt|PROMPT|Prompt|prompt|instructions|rubric|persona|You are an AI|You are a)/) {
+      if (is_prompt_content($0)) {
         print file
       }
     }

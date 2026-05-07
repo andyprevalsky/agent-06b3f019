@@ -14,6 +14,7 @@ import {
 } from './supabaseBroadcast';
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
+import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 
 const log = createLogger('RouterLLM');
 
@@ -370,8 +371,8 @@ export async function callRouterLlm(params: {
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
-      // Skip IN_PROGRESS messages (empty text) - only send FINISHED results to LLM
-      if (!msg.text || msg.text.trim() === '') {
+      // Skip UI-only lifecycle tools and IN_PROGRESS messages.
+      if (isCloudAgentLifecycleTool(msg.metadata) || !msg.text || msg.text.trim() === '') {
         continue;
       }
       // Convert TOOL to system message with content (matches worker pattern)
@@ -541,7 +542,10 @@ export async function callRouterLlm(params: {
           webSearchToolCallId,
           'web_search',
           'IN_PROGRESS',
-          '🔍 Searching the web'
+          '🔍 Searching the web',
+          accumulatedReasoning.length + accumulatedJson.length,
+          isClaude,
+          isGpt
         );
       }
     }

@@ -1583,17 +1583,31 @@ def test_all_caps_marker_count_under_limit():
 def test_planner_depends_on_schema_matches_prompt_contract():
     """Planner task dependency IDs are strings in both prompt text and response schema."""
     from helpers.llm import prepare_schema_for_openai
-    from utils.prompts import PLANNER_OUTPUT_ARG_DESCRIPTIONS, PLANNER_TASK_DEPENDS_ON_DESCRIPTION, build_planner_system_prompt
+    from utils.prompts import (
+        PLANNER_OUTPUT_ARG_DESCRIPTIONS,
+        PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
+        PLANNER_TASK_IDX_DESCRIPTION,
+        build_planner_system_prompt,
+    )
     from utils.tool_schemas import PlannerResponse
 
     prompt = build_planner_system_prompt("tool descriptions here")
+    assert "tasks[i].task_idx is the 0-based array index encoded as a string" in prompt
     assert "tasks[i].depends_on lists indices of tasks that must complete first" in prompt
+    assert "If one task needs another task's output, state, credentials, artifact, or decision" in prompt
+    assert "Empty depends_on means the task can start immediately" in prompt
+    assert "Causal handoff: Step 0 gather facts" in prompt
     assert 'Use 0-based indices as strings ("0", "1", ...)' in prompt
     assert "# Output Field Descriptions" in prompt
     assert PLANNER_OUTPUT_ARG_DESCRIPTIONS in prompt
+    assert "Use an empty list only when the task can start immediately" in PLANNER_TASK_DEPENDS_ON_DESCRIPTION
 
     schema = prepare_schema_for_openai(PlannerResponse)
     task_schema = schema["properties"]["tasks"]["items"]
+    task_idx = task_schema["properties"]["task_idx"]
+    assert "task_idx" in task_schema["required"]
+    assert task_idx["type"] == "string"
+    assert task_idx["description"] == PLANNER_TASK_IDX_DESCRIPTION
     depends_on = task_schema["properties"]["depends_on"]
     assert depends_on["type"] == "array"
     assert depends_on["items"]["type"] == "string"

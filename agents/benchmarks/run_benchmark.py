@@ -58,6 +58,7 @@ from benchmarks.logs import (
     start_fly_log_collector,
     stop_fly_log_collector,
 )
+from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
@@ -404,6 +405,7 @@ async def poll_agent(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
+    realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None,
 ) -> Tuple[dict, int, int, Optional[str]]:
     """
     Poll agent until terminal state, timeout, or early-failure.
@@ -474,6 +476,9 @@ async def poll_agent(
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
         root_msg_count = len(messages)
+
+        if realtime_monitor and realtime_monitor.failure_reason:
+            return data, approvals_triggered, approvals_resolved, realtime_monitor.failure_reason
 
         # Validate context well-formedness. Any error-severity violation is an
         # instant fail — don't keep polling, the agent will not recover.
@@ -854,14 +859,25 @@ async def run_single_task(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
 
     temp_csv_paths: list = []  # track temp files for cleanup
+
+    async def start_realtime_monitor() -> None:
+        nonlocal realtime_monitor
+        if "smoke" not in task.tags:
+            return
+        is_private = "localhost" not in base_url and "127.0.0.1" not in base_url
+        realtime_monitor = SupabaseRealtimeSmokeMonitor(agent_id, private=is_private)
+        await realtime_monitor.start()
+        print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            await start_realtime_monitor()
 
             file_pointers = []
             for attach_filename in all_attachments:
@@ -889,11 +905,15 @@ async def run_single_task(
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            await start_realtime_monitor()
 
         # Poll until done (or early-fail)
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
-            base_url, agent_id, task
+            base_url, agent_id, task, realtime_monitor
         )
+        if realtime_monitor:
+            await realtime_monitor.stop()
+            realtime_monitor = None
 
         # Get final agent data
         agent = data.get("agent", {})
@@ -1025,6 +1045,9 @@ async def run_single_task(
     except Exception as e:
         duration = time.time() - start
         print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
+        if realtime_monitor:
+            await realtime_monitor.stop()
+            realtime_monitor = None
         # Best-effort log collection — errors are when logs matter most
         logs = None
         if agent_id:
@@ -1054,6 +1077,8 @@ async def run_single_task(
             logs=logs,
         )
     finally:
+        if realtime_monitor:
+            await realtime_monitor.stop()
         for tmp in temp_csv_paths:
             try:
                 os.unlink(tmp)

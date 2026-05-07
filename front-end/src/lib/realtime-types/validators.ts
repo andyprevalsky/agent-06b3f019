@@ -123,6 +123,15 @@ export function validateToolStreamPayload(payload: unknown): string | null {
   if (typeof p.tool_name !== 'string')
     return `Missing or invalid 'tool_name' (got ${typeof p.tool_name})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
+  if (p.char_count !== undefined && typeof p.char_count !== 'number') {
+    return `Invalid 'char_count' type (got ${typeof p.char_count})`;
+  }
+  if (p.is_claude !== undefined && typeof p.is_claude !== 'boolean') {
+    return `Invalid 'is_claude' type (got ${typeof p.is_claude})`;
+  }
+  if (p.is_gpt !== undefined && typeof p.is_gpt !== 'boolean') {
+    return `Invalid 'is_gpt' type (got ${typeof p.is_gpt})`;
+  }
   return null;
 }
 
