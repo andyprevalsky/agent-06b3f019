@@ -10,7 +10,7 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
-export LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 10))
+export LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
