@@ -2112,8 +2112,8 @@ async def test_workflow_post_message_failure_logs_warning():
         _restore_workflow(original)
 
 
-async def test_workflow_finishes_pending_cloud_agent_tool():
-    """Workflow startup closes the chat-mode Creating Cloud Agent chip."""
+async def test_workflow_advances_pending_cloud_agent_tool():
+    """Workflow posts the approved cloud-agent lifecycle states on one tool call."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     fake = _FakeWorkflowModule()
@@ -2131,21 +2131,26 @@ async def test_workflow_finishes_pending_cloud_agent_tool():
     ]
     original = _patch_workflow(fake)
     try:
-        await wf._finish_pending_cloud_agent_tool()
+        await wf._advance_cloud_agent_lifecycle("Preparing Cloud Agent", "IN_PROGRESS")
+        await wf._advance_cloud_agent_lifecycle("Starting Reasoning", "IN_PROGRESS")
+        await wf._advance_cloud_agent_lifecycle("Cloud Agent Ready", "FINISHED")
         posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
-        assert len(posts) == 1
-        args = posts[0][1]
-        assert args[1] == ""
-        assert args[3]["toolCallId"] == "tc-cloud"
-        assert args[3]["toolName"] == "cloud_agent"
-        assert args[3]["toolStatus"] == "FINISHED"
-        assert args[3]["title"] == "Cloud Agent Created"
+        assert len(posts) == 3
+        titles = [post[1][3]["title"] for post in posts]
+        statuses = [post[1][3]["toolStatus"] for post in posts]
+        assert titles == ["Preparing Cloud Agent", "Starting Reasoning", "Cloud Agent Ready"]
+        assert statuses == ["IN_PROGRESS", "IN_PROGRESS", "FINISHED"]
+        for post in posts:
+            args = post[1]
+            assert args[1] == ""
+            assert args[3]["toolCallId"] == "tc-cloud"
+            assert args[3]["toolName"] == "cloud_agent"
     finally:
         _restore_workflow(original)
 
 
-async def test_workflow_does_not_finish_cloud_agent_tool_twice():
-    """Existing terminal cloud_agent row prevents duplicate FINISHED messages."""
+async def test_workflow_does_not_advance_terminal_cloud_agent_tool():
+    """Existing terminal cloud_agent row prevents duplicate lifecycle messages."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     fake = _FakeWorkflowModule()
@@ -2167,13 +2172,13 @@ async def test_workflow_does_not_finish_cloud_agent_tool_twice():
                 "toolCallId": "tc-cloud",
                 "toolName": "cloud_agent",
                 "toolStatus": "FINISHED",
-                "title": "Cloud Agent Created",
+                "title": "Cloud Agent Ready",
             },
         },
     ]
     original = _patch_workflow(fake)
     try:
-        await wf._finish_pending_cloud_agent_tool()
+        await wf._advance_cloud_agent_lifecycle("Preparing Cloud Agent", "IN_PROGRESS")
         posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
         assert posts == []
     finally:
@@ -2820,8 +2825,8 @@ async def run_all_tests():
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)
     await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)
     await r.record_async("wf_post_message_failure", test_workflow_post_message_failure_logs_warning)
-    await r.record_async("wf_finish_cloud_agent_tool", test_workflow_finishes_pending_cloud_agent_tool)
-    await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_finish_cloud_agent_tool_twice)
+    await r.record_async("wf_advance_cloud_agent_tool", test_workflow_advances_pending_cloud_agent_tool)
+    await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)

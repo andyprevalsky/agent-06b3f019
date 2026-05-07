@@ -193,35 +193,25 @@ describe('MessageBubble', () => {
     expect(inner).not.toBeNull();
   });
 
-  it('renders Creating Cloud Agent tool while escalation starts', async () => {
+  it.each([
+    ['Creating Cloud Agent', 'IN_PROGRESS'],
+    ['Preparing Cloud Agent', 'IN_PROGRESS'],
+    ['Starting Reasoning', 'IN_PROGRESS'],
+    ['Cloud Agent Ready', 'FINISHED'],
+  ] as const)('renders %s cloud lifecycle tool without expandable output', async (title, toolStatus) => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: '',
+      text: `${title} body should stay hidden.`,
       metadata: {
         toolCallId: 'tc-cloud-agent',
         toolName: 'cloud_agent',
-        title: 'Creating Cloud Agent',
-        toolStatus: 'IN_PROGRESS',
+        title,
+        toolStatus,
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText('Creating Cloud Agent')).toBeInTheDocument());
-  });
-
-  it('renders Cloud Agent Created tool when workflow starts', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'Cloud agent created.',
-      metadata: {
-        toolCallId: 'tc-cloud-agent',
-        toolName: 'cloud_agent',
-        title: 'Cloud Agent Created',
-        toolStatus: 'FINISHED',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText('Cloud Agent Created')).toBeInTheDocument());
-    expect(screen.queryByText('Cloud agent created.')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
+    expect(screen.queryByText(`${title} body should stay hidden.`)).not.toBeInTheDocument();
   });
 
   it('renders TOOL ERROR in red with error title', async () => {
