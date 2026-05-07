@@ -34,9 +34,7 @@ def _make_rsa_keypair():
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    private_key = rsa.generate_private_key(
-        public_exponent=65537, key_size=2048, backend=default_backend()
-    )
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
     public_key = private_key.public_key()
 
     pem = private_key.private_bytes(
@@ -90,9 +88,7 @@ def _fake_config(
     """Build a minimal config object (ducktyped) compatible with repo/service calls."""
     return SimpleNamespace(
         backend=SimpleNamespace(api_url=backend_url, api_key=backend_api_key),
-        rose=SimpleNamespace(
-            api_url=rose_api_url, api_key=rose_api_key, supabase_anon_key=rose_supabase_anon_key
-        ),
+        rose=SimpleNamespace(api_url=rose_api_url, api_key=rose_api_key, supabase_anon_key=rose_supabase_anon_key),
         payment=SimpleNamespace(decryption_key=payment_decryption_key),
         openrouter=SimpleNamespace(api_key=openrouter_api_key, base_url=openrouter_base_url),
     )
@@ -342,10 +338,7 @@ def test_extract_otp_from_text_low_confidence_context_strict():
     assert extract_otp_from_text("Your order number is 123456") is None
 
     # But with explicit auth context, still returns
-    assert (
-        extract_otp_from_text("Your order #555. Verification code: 123456")
-        == "123456"
-    )
+    assert extract_otp_from_text("Your order #555. Verification code: 123456") == "123456"
 
 
 def test_extract_otp_from_text_no_match():
@@ -357,9 +350,7 @@ def test_extract_otp_from_text_no_match():
 async def test_fetch_recent_otps_empty():
     from domains.spawn_browser_agent_v3.service_crypto import fetch_recent_otps
 
-    setup_mock(
-        {"/api/integrations/email/messages": {"status": 200, "json": {"emails": []}}}
-    )
+    setup_mock({"/api/integrations/email/messages": {"status": 200, "json": {"emails": []}}})
     result = await fetch_recent_otps("u1", "https://backend.example.com", "k1")
     assert result == ""
 
@@ -393,9 +384,7 @@ async def test_fetch_recent_otps_dedupes_old_emails():
     from domains.spawn_browser_agent_v3.service_crypto import fetch_recent_otps
 
     # age > 600s -> excluded
-    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat().replace(
-        "+00:00", "Z"
-    )
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
     setup_mock(
         {
             "/api/integrations/email/messages": {
@@ -512,9 +501,7 @@ async def test_fetch_claude_token_success():
 async def test_fetch_claude_token_non_200_returns_none():
     from domains.spawn_browser_agent_v3.repo import fetch_claude_token
 
-    setup_mock(
-        {"/api/integrations/claude-code/credentials/token": {"status": 404, "json": {}}}
-    )
+    setup_mock({"/api/integrations/claude-code/credentials/token": {"status": 404, "json": {}}})
     cfg = _fake_config()
     assert await fetch_claude_token(cfg, "user-1") is None
 
@@ -538,13 +525,10 @@ async def test_fetch_claude_token_with_force_pool_and_excludes():
         }
     )
     cfg = _fake_config()
-    out = await fetch_claude_token(
-        cfg, "u1", force_pool=True, exclude_pool_ids=["a", "b"]
-    )
+    out = await fetch_claude_token(cfg, "u1", force_pool=True, exclude_pool_ids=["a", "b"])
     assert out["poolTokenId"] == "p1"
     call = assert_captured_call(url_contains="/credentials/token")
-    assert call["requestHeaders"].get("X-Force-Pool") == "true" or \
-        call["requestHeaders"].get("x-force-pool") == "true"
+    assert call["requestHeaders"].get("X-Force-Pool") == "true" or call["requestHeaders"].get("x-force-pool") == "true"
 
 
 async def test_fetch_claude_token_network_error_returns_none():
@@ -779,9 +763,7 @@ async def test_list_session_files_no_api_key():
 async def test_list_session_files_success():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock(
-        {"api.steel.dev/v1/sessions/s1/files": {"status": 200, "json": {"data": [{"path": "/f/x.pdf"}]}}}
-    )
+    setup_mock({"api.steel.dev/v1/sessions/s1/files": {"status": 200, "json": {"data": [{"path": "/f/x.pdf"}]}}})
     with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
         files = await repo.list_session_files("s1")
     assert files == [{"path": "/f/x.pdf"}]
@@ -975,9 +957,7 @@ async def test_close_browser_session_success_payload():
 async def test_inject_local_storage_success():
     from domains.spawn_browser_agent_v3.repo import inject_local_storage
 
-    setup_mock(
-        {"inject-localStorage": {"status": 200, "json": {"injected": True, "count": 5}}}
-    )
+    setup_mock({"inject-localStorage": {"status": 200, "json": {"injected": True, "count": 5}}})
     cfg = _fake_config()
     out = await inject_local_storage(cfg, "s1", "https://x.com")
     assert out == {"injected": True, "count": 5}
@@ -1407,21 +1387,25 @@ async def test_call_browser_use_with_rotation_rotates_claude_token():
     token_state.source = "pool"
     token_state.pool_token_id = "pool-old"
 
-    with patch.object(handler.activity, "heartbeat"), patch.object(
-        handler,
-        "report_claude_token_rate_limited",
-        new=AsyncMock(),
-    ) as mark_limited, patch.object(
-        handler,
-        "fetch_claude_token",
-        new=AsyncMock(
-            return_value={
-                "accessToken": "new-token",
-                "source": "pool",
-                "poolTokenId": "pool-new",
-            }
-        ),
-    ) as fetch_token:
+    with (
+        patch.object(handler.activity, "heartbeat"),
+        patch.object(
+            handler,
+            "report_claude_token_rate_limited",
+            new=AsyncMock(),
+        ) as mark_limited,
+        patch.object(
+            handler,
+            "fetch_claude_token",
+            new=AsyncMock(
+                return_value={
+                    "accessToken": "new-token",
+                    "source": "pool",
+                    "poolTokenId": "pool-new",
+                }
+            ),
+        ) as fetch_token,
+    ):
         result = await _call_browser_use_with_rotation(
             rose_client=client,
             task="do it",
@@ -1461,11 +1445,15 @@ async def test_call_browser_use_with_rotation_stops_when_no_replacement():
     token_state.access_token = "bad-token"
     token_state.source = "user"
 
-    with patch.object(handler.activity, "heartbeat"), patch.object(
-        handler,
-        "report_claude_token_rate_limited",
-        new=AsyncMock(),
-    ), patch.object(handler, "fetch_claude_token", new=AsyncMock(return_value=None)):
+    with (
+        patch.object(handler.activity, "heartbeat"),
+        patch.object(
+            handler,
+            "report_claude_token_rate_limited",
+            new=AsyncMock(),
+        ),
+        patch.object(handler, "fetch_claude_token", new=AsyncMock(return_value=None)),
+    ):
         result = await _call_browser_use_with_rotation(
             rose_client=client,
             task="do it",
@@ -1554,9 +1542,7 @@ def test_build_action_titles_goto():
 def test_build_action_titles_scroll():
     from domains.spawn_browser_agent_v3.service import build_action_titles
 
-    p, d, name = build_action_titles(
-        "scroll", {"params": {"direction": "up", "amount": 500}}, None, None, None
-    )
+    p, d, name = build_action_titles("scroll", {"params": {"direction": "up", "amount": 500}}, None, None, None)
     assert "up 500px" in p
     assert name == "scroll_up"
 
@@ -1564,9 +1550,7 @@ def test_build_action_titles_scroll():
 def test_build_action_titles_press_key_and_extract():
     from domains.spawn_browser_agent_v3.service import build_action_titles
 
-    p, d, _ = build_action_titles(
-        "press_key", {"params": {"key": "Enter"}}, None, None, None
-    )
+    p, d, _ = build_action_titles("press_key", {"params": {"key": "Enter"}}, None, None, None)
     assert "Enter" in p
 
     p2, d2, _ = build_action_titles("extract", {}, None, None, None)
@@ -1579,24 +1563,16 @@ def test_build_action_titles_wait_select_upload_screenshot():
     p, d, _ = build_action_titles("wait", {"params": {"time_ms": 500}}, None, None, None)
     assert "500ms" in p
 
-    p2, d2, _ = build_action_titles(
-        "select_dropdown", {"params": {"value": "USA"}}, "<select>", None, None
-    )
+    p2, d2, _ = build_action_titles("select_dropdown", {"params": {"value": "USA"}}, "<select>", None, None)
     assert "USA" in d2
 
-    p3, d3, _ = build_action_titles(
-        "select_dropdown", {"params": {"value": "CA"}}, None, None, None
-    )
+    p3, d3, _ = build_action_titles("select_dropdown", {"params": {"value": "CA"}}, None, None, None)
     assert "Selecting 'CA'..." in p3
 
-    p4, d4, _ = build_action_titles(
-        "upload_file", {"params": {"filename": "doc.pdf"}}, "<input>", None, None
-    )
+    p4, d4, _ = build_action_titles("upload_file", {"params": {"filename": "doc.pdf"}}, "<input>", None, None)
     assert "doc.pdf" in d4
 
-    p5, d5, _ = build_action_titles(
-        "upload_file", {"params": {"filename": "x.csv"}}, None, None, None
-    )
+    p5, d5, _ = build_action_titles("upload_file", {"params": {"filename": "x.csv"}}, None, None, None)
     assert "x.csv" in p5
 
     p6, d6, _ = build_action_titles("screenshot", {}, None, None, None)
@@ -2108,9 +2084,7 @@ async def test_execute_action_extract_delegates():
         return {"success": True, "message": "extracted"}
 
     with patch.object(service_actions, "_execute_extract", side_effect=fake_extract):
-        out = await service_actions.execute_action(
-            dom, ah, {"action": "extract", "params": {"query": "q"}}
-        )
+        out = await service_actions.execute_action(dom, ah, {"action": "extract", "params": {"query": "q"}})
     assert out == {"success": True, "message": "extracted"}
 
 
@@ -2127,9 +2101,7 @@ async def test_execute_action_goto_delegates():
         return {"success": True, "message": "navigated"}
 
     with patch.object(service_actions, "_execute_goto", side_effect=fake_goto):
-        out = await service_actions.execute_action(
-            dom, ah, {"action": "goto", "params": {"url": "https://x.com"}}
-        )
+        out = await service_actions.execute_action(dom, ah, {"action": "goto", "params": {"url": "https://x.com"}})
     assert out == {"success": True, "message": "navigated"}
 
 
@@ -2146,9 +2118,7 @@ async def test_execute_action_click_delegates():
         return {"success": True, "message": ""}
 
     with patch.object(service_actions, "_execute_click", side_effect=fake_click):
-        out = await service_actions.execute_action(
-            dom, ah, {"action": "click", "index": 3, "params": {}}
-        )
+        out = await service_actions.execute_action(dom, ah, {"action": "click", "index": 3, "params": {}})
     assert out == {"success": True, "message": ""}
 
 
@@ -2201,9 +2171,7 @@ async def test_execute_action_exception_catches():
         raise RuntimeError("kaboom")
 
     with patch.object(service_actions, "_execute_click", side_effect=boom):
-        out = await service_actions.execute_action(
-            dom, ah, {"action": "click", "index": 2, "params": {}}
-        )
+        out = await service_actions.execute_action(dom, ah, {"action": "click", "index": 2, "params": {}})
     # The outer try/except should catch and return {success: False, error: ...}
     assert out["success"] is False
     assert "kaboom" in str(out.get("error", "")) or "error" in out
@@ -2255,9 +2223,7 @@ async def test_execute_action_press_key_no_humanizer():
     dom.selector_map = {}
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await execute_action(
-        dom, ah, {"action": "press_key", "params": {"key": "Tab"}}, humanizer=None
-    )
+    out = await execute_action(dom, ah, {"action": "press_key", "params": {"key": "Tab"}}, humanizer=None)
     assert out == {"success": True, "message": ""}
     dom.session.event_bus.dispatch.assert_called()
 
@@ -2326,9 +2292,7 @@ async def test_execute_action_select_dropdown_with_element():
     ah = MagicMock()
     ah.record_action = AsyncMock()
     with patch("browser_use.browser.events.SelectDropdownOptionEvent", lambda **kw: kw):
-        out = await execute_action(
-            dom, ah, {"action": "select_dropdown", "index": 1, "params": {"value": "red"}}
-        )
+        out = await execute_action(dom, ah, {"action": "select_dropdown", "index": 1, "params": {"value": "red"}})
     assert out == {"success": True, "message": ""}
 
 
@@ -2345,9 +2309,7 @@ async def test_execute_action_evaluate():
     dom.selector_map = {}
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await execute_action(
-        dom, ah, {"action": "evaluate", "params": {"code": "1+1"}}
-    )
+    out = await execute_action(dom, ah, {"action": "evaluate", "params": {"code": "1+1"}})
     assert out["success"] is True
     assert out["value"] == 42
 
@@ -2362,9 +2324,7 @@ async def test_execute_action_open_new_tab():
     dom.selector_map = {}
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await execute_action(
-        dom, ah, {"action": "open_new_tab", "params": {"url": "https://x.com"}}
-    )
+    out = await execute_action(dom, ah, {"action": "open_new_tab", "params": {"url": "https://x.com"}})
     assert out["success"] is True
     assert out["new_tab_id"] == "1234"
 
@@ -2460,9 +2420,7 @@ async def test_execute_action_switch_tab_not_found():
 
     dom = MagicMock()
     session = _fake_session_with_event_bus()
-    session.get_tabs = AsyncMock(
-        return_value=[SimpleNamespace(target_id="xxxxxxxxAAAA", title="t", url="u")]
-    )
+    session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="xxxxxxxxAAAA", title="t", url="u")])
     dom.session = session
     dom.selector_map = {}
     ah = MagicMock()
@@ -2737,9 +2695,7 @@ async def test_execute_input_text_payment_triggers_approval():
     ah.record_action = AsyncMock()
     with (
         patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
-        patch(
-            "browser_tools.write_lock.get_write_lock_approval_question", return_value="sure?"
-        ),
+        patch("browser_tools.write_lock.get_write_lock_approval_question", return_value="sure?"),
     ):
         out = await service_actions._execute_input_text(
             session=session,
@@ -2850,13 +2806,17 @@ async def test_execute_goto_injects_local_storage():
     dom = MagicMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    with patch.object(
-        service_actions,
-        "inject_local_storage",
-        AsyncMock(return_value={"injected": True, "count": 3}),
-    ) if False else patch(
-        "domains.spawn_browser_agent_v3.repo.inject_local_storage",
-        AsyncMock(return_value={"injected": True, "count": 3}),
+    with (
+        patch.object(
+            service_actions,
+            "inject_local_storage",
+            AsyncMock(return_value={"injected": True, "count": 3}),
+        )
+        if False
+        else patch(
+            "domains.spawn_browser_agent_v3.repo.inject_local_storage",
+            AsyncMock(return_value={"injected": True, "count": 3}),
+        )
     ):
         out = await service_actions._execute_goto(
             session=session,
@@ -3030,9 +2990,7 @@ async def test_execute_switch_tab_success():
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
-    session.get_tabs = AsyncMock(
-        return_value=[SimpleNamespace(target_id="aaaaaaaa1234", title="t", url="u")]
-    )
+    session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="aaaaaaaa1234", title="t", url="u")])
     dom = MagicMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -3068,9 +3026,7 @@ async def test_execute_close_tab_with_explicit_id():
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
-    session.get_tabs = AsyncMock(
-        return_value=[SimpleNamespace(target_id="zzzzzzzz5678", title="t", url="u")]
-    )
+    session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="zzzzzzzz5678", title="t", url="u")])
     dom = MagicMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -3107,13 +3063,17 @@ async def test_execute_screenshot_success():
     dom = MagicMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    with patch.object(
-        service_actions,
-        "upload_file_to_session",
-        AsyncMock(return_value={"path": "/tmp/s.png"}),
-    ) if False else patch(
-        "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
-        AsyncMock(return_value={"path": "/tmp/s.png"}),
+    with (
+        patch.object(
+            service_actions,
+            "upload_file_to_session",
+            AsyncMock(return_value={"path": "/tmp/s.png"}),
+        )
+        if False
+        else patch(
+            "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+            AsyncMock(return_value={"path": "/tmp/s.png"}),
+        )
     ):
         out = await service_actions._execute_screenshot(
             session=session,
@@ -3214,6 +3174,91 @@ def test_get_manager_singleton():
     assert m1.tool_name == "spawn_browser_agent"
 
 
+async def test_spawn_browser_activity_requires_output_schema():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    with patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                use_claude_mode=False,
+            )
+        except ValueError as exc:
+            assert "output_schema is required" in str(exc)
+        else:
+            raise AssertionError("expected missing output_schema to raise")
+
+
+async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": None,
+        "passwords": [],
+        "user_settings": {"name": "Andy", "addressLine1": "1 Main St"},
+    }
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing cdp_url to raise")
+
+
+async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [{"origin": "https://example.com", "username": "u"}],
+    }
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing resumed cdp_url to raise")
+
+
 # ========================================
 # Runner
 # ========================================
@@ -3288,7 +3333,9 @@ async def run_all_tests():
     await r.record_async("save_browser_action_message_error_flag", test_save_browser_action_message_error_sets_flag)
     await r.record_async("save_browser_action_message_swallows", test_save_browser_action_message_swallows_exception)
     await r.record_async("save_browser_assistant_message", test_save_browser_assistant_message)
-    await r.record_async("save_browser_assistant_message_swallows", test_save_browser_assistant_message_swallows_exception)
+    await r.record_async(
+        "save_browser_assistant_message_swallows", test_save_browser_assistant_message_swallows_exception
+    )
 
     await r.record_async("list_session_files_no_api_key", test_list_session_files_no_api_key)
     await r.record_async("list_session_files_success", test_list_session_files_success)
@@ -3460,6 +3507,13 @@ async def run_all_tests():
         test_call_browser_use_with_rotation_stops_when_no_replacement,
     )
     r.record("get_manager_singleton", test_get_manager_singleton)
+    await r.record_async("activity_requires_schema", test_spawn_browser_activity_requires_output_schema)
+    await r.record_async(
+        "activity_new_session_no_cdp", test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url
+    )
+    await r.record_async(
+        "activity_resume_no_cdp", test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
+    )
 
     teardown_mock()
     return r.all_passed

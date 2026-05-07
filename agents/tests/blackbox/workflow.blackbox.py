@@ -139,9 +139,7 @@ def test_task_dag_diamond():
 
     dag.mark_completed(1)
     ready = dag.get_ready_tasks()
-    assert len(ready) == 0 or all(t.index != 3 for t in ready), (
-        "Task 3 should NOT be ready (task 2 still pending)"
-    )
+    assert len(ready) == 0 or all(t.index != 3 for t in ready), "Task 3 should NOT be ready (task 2 still pending)"
 
     dag.mark_completed(2)
     ready = dag.get_ready_tasks()
@@ -273,16 +271,12 @@ async def mock_get_agent_source(agent_id: str) -> str:
 
 
 @activity.defn(name="notify_sms_event_activity")
-async def mock_notify_sms_event_activity(
-    user_id: str, event_type: str, agent_id: str, payload: dict
-) -> None:
+async def mock_notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: dict) -> None:
     return None
 
 
 @activity.defn(name="get_user_context")
-async def mock_get_user_context(
-    user_id: str, context_gates: Optional[Dict[str, bool]] = None
-) -> str:
+async def mock_get_user_context(user_id: str, context_gates: Optional[Dict[str, bool]] = None) -> str:
     return "Test user context"
 
 
@@ -341,9 +335,7 @@ async def mock_post_agent_message(
 
 
 @activity.defn(name="poll_new_messages")
-async def mock_poll_new_messages(
-    agent_id: str, last_checked: datetime
-) -> List[Dict[str, Any]]:
+async def mock_poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     return []
 
 
@@ -353,9 +345,7 @@ async def mock_check_user_usage(user_id: str) -> dict:
 
 
 @activity.defn(name="save_tool_usage")
-async def mock_save_tool_usage(
-    agent_id: str, user_id: str, tool_name: str, usage_items: list
-) -> None:
+async def mock_save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_items: list) -> None:
     return None
 
 
@@ -406,16 +396,12 @@ async def mock_compress_context(
 
 
 @activity.defn(name="update_agent_tree_cost_activity")
-async def mock_update_agent_tree_cost_activity(
-    agent_id: str, tree_cost_cents: int, own_cost_cents: float = 0
-) -> None:
+async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: int, own_cost_cents: float = 0) -> None:
     return None
 
 
 @activity.defn(name="update_agent_tokens_activity")
-async def mock_update_agent_tokens_activity(
-    agent_id: str, tokens_in: int, tokens_out: int
-) -> None:
+async def mock_update_agent_tokens_activity(agent_id: str, tokens_in: int, tokens_out: int) -> None:
     return None
 
 
@@ -434,6 +420,8 @@ async def mock_call_llm_activity(
     extra_user_message: Optional[str] = None,
     required_tool: Optional[str] = None,
     skip_cache_write: bool = False,
+    include_attempt_completion_result: bool = False,
+    llm_only_user_preamble: str = "",
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
     claude_token_user_id: Optional[str] = None,
@@ -442,6 +430,7 @@ async def mock_call_llm_activity(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Mock LLM activity that returns an attempt_completion tool call to end the loop.
 
@@ -644,9 +633,7 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
-_WORKFLOW_RUNNER = SandboxedWorkflowRunner(
-    restrictions=SandboxRestrictions.default.with_passthrough_all_modules()
-)
+_WORKFLOW_RUNNER = SandboxedWorkflowRunner(restrictions=SandboxRestrictions.default.with_passthrough_all_modules())
 
 # Default workflow args matching AgentWorkflow.run() signature
 DEFAULT_WF_ARGS: list = [
@@ -751,9 +738,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 assert status["agent_id"] == "agent-test-1", (
                     f"Expected agent_id='agent-test-1', got {status.get('agent_id')}"
                 )
-                assert status["goal"] == "Test goal", (
-                    f"Expected goal='Test goal', got {status.get('goal')}"
-                )
+                assert status["goal"] == "Test goal", f"Expected goal='Test goal', got {status.get('goal')}"
 
                 await _cancel_workflow(handle)
                 results.append((name, None))
@@ -809,14 +794,10 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 await asyncio.sleep(0.5)
 
                 cost_limited = await handle.query(AgentWorkflow.is_cost_limit_reached_query)
-                assert cost_limited is False, (
-                    f"Expected cost_limited=False after price increase, got {cost_limited}"
-                )
+                assert cost_limited is False, f"Expected cost_limited=False after price increase, got {cost_limited}"
 
                 paused = await handle.query(AgentWorkflow.is_paused_query)
-                assert paused is False, (
-                    f"Expected paused=False after price increase, got {paused}"
-                )
+                assert paused is False, f"Expected paused=False after price increase, got {paused}"
 
                 await _cancel_workflow(handle)
                 results.append((name, None))
@@ -836,10 +817,12 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 await handle.signal(AgentWorkflow.pause)
                 await asyncio.sleep(0.5)
 
-                response_data = json.dumps({
-                    "request_id": "req-1",
-                    "response": "approved",
-                })
+                response_data = json.dumps(
+                    {
+                        "request_id": "req-1",
+                        "response": "approved",
+                    }
+                )
                 await handle.signal(AgentWorkflow.receive_user_response, response_data)
                 await asyncio.sleep(0.5)
 
@@ -1178,9 +1161,7 @@ def test_workflow_extract_failure_context_skips_in_progress_tools():
 
 def test_workflow_extract_failure_context_verifier_progress():
     wf = _bare_workflow_instance()
-    result = wf._extract_failure_context(
-        context=[], verifier_progress=0.75, verifier_reasoning="mostly done"
-    )
+    result = wf._extract_failure_context(context=[], verifier_progress=0.75, verifier_reasoning="mostly done")
     assert result["progress_estimate"] == "75%"
     assert result["verifier_reasoning"] == "mostly done"
 
@@ -1924,9 +1905,7 @@ async def test_workflow_on_tokens_no_pricing_still_logs():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        await wf._on_tokens(
-            tokens_in_delta=100, tokens_out_delta=50, actual_model=None, call_site="x"
-        )
+        await wf._on_tokens(tokens_in_delta=100, tokens_out_delta=50, actual_model=None, call_site="x")
         assert wf.tokens_in == 100
         assert wf.tokens_out == 50
         assert wf.own_cost_cents == 0.0
@@ -2258,6 +2237,103 @@ async def test_workflow_does_not_advance_terminal_cloud_agent_tool():
         _restore_workflow(original)
 
 
+async def test_workflow_run_covers_chat_agent_startup_and_completion():
+    """Direct run() smoke covers startup lifecycle, context gates, schema generation, and completion."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "SMS",
+            "get_user_context": "remembered context",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": "Prefer concise answers.",
+            "fetch_compute_token_activity": {
+                "type": "gpt",
+                "accessToken": "gpt-token",
+                "accountId": "acct-1",
+                "source": "pool",
+                "poolTokenId": "pool-1",
+            },
+            "fetch_agent_config": {
+                "response_schema": None,
+                "write_lock_enabled": False,
+            },
+            "set_response_schema_activity": {
+                "schema": {"fields": [{"name": "answer", "type": "string"}]},
+            },
+            "generate_completion_summary": {
+                "summary": "Finished cleanly.",
+                "tool_counts": {"web_search": 1},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+    run_agent_calls = []
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        if kwargs.get("is_plan_loop"):
+            return {
+                "status": "completed",
+                "context": [],
+                "token_count": 7,
+                "context_size": 100,
+            }
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "done", "metadata": None}],
+            "structured_response": {"answer": "done"},
+            "token_count": 11,
+            "context_size": 120,
+        }
+
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-run-1",
+            "user-run-1",
+            "Complete the task",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "plan",
+            None,
+            250,
+            {"custom_system_prompt": True},
+        )
+
+        assert result == {"status": "completed", "goal": "Complete the task"}
+        assert len(run_agent_calls) == 2
+        assert run_agent_calls[0]["is_plan_loop"] is True
+        assert run_agent_calls[1]["skip_blueprint_query"] is True
+        assert wf.compute_token_provider == "gpt"
+        assert wf.gpt_code_token == "gpt-token"
+        assert wf.output_schema == {"fields": [{"name": "answer", "type": "string"}]}
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "notify_sms_event_activity" in activity_names
+        assert "set_response_schema_activity" in activity_names
+        assert "mark_finished" in activity_names
+    finally:
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
 async def test_workflow_handle_tool_event_forwards_to_helper():
     """_handle_tool_event invokes handle_tool_event helper with our execute_activity."""
     wf = _bare_workflow_instance()
@@ -2577,14 +2653,10 @@ async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        result = await wf._execute_tool(
-            "spawn_agent", {"type": "browser", "goal": "x"}, "call-1"
-        )
+        result = await wf._execute_tool("spawn_agent", {"type": "browser", "goal": "x"}, "call-1")
         assert result.get("error") is True
         assert "PLAN" in result.get("message", "") or "explore" in result.get("message", "")
-        assert len(handle_calls) == 1, (
-            "Expected one TOOL event posted for PLAN+non-explore block"
-        )
+        assert len(handle_calls) == 1, "Expected one TOOL event posted for PLAN+non-explore block"
         event, tcid, tname = handle_calls[0]
         assert tcid == "call-1"
         assert tname == "spawn_agent"
@@ -2956,7 +3028,9 @@ async def run_all_tests():
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async("wf_signal_recv_user_plain", test_workflow_signal_receive_user_response_plain_string)
     await r.record_async("wf_signal_recv_user_req_id", test_workflow_signal_receive_user_response_with_request_id)
-    await r.record_async("wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id)
+    await r.record_async(
+        "wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id
+    )
     await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
     await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)
     await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
@@ -3004,6 +3078,7 @@ async def run_all_tests():
     await r.record_async("wf_post_message_failure", test_workflow_post_message_failure_logs_warning)
     await r.record_async("wf_advance_cloud_agent_tool", test_workflow_advances_pending_cloud_agent_tool)
     await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
+    await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
@@ -3019,22 +3094,33 @@ async def run_all_tests():
     await r.record_async("wf_poll_messages_merges", test_workflow_poll_messages_merges_and_sorts)
     await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_returns_empty)
     await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
-    await r.record_async("wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn)
+    await r.record_async(
+        "wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn
+    )
     await r.record_async(
         "wf_execute_tool_invalid_params_posts_event",
         test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
-    await r.record_async("wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token)
-    await r.record_async("wf_refresh_claude_token_exception", test_workflow_refresh_claude_token_exception_logged_no_raise)
+    await r.record_async(
+        "wf_refresh_claude_token_none_clears", test_workflow_refresh_claude_token_result_none_clears_token
+    )
+    await r.record_async(
+        "wf_refresh_claude_token_exception", test_workflow_refresh_claude_token_exception_logged_no_raise
+    )
     await r.record_async(
         "wf_get_model_pricing_in_process",
         test_workflow_get_model_pricing_resolves_in_process_and_caches,
     )
     await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
-    await r.record_async("wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token)
-    await r.record_async("wf_on_tokens_successful_claude_rotation", test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token)
+    await r.record_async(
+        "wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token
+    )
+    await r.record_async(
+        "wf_on_tokens_successful_claude_rotation",
+        test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token,
+    )
     await r.record_async("wf_on_tokens_rotates_gpt", test_workflow_on_tokens_rotates_gpt_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)
     await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
