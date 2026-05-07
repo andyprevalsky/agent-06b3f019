@@ -1588,9 +1588,13 @@ def test_planner_depends_on_schema_matches_prompt_contract():
 
     prompt = build_planner_system_prompt("tool descriptions here")
     assert "tasks[i].depends_on lists indices of tasks that must complete first" in prompt
+    assert "If one task needs another task's output, state, credentials, artifact, or decision" in prompt
+    assert "Empty depends_on means the task can start immediately" in prompt
+    assert "Causal handoff: Step 0 gather facts" in prompt
     assert 'Use 0-based indices as strings ("0", "1", ...)' in prompt
     assert "# Output Field Descriptions" in prompt
     assert PLANNER_OUTPUT_ARG_DESCRIPTIONS in prompt
+    assert "Use an empty list only when the task can start immediately" in PLANNER_TASK_DEPENDS_ON_DESCRIPTION
 
     schema = prepare_schema_for_openai(PlannerResponse)
     task_schema = schema["properties"]["tasks"]["items"]

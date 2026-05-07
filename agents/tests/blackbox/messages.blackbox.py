@@ -410,6 +410,8 @@ async def test_stream_tool_event_broadcasts():
         tool_call_id="tc-2",
         tool_name="web_search",
         title="Starting web_search...",
+        char_count=123,
+        is_claude=True,
     )
 
     captures = get_captured_requests()
@@ -418,6 +420,8 @@ async def test_stream_tool_event_broadcasts():
     assert body["messages"][0]["event"] == "TOOL_STREAM"
     record = body["messages"][0]["payload"]["record"]
     assert record["tool_name"] == "web_search"
+    assert record["char_count"] == 123
+    assert record["is_claude"] is True
 
 
 async def test_stream_tool_event_handles_errors():

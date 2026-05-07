@@ -82,9 +82,8 @@ def _validate_dep_indices(deps: dict[str, list[str]], n: int) -> str | None:
             pred_idx = int(pred)
             if pred_idx < 0 or pred_idx >= n:
                 return f"Task {task_idx} depends on non-existent task '{pred}'. Valid indices: 0 to {n - 1}."
-
-        if task_idx in predecessors:
-            return f"Task {task_idx} cannot depend on itself."
+            if pred_idx == idx:
+                return f"Task {task_idx} cannot depend on itself."
 
     return None
 

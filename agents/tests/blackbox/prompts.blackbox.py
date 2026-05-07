@@ -37,6 +37,12 @@ def test_build_system_prompt_execute():
     assert "You are a Rose Labs Agent" in result
     assert "EXECUTE phase" in result
     assert "attempt_completion" in result
+    assert (
+        "The beginning of your context might have information generated from the RESEARCH phase"
+        in result
+    )
+    assert "real-world, long-horizon task execution" in result
+    assert "no further actions required from the user" in result
 
 
 def test_build_system_prompt_with_user_context():

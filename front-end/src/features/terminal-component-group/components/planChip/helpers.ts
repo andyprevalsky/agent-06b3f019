@@ -25,7 +25,6 @@ export function topologicalSort(
     deps: (normalizedDeps[String(idx)] || []).map((d) => parseInt(d)),
   }));
 
-  // Kahn's algorithm for topological sort
   const inDegree = new Map<number, number>();
   const adjList = new Map<number, number[]>();
 
@@ -70,7 +69,7 @@ export function topologicalSort(
     queue.push(...nextLevel);
   }
 
-  // Cycle — fall back to original order
+  // Cycle - fall back to original order
   if (sorted.length !== n) {
     return taskInfos;
   }

@@ -72,7 +72,10 @@ export async function broadcastToolEvent(
   toolCallId: string,
   toolName: string,
   status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR',
-  title: string
+  title: string,
+  charCount: number = 0,
+  isClaude: boolean = false,
+  isGpt: boolean = false
 ): Promise<void> {
   log.info('[Broadcast] TOOL_STREAM', {
     agentId,
@@ -81,6 +84,9 @@ export async function broadcastToolEvent(
     toolName,
     status,
     title,
+    charCount,
+    isClaude,
+    isGpt,
   });
   await broadcast({
     topic: `agent:${agentId}`,
@@ -92,6 +98,9 @@ export async function broadcastToolEvent(
       tool_name: toolName,
       status: status,
       title: title,
+      char_count: charCount,
+      is_claude: isClaude,
+      is_gpt: isGpt,
     },
   });
 }

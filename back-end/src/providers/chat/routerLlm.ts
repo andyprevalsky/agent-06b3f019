@@ -541,7 +541,10 @@ export async function callRouterLlm(params: {
           webSearchToolCallId,
           'web_search',
           'IN_PROGRESS',
-          '🔍 Searching the web'
+          '🔍 Searching the web',
+          accumulatedReasoning.length + accumulatedJson.length,
+          isClaude,
+          isGpt
         );
       }
     }
