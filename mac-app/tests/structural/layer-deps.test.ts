@@ -155,6 +155,9 @@ function classify(abs: string): SourceFile {
         : 'provider';
     return { abs, rel, kind };
   }
+  if (rel.startsWith('shared/utils/') || rel.startsWith('ui/shared/utils/')) {
+    return { abs, rel, kind: 'util' };
+  }
   if (rel.startsWith('shared/') || rel.startsWith('ui/shared/'))
     return { abs, rel, kind: 'provider' };
   if (rel === 'main/index.ts' || rel.startsWith('main/app/') || rel === 'ui/main.tsx') {

@@ -16,7 +16,7 @@
 
 import type { BrowserWindow } from 'electron';
 import { config } from '../../base/config';
-import { getErrorMessage } from '../../base/logger';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { DEV_MODE_ERROR_MESSAGE, IPC_CHANNELS } from './config';
 import {
   checkForUpdatesRaw,

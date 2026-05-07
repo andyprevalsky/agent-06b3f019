@@ -11,6 +11,7 @@
  * Imports: own repo, own config, own types, EventEmitter.
  */
 import { EventEmitter } from 'events';
+import { toError } from '../../../shared/utils/error';
 import { DEBOUNCE_MS } from './config';
 import { watchChatDb, type FSWatcher } from './repo';
 import type { NormalizedMessage, QueryNewMessages, SyncEvent } from './types';
@@ -133,7 +134,7 @@ export class IMessageWatcher extends EventEmitter {
       this.emit('sync', {
         type: 'error',
         channel: 'IMESSAGE',
-        error: error instanceof Error ? error : new Error(String(error)),
+        error: toError(error),
       } satisfies SyncEvent);
     }
   }

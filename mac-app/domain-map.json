@@ -8,6 +8,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -184,7 +185,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/ipc-registry.blackbox.ts",
-      "fileCount": 177
+      "fileCount": 178
     },
     {
       "domain": "i-message-queue-service",
@@ -254,7 +255,7 @@
       "entryFile": "main/services/autoUpdater.ts",
       "files": [
         "main/base/config.ts",
-        "main/base/logger.ts",
+        "main/base/error.ts",
         "main/domains/auto-updater/config.ts",
         "main/domains/auto-updater/repo.ts",
         "main/domains/auto-updater/runtime.ts",
@@ -327,6 +328,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -476,7 +478,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/browser-state-sync.blackbox.ts",
-      "fileCount": 149
+      "fileCount": 150
     },
     {
       "domain": "cache-storage-reader",
@@ -522,6 +524,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -677,7 +680,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/claude-credential-sync.blackbox.ts",
-      "fileCount": 156
+      "fileCount": 157
     },
     {
       "domain": "contacts-reader-native",
@@ -723,6 +726,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -872,7 +876,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/cookie-sync.blackbox.ts",
-      "fileCount": 149
+      "fileCount": 150
     },
     {
       "domain": "fingerprint-reader",
@@ -899,6 +903,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -1054,7 +1059,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/gpt-credential-sync.blackbox.ts",
-      "fileCount": 156
+      "fileCount": 157
     },
     {
       "domain": "i-message-reader",
@@ -1103,6 +1108,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -1252,7 +1258,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/i-message-sync.blackbox.ts",
-      "fileCount": 149
+      "fileCount": 150
     },
     {
       "domain": "indexed-db-reader",
@@ -1354,6 +1360,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -1506,7 +1513,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/messaging-telegram.blackbox.ts",
-      "fileCount": 152
+      "fileCount": 153
     },
     {
       "domain": "messaging-whatsapp",
@@ -1515,6 +1522,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -1666,7 +1674,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/messaging-whatsapp.blackbox.ts",
-      "fileCount": 151
+      "fileCount": 152
     },
     {
       "domain": "messaging-core",
@@ -1675,6 +1683,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -1833,7 +1842,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/messaging-core.blackbox.ts",
-      "fileCount": 158
+      "fileCount": 159
     },
     {
       "domain": "sync-manager",
@@ -1842,6 +1851,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -2007,7 +2017,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/sync-manager.blackbox.ts",
-      "fileCount": 165
+      "fileCount": 166
     },
     {
       "domain": "electron-main",
@@ -2022,6 +2032,7 @@
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
         "main/base/crypto.ts",
+        "main/base/error.ts",
         "main/base/logger.ts",
         "main/domains/atlas-credential-store/config.ts",
         "main/domains/atlas-credential-store/repo.ts",
@@ -2205,7 +2216,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/electron-main.blackbox.ts",
-      "fileCount": 189
+      "fileCount": 190
     },
     {
       "domain": "electron-preload",
@@ -2680,9 +2691,15 @@
         "testFile": null
       },
       {
+        "file": "main/base/error.ts",
+        "category": "main/base (util)",
+        "usedByCount": 12,
+        "testFile": null
+      },
+      {
         "file": "main/base/logger.ts",
         "category": "main/base (provider)",
-        "usedByCount": 13,
+        "usedByCount": 12,
         "testFile": null
       },
       {

@@ -80,7 +80,15 @@ The blackbox runner auto-starts an isolated backend on a dedicated port:
 cd back-end && bash scripts/run-blackbox-tests.sh
 ```
 
-### 2i. Mac-app blackbox tests (skip if no mac-app/ changes)
+### 2i. Mac-app code coverage (skip if no mac-app/ changes)
+
+```bash
+cd mac-app && npm run test:coverage
+```
+
+Coverage must meet the thresholds configured in `mac-app/vitest.config.ts`. Thresholds ratchet toward 80%.
+
+### 2j. Mac-app blackbox tests (skip if no mac-app/ changes)
 
 Runs vitest + MSW + jsdom across every renderer and main-process domain. Self-contained — no backend required.
 
@@ -90,7 +98,7 @@ cd mac-app && bash scripts/run-blackbox-tests.sh
 
 **ALL domains must pass — 0 failures.** Same rule as the backend blackbox: pre-existing is not an excuse, fix every failure.
 
-### 2j. Research lint + structural (skip if no research/ changes)
+### 2k. Research lint + structural (skip if no research/ changes)
 
 Runs deno fmt/lint (base + strict overlay), structural invariants (file/function length), and ruff for Python:
 
@@ -119,6 +127,7 @@ git push origin main
 ```
 
 If on main already (linear commits), just push:
+
 ```bash
 git push origin main
 ```

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   cancelTelegramAuth,
   isTelegramApiAvailable,
@@ -154,7 +155,7 @@ const runStepSubmit = async (step: AuthStep, input: string, state: SubmitState):
       state.setLoading(false);
     }
   } catch (err) {
-    state.setError(err instanceof Error ? err.message : spec.thrownFallback);
+    state.setError(getErrorMessageOrFallback(err, spec.thrownFallback));
     state.setLoading(false);
   }
 };

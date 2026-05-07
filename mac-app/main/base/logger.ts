@@ -114,19 +114,3 @@ export function closeLogger(): void {
   consoleStream = null;
   ipcStream = null;
 }
-
-/**
- * Extract a human-readable message from any caught error value.
- * Catch variables are typed as `unknown` under strict TypeScript; use this
- * helper instead of annotating catches with `any` to keep lint + types happy.
- */
-export function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  try {
-    const serialized = JSON.stringify(error);
-    return serialized ?? String(error);
-  } catch {
-    return String(error);
-  }
-}

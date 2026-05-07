@@ -97,7 +97,6 @@ vi.mock('../../main/base/logger', () => ({
   logIpc: vi.fn(),
   logConsole: vi.fn(),
   logConsoleError: vi.fn(),
-  getErrorMessage: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }));
 
 // ---------------------------------------------------------------------------

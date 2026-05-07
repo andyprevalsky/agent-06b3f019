@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../shared/utils/error';
 import {
   uploadCacheStoragePayload,
   uploadPasswordsPayload,
@@ -19,7 +20,7 @@ export async function uploadPermissions(
     console.log(`[BrowserStateSync] \u2705 Uploaded ${data.grants.length} permission grants`);
     return { success: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     console.error(`[BrowserStateSync] \u274c Failed to upload permissions:`, message);
     return { success: false, message };
   }
@@ -39,7 +40,7 @@ export async function uploadCacheStorage(
     console.log(`[BrowserStateSync] \u2705 Uploaded ${data.origins.length} Cache Storage origins`);
     return { success: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     console.error(`[BrowserStateSync] \u274c Failed to upload Cache Storage:`, message);
     return { success: false, message };
   }
@@ -62,7 +63,7 @@ export async function uploadPasswords(
     console.log(`[BrowserStateSync] \u2705 Uploaded ${passwords.length} passwords`);
     return { success: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     console.error(`[BrowserStateSync] \u274c Failed to upload passwords:`, message);
     return { success: false, message };
   }

@@ -24,6 +24,8 @@
     "map-domains": "tsx scripts/map-domains.ts",
     "test": "vitest run",
     "test:structural": "tsx tests/structural/layer-deps.test.ts",
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:report": "vitest run --coverage --reporter=verbose",
     "test:watch": "vitest",
     "test:blackbox": "bash scripts/run-blackbox-tests.sh"
   },
@@ -64,6 +66,7 @@
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "@vitest/ui": "2.1.9",
     "autoprefixer": "^10.4.14",
     "concurrently": "^8.2.0",

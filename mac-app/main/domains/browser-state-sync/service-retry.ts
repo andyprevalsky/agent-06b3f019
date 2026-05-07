@@ -1,4 +1,5 @@
 import { MAX_RETRIES, RETRY_DELAY_MS } from './config';
+import { toError } from '../../../shared/utils/error';
 import type { UploadResult } from './types';
 
 /**
@@ -16,7 +17,7 @@ export async function withRetry(
       await uploader();
       return { success: true };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+      lastError = toError(error);
       console.warn(
         `[BrowserStateSync] ${label} upload attempt ${attempt + 1} failed:`,
         lastError.message

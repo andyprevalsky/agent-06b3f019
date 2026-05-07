@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { sendOTP, verifyOTP } from '@/features/auth/api';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   fetchCustomization,
   fetchIntegrations,
@@ -109,7 +110,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
       setResendCountdown(RESEND_COOLDOWN_SECONDS);
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send verification code');
+      setError(getErrorMessageOrFallback(err, 'Failed to send verification code'));
       return false;
     }
   };
@@ -140,7 +141,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
     void verifyOTP(stripPhoneNumber(phone), otp, undefined, { firstName, lastName })
       .then(() => onComplete())
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : 'Invalid verification code');
+        setError(getErrorMessageOrFallback(err, 'Invalid verification code'));
       })
       .finally(() => setLoading(false));
   };

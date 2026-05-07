@@ -16,6 +16,7 @@
 import { useState, useEffect } from 'react';
 import { Loader2, ArrowRight, Sparkles } from 'lucide-react';
 import { SystemCustomization, type CustomizationData } from '@/features/customization';
+import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 import { useOnboardingCustomizationApi } from '../hooks';
 
 interface OnboardingCustomizationProps {
@@ -48,7 +49,7 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
       onComplete();
     } catch (err) {
       console.error('Failed to save customization:', err);
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setError(getErrorMessageOrFallback(err, 'Failed to save'));
       setSaving(false);
     }
   };

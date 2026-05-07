@@ -36,6 +36,7 @@ Run all checks locally. If any step fails, fix the issue and re-run that step. I
 ## Test Report Tracking
 
 As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. For each step, record:
+
 - The step name
 - Pass/fail status
 - A brief summary of the output (e.g., "0 errors", "3 files formatted", "5/5 benchmarks passed")
@@ -101,6 +102,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
+   - Step 4m-coverage: mac-app coverage (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
 
@@ -115,6 +117,7 @@ cd back-end && npx prettier --write $CHANGED_TS
 ```
 
 If any files were modified by this step, stage and commit them:
+
 ```bash
 git add -p  # review changes
 git commit -m "style: auto-format and lint fixes"
@@ -125,11 +128,13 @@ git commit -m "style: auto-format and lint fixes"
 Using the same `$CHANGED_TS` from Step 1 (skip if empty):
 
 **Step 2a (mutator — runs before the parallel verifier batch):**
+
 ```bash
 cd back-end && npx eslint --fix $CHANGED_TS
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
+
 ```bash
 cd back-end && npx eslint $CHANGED_TS
 ```
@@ -203,6 +208,14 @@ cd mac-app && npm run format:check && npm run lint && npm run type-check
 ```
 
 If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
+
+## Step 4m-coverage: Mac-app code coverage check (skip if `$CHANGED_MAC_APP` is empty)
+
+```bash
+cd mac-app && npm run test:coverage
+```
+
+Coverage must meet the thresholds configured in `mac-app/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
 
 ## Step 4m: Mac-app blackbox tests (skip if `$CHANGED_MAC_APP` is empty)
 
@@ -379,38 +392,39 @@ Smoke benchmarks exercise the full agent runtime (backend API → Temporal → w
 
 **SAFE TO SKIP** when the diff is limited to paths that don't ship or don't affect agent behavior:
 
-| Path pattern | Why safe |
-|---|---|
-| `**/tests/**` (including structural, blackbox, e2e, semantic) | Test code doesn't run in prod |
-| `**/benchmarks/**` | Benchmarks don't run in prod |
-| `docs/**`, `**/*.md`, `**/README*`, `**/CLAUDE.md` | Documentation only |
-| `front-end/**` | Smoke doesn't exercise the front-end path (covered by FE blackbox + build) |
-| `mac-app/**` | Smoke doesn't exercise mac-app |
-| `.claude/**` | Agent/skill config; local tooling only |
-| `.coderabbit.yaml`, `.eslintrc*`, `eslint.config.*`, `.prettier*`, `*.test.config.*`, `vitest.config.*` | Lint/format/test-runner config only |
-| `scripts/test.sh`, `scripts/run-*-tests.sh`, `**/scripts/run_blackbox_tests.py` | Test harness — doesn't change runtime |
-| `.github/workflows/*.yml` (CI config only) | Deploy/CI config — doesn't change app code |
-| `refactor.md`, `conductor.json` (unless it changes service wiring) | Tooling config |
-| Lock files (`package-lock.json`, `pnpm-lock.yaml`, `uv.lock`) **with no `package.json`/`pyproject.toml` diff** | Pure lock churn |
+| Path pattern                                                                                                   | Why safe                                                                   |
+| -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `**/tests/**` (including structural, blackbox, e2e, semantic)                                                  | Test code doesn't run in prod                                              |
+| `**/benchmarks/**`                                                                                             | Benchmarks don't run in prod                                               |
+| `docs/**`, `**/*.md`, `**/README*`, `**/CLAUDE.md`                                                             | Documentation only                                                         |
+| `front-end/**`                                                                                                 | Smoke doesn't exercise the front-end path (covered by FE blackbox + build) |
+| `mac-app/**`                                                                                                   | Smoke doesn't exercise mac-app                                             |
+| `.claude/**`                                                                                                   | Agent/skill config; local tooling only                                     |
+| `.coderabbit.yaml`, `.eslintrc*`, `eslint.config.*`, `.prettier*`, `*.test.config.*`, `vitest.config.*`        | Lint/format/test-runner config only                                        |
+| `scripts/test.sh`, `scripts/run-*-tests.sh`, `**/scripts/run_blackbox_tests.py`                                | Test harness — doesn't change runtime                                      |
+| `.github/workflows/*.yml` (CI config only)                                                                     | Deploy/CI config — doesn't change app code                                 |
+| `refactor.md`, `conductor.json` (unless it changes service wiring)                                             | Tooling config                                                             |
+| Lock files (`package-lock.json`, `pnpm-lock.yaml`, `uv.lock`) **with no `package.json`/`pyproject.toml` diff** | Pure lock churn                                                            |
 
 **MUST RUN SMOKE** when the diff touches any of these (even one line):
 
-| Key path | Why it needs smoke |
-|---|---|
-| `back-end/src/**/*.ts` (excluding `back-end/src/tests/**`) | Any API, middleware, service, route, provider change can affect the request path smoke hits |
-| `back-end/prisma/schema.prisma`, `back-end/prisma/migrations/**` | DB schema / realtime triggers — blast radius across every DB read/write |
-| `agents/activities/**`, `agents/helpers/**`, `agents/loop/**`, `agents/workflows/**` | Core Temporal runtime — workflow/activity code paths executed by every benchmark |
-| `agents/tools/**`, `agents/domains/**`, `agents/browser_tools/**` | Tool implementations smoke depends on (spawn_sub_agents, parallel-tool-calls, browser-smoke) |
-| `agents/worker.py`, `agents/config.py`, `agents/health_server.py` | Composition root / worker wiring |
-| `agents/requirements.txt`, `agents/pyproject.toml` (non-lint sections) | Runtime dep changes can break imports at startup |
-| `agents/Dockerfile`, `agents/fly.toml`, `agents/deploy.sh` | Worker deployment shape |
-| `research/supabase/functions/**` | Rose completions endpoint — all A* / S* LLM calls route through here |
-| `scripts/run.sh` | Service startup and env wiring that smoke depends on |
-| `back-end/.env.example` **when it adds a new required env var** | Runtime config contract change |
+| Key path                                                                             | Why it needs smoke                                                                           |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `back-end/src/**/*.ts` (excluding `back-end/src/tests/**`)                           | Any API, middleware, service, route, provider change can affect the request path smoke hits  |
+| `back-end/prisma/schema.prisma`, `back-end/prisma/migrations/**`                     | DB schema / realtime triggers — blast radius across every DB read/write                      |
+| `agents/activities/**`, `agents/helpers/**`, `agents/loop/**`, `agents/workflows/**` | Core Temporal runtime — workflow/activity code paths executed by every benchmark             |
+| `agents/tools/**`, `agents/domains/**`, `agents/browser_tools/**`                    | Tool implementations smoke depends on (spawn_sub_agents, parallel-tool-calls, browser-smoke) |
+| `agents/worker.py`, `agents/config.py`, `agents/health_server.py`                    | Composition root / worker wiring                                                             |
+| `agents/requirements.txt`, `agents/pyproject.toml` (non-lint sections)               | Runtime dep changes can break imports at startup                                             |
+| `agents/Dockerfile`, `agents/fly.toml`, `agents/deploy.sh`                           | Worker deployment shape                                                                      |
+| `research/supabase/functions/**`                                                     | Rose completions endpoint — all A* / S* LLM calls route through here                         |
+| `scripts/run.sh`                                                                     | Service startup and env wiring that smoke depends on                                         |
+| `back-end/.env.example` **when it adds a new required env var**                      | Runtime config contract change                                                               |
 
 **Tie-breaker rule:** if a path touches both safe and must-run buckets, treat the diff as must-run. When in doubt, run smoke — or ask the user.
 
 When skipping, record it explicitly in the Test Report:
+
 ```
 | Smoke Benchmarks | ⏭️ Skipped | Diff is test-infra only (paths: <list>) — no runtime impact |
 ```
@@ -439,6 +453,7 @@ Per-task timeouts are **dynamic** — derived from p95 × 1.5 of past passes in 
 **Two cases:**
 
 1. **First run on a fresh checkout** (or any task shows `InsufficientHistoryError`): bootstrap the corpus with `--bootstrap`. This accepts the tasks.json `timeout_seconds` as a ceiling and still records passes. Run 5×:
+
    ```bash
    cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
    for i in 1 2 3 4 5; do
@@ -452,6 +467,7 @@ Per-task timeouts are **dynamic** — derived from p95 × 1.5 of past passes in 
 2. **Normal run** (history exists): the command at the top of Step 6 runs as-is, without `--bootstrap`. On success, passes auto-append to the JSONL.
 
 **After Step 6 passes: stage and commit the updated history** before Phase 2:
+
 ```bash
 if ! git diff --quiet -- agents/benchmarks/history/task_durations.jsonl; then
   git add agents/benchmarks/history/task_durations.jsonl
@@ -466,11 +482,13 @@ The JSONL uses `merge=union` (`.gitattributes`) so parallel branches do not conf
 **Do NOT fire-and-forget.** While benchmarks run, actively monitor agent progress by polling each agent's detail endpoint (`GET /api/agents/{id}`) AND tailing the smoke log file.
 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
+
 - **First 60 seconds:** poll every **10 seconds** (catches silent early deaths — 0-byte logs, missing-env crashes, queue-routing bugs)
 - **After 60 seconds:** poll every **60 seconds**
 - **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (exit code, "RESULTS:" line, PID no longer running), stop polling and move on.
 
 At each poll, check:
+
 - Agent status (ACTIVE, COMPLETED, FAILED, ERROR)
 - Message count and latest messages
 - Progress score
@@ -478,6 +496,7 @@ At each poll, check:
 - Background PID is still alive (`ps -p <pid>`) — a 0-byte log + dead PID means the task died silently
 
 **If any agent shows signs of trouble** (stuck at 0 messages for 30s+, ERROR status, backend 500s in logs), immediately:
+
 1. Kill ALL running benchmark agents (DELETE each agent)
 2. Read logs (backend, worker, research) to diagnose
 3. Fix the root cause
@@ -563,11 +582,13 @@ agent's fix was complete.
 exact agent_id, scan the result, then hand the agent_id off.
 
 **NOT allowed when fixing smoke tests:**
+
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
 - Skipping or disabling tests
 
 **Escalation is ONLY for:**
+
 - Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded")
 - Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
 
@@ -608,13 +629,14 @@ If benchmarks **fail**: do NOT delete agents yet — keep them alive for diagnos
 
 When any test or benchmark fails, check these local log files before making code changes:
 
-| Service | Log file | What to look for |
-|---------|----------|-----------------|
-| Backend | `back-end/backend-logs.log` | HTTP errors, Temporal client failures, DB errors |
-| Worker | `agents/navi-worker-log.txt` | Workflow tracebacks, activity failures, LLM call errors |
-| Research | `research/research-logs.log` | Edge function errors, rate limits, auth failures |
+| Service  | Log file                     | What to look for                                        |
+| -------- | ---------------------------- | ------------------------------------------------------- |
+| Backend  | `back-end/backend-logs.log`  | HTTP errors, Temporal client failures, DB errors        |
+| Worker   | `agents/navi-worker-log.txt` | Workflow tracebacks, activity failures, LLM call errors |
+| Research | `research/research-logs.log` | Edge function errors, rate limits, auth failures        |
 
 For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions:
+
 ```bash
 # "Why was this slow/stalled?" — span waterfall + top-10 bad paths
 cd agents && python benchmarks/agent_latency.py <agent_id>
@@ -625,6 +647,7 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 # "How much did this cost / cache?" — tree-wide token + cache breakdown
 cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
 ```
+
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
 
 ## Step 6b: Semantic tests + fix
@@ -666,41 +689,79 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 ---
 
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║                    HARD GATE — PHASE 2 BLOCKED                     ║
-# ║                                                                    ║
-# ║  Do NOT enter Phase 2 unless ALL of the following are true:        ║
-# ║                                                                    ║
-# ║  1. Prettier: 0 formatting changes remaining                      ║
-# ║  2. ESLint: 0 errors                                              ║
-# ║  3. TypeScript: 0 errors                                          ║
-# ║  4. Structural tests: 100% pass                                   ║
-# ║  4a. Code coverage: meets thresholds in .c8rc.json                ║
-# ║  4g. Agents code coverage: meets pyproject.toml threshold         ║
-# ║  4c. Credential health: all integrations authenticate             ║
-# ║  4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes)    ║
-# ║  5. Blackbox API tests: 100% pass (ALL domains)                   ║
-# ║  6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the    ║
-# ║     "When smoke can be skipped" table in Step 6 (diff must be     ║
-# ║     limited to safe paths; if ANY must-run path is touched, smoke ║
-# ║     is required)                                                   ║
-# ║  6b. Semantic tests: 100% pass whenever smoke ran (skip together  ║
-# ║      with smoke — never skip one without the other)               ║
-# ║                                                                    ║
-# ║  If ANY test has ANY failure, you are BLOCKED.                     ║
-# ║  Fix it or escalate to the user. Do NOT proceed.                   ║
-# ║                                                                    ║
-# ║  INVALID EXCUSES (do NOT use these to justify proceeding):         ║
-# ║  - "Pre-existing" / "not related to my changes"                   ║
-# ║  - "Infrastructure issue" / "flaky" / "resource contention"       ║
-# ║  - "The code changes don't touch agent/Temporal code" (check the  ║
-# ║     Step 6 table — back-end/ and research/ changes ALSO require   ║
-# ║     smoke, not just agents/)                                      ║
-# ║  - "Expired tokens" (re-run seed script or escalate to user)      ║
-# ║  - "Temporal connectivity" (restart workers, fix it)              ║
-# ║  - "Agents timing out" (investigate and fix)                      ║
-# ║                                                                    ║
-# ║  Merging or creating a PR with known failures is a CRITICAL       ║
-# ║  ERROR. The user has explicitly and repeatedly stated this.        ║
+
+# ║ HARD GATE — PHASE 2 BLOCKED ║
+
+# ║ ║
+
+# ║ Do NOT enter Phase 2 unless ALL of the following are true: ║
+
+# ║ ║
+
+# ║ 1. Prettier: 0 formatting changes remaining ║
+
+# ║ 2. ESLint: 0 errors ║
+
+# ║ 3. TypeScript: 0 errors ║
+
+# ║ 4. Structural tests: 100% pass ║
+
+# ║ 4a. Code coverage: meets thresholds in .c8rc.json ║
+
+# ║ 4g. Agents code coverage: meets pyproject.toml threshold ║
+
+# ║ 4c. Credential health: all integrations authenticate ║
+
+# ║ 4m-coverage. Mac-app coverage: meets vitest thresholds ║
+
+# ║ 4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes) ║
+
+# ║ 5. Blackbox API tests: 100% pass (ALL domains) ║
+
+# ║ 6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the ║
+
+# ║ "When smoke can be skipped" table in Step 6 (diff must be ║
+
+# ║ limited to safe paths; if ANY must-run path is touched, smoke ║
+
+# ║ is required) ║
+
+# ║ 6b. Semantic tests: 100% pass whenever smoke ran (skip together ║
+
+# ║ with smoke — never skip one without the other) ║
+
+# ║ ║
+
+# ║ If ANY test has ANY failure, you are BLOCKED. ║
+
+# ║ Fix it or escalate to the user. Do NOT proceed. ║
+
+# ║ ║
+
+# ║ INVALID EXCUSES (do NOT use these to justify proceeding): ║
+
+# ║ - "Pre-existing" / "not related to my changes" ║
+
+# ║ - "Infrastructure issue" / "flaky" / "resource contention" ║
+
+# ║ - "The code changes don't touch agent/Temporal code" (check the ║
+
+# ║ Step 6 table — back-end/ and research/ changes ALSO require ║
+
+# ║ smoke, not just agents/) ║
+
+# ║ - "Expired tokens" (re-run seed script or escalate to user) ║
+
+# ║ - "Temporal connectivity" (restart workers, fix it) ║
+
+# ║ - "Agents timing out" (investigate and fix) ║
+
+# ║ ║
+
+# ║ Merging or creating a PR with known failures is a CRITICAL ║
+
+# ║ ERROR. The user has explicitly and repeatedly stated this. ║
+
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 # Phase 2: CI/CD Loop
@@ -708,6 +769,7 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 ## Step 7: Prepare the branch
 
 1. Check `git status` for uncommitted changes. If there are any, stage and commit them with a message that includes the test report:
+
    ```bash
    git commit -m "$(cat <<'EOF'
    <concise description of changes>
@@ -720,6 +782,7 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
    EOF
    )"
    ```
+
 2. If on `main`, create a new branch first:
    ```bash
    git checkout -b <descriptive-branch-name>
@@ -758,6 +821,7 @@ EOF
 ```
 
 If a PR already exists for this branch, skip creation and read its title:
+
 ```bash
 PR_TITLE=$(gh pr view --json title --jq '.title')
 ```
@@ -810,6 +874,7 @@ gh pr checks <PR_NUMBER> --watch
 ```
 
 This blocks until CodeRabbit actually reviews the current HEAD. Once it returns, read reviews from ALL three comment locations:
+
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
@@ -872,10 +937,12 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
+
 - `[FIXED] <short solution description>` — if you fixed the issue
 - `[IGNORED] <reason>` — ONLY for pure style nits with zero correctness/security impact
 
 Use `gh api` to post replies:
+
 ```bash
 # Reply to a pull request review comment (inline code comment)
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments/<COMMENT_ID>/replies -f body="[IGNORED] style nit"
@@ -899,6 +966,7 @@ ls docs/plans/active/ 2>/dev/null
 ```
 
 If a related plan exists in `docs/plans/active/`:
+
 1. Move it to `docs/plans/completed/`:
    ```bash
    git mv docs/plans/active/<plan-file>.md docs/plans/completed/<plan-file>.md
@@ -927,11 +995,13 @@ gh pr merge <PR_NUMBER> --merge
 ```
 
 If `main` can be checked out in this worktree, switch back to main and pull:
+
 ```bash
 git checkout main && git pull origin main
 ```
 
 If `main` is already checked out in another worktree, do not force a branch deletion or branch switch just to satisfy this step. Leave the current branch checked out and refresh refs instead:
+
 ```bash
 git fetch origin main
 ```
@@ -962,6 +1032,7 @@ gh run watch "$RUN_ID"
 This avoids watching a stale run that started before the merge. Repeat for each relevant workflow.
 
 If a deploy fails:
+
 1. Show the failure to the user
 2. If fixable, create a new fix branch/commit, push, create a new PR (Step 8), then continue from Step 9.
 
@@ -984,6 +1055,7 @@ If `ORIGINAL_WORKSPACE_TITLE` was empty in Step 0, skip this step.
 ## Step 15: Done
 
 After the new branch is created, report to the user:
+
 - PR URL
 - Which services were deployed
 - Any review issues that were fixed along the way

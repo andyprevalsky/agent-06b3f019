@@ -42,5 +42,31 @@ export default defineConfig({
     pool: 'forks',
     testTimeout: 10000,
     hookTimeout: 10000,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'text-summary', 'json-summary'],
+      reportsDirectory: './coverage',
+      include: ['main/**/*.{ts,tsx}', 'shared/**/*.{ts,tsx}', 'ui/**/*.{ts,tsx}'],
+      exclude: [
+        'dist/**',
+        'node_modules/**',
+        'tests/**',
+        '**/*.d.ts',
+        '**/types.ts',
+        'ui/assets/**',
+        'ui/fonts.css',
+        'ui/index.css',
+      ],
+      // Target: at least 80% across all metrics. Baseline on 2026-05-07 after
+      // onboarding-data/error-utils coverage: lines/statements 80.05%,
+      // branches 85.26%, functions 83.58%.
+      // Ratchet thresholds upward as coverage improves; never lower them.
+      thresholds: {
+        lines: 80,
+        statements: 80,
+        branches: 85,
+        functions: 80,
+      },
+    },
   },
 });

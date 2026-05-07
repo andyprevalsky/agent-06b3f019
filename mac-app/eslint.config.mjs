@@ -131,6 +131,21 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       'prefer-const': 'error',
       'no-duplicate-imports': 'error',
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "ConditionalExpression[test.type='BinaryExpression'][test.operator='instanceof'][test.right.name='Error']",
+          message:
+            'Use getErrorMessage(), getErrorMessageOrFallback(), or toError() from shared/utils/error instead of hand-rolling Error normalization.',
+        },
+        {
+          selector:
+            "NewExpression[callee.name='Error'] CallExpression[callee.name='String'][arguments.0.name=/err|error/i]",
+          message:
+            'Use toError() from shared/utils/error instead of wrapping unknown errors with new Error(String(...)).',
+        },
+      ],
       eqeqeq: ['error', 'always'],
     },
   },
