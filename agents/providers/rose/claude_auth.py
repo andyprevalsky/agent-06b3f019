@@ -10,7 +10,8 @@ is rotated on auth/rate-limit failures via the callbacks in
 Contract (P1):
 
     In-place retry (same token):
-        429                -> up to 3 attempts, exp backoff (retry-after honoured, cap 5s)
+        transient 429      -> up to 3 attempts, exp backoff + jitter
+        usage-window 429   -> rotate immediately; do not retry known-dead token
         5xx                -> up to 3 attempts, exp backoff (cap 5s)
         connect/tls errors -> up to 3 attempts, exp backoff (cap 5s)
 
@@ -36,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import random
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -67,6 +69,7 @@ _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
 _DEFAULT_IDLE_TIMEOUT_S = 60.0
 _COOLDOWN_SECONDS = 5 * 60
+_USAGE_WINDOW_RESET_THRESHOLD_S = 60.0
 
 
 # Claude OAuth tokens require the first two system blocks to be a specific
@@ -398,20 +401,27 @@ async def _attempt_with_token(
                 error_body = get_error_body(response)
 
                 if status == 429:
+                    rate_limited_until = _extract_rate_limited_until(response, error_body)
+                    if _should_rotate_429_without_retry(error_body, rate_limited_until):
+                        raise _RotateToken(
+                            "rate_limit",
+                            status=status,
+                            rate_limited_until=rate_limited_until,
+                        )
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
                     raise _RotateToken(
                         "rate_limit",
                         status=status,
-                        rate_limited_until=_extract_rate_limited_until(response, error_body),
+                        rate_limited_until=rate_limited_until,
                     )
 
                 if status in (401, 403):
                     rate_limited_until = _extract_rate_limited_until(response, error_body)
                     reason = (
                         "rate_limit"
-                        if rate_limited_until or _looks_like_usage_limit(error_body)
+                        if rate_limited_until or _looks_like_rate_limit(error_body)
                         else "auth_error"
                     )
                     raise _RotateToken(
@@ -472,12 +482,16 @@ async def _attempt_with_token(
 def _backoff_for_429(response: httpx.Response, attempt: int) -> float:
     """Respect Retry-After when present, else exponential backoff capped at 5s."""
     retry_after = response.headers.get("retry-after")
+    delay: float
     if retry_after:
         try:
-            return max(1.0, min(float(retry_after), _BACKOFF_CAP_S))
+            delay = max(1.0, min(float(retry_after), _BACKOFF_CAP_S))
         except ValueError:
-            pass
-    return min(2 ** attempt, _BACKOFF_CAP_S)
+            delay = min(2 ** attempt, _BACKOFF_CAP_S)
+    else:
+        delay = min(2 ** attempt, _BACKOFF_CAP_S)
+    jitter = random.uniform(0, min(delay * 0.25, 1.0))
+    return min(delay + jitter, _BACKOFF_CAP_S)
 
 
 _RESET_HEADER_NAMES = (
@@ -599,7 +613,47 @@ def _format_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _looks_like_usage_limit(error_body: str) -> bool:
+def _should_rotate_429_without_retry(
+    error_body: str,
+    rate_limited_until: Optional[str],
+) -> bool:
+    return _looks_like_usage_window_limit(error_body) or _reset_is_far_future(rate_limited_until)
+
+
+def _reset_is_far_future(rate_limited_until: Optional[str]) -> bool:
+    if not rate_limited_until:
+        return False
+    try:
+        reset_at = datetime.fromisoformat(rate_limited_until.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=timezone.utc)
+    seconds_until_reset = (
+        reset_at.astimezone(timezone.utc) - datetime.now(timezone.utc)
+    ).total_seconds()
+    return seconds_until_reset > _USAGE_WINDOW_RESET_THRESHOLD_S
+
+
+def _looks_like_usage_window_limit(error_body: str) -> bool:
+    body = (error_body or "").lower()
+    return any(
+        phrase in body
+        for phrase in (
+            "usage limit",
+            "usage_limit",
+            "weekly limit",
+            "monthly limit",
+            "plan limit",
+            "subscription limit",
+            "quota exceeded",
+            "limit resets",
+            "resets at",
+        )
+    )
+
+
+def _looks_like_rate_limit(error_body: str) -> bool:
     body = (error_body or "").lower()
     return any(
         phrase in body
@@ -640,7 +694,12 @@ async def _cool_down(
         )
         return
     try:
-        await auth.mark_rate_limited(auth, _COOLDOWN_SECONDS, rate_limited_until)
+        await auth.mark_rate_limited(
+            auth,
+            _COOLDOWN_SECONDS,
+            rate_limited_until,
+            reason,
+        )
     except Exception as exc:
         logger.warning(
             "rose.claude_auth.cooldown_failed",

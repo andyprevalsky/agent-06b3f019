@@ -231,6 +231,17 @@ function authHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
+async function authHeadersWithoutExistingClaudePools(
+  token: string
+): Promise<Record<string, string>> {
+  const headers = authHeaders(token);
+  const poolIds = await existingPoolIds();
+  if (poolIds.length > 0) {
+    headers['X-Exclude-Pool-Tokens'] = poolIds.join(',');
+  }
+  return headers;
+}
+
 function apiKeyHeaders(userId?: string): Record<string, string> {
   const h: Record<string, string> = { 'X-API-Key': API_KEY };
   if (userId) h['X-User-Id'] = userId;
@@ -278,6 +289,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'anthropic.com',
   'openai.com',
+  'chatgpt.com',
   'ip-api.com',
   'supabase.co',
   'surge.app',
@@ -330,16 +342,14 @@ function encryptPayload(payload: unknown): { data: string; iv: string; key: stri
 
 // ==================== CAPTURE HELPERS ====================
 
-async function getCaptureCursor(): Promise<number> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(res.status, 200, res.data);
-  return (res.data as { nextId: number }).nextId - 1;
-}
-
-async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+async function readCapturesForToken(token: string): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?token=${encodeURIComponent(token)}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
+}
+
+function captureToken(prefix: string): string {
+  return `integrations-${prefix}-${crypto.randomUUID()}`;
 }
 
 async function checkCaptureAvailable(): Promise<boolean> {
@@ -1916,12 +1926,8 @@ async function testClaudeCodeUpload_happyPath() {
 
 async function testClaudeCodeToken_notFound() {
   const { accessToken } = await createAnonSession();
-  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: {
-      ...authHeaders(accessToken),
-      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
-    },
+    headers: await authHeadersWithoutExistingClaudePools(accessToken),
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token not found');
@@ -2556,16 +2562,16 @@ async function testOAuthCallback_missingState() {
  * All work is local (Prisma DB operations only).
  */
 async function testBoundary_createNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('create');
   const name = uniqueName('boundary_create');
 
   await request(`${BASE_URL}/api/integrations`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
     body: JSON.stringify({ name, type: 'DATA_SOURCE' }),
   });
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for create, got ${filterInfraCalls(calls).length}`
@@ -2586,15 +2592,15 @@ async function testBoundary_createNoOutbound() {
  * We filter those out and only check for email/OAuth-related outbound calls.
  */
 async function testBoundary_emailStartNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('email-start');
 
   // This may return 500 if Gmail client ID is not configured, but still no outbound calls
   await request(`${BASE_URL}/api/integrations/email/gmail/start`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for email/start, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -2606,15 +2612,15 @@ async function testBoundary_emailStartNoOutbound() {
  * Validation short-circuits before any DB or external calls.
  */
 async function testBoundary_validationNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('validation');
 
   await request(`${BASE_URL}/api/integrations`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
     body: JSON.stringify({ name: 'test', type: 'INVALID' }),
   });
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for validation failure, got ${filterInfraCalls(calls).length}`
@@ -2625,13 +2631,13 @@ async function testBoundary_validationNoOutbound() {
  * GET /api/integrations/email/messages with missing 'since' param (400) makes NO outbound calls.
  */
 async function testBoundary_emailMessagesValidationNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('email-messages');
 
   await request(`${BASE_URL}/api/integrations/email/messages`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for email/messages validation, got ${filterInfraCalls(calls).length}`
@@ -2645,18 +2651,18 @@ async function testBoundary_emailMessagesValidationNoOutbound() {
  * If SMS provider is not configured, skip the boundary assertion.
  */
 async function testBoundary_passwordsRequestSms() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('passwords-request');
 
   const res = await request(`${BASE_URL}/api/integrations/passwords/request`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
     body: JSON.stringify({ request: 'Test integration request for boundary test' }),
   });
 
   // Allow short delay for async SMS dispatch
   await new Promise((resolve) => setTimeout(resolve, 500));
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
 
   if (res.status === 500) {
     // SMS provider not configured — no outbound calls expected
@@ -2690,14 +2696,14 @@ async function testBoundary_passwordsRequestSms() {
  * We filter those out and only check for telegram-related outbound calls.
  */
 async function testBoundary_telegramConnectNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('telegram-connect');
 
   await request(`${BASE_URL}/api/integrations/telegram/connect`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
 
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   const relevant = filterInfraCalls(calls);
   assert(
     relevant.length === 0,
@@ -2934,15 +2940,11 @@ async function testClaudeCodeCredentials_upload() {
 // 17. Claude Code credentials get token: returns 404 for anon user without onboarding
 async function testClaudeCodeCredentials_getToken() {
   const { accessToken } = await createAnonSession();
-  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: {
-      ...authHeaders(accessToken),
-      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
-    },
+    headers: await authHeadersWithoutExistingClaudePools(accessToken),
   });
   assertStatus(res.status, 404, res.data);
-  assertSchema(ErrorResponse, res.data, 'claude-code credentials get token');
+  assertSchema(ErrorResponse, res.data, 'claude-code token anon missing');
 }
 
 // 18. Claude Code token rate-limited: with API key (internal auth)
@@ -3405,7 +3407,7 @@ interface SeededIntegration {
 
 async function seedClaudeIntegration(
   userId: string,
-  opts: { poolingEnabled?: boolean; accessToken?: string } = {}
+  opts: { poolingEnabled?: boolean; accessToken?: string; lastUsedAt?: Date | null } = {}
 ): Promise<SeededIntegration> {
   // The "sk-ant-oat" prefix mirrors real Anthropic OAuth tokens — required so
   // these seeded envelopes pass `hasUsableClaudeCodeEnvelope` and exercise the
@@ -3423,17 +3425,67 @@ async function seedClaudeIntegration(
       status: 'CONNECTED',
       isActive: true,
       poolingEnabled: opts.poolingEnabled ?? false,
+      lastUsedAt: opts.lastUsedAt ?? null,
       config: { encryptedCredentials },
     },
     update: {
       status: 'CONNECTED',
       poolingEnabled: opts.poolingEnabled ?? false,
       rateLimitedUntil: null,
-      lastUsedAt: null,
+      lastUsedAt: opts.lastUsedAt ?? null,
       config: { encryptedCredentials },
     },
   });
   return { id: integration.id, userId, accessToken };
+}
+
+function buildGptCredentialPayload(accessToken: string, accountId: string): string {
+  return encryptClaudeEnvelope(
+    JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        access_token: accessToken,
+        refresh_token: 'gpt-refresh-token',
+        account_id: accountId,
+      },
+    })
+  );
+}
+
+async function seedGptIntegration(
+  userId: string,
+  opts: {
+    poolingEnabled?: boolean;
+    accessToken?: string;
+    accountId?: string;
+    lastUsedAt?: Date | null;
+  } = {}
+): Promise<SeededIntegration & { accountId: string }> {
+  const accessToken = opts.accessToken ?? `gpt-access-${crypto.randomBytes(8).toString('hex')}`;
+  const accountId = opts.accountId ?? `acct-${crypto.randomBytes(6).toString('hex')}`;
+  const encryptedCredentials = buildGptCredentialPayload(accessToken, accountId);
+
+  const integration = await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'gpt_code' } },
+    create: {
+      userId,
+      name: 'gpt_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+      poolingEnabled: opts.poolingEnabled ?? false,
+      lastUsedAt: opts.lastUsedAt ?? null,
+      config: { encryptedCredentials },
+    },
+    update: {
+      status: 'CONNECTED',
+      poolingEnabled: opts.poolingEnabled ?? false,
+      rateLimitedUntil: null,
+      lastUsedAt: opts.lastUsedAt ?? null,
+      config: { encryptedCredentials },
+    },
+  });
+  return { id: integration.id, userId, accessToken, accountId };
 }
 
 async function completeOnboarding(userId: string): Promise<void> {
@@ -3448,6 +3500,14 @@ async function completeOnboarding(userId: string): Promise<void> {
 async function existingPoolIds(): Promise<string[]> {
   const rows = await prisma.integration.findMany({
     where: { name: 'claude_code', poolingEnabled: true, status: 'CONNECTED' },
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+async function existingComputePoolIds(): Promise<string[]> {
+  const rows = await prisma.integration.findMany({
+    where: { name: { in: ['claude_code', 'gpt_code'] }, poolingEnabled: true, status: 'CONNECTED' },
     select: { id: true },
   });
   return rows.map((r) => r.id);
@@ -3589,6 +3649,104 @@ async function testRotation_poolRotatesOnRateLimit() {
     );
   } finally {
     await cleanupIntegrations([poolA.id, poolB.id]);
+  }
+}
+
+// Test 2b: Heterogeneous compute pool rotation — GPT and Claude tokens share
+// one LRU pool. The backend returns a provider type; callers use that type to
+// choose the direct GPT or Claude API path.
+async function testComputeRotation_poolRotatesAcrossProviders() {
+  const existing = await existingComputePoolIds();
+  const caller = await createAnonSession();
+  await completeOnboarding(caller.userId);
+
+  const poolOwnerClaude = await createAnonSession();
+  const poolOwnerGpt = await createAnonSession();
+  const claudePool = await seedClaudeIntegration(poolOwnerClaude.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 60_000),
+  });
+  const gptPool = await seedGptIntegration(poolOwnerGpt.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+
+  const fetchPool = async () => {
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    if (existing.length > 0) headers['X-Exclude-Pool-Tokens'] = existing.join(',');
+    return request(`${BASE_URL}/api/integrations/compute-code/credentials/token`, { headers });
+  };
+
+  try {
+    const first = await fetchPool();
+    assertStatus(first.status, 200, first.data);
+    const firstBody = first.data as {
+      type: string;
+      source: string;
+      poolTokenId?: string;
+      accountId?: string;
+    };
+    assert(
+      firstBody.type === 'gpt',
+      `Expected LRU GPT pool token first, got ${JSON.stringify(firstBody)}`
+    );
+    assert(firstBody.source === 'pool', `Expected source=pool, got ${firstBody.source}`);
+    assert(
+      firstBody.poolTokenId === gptPool.id,
+      `Expected GPT pool ${gptPool.id}, got ${firstBody.poolTokenId}`
+    );
+    assert(
+      firstBody.accountId === gptPool.accountId,
+      `Expected GPT account ID ${gptPool.accountId}, got ${firstBody.accountId}`
+    );
+
+    const markGpt = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'gpt',
+        source: 'pool',
+        poolTokenId: gptPool.id,
+        rateLimitedUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      }),
+    });
+    assertStatus(markGpt.status, 200, markGpt.data);
+
+    const second = await fetchPool();
+    assertStatus(second.status, 200, second.data);
+    const secondBody = second.data as { type: string; source: string; poolTokenId?: string };
+    assert(
+      secondBody.type === 'claude',
+      `Expected rotation across providers to Claude, got ${JSON.stringify(secondBody)}`
+    );
+    assert(
+      secondBody.poolTokenId === claudePool.id,
+      `Expected Claude pool ${claudePool.id}, got ${secondBody.poolTokenId}`
+    );
+
+    const markClaude = await request(
+      `${BASE_URL}/api/integrations/compute-code/token/rate-limited`,
+      {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({
+          type: 'claude',
+          source: 'pool',
+          poolTokenId: claudePool.id,
+          rateLimitedUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        }),
+      }
+    );
+    assertStatus(markClaude.status, 200, markClaude.data);
+
+    const exhausted = await fetchPool();
+    assertStatus(exhausted.status, 404, exhausted.data);
+    assertSchema(ErrorResponse, exhausted.data, 'compute pool exhausted');
+  } finally {
+    await cleanupIntegrations([claudePool.id, gptPool.id]);
   }
 }
 
@@ -4229,15 +4387,11 @@ async function testPasswordRequest_happy() {
 // 10. Claude Code credentials token for user without onboarding
 async function testClaudeCodeToken_noOnboarding() {
   const session = await createAnonSession();
-  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: {
-      ...authHeaders(session.accessToken),
-      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
-    },
+    headers: await authHeadersWithoutExistingClaudePools(session.accessToken),
   });
   assertStatus(res.status, 404, res.data);
-  assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding');
+  assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding missing');
 }
 
 // ==================== RUNNER ====================
@@ -4727,6 +4881,10 @@ async function runAll() {
       fn: testRotation_userRateLimitedFallsBackToPool,
     },
     { name: 'rotation -- pool rotates on rate-limit', fn: testRotation_poolRotatesOnRateLimit },
+    {
+      name: 'rotation -- compute pool rotates across providers',
+      fn: testComputeRotation_poolRotatesAcrossProviders,
+    },
     {
       name: 'rotation -- auto-expires after cooldown (time-windowed)',
       fn: testRotation_autoExpiresAfterCooldown,

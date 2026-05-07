@@ -37,10 +37,36 @@ from typing import Any, AsyncIterator, Dict, Optional, Protocol
 
 import structlog
 
-from providers.rose.errors import RoseStallError
+from providers.rose.errors import (
+    RoseAuthError,
+    RoseInvalidRequest,
+    RoseRateLimitError,
+    RoseServerError,
+    RoseStallError,
+)
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
+
+
+def _responses_error_to_exception(error_payload: Any, request_id: str):
+    if isinstance(error_payload, dict):
+        code = str(error_payload.get("code") or error_payload.get("type") or "").lower()
+        message = str(error_payload.get("message") or error_payload)
+    else:
+        code = ""
+        message = str(error_payload or "Responses stream failed")
+
+    details = f"Responses stream failed (request_id={request_id}, code={code or 'unknown'}): {message[:1000]}"
+    if code in {"invalid_request_error", "context_length_exceeded", "bad_request"}:
+        return RoseInvalidRequest(details)
+    if code in {"rate_limit_exceeded", "rate_limit_error", "too_many_requests"}:
+        return RoseRateLimitError(details)
+    if code in {"authentication_error", "permission_error", "unauthorized", "forbidden"}:
+        return RoseAuthError(details)
+    if code in {"server_error", "internal_server_error", "overloaded"}:
+        return RoseServerError(details)
+    return RoseServerError(details)
 
 
 class _LineStream(Protocol):
@@ -436,6 +462,150 @@ async def parse_openai_sse(
             "cache_creation_input_tokens": cache_write,
             "cache_read_input_tokens": cache_read,
             "finish_reason": finish_reason,
+        },
+    )
+    yield StreamChunk(kind="done", data={})
+
+
+async def parse_responses_sse(
+    response: _LineStream,
+    *,
+    actual_model: str = "",
+    pool_name: str = "",
+    request_id: str,
+    idle_timeout_s: float = 60.0,
+) -> AsyncIterator[StreamChunk]:
+    """Parse OpenAI Responses API SSE events into normalized StreamChunks."""
+    yield StreamChunk(
+        kind="metadata",
+        data={
+            "actual_model": actual_model,
+            "pool_name": pool_name,
+            "request_id": request_id,
+        },
+    )
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    cache_read_tokens = 0
+    finish_reason = ""
+    emitted_content_or_tool = False
+    saw_done = False
+
+    def apply_usage(usage: Optional[Dict[str, Any]]) -> None:
+        nonlocal prompt_tokens, completion_tokens, total_tokens, cache_read_tokens
+        if not usage:
+            return
+        prompt_tokens = usage.get("input_tokens", prompt_tokens) or prompt_tokens
+        completion_tokens = usage.get("output_tokens", completion_tokens) or completion_tokens
+        total_tokens = usage.get("total_tokens", total_tokens) or total_tokens
+        details = usage.get("input_tokens_details") or {}
+        cache_read_tokens = details.get("cached_tokens", cache_read_tokens) or cache_read_tokens
+
+    try:
+        async for line in _iter_with_idle_timeout(response, idle_timeout_s, request_id):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                continue
+            if not line.startswith("data: "):
+                continue
+
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                saw_done = True
+                break
+
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "rose.sse.parse_error",
+                    request_id=request_id,
+                    provider="responses",
+                    error=str(exc),
+                    snippet=data_str[:200],
+                )
+                continue
+
+            event_type = str(event.get("type") or "")
+            delta = event.get("delta") or event.get("text")
+            if (
+                isinstance(delta, str)
+                and delta
+                and (
+                    event_type.endswith(".output_text.delta")
+                    or event_type.endswith(".text.delta")
+                    or event_type == "response.output_item.delta"
+                )
+            ):
+                emitted_content_or_tool = True
+                yield StreamChunk(kind="content", data={"text": delta})
+                continue
+
+            reasoning_delta = event.get("summary_text") or event.get("reasoning")
+            if isinstance(reasoning_delta, str) and reasoning_delta and "reasoning" in event_type:
+                emitted_content_or_tool = True
+                yield StreamChunk(kind="reasoning", data={"text": reasoning_delta})
+                continue
+
+            if event_type == "response.output_item.done":
+                item = event.get("item") or {}
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    emitted_content_or_tool = True
+                    yield StreamChunk(
+                        kind="tool_call",
+                        data={
+                            "id": item.get("call_id") or item.get("id") or "",
+                            "name": item.get("name") or "",
+                            "arguments": item.get("arguments") or "",
+                        },
+                    )
+                    continue
+
+            if event_type == "response.completed":
+                response_obj = event.get("response") or {}
+                apply_usage(response_obj.get("usage") or {})
+                finish_reason = "stop"
+                continue
+
+            if event_type == "response.incomplete":
+                response_obj = event.get("response") or {}
+                apply_usage(response_obj.get("usage") or {})
+                finish_reason = "length"
+                continue
+
+            if event_type in ("error", "response.failed"):
+                error_payload = event.get("error")
+                if error_payload is None and isinstance(event.get("response"), dict):
+                    error_payload = (event.get("response") or {}).get("error")
+                logger.warning(
+                    "rose.sse.provider_error",
+                    request_id=request_id,
+                    provider="responses",
+                    event_type=event_type,
+                    error_payload=json.dumps(error_payload, default=str)[:1000],
+                )
+                raise _responses_error_to_exception(error_payload, request_id)
+    finally:
+        await _close_quietly(response)
+
+    if not emitted_content_or_tool:
+        raise RoseStallError(
+            f"Responses stream closed without content or tool_call "
+            f"(request_id={request_id}, saw_done={saw_done})"
+        )
+
+    yield StreamChunk(
+        kind="usage",
+        data={
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": cache_read_tokens,
+            "finish_reason": finish_reason or "stop",
         },
     )
     yield StreamChunk(kind="done", data={})

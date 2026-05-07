@@ -271,6 +271,10 @@ async def execute_dag(
     claude_token: Optional[str] = None,
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
     system_prompt_text: Optional[str] = None,
     tool_names: Optional[List[str]] = None,
@@ -313,7 +317,7 @@ async def execute_dag(
     has_llm_tasks = any(
         t.tool_name != "reasoning" for t in dag.tasks
     )
-    if has_llm_tasks and system_prompt_text and claude_token:
+    if has_llm_tasks and system_prompt_text and (claude_token or gpt_token):
         try:
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
             await execute_activity(
@@ -324,7 +328,9 @@ async def execute_dag(
                     "dag_cache_warm", system_prompt_text,
                     None, None, False,
                     False, "",
-                    claude_token_source, claude_token_pool_id, user_id, user_id,
+                    claude_token_source, claude_token_pool_id, user_id,
+                    gpt_token, gpt_account_id, gpt_token_source, gpt_token_pool_id, user_id,
+                    user_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -373,6 +379,10 @@ async def execute_dag(
                     claude_token=claude_token,
                     claude_token_source=claude_token_source,
                     claude_token_pool_id=claude_token_pool_id,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
                     user_id=user_id,
                     on_tokens=on_tokens,
                     system_prompt_text=system_prompt_text,
@@ -446,6 +456,10 @@ async def _execute_single_task(
     claude_token: Optional[str] = None,
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
     user_id: Optional[str] = None,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
     system_prompt_text: Optional[str] = None,
@@ -504,7 +518,22 @@ async def _execute_single_task(
                 if len(context) > REASONING_MAX_CONTEXT_MESSAGES
                 else context
             )
-            reasoning_args = [task.goal, trimmed_context, model, agent_id, stream_id, claude_token]
+            reasoning_args = [
+                task.goal,
+                trimmed_context,
+                model,
+                agent_id,
+                stream_id,
+                claude_token,
+                claude_token_source,
+                claude_token_pool_id,
+                user_id,
+                gpt_token,
+                gpt_account_id,
+                gpt_token_source,
+                gpt_token_pool_id,
+                user_id,
+            ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
             check_activity_payload("execute_reasoning_activity", reasoning_args)
@@ -551,6 +580,9 @@ async def _execute_single_task(
                             cache_read_input_tokens=reasoning_usage.get("cache_read_input_tokens", 0),
                             cache_creation_input_tokens=reasoning_usage.get("cache_creation_input_tokens", 0),
                             call_site="dag_reasoning",
+                            claude_token_rotated=reasoning_usage.get("claude_token_rotated", False),
+                            claude_token_error=reasoning_usage.get("claude_token_error"),
+                            gpt_token_error=reasoning_usage.get("gpt_token_error"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
@@ -612,6 +644,11 @@ async def _execute_single_task(
                     claude_token_source,
                     claude_token_pool_id,
                     user_id,
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    user_id,
                     user_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=120),
@@ -648,6 +685,7 @@ async def _execute_single_task(
                             call_site="dag_param_populator",
                             claude_token_rotated=param_usage.get("claude_token_rotated", False),
                             claude_token_error=param_usage.get("claude_token_error"),
+                            gpt_token_error=param_usage.get("gpt_token_error"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")

@@ -455,6 +455,7 @@ interface CapturedCall {
 const INFRA_URL_PATTERNS = [
   'anthropic.com',
   'openai.com',
+  'chatgpt.com',
   'openrouter.ai',
   'supabase.co',
   'api.github.com',
@@ -476,14 +477,8 @@ function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
 
 // ==================== CAPTURE HELPERS ====================
 
-async function getCaptureCursor(): Promise<number> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(res.status, 200, res.data);
-  return (res.data as { nextId: number }).nextId - 1;
-}
-
-async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+async function readCapturesForToken(token: string): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?token=${encodeURIComponent(token)}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
 }
@@ -495,9 +490,11 @@ async function testBoundary_noOutboundCalls() {
   const probeRes = await request(`${BASE_URL}/api/test/captures`);
   if (probeRes.status !== 200) return;
 
-  const cursor = await getCaptureCursor();
-  await request(`${BASE_URL}/api/benchmarks`);
-  const calls = await readCapturesAfter(cursor);
+  const captureToken = `benchmarks-${crypto.randomUUID()}`;
+  await request(`${BASE_URL}/api/benchmarks`, {
+    headers: { 'X-Capture-Token': captureToken },
+  });
+  const calls = await readCapturesForToken(captureToken);
   const real = filterInfraCalls(calls);
   if (real.length > 0) {
     throw new Error(

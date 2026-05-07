@@ -1,0 +1,149 @@
+import { prisma } from './database';
+import { decryptCredentialEnvelope } from './claudeCredentials';
+import { createLogger } from './logger';
+
+const log = createLogger('GptCredentials');
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+
+export interface GptCodeCredentialResult {
+  accessToken: string;
+  accountId?: string;
+  source: 'user' | 'pool';
+  userId: string;
+  poolTokenId?: string;
+}
+
+function decryptIntegrationCredentials(
+  integration: { id: string; config: unknown },
+  decryptionKey: string
+): string | null {
+  const config = integration.config as Record<string, unknown> | null;
+  const encryptedCredentials = config?.encryptedCredentials as string | undefined;
+  if (!encryptedCredentials) return null;
+  return decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
+}
+
+function parseGptCodeEnvelope(credentialsJson: string) {
+  try {
+    const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
+    if (parsed.auth_mode !== 'chatgpt') return null;
+    const tokens = parsed.tokens as Record<string, unknown> | undefined;
+    const accessToken = typeof tokens?.access_token === 'string' ? tokens.access_token : '';
+    const refreshToken = typeof tokens?.refresh_token === 'string' ? tokens.refresh_token : '';
+    if (accessToken.length === 0 || refreshToken.length === 0) return null;
+    const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
+    return { accessToken, accountId };
+  } catch {
+    return null;
+  }
+}
+
+function resolveRateLimitedUntil(rateLimitedUntil?: string | Date | null): Date {
+  if (rateLimitedUntil instanceof Date) return rateLimitedUntil;
+  if (typeof rateLimitedUntil === 'string') {
+    const parsed = new Date(rateLimitedUntil);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS);
+}
+
+export async function fetchGptPoolToken(
+  excludeIds?: string[]
+): Promise<GptCodeCredentialResult | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+
+  const now = new Date();
+  const poolIntegrations = await prisma.integration.findMany({
+    where: {
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      poolingEnabled: true,
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+      ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
+    },
+    orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }],
+  });
+
+  for (const poolIntegration of poolIntegrations) {
+    const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
+    const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+    if (!parsed) continue;
+
+    await prisma.integration.update({
+      where: { id: poolIntegration.id },
+      data: { lastUsedAt: now },
+    });
+    log.info('Serving GPT pool token', {
+      integrationId: poolIntegration.id,
+      userId: poolIntegration.userId,
+    });
+    return {
+      accessToken: parsed.accessToken,
+      accountId: parsed.accountId,
+      source: 'pool',
+      userId: poolIntegration.userId,
+      poolTokenId: poolIntegration.id,
+    };
+  }
+
+  return null;
+}
+
+export async function markGptPoolTokenRateLimited(
+  poolTokenId: string,
+  options?: { rateLimitedUntil?: string | Date | null; failureReason?: string | null }
+): Promise<void> {
+  if (options?.failureReason === 'auth_error') {
+    await prisma.integration.update({
+      where: { id: poolTokenId },
+      data: {
+        poolingEnabled: false,
+        rateLimitedUntil: null,
+        failureReason: 'auth_error',
+      },
+    });
+    log.info(`GPT pool token ${poolTokenId} disabled after auth_error`);
+    return;
+  }
+
+  const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
+  await prisma.integration.update({
+    where: { id: poolTokenId },
+    data: { rateLimitedUntil: until },
+  });
+  log.info(`GPT pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
+}
+
+export async function markGptUserTokenRateLimited(
+  userId: string,
+  options?: { rateLimitedUntil?: string | Date | null }
+): Promise<void> {
+  const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
+  await prisma.integration.updateMany({
+    where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+    data: { rateLimitedUntil: until },
+  });
+  log.info(`GPT user token for ${userId} rate-limited until ${until.toISOString()}`);
+}
+
+export async function fetchGptCodeAccessToken(
+  userId: string
+): Promise<{ accessToken: string; accountId?: string } | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+
+  const now = new Date();
+  const integration = await prisma.integration.findFirst({
+    where: {
+      userId,
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+  });
+  if (!integration) return null;
+
+  const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
+  return decrypted ? parseGptCodeEnvelope(decrypted) : null;
+}

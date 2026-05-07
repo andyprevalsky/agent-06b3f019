@@ -117,6 +117,12 @@ export interface IPC {
     setMockNoClaudeCode: (mock: boolean) => Promise<{ success: boolean }>;
   };
 
+  // GPT/Codex credentials
+  gptCode?: {
+    hasCredentials: () => Promise<boolean>;
+    syncCredentials: () => Promise<{ success: boolean; message?: string }>;
+  };
+
   // Claude Code setup status events
   onClaudeSetupStatus?: (callback: (status: string) => void) => () => void;
 

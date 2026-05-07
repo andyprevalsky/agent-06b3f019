@@ -300,6 +300,10 @@ async def run_planner_attempt(
     user_context: str,
     response_schema: dict[str, Any] | None,
     claude_max_token: str | None,
+    gpt_token: str | None,
+    gpt_account_id: str | None,
+    gpt_token_source: str | None,
+    gpt_token_pool_id: str | None,
     user_messages: list[str],
     tool_call_id: str,
     attempt: int,
@@ -322,6 +326,11 @@ async def run_planner_attempt(
         tool_call_id,
         getattr(workflow_instance, "claude_max_token_source", None),
         getattr(workflow_instance, "claude_max_token_pool_id", None),
+        getattr(workflow_instance, "user_id", None),
+        gpt_token,
+        gpt_account_id,
+        gpt_token_source,
+        gpt_token_pool_id,
         getattr(workflow_instance, "user_id", None),
     ]
 

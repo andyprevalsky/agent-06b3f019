@@ -722,6 +722,37 @@ async def test_set_response_schema_activity_success():
     assert any("/api/agents/agent-abc" in u for u in urls)
 
 
+async def test_set_response_schema_activity_uses_internal_auth_only():
+    """set_response_schema_activity does not forward compute-token scoped user headers."""
+    setup_mock({
+        "/api/agents/generate-response-schema": {
+            "status": 200,
+            "json": {
+                "schema": {"fields": [{"name": "summary", "type": "str"}]},
+                "tokensIn": 10,
+                "tokensOut": 5,
+            },
+        },
+        "/api/agents/": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity("agent-abc", ["goal"])
+
+    assert result is not None
+    captures = get_captured_requests()
+    schema_requests = [c for c in captures if "generate-response-schema" in c["url"]]
+    assert schema_requests
+    headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
+    assert "x-api-key" in headers
+    assert "x-user-id" not in headers
+
+
 async def test_set_response_schema_activity_empty_goal():
     """Returns None when no user messages are provided."""
     with patch("temporalio.activity.heartbeat"):
@@ -1707,7 +1738,8 @@ async def test_call_planner_llm_activity_happy_path():
     # claude_max_token is set → routes through Anthropic claudeAuth path.
     body = _anthropic_sse_body(text=plan_json, input_tokens=100, output_tokens=50)
 
-    captured = {"calls": []}
+    pointer_id = "bbbb1111-0000-0000-0000-000000000000"
+    captured = {"calls": [], "batch_user_id": None}
 
     def handler(req):
         url = str(req.url)
@@ -1716,6 +1748,11 @@ async def test_call_planner_llm_activity_happy_path():
         except Exception:
             parsed_body = None
         captured["calls"].append({"url": url, "headers": dict(req.headers), "body": parsed_body})
+        if "/api/agents/messages/batch" in url:
+            captured["batch_user_id"] = req.headers.get("x-user-id")
+            return httpx.Response(200, json={
+                "messages": [{"id": pointer_id, "text": "scoped referenced text", "role": "USER"}]
+            })
         if "api.anthropic.com" in url:
             return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
         # Broadcast/realtime endpoints: return 200 empty
@@ -1725,13 +1762,14 @@ async def test_call_planner_llm_activity_happy_path():
 
     with patch("temporalio.activity.heartbeat"):
         result = await call_planner_llm_activity(
-            messages=[{"role": "user", "content": "plan me this"}],
+            messages=[{"role": "user", "content": f"plan me this @ref:message:{pointer_id}"}],
             model="rose",
             tools_description="web_search: search the web",
             user_context="user is testing",
             claude_max_token="ct-planner-123",
             agent_id="agent-planner",
             tool_call_id="tc-planner",
+            claude_token_user_id="planner-user",
         )
 
     assert result["result"]["title"] == "Test Plan"
@@ -1752,6 +1790,8 @@ async def test_call_planner_llm_activity_happy_path():
     assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
     # claude_token is forwarded as the Anthropic Bearer token, not in the body.
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
+    assert captured["batch_user_id"] == "planner-user"
+    assert "scoped referenced text" in json.dumps(planner_body)
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
     assert planner_body["model"] == "claude-sonnet-4-6"
     assert planner_body["stream"] is True
@@ -3555,6 +3595,7 @@ async def run_all_tests():
     await r.record_async("mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success)
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
+    await r.record_async("set_response_schema_activity_uses_internal_auth_only", test_set_response_schema_activity_uses_internal_auth_only)
     await r.record_async("set_response_schema_activity_empty_goal", test_set_response_schema_activity_empty_goal)
     await r.record_async("set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned)
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)

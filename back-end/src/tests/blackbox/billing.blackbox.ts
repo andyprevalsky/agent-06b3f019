@@ -209,6 +209,7 @@ const INFRA_URL_PATTERNS = [
   'openrouter.ai',
   'anthropic.com',
   'openai.com',
+  'chatgpt.com',
   'ip-api.com',
   'supabase.co',
   'surge.app',
@@ -248,16 +249,14 @@ async function runPool(
 
 // ==================== CAPTURE HELPERS ====================
 
-async function getCaptureCursor(): Promise<number> {
-  const res = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(res.status, 200, res.data);
-  return (res.data as { nextId: number }).nextId - 1;
-}
-
-async function readCapturesAfter(afterId: number): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures?after=${afterId}`);
+async function readCapturesForToken(token: string): Promise<CapturedCall[]> {
+  const res = await request(`${BASE_URL}/api/test/captures?token=${encodeURIComponent(token)}`);
   assertStatus(res.status, 200, res.data);
   return (res.data as { captures: CapturedCall[] }).captures;
+}
+
+function captureToken(prefix: string): string {
+  return `billing-${prefix}-${crypto.randomUUID()}`;
 }
 
 async function checkCaptureAvailable(): Promise<boolean> {
@@ -929,11 +928,11 @@ async function testReadAfterWrite_initializeThenUsage() {
 // ==================== BOUNDARY CAPTURE TESTS ====================
 
 async function testBoundary_portalNoSubscriptionNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('portal');
   await request(`${BASE_URL}/api/billing/portal`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for portal without subscription, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -941,9 +940,11 @@ async function testBoundary_portalNoSubscriptionNoOutbound() {
 }
 
 async function testBoundary_usageNoAuthNoOutbound() {
-  const cursor = await getCaptureCursor();
-  await request(`${BASE_URL}/api/credits/usage`);
-  const calls = await readCapturesAfter(cursor);
+  const token = captureToken('usage-no-auth');
+  await request(`${BASE_URL}/api/credits/usage`, {
+    headers: { 'X-Capture-Token': token },
+  });
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for /usage without auth, got ${filterInfraCalls(calls).length}`
@@ -951,12 +952,12 @@ async function testBoundary_usageNoAuthNoOutbound() {
 }
 
 async function testBoundary_initializeNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('initialize');
   await request(`${BASE_URL}/api/credits/initialize`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for /initialize, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -964,11 +965,11 @@ async function testBoundary_initializeNoOutbound() {
 }
 
 async function testBoundary_subscriptionNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('subscription');
   await request(`${BASE_URL}/api/credits/subscription`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for /subscription, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -976,11 +977,11 @@ async function testBoundary_subscriptionNoOutbound() {
 }
 
 async function testBoundary_statsNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('stats');
   await request(`${BASE_URL}/api/credits/stats`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for /stats, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -988,16 +989,17 @@ async function testBoundary_statsNoOutbound() {
 }
 
 async function testBoundary_webhookInvalidSigNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('webhook');
   await fetch(`${BASE_URL}/webhooks/stripe`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'stripe-signature': 't=9999999999,v1=invalidhash',
+      'X-Capture-Token': token,
     },
     body: JSON.stringify({ type: 'invoice.payment_succeeded' }),
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for webhook with invalid signature, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
@@ -1005,11 +1007,11 @@ async function testBoundary_webhookInvalidSigNoOutbound() {
 }
 
 async function testBoundary_usageAuthenticatedNoOutbound() {
-  const cursor = await getCaptureCursor();
+  const token = captureToken('usage-auth');
   await request(`${BASE_URL}/api/credits/usage`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
   });
-  const calls = await readCapturesAfter(cursor);
+  const calls = await readCapturesForToken(token);
   assert(
     filterInfraCalls(calls).length === 0,
     `Expected 0 outbound calls for authenticated /usage, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`

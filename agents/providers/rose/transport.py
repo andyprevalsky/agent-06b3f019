@@ -1,4 +1,4 @@
-"""HTTP transport for direct provider calls — Anthropic + OpenRouter.
+"""HTTP transport for direct provider calls — Anthropic + Codex + OpenRouter.
 
 Thin wrapper around `httpx.AsyncClient` that:
   - Builds provider-specific headers (Anthropic OAuth + beta flags vs.
@@ -25,6 +25,7 @@ logger = structlog.get_logger()
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 # Mirrors research/.../service/claude-token.ts:320-322. The combination of
 # `claude-code-20250219` + `oauth-2025-04-20` is what unlocks the Claude Max
@@ -65,6 +66,26 @@ def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai
         "HTTP-Referer": referer,
         "X-Title": "Rose Agents",
     }
+
+
+def _codex_headers(gpt_token: str, account_id: Optional[str] = None) -> Dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {gpt_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "codex_cli_rs/0.0.0 (Rose Agents)",
+        "originator": "codex_cli_rs",
+    }
+    if account_id:
+        headers["ChatGPT-Account-ID"] = account_id
+    return headers
+
+
+def _codex_extra_headers_from_body(body: Dict[str, Any]) -> Dict[str, str]:
+    cache_scope = body.get("prompt_cache_key")
+    if isinstance(cache_scope, str) and cache_scope.strip():
+        scope = cache_scope.strip()
+        return {"session_id": scope, "x-client-request-id": scope}
+    return {}
 
 
 @contextlib.asynccontextmanager
@@ -156,6 +177,44 @@ async def post_openrouter_stream(
                     # See post_anthropic_stream for rationale — log length
                     # only; raw body stays on the response for the classifier.
                     error_body_len=len(error_body),
+                )
+                response._rose_error_body = error_body  # type: ignore[attr-defined]
+            yield response
+
+
+@contextlib.asynccontextmanager
+async def post_codex_stream(
+    *,
+    body: Dict[str, Any],
+    gpt_token: str,
+    account_id: Optional[str] = None,
+    request_id: str,
+    agent_id: Optional[str] = None,
+    call_site: Optional[str] = None,
+    connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+) -> AsyncIterator[httpx.Response]:
+    """Open a streaming POST to Codex's ChatGPT-account Responses backend."""
+    headers = {**_codex_headers(gpt_token, account_id), **_codex_extra_headers_from_body(body)}
+    timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
+    logger.info(
+        "rose.transport.codex.start",
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+        model=body.get("model"),
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", CODEX_API_URL, headers=headers, json=body) as response:
+            if response.status_code >= 400:
+                error_body = (await response.aread()).decode("utf-8", errors="replace")
+                logger.warning(
+                    "rose.transport.codex.error",
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    status=response.status_code,
+                    error_body_len=len(error_body),
+                    error_body_preview=error_body[:1000],
                 )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
             yield response

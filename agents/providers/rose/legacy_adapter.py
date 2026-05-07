@@ -24,7 +24,7 @@ from providers.rose.errors import (
     RoseStallError,
 )
 from providers.rose.pools import PoolName
-from providers.rose.types import ClaudeAuthContext
+from providers.rose.types import ClaudeAuthContext, GptAuthContext
 
 
 # Map of every legacy model string the agent passes for "I want a Rose pool".
@@ -92,6 +92,23 @@ def claude_auth_from_token(claude_token: Optional[str]) -> Optional[ClaudeAuthCo
     )
 
 
+def gpt_auth_from_token(
+    gpt_token: Optional[str],
+    account_id: Optional[str] = None,
+) -> Optional[GptAuthContext]:
+    """Build a `GptAuthContext` from a legacy GPT token string."""
+    if not gpt_token:
+        return None
+    return GptAuthContext(
+        token=gpt_token,
+        source="user",
+        user_id="",
+        account_id=account_id,
+        pool_token_id=None,
+        max_rotations=0,
+    )
+
+
 def classify_claude_token_error(exc: RoseError) -> str:
     """Translate a typed `RoseError` from claude_auth into the string the
     workflow expects in `usage.claude_token_error`.
@@ -114,3 +131,8 @@ def classify_claude_token_error(exc: RoseError) -> str:
     if isinstance(exc, RoseServerError):
         return "server_error"
     return "server_error"
+
+
+def classify_gpt_token_error(exc: RoseError) -> str:
+    """Translate a typed `RoseError` from gpt_auth into workflow metadata."""
+    return classify_claude_token_error(exc)

@@ -335,8 +335,22 @@ export async function markPoolTokenRateLimited(
   options?: {
     rateLimitedUntil?: string | Date | null;
     cooldownMs?: number;
+    failureReason?: string | null;
   }
 ): Promise<void> {
+  if (options?.failureReason === 'auth_error') {
+    await prisma.integration.update({
+      where: { id: poolTokenId },
+      data: {
+        poolingEnabled: false,
+        rateLimitedUntil: null,
+        failureReason: 'auth_error',
+      },
+    });
+    log.info(`Pool token ${poolTokenId} disabled after auth_error`);
+    return;
+  }
+
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
   await prisma.integration.update({
     where: { id: poolTokenId },
@@ -423,15 +437,4 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     });
     return null;
   }
-}
-
-/**
- * Fetch a Claude token for a user: tries their personal token first, then pool.
- * Returns just the access token string, or null if unavailable.
- */
-export async function fetchClaudeTokenForUser(userId: string): Promise<string | null> {
-  const userToken = await fetchClaudeCodeAccessToken(userId);
-  if (userToken) return userToken;
-  const poolResult = await fetchPoolToken();
-  return poolResult?.accessToken ?? null;
 }

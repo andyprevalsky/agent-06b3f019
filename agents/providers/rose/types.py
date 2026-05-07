@@ -51,10 +51,13 @@ class ToolSchema:
 # ---------------------------------------------------------------------------
 
 
-# Source of a Claude OAuth token, as returned by the backend.
-#   - "user": the user's own Claude Max subscription
+# Source of a direct compute token, as returned by the backend.
+#   - "user": the user's own subscription token
 #   - "pool": one of the shared pooled tokens (LRU-rotated by the backend)
-ClaudeTokenSource = Literal["user", "pool"]
+ComputeTokenType = Literal["claude", "gpt"]
+ComputeTokenSource = Literal["user", "pool"]
+ClaudeTokenSource = ComputeTokenSource
+GptTokenSource = ComputeTokenSource
 
 
 # Async callback the client invokes on a rotation-worthy failure (401/403/429
@@ -62,7 +65,7 @@ ClaudeTokenSource = Literal["user", "pool"]
 # the existing `mark_claude_token_rate_limited_activity` so we don't
 # re-implement backend-side state.
 MarkRateLimitedFn = Callable[
-    ["ClaudeAuthContext", int, Optional[str]],  # (context, cooldown_seconds, rate_limited_until)
+    ["ComputeAuthContext", int, Optional[str], Optional[str]],  # context, cooldown, until, reason
     Awaitable[bool],
 ]
 
@@ -73,23 +76,26 @@ MarkRateLimitedFn = Callable[
 # `fetch_claude_max_token_activity`.
 FetchFreshTokenFn = Callable[
     [str],  # user_id
-    Awaitable[Optional["ClaudeAuthContext"]],
+    Awaitable[Optional["ComputeAuthContext"]],
 ]
 
 
 @dataclass
-class ClaudeAuthContext:
-    """Everything the Rose client needs to make a claudeAuth call AND to
-    rotate the token if it fails.
+class ComputeAuthContext:
+    """Everything the Rose client needs to make a direct compute-token call
+    and rotate the token if it fails.
 
     The backend owns the actual pool storage + LRU + cooldown tracking
-    (see back-end/.../integrations/claude-code/token/*). The agents-side
-    Rose client just calls the two callbacks at the right moments.
+    (see back-end/.../integrations/compute-code/token/*). The agents-side
+    Rose client just routes by `token_type` and calls the two callbacks at
+    the right moments.
     """
 
+    token_type: ComputeTokenType
     token: str
-    source: ClaudeTokenSource
+    source: ComputeTokenSource
     user_id: str
+    account_id: Optional[str] = None  # GPT/Codex account id when token_type == "gpt"
     pool_token_id: Optional[str] = None  # set when source == "pool"
 
     # Callbacks (injected by the caller in helpers/llm.py — kept out of the
@@ -97,10 +103,66 @@ class ClaudeAuthContext:
     mark_rate_limited: Optional[MarkRateLimitedFn] = None
     fetch_fresh: Optional[FetchFreshTokenFn] = None
 
-    # Per-request rotation budget — caps how many tokens we burn before
-    # giving up on claudeAuth and falling through to waterfall. Default 3
-    # mirrors the original retry budget in claude-token.ts.
+    # Per-request rotation budget — caps how many tokens we burn before giving
+    # up on direct compute-token routing and falling through to waterfall.
     max_rotations: int = 3
+
+
+class ClaudeAuthContext(ComputeAuthContext):
+    """Back-compat constructor for Claude direct-token callers.
+
+    Runtime behavior is the generic `ComputeAuthContext`; only provider routing
+    in RoseClient/transport cares that `token_type == "claude"`.
+    """
+
+    def __init__(
+        self,
+        token: str,
+        source: ClaudeTokenSource,
+        user_id: str,
+        pool_token_id: Optional[str] = None,
+        mark_rate_limited: Optional[MarkRateLimitedFn] = None,
+        fetch_fresh: Optional[FetchFreshTokenFn] = None,
+        max_rotations: int = 3,
+    ) -> None:
+        super().__init__(
+            token_type="claude",
+            token=token,
+            source=source,
+            user_id=user_id,
+            account_id=None,
+            pool_token_id=pool_token_id,
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=fetch_fresh,
+            max_rotations=max_rotations,
+        )
+
+
+class GptAuthContext(ComputeAuthContext):
+    """Back-compat constructor for GPT/Codex direct-token callers."""
+
+    def __init__(
+        self,
+        token: str,
+        source: GptTokenSource,
+        user_id: str,
+        account_id: Optional[str] = None,
+        pool_token_id: Optional[str] = None,
+        mark_rate_limited: Optional[MarkRateLimitedFn] = None,
+        fetch_fresh: Optional[FetchFreshTokenFn] = None,
+        max_rotations: int = 3,
+    ) -> None:
+        super().__init__(
+            token_type="gpt",
+            token=token,
+            source=source,
+            user_id=user_id,
+            account_id=account_id,
+            pool_token_id=pool_token_id,
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=fetch_fresh,
+            max_rotations=max_rotations,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -155,3 +217,4 @@ class RoseResponse:
     # ("invalid_request" | "auth_error" | "rate_limit" | "server_error").
     # The workflow uses this to decide whether to rotate the token.
     claude_token_error: Optional[str] = None
+    gpt_token_error: Optional[str] = None

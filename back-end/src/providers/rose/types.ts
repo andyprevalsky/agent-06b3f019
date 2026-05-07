@@ -13,13 +13,25 @@ export type MessageRole = 'system' | 'user' | 'assistant';
 export interface ContentBlock {
   type: string;
   text?: string;
-  image_url?: { url: string };
+  image_url?: { url: string; detail?: string };
+  detail?: string;
   file?: { filename: string; file_data: string };
 }
 
 export interface CompletionMessage {
   role: MessageRole;
   content: string | ContentBlock[];
+  tool_call_id?: string;
+  call_id?: string;
+  tool_calls?: Array<{
+    id?: string;
+    call_id?: string;
+    name?: string;
+    arguments?: unknown;
+    function?: { name?: string; arguments?: unknown };
+  }>;
+  codex_reasoning_items?: Array<Record<string, unknown>>;
+  codex_message_items?: Array<Record<string, unknown>>;
 }
 
 export interface ResponseFormat {
@@ -38,7 +50,12 @@ export interface CompletionOptions {
   temperature?: number;
   stream?: boolean;
   response_format?: ResponseFormat;
+  tools?: Array<Record<string, unknown>>;
+  tool_choice?: unknown;
+  effort?: string;
   claude_token?: string;
+  gpt_token?: string;
+  gpt_account_id?: string;
 }
 
 /**
@@ -74,7 +91,7 @@ export interface CompletionChunk {
  * Producers (claudeAuth/waterfall + parsers) yield these; the client wraps
  * them into the OpenAI-shaped CompletionChunk for chat callers.
  */
-export type ChunkKind = 'metadata' | 'content' | 'reasoning' | 'usage' | 'done';
+export type ChunkKind = 'metadata' | 'content' | 'tool_call' | 'reasoning' | 'usage' | 'done';
 
 export type RoseStreamChunk =
   | {
@@ -83,6 +100,7 @@ export type RoseStreamChunk =
     }
   | { kind: 'content'; data: { text: string } }
   | { kind: 'reasoning'; data: { text: string } }
+  | { kind: 'tool_call'; data: { id: string; name: string; arguments: string } }
   | {
       kind: 'usage';
       data: {

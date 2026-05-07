@@ -40,8 +40,8 @@ with workflow.unsafe.imports_passed_through():
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         check_progress,
-        fetch_claude_max_token_activity,
-        mark_claude_token_rate_limited_activity,
+        fetch_compute_token_activity,
+        mark_compute_token_rate_limited_activity,
         set_response_schema_activity,
     )
     from helpers.messages import update_agent_tree_state
@@ -181,11 +181,17 @@ class AgentWorkflow:
         self.tree_tokens_in: int = 0  # own + sum(children) - for display
         self.tree_tokens_out: int = 0  # own + sum(children) - for display
 
-        # Claude token (passed to Rose endpoint for direct Anthropic calls)
+        # Selected compute token (passed to Rose for direct provider calls)
+        self.compute_token_provider: Optional[str] = None  # "claude" | "gpt"
         self.claude_max_token: Optional[str] = None
-        self.claude_max_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
+        self.claude_max_token_fetched_at: Optional[datetime] = None  # Legacy alias for tests/callers
         self.claude_max_token_source: Optional[str] = None  # 'user' or 'pool' — used for rotation on rate_limit
         self.claude_max_token_pool_id: Optional[str] = None  # Integration ID when source='pool'
+        self.gpt_code_token: Optional[str] = None
+        self.gpt_code_account_id: Optional[str] = None
+        self.gpt_code_token_source: Optional[str] = None
+        self.gpt_code_token_pool_id: Optional[str] = None
+        self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
         self.input_cents_per_1k: float = 0.0  # Price per 1k input tokens in cents
@@ -595,8 +601,10 @@ class AgentWorkflow:
         else:
             workflow.logger.info("Skipping custom system prompt (gate closed)")
 
-        # Fetch Claude token for Anthropic calls via Rose endpoint
-        await self._refresh_claude_token(user_id)
+        # Fetch one direct compute token for Rose. Claude is preferred when
+        # available; otherwise GPT/Codex is used. Each LLM call receives only
+        # the selected token family.
+        await self._refresh_compute_token(user_id)
 
         # Inject custom system prompt as hidden USER message for new agents
         # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
@@ -725,10 +733,16 @@ class AgentWorkflow:
                 is_plan_loop=True,  # PLAN phase: requires set_plan, posts "sit back" message
                 response_schema=response_schema,
                 get_response_schema=self._make_response_schema_getter(),
-                claude_token=self.claude_max_token,
-                get_claude_token=lambda: self.claude_max_token,
-                get_claude_token_source=lambda: self.claude_max_token_source,
-                get_claude_token_pool_id=lambda: self.claude_max_token_pool_id,
+                claude_token=self._active_claude_token(),
+                get_claude_token=self._active_claude_token,
+                get_claude_token_source=self._active_claude_source,
+                get_claude_token_pool_id=self._active_claude_pool_id,
+                gpt_token=self._active_gpt_token(),
+                gpt_account_id=self._active_gpt_account_id(),
+                get_gpt_token=self._active_gpt_token,
+                get_gpt_account_id=self._active_gpt_account_id,
+                get_gpt_token_source=self._active_gpt_source,
+                get_gpt_token_pool_id=self._active_gpt_pool_id,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -783,9 +797,13 @@ class AgentWorkflow:
                     execute_tool=self._execute_tool,
                     handle_tool_event_fn=self._handle_tool_event,
                     poll_messages=self._poll_messages,
-                    claude_token=self.claude_max_token,
-                    claude_token_source=self.claude_max_token_source,
-                    claude_token_pool_id=self.claude_max_token_pool_id,
+                    claude_token=self._active_claude_token(),
+                    claude_token_source=self._active_claude_source(),
+                    claude_token_pool_id=self._active_claude_pool_id(),
+                    gpt_token=self._active_gpt_token(),
+                    gpt_account_id=self._active_gpt_account_id(),
+                    gpt_token_source=self._active_gpt_source(),
+                    gpt_token_pool_id=self._active_gpt_pool_id(),
                     on_tokens=self._on_tokens,
                     system_prompt_text=execute_system_prompt,
                     tool_names=execute_tools,
@@ -828,8 +846,8 @@ class AgentWorkflow:
         # Note: Don't pass initial_context - run_agent polls from DB each step
         # DAG already posted all results to DB via post_message callback
 
-        # Refresh Claude token before execute phase (may have expired during PLAN)
-        await self._refresh_claude_token(user_id)
+        # Refresh compute token before execute phase (may have expired during PLAN)
+        await self._refresh_compute_token(user_id)
 
         execute_result = await run_agent(
             agent_id=agent_id,
@@ -855,10 +873,16 @@ class AgentWorkflow:
             skip_blueprint_query=True,
             response_schema=response_schema,
             get_response_schema=self._make_response_schema_getter(),
-            claude_token=self.claude_max_token,
-            get_claude_token=lambda: self.claude_max_token,
-            get_claude_token_source=lambda: self.claude_max_token_source,
-            get_claude_token_pool_id=lambda: self.claude_max_token_pool_id,
+            claude_token=self._active_claude_token(),
+            get_claude_token=self._active_claude_token,
+            get_claude_token_source=self._active_claude_source,
+            get_claude_token_pool_id=self._active_claude_pool_id,
+            gpt_token=self._active_gpt_token(),
+            gpt_account_id=self._active_gpt_account_id(),
+            get_gpt_token=self._active_gpt_token,
+            get_gpt_account_id=self._active_gpt_account_id,
+            get_gpt_token_source=self._active_gpt_source,
+            get_gpt_token_pool_id=self._active_gpt_pool_id,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -906,8 +930,8 @@ class AgentWorkflow:
             prompt_gen = self._make_verifier_prompt_generator()
             verifier_prompt = await prompt_gen()
 
-            # Refresh claude token in case it expired during DAG.
-            await self._refresh_claude_token(user_id)
+            # Refresh compute token in case it expired during DAG.
+            await self._refresh_compute_token(user_id)
 
             # C7: dead `phase` positional arg has been removed from
             # check_progress; callers no longer pass it.
@@ -921,11 +945,16 @@ class AgentWorkflow:
                     verifier_prompt,
                     model,
                     self.output_schema,
-                    self.claude_max_token,
+                    self._active_claude_token(),
                     "verifier_post_dag",
                     agent_id,
-                    self.claude_max_token_source,
-                    self.claude_max_token_pool_id,
+                    self._active_claude_source(),
+                    self._active_claude_pool_id(),
+                    user_id,
+                    self._active_gpt_token(),
+                    self._active_gpt_account_id(),
+                    self._active_gpt_source(),
+                    self._active_gpt_pool_id(),
                     user_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -948,6 +977,7 @@ class AgentWorkflow:
                         cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                         call_site="verifier_post_dag",
                         claude_token_error=v_usage.get("claude_token_error"),
+                        gpt_token_error=v_usage.get("gpt_token_error"),
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
                     )
                 except Exception as e:
@@ -1080,40 +1110,87 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Credit check failed (continuing): {e}")
 
-    # Claude token TTL: 5 minutes
-    CLAUDE_TOKEN_TTL = timedelta(minutes=5)
+    # Direct compute token TTL: 5 minutes
+    COMPUTE_TOKEN_TTL = timedelta(minutes=5)
 
-    async def _refresh_claude_token(self, user_id: str) -> None:
-        """Fetch or refresh the Claude OAuth token if missing or expired (5-min TTL)."""
+    def _clear_compute_token(self) -> None:
+        self.compute_token_provider = None
+        self.claude_max_token = None
+        self.claude_max_token_source = None
+        self.claude_max_token_pool_id = None
+        self.gpt_code_token = None
+        self.gpt_code_account_id = None
+        self.gpt_code_token_source = None
+        self.gpt_code_token_pool_id = None
+        self.compute_token_fetched_at = None
+        self.claude_max_token_fetched_at = None
+
+    async def _refresh_compute_token(self, user_id: str) -> None:
+        """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
-        if self.claude_max_token_fetched_at:
-            age = now - self.claude_max_token_fetched_at
-            if age < self.CLAUDE_TOKEN_TTL:
+        fetched_at = self.compute_token_fetched_at or self.claude_max_token_fetched_at
+        if fetched_at:
+            age = now - fetched_at
+            if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
-            workflow.logger.info(f"🔑 Claude token expired ({age.total_seconds():.0f}s old), refreshing")
+            workflow.logger.info(
+                f"🔑 Compute token expired ({age.total_seconds():.0f}s old), refreshing"
+            )
 
         try:
             result = await workflow.execute_activity(
-                fetch_claude_max_token_activity,
+                fetch_compute_token_activity,
                 args=[user_id],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            if result:
-                self.claude_max_token = result.get("accessToken")
-                self.claude_max_token_source = result.get("source")
-                self.claude_max_token_pool_id = result.get("poolTokenId")
-            else:
-                self.claude_max_token = None
-                self.claude_max_token_source = None
-                self.claude_max_token_pool_id = None
-            self.claude_max_token_fetched_at = now
-            if self.claude_max_token:
+            if result and result.get("accessToken") and result.get("type") in ("claude", "gpt"):
+                self._clear_compute_token()
+                self.compute_token_provider = result.get("type")
+                if self.compute_token_provider == "claude":
+                    self.claude_max_token = result.get("accessToken")
+                    self.claude_max_token_source = result.get("source")
+                    self.claude_max_token_pool_id = result.get("poolTokenId")
+                    self.claude_max_token_fetched_at = now
+                else:
+                    self.gpt_code_token = result.get("accessToken")
+                    self.gpt_code_account_id = result.get("accountId")
+                    self.gpt_code_token_source = result.get("source")
+                    self.gpt_code_token_pool_id = result.get("poolTokenId")
+                self.compute_token_fetched_at = now
                 workflow.logger.info(
-                    f"🔑 Claude token available for planner (source={self.claude_max_token_source})"
+                    f"🔑 Compute token selected (type={self.compute_token_provider}, source={result.get('source')})"
                 )
+                return
         except Exception as e:
-            workflow.logger.warning(f"Failed to fetch Claude token: {e}")
+            workflow.logger.warning(f"Failed to fetch compute token: {e}")
+
+        self._clear_compute_token()
+
+    def _active_claude_token(self) -> Optional[str]:
+        return self.claude_max_token if self.compute_token_provider == "claude" else None
+
+    def _active_gpt_token(self) -> Optional[str]:
+        return self.gpt_code_token if self.compute_token_provider == "gpt" else None
+
+    def _active_gpt_account_id(self) -> Optional[str]:
+        return self.gpt_code_account_id if self.compute_token_provider == "gpt" else None
+
+    def _active_claude_source(self) -> Optional[str]:
+        return self.claude_max_token_source if self.compute_token_provider == "claude" else None
+
+    def _active_claude_pool_id(self) -> Optional[str]:
+        return self.claude_max_token_pool_id if self.compute_token_provider == "claude" else None
+
+    def _active_gpt_source(self) -> Optional[str]:
+        return self.gpt_code_token_source if self.compute_token_provider == "gpt" else None
+
+    def _active_gpt_pool_id(self) -> Optional[str]:
+        return self.gpt_code_token_pool_id if self.compute_token_provider == "gpt" else None
+
+    async def _refresh_claude_token(self, user_id: str) -> None:
+        """Compatibility wrapper for older tests/callers."""
+        await self._refresh_compute_token(user_id)
 
     async def _post_message(self, text: str, role: str = "ASSISTANT", metadata: Optional[Dict] = None) -> None:
         """Post message to database."""
@@ -1470,6 +1547,14 @@ class AgentWorkflow:
             tokens_out = llm.get("tokens_out", 0)
             model = llm.get("model") or self.model
             provider = llm.get("provider") or model
+            effective_call_site = call_site or tool_name or "unknown"
+
+            if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
+                workflow.logger.info(
+                    f"💰 $0 cost (direct compute token): actual_model={model}, "
+                    f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
+                )
+                continue
 
             # Get pricing for this model (fetch if not cached)
             pricing = await self._get_model_pricing(model)
@@ -1495,7 +1580,6 @@ class AgentWorkflow:
                 + (cache_write * input_rate * cache_write_mult / 1000)
                 + (tokens_out * output_rate / 1000)
             )
-            effective_call_site = call_site or tool_name or "unknown"
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(
@@ -1659,7 +1743,9 @@ class AgentWorkflow:
         cache_creation_input_tokens: int = 0,
         call_site: str = "unknown",
         claude_token_error: Optional[str] = None,
+        gpt_token_error: Optional[str] = None,
         claude_token_rotated: bool = False,
+        gpt_token_rotated: bool = False,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -1674,6 +1760,7 @@ class AgentWorkflow:
             call_site: Label identifying the LLM call source (e.g., plan_loop, execute_loop, verifier_execute)
             claude_token_error: Why the claude token call failed (auth_error, rate_limit, stall, server_error)
             claude_token_rotated: True when RoseClient swapped tokens inside a successful claudeAuth call.
+            gpt_token_rotated: True when RoseClient swapped tokens inside a successful gptAuth call.
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -1685,26 +1772,33 @@ class AgentWorkflow:
         if actual_model:
             self.actual_model = actual_model
 
-            if self.claude_max_token and actual_model.endswith("-claude") and claude_token_rotated:
+            if (
+                self.compute_token_provider == "claude"
+                and self.claude_max_token
+                and actual_model.endswith("-claude")
+                and claude_token_rotated
+            ):
                 workflow.logger.info(
                     "🔁 Claude token rotated inside RoseClient; refreshing workflow cached token"
                 )
-                self.claude_max_token = None
-                self.claude_max_token_fetched_at = None
-                self.claude_max_token_source = None
-                self.claude_max_token_pool_id = None
+                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_claude_token(self.user_id)
+                        await self._refresh_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"Rotation refetch failed after successful claudeAuth call: {refresh_error}"
                         )
 
-            # Detect Claude token fallback: we had a token but Rose fell through to the waterfall
-            # Only invalidate the token for permanent failures (auth errors, rate limits).
+            # Detect direct-token fallback: we had a selected token but Rose fell through to
+            # the waterfall. Only invalidate for permanent failures (auth errors, rate limits).
             # Transient failures (stalls, server errors) keep the token for retry on next call.
-            if self.claude_max_token and actual_model != "unknown" and not actual_model.endswith("-claude"):
+            if (
+                self.compute_token_provider == "claude"
+                and self.claude_max_token
+                and actual_model != "unknown"
+                and not actual_model.endswith("-claude")
+            ):
                 if claude_token_error in ("auth_error", "rate_limit"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
@@ -1717,11 +1811,15 @@ class AgentWorkflow:
                     if self.claude_max_token_source and self.user_id:
                         try:
                             await workflow.execute_activity(
-                                mark_claude_token_rate_limited_activity,
+                                mark_compute_token_rate_limited_activity,
                                 args=[
+                                    "claude",
                                     self.claude_max_token_source,
                                     self.user_id,
                                     self.claude_max_token_pool_id,
+                                    5 * 60,
+                                    None,
+                                    claude_token_error,
                                 ],
                                 start_to_close_timeout=timedelta(seconds=10),
                                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1731,16 +1829,13 @@ class AgentWorkflow:
                                 f"Failed to mark Claude token rate-limited: {mark_error}"
                             )
                     # Clear cache to force refetch on next call → rotation kicks in
-                    self.claude_max_token = None
-                    self.claude_max_token_fetched_at = None
-                    self.claude_max_token_source = None
-                    self.claude_max_token_pool_id = None
+                    self._clear_compute_token()
                     # Proactively refetch so subsequent LLM calls in this phase use the
                     # rotated token (otherwise they'd fall through to the waterfall until
-                    # the next phase boundary calls _refresh_claude_token).
+                    # the next phase boundary calls _refresh_compute_token).
                     if self.user_id:
                         try:
-                            await self._refresh_claude_token(self.user_id)
+                            await self._refresh_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(
                                 f"Rotation refetch failed: {refresh_error}"
@@ -1748,6 +1843,68 @@ class AgentWorkflow:
                 else:
                     workflow.logger.info(
                         f"ℹ️ Claude token fallback (transient: {claude_token_error}): "
+                        f"actual_model={actual_model}, keeping token for retry"
+                    )
+            if (
+                self.compute_token_provider == "gpt"
+                and self.gpt_code_token
+                and actual_model.endswith("-gpt")
+                and gpt_token_rotated
+            ):
+                workflow.logger.info(
+                    "🔁 GPT token rotated inside RoseClient; refreshing workflow cached token"
+                )
+                self._clear_compute_token()
+                if self.user_id:
+                    try:
+                        await self._refresh_compute_token(self.user_id)
+                    except Exception as refresh_error:
+                        workflow.logger.warning(
+                            f"GPT rotation refetch failed after successful gptAuth call: {refresh_error}"
+                        )
+
+            if (
+                self.compute_token_provider == "gpt"
+                and self.gpt_code_token
+                and actual_model != "unknown"
+                and not actual_model.endswith("-gpt")
+            ):
+                if gpt_token_error in ("auth_error", "rate_limit"):
+                    workflow.logger.warning(
+                        f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
+                        f"marking {self.gpt_code_token_source} token rate-limited and rotating"
+                    )
+                    if self.gpt_code_token_source and self.user_id:
+                        try:
+                            await workflow.execute_activity(
+                                mark_compute_token_rate_limited_activity,
+                                args=[
+                                    "gpt",
+                                    self.gpt_code_token_source,
+                                    self.user_id,
+                                    self.gpt_code_token_pool_id,
+                                    5 * 60,
+                                    None,
+                                    gpt_token_error,
+                                ],
+                                start_to_close_timeout=timedelta(seconds=10),
+                                retry_policy=RetryPolicy(maximum_attempts=2),
+                            )
+                        except Exception as mark_error:
+                            workflow.logger.warning(
+                                f"Failed to mark GPT token rate-limited: {mark_error}"
+                            )
+                    self._clear_compute_token()
+                    if self.user_id:
+                        try:
+                            await self._refresh_compute_token(self.user_id)
+                        except Exception as refresh_error:
+                            workflow.logger.warning(
+                                f"GPT rotation refetch failed: {refresh_error}"
+                            )
+                else:
+                    workflow.logger.info(
+                        f"ℹ️ GPT token fallback (transient: {gpt_token_error}): "
                         f"actual_model={actual_model}, keeping token for retry"
                     )
 
@@ -1763,7 +1920,7 @@ class AgentWorkflow:
                 output_rate = actual_pricing["output_cents_per_1k"]
                 if input_rate == 0 and output_rate == 0:
                     workflow.logger.info(
-                        f"💰 $0 cost (user Claude token): actual_model={actual_model}, "
+                        f"💰 $0 cost (direct compute token): actual_model={actual_model}, "
                         f"in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 

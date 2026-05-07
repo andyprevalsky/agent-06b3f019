@@ -13,6 +13,13 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
+import { fetchComputeTokenForUser } from '../../providers/computeCredentials';
+import {
+  fetchGptCodeAccessToken,
+  fetchGptPoolToken,
+  markGptPoolTokenRateLimited,
+  markGptUserTokenRateLimited,
+} from '../../providers/gptCredentials';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import * as repo from './repo';
@@ -320,6 +327,22 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
   log.info('Claude Code credentials stored', { userId });
 }
 
+export async function uploadGptCodeCredentials(userId: string, encryptedCredentials: string) {
+  log.info('Storing GPT Code credentials', { userId });
+  await repo.upsertIntegrationRaw({
+    userId,
+    name: 'gpt_code',
+    type: IntegrationType.TOOL_SETUP,
+    status: IntegrationStatus.CONNECTED,
+    isActive: true,
+    lastSyncAt: new Date(),
+    lastSuccessfulSyncAt: new Date(),
+    config: { encryptedCredentials },
+    updateExtra: { failureReason: null },
+  });
+  log.info('GPT Code credentials stored', { userId });
+}
+
 export async function getClaudeCodeToken(
   userId: string,
   forcePool: boolean,
@@ -345,9 +368,59 @@ export async function getClaudeCodeToken(
   };
 }
 
+export async function getGptCodeToken(
+  userId: string,
+  forcePool: boolean,
+  excludePoolTokenIds?: string[]
+) {
+  if (!forcePool) {
+    const userToken = await fetchGptCodeAccessToken(userId);
+    if (
+      userToken?.accessToken !== undefined &&
+      userToken.accessToken !== null &&
+      userToken.accessToken !== ''
+    ) {
+      return {
+        accessToken: userToken.accessToken,
+        accountId: userToken.accountId,
+        source: 'user' as const,
+      };
+    }
+  }
+  const poolResult = await fetchGptPoolToken(excludePoolTokenIds);
+  if (poolResult === null || poolResult === undefined) throw new NoTokensAvailableError();
+  return {
+    accessToken: poolResult.accessToken,
+    accountId: poolResult.accountId,
+    source: 'pool' as const,
+    poolTokenId: poolResult.poolTokenId,
+  };
+}
+
+export async function getComputeCodeToken(
+  userId: string,
+  forcePool: boolean,
+  excludePoolTokenIds?: string[]
+) {
+  const result = await fetchComputeTokenForUser(userId, { forcePool, excludePoolTokenIds });
+  if (result === null || result === undefined) throw new NoTokensAvailableError();
+  return {
+    type: result.type,
+    accessToken: result.accessToken,
+    accountId: result.accountId,
+    source: result.source,
+    poolTokenId: result.poolTokenId,
+  };
+}
+
 export async function markTokenRateLimited(
   source: string,
-  params: { poolTokenId?: string; userId?: string; rateLimitedUntil?: string }
+  params: {
+    poolTokenId?: string;
+    userId?: string;
+    rateLimitedUntil?: string;
+    failureReason?: string;
+  }
 ) {
   if (source === 'pool') {
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
@@ -355,12 +428,14 @@ export async function markTokenRateLimited(
     }
     await markPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
     });
     return {
       ok: true,
       source,
       poolTokenId: params.poolTokenId,
       rateLimitedUntil: params.rateLimitedUntil ?? null,
+      failureReason: params.failureReason ?? null,
     };
   }
   if (source === 'user') {
@@ -378,7 +453,89 @@ export async function markTokenRateLimited(
   throw new Error('Invalid source. Must be "pool" or "user".');
 }
 
-export async function markPoolTokenAsRateLimited(poolTokenId: string, rateLimitedUntil?: string) {
-  await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil });
-  return { ok: true, poolTokenId, rateLimitedUntil: rateLimitedUntil ?? null };
+export async function markComputeTokenRateLimited(
+  type: string,
+  source: string,
+  params: {
+    poolTokenId?: string;
+    userId?: string;
+    rateLimitedUntil?: string;
+    failureReason?: string;
+  }
+) {
+  if (type === 'claude') {
+    return markTokenRateLimited(source, params);
+  }
+  if (type === 'gpt') {
+    return markGptTokenRateLimited(source, params);
+  }
+  throw new Error('Invalid type. Must be "claude" or "gpt".');
+}
+
+export async function markGptTokenRateLimited(
+  source: string,
+  params: {
+    poolTokenId?: string;
+    userId?: string;
+    rateLimitedUntil?: string;
+    failureReason?: string;
+  }
+) {
+  if (source === 'pool') {
+    if (params.poolTokenId === undefined || params.poolTokenId === '') {
+      throw new Error('Missing poolTokenId for source=pool');
+    }
+    await markGptPoolTokenRateLimited(params.poolTokenId, {
+      rateLimitedUntil: params.rateLimitedUntil,
+      failureReason: params.failureReason,
+    });
+    return {
+      ok: true,
+      source,
+      poolTokenId: params.poolTokenId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+      failureReason: params.failureReason ?? null,
+    };
+  }
+  if (source === 'user') {
+    if (params.userId === undefined || params.userId === '') {
+      throw new Error('Missing userId for source=user');
+    }
+    await markGptUserTokenRateLimited(params.userId, { rateLimitedUntil: params.rateLimitedUntil });
+    return {
+      ok: true,
+      source,
+      userId: params.userId,
+      rateLimitedUntil: params.rateLimitedUntil ?? null,
+    };
+  }
+  throw new Error('Invalid source. Must be "pool" or "user".');
+}
+
+export async function markPoolTokenAsRateLimited(
+  poolTokenId: string,
+  rateLimitedUntil?: string,
+  failureReason?: string
+) {
+  await markPoolTokenRateLimited(poolTokenId, { rateLimitedUntil, failureReason });
+  return {
+    ok: true,
+    poolTokenId,
+    rateLimitedUntil: rateLimitedUntil ?? null,
+    failureReason: failureReason ?? null,
+  };
+}
+
+export async function markGptPoolTokenAsRateLimited(
+  poolTokenId: string,
+  rateLimitedUntil?: string,
+  failureReason?: string
+) {
+  await markGptPoolTokenRateLimited(poolTokenId, { rateLimitedUntil, failureReason });
+  return {
+    ok: true,
+    poolTokenId,
+    rateLimitedUntil: rateLimitedUntil ?? null,
+    failureReason: failureReason ?? null,
+  };
 }

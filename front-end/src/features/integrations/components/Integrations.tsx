@@ -62,6 +62,7 @@ export default function Integrations() {
     handleAtlasPasswordsSync: passwords.handleAtlasPasswordsSync,
     handlePasswordRequest: passwordRequest.handlePasswordRequest,
     handleClaudeCodeSync: compute.handleClaudeCodeSync,
+    handleGptCodeSync: compute.handleGptCodeSync,
     handleIMessageSync: messages.handleIMessageSync,
     handleLinkedInSync: messages.handleLinkedInSync,
     handleEmailConnect: gmail.handleEmailConnect,
@@ -100,6 +101,7 @@ export default function Integrations() {
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
               isClaudeCodeAvailable={!!handlers.claudeCode?.isAvailable}
+              isGptCodeAvailable={!!handlers.gptCode?.isAvailable}
               isFullySignedIn={isFullySignedIn}
               accordion={accordion}
               data={data}

@@ -301,6 +301,21 @@ async def mock_fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
     return None
 
 
+@activity.defn(name="fetch_compute_token_activity")
+async def mock_fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+    return None
+
+
+@activity.defn(name="mark_compute_token_rate_limited_activity")
+async def mock_mark_compute_token_rate_limited_activity(
+    token_type: str,
+    source: str,
+    user_id: str,
+    pool_token_id: Optional[str] = None,
+) -> None:
+    return None
+
+
 @activity.defn(name="fetch_agent_config")
 async def mock_fetch_agent_config(agent_id: str) -> Dict:
     return {"context_gates": {}, "response_schema": None, "write_lock_enabled": True}
@@ -380,7 +395,9 @@ async def mock_mark_finished(
 
 @activity.defn(name="compress_context")
 async def mock_compress_context(
-    context: list, iteration_count: int, model: str = "rose-labs/rose-1-lite"
+    context: list,
+    iteration_count: int,
+    model: str = "rose-labs/rose-1-lite",
 ) -> Dict:
     return {"learnings": "compressed learnings", "usage": {}}
 
@@ -417,6 +434,11 @@ async def mock_call_llm_activity(
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
     claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Mock LLM activity that returns an attempt_completion tool call to end the loop.
 
@@ -465,6 +487,11 @@ async def mock_check_progress(
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
     claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "score": 1.0,
@@ -495,6 +522,14 @@ async def mock_call_planner_llm_activity(
     claude_max_token: Optional[str] = None,
     agent_id: Optional[str] = None,
     tool_call_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "plan_text": "Plan: do the thing",
@@ -544,7 +579,7 @@ async def mock_save_blueprint_activity(user_id: str, data: dict) -> dict:
 
 
 @activity.defn(name="set_response_schema_activity")
-async def mock_set_response_schema_activity(agent_id: str, schema: dict) -> None:
+async def mock_set_response_schema_activity(agent_id: str, schema: Any) -> None:
     return None
 
 
@@ -563,6 +598,8 @@ MOCK_ACTIVITIES = [
     mock_get_user_system_name,
     mock_get_user_custom_system_prompt,
     mock_fetch_claude_max_token_activity,
+    mock_fetch_compute_token_activity,
+    mock_mark_compute_token_rate_limited_activity,
     mock_fetch_agent_config,
     mock_fetch_model_pricing,
     mock_post_agent_message,
@@ -1619,6 +1656,33 @@ async def test_workflow_track_usage_service_cost():
         _restore_workflow(original)
 
 
+async def test_workflow_track_usage_direct_compute_token_is_zero_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        usage = {
+            "llm": [
+                {
+                    "tokens_in": 104487,
+                    "tokens_out": 539,
+                    "model": "gpt-5.4-gpt",
+                    "provider": "Explore Agent",
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                }
+            ]
+        }
+        await wf._track_usage(usage, tool_name="spawn_sub_agent", call_site="explore_agent")
+        assert wf.own_cost_cents == 0.0
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_update_cost_and_signal_parent_root_checks_limit():
     wf = _bare_workflow_instance()
     wf.agent_id = "root"
@@ -1815,7 +1879,7 @@ async def test_workflow_refresh_claude_token_still_fresh_returns_early():
         await wf._refresh_claude_token("user-1")
         # No activity calls because token fresh
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "fetch_claude_max_token_activity" not in activity_names
+        assert "fetch_compute_token_activity" not in activity_names
         assert wf.claude_max_token == "existing-token"
     finally:
         _restore_workflow(original)
@@ -2490,7 +2554,8 @@ async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
     wf.claude_max_token = None
     wf.claude_max_token_fetched_at = None
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_claude_max_token_activity"] = {
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "claude",
         "accessToken": "new-tok",
         "source": "user",
         "poolTokenId": None,
@@ -2511,7 +2576,7 @@ async def test_workflow_refresh_claude_token_result_none_clears_token():
     wf.claude_max_token_source = "pool"
     wf.claude_max_token_fetched_at = None
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_claude_max_token_activity"] = None
+    fake.activity_returns["fetch_compute_token_activity"] = None
     original = _patch_workflow(fake)
     try:
         await wf._refresh_claude_token("user-1")
@@ -2526,7 +2591,7 @@ async def test_workflow_refresh_claude_token_exception_logged_no_raise():
     wf.claude_max_token = None
     wf.claude_max_token_fetched_at = None
     fake = _FakeWorkflowModule()
-    fake.activity_fail_for.add("fetch_claude_max_token_activity")
+    fake.activity_fail_for.add("fetch_compute_token_activity")
     original = _patch_workflow(fake)
     try:
         # Must not raise
@@ -2576,6 +2641,7 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
+    wf.compute_token_provider = "claude"
     wf.claude_max_token = "some-token"
     wf.claude_max_token_source = "pool"
     wf.claude_max_token_pool_id = "pool-id-1"
@@ -2584,7 +2650,7 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
     # After rotation, refresh returns None so token stays cleared
-    fake.activity_returns["fetch_claude_max_token_activity"] = None
+    fake.activity_returns["fetch_compute_token_activity"] = None
     original = _patch_workflow(fake)
     try:
         await wf._on_tokens(
@@ -2599,7 +2665,7 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         assert wf.claude_max_token_source is None
         # mark activity executed
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_claude_token_rate_limited_activity" in activity_names
+        assert "mark_compute_token_rate_limited_activity" in activity_names
     finally:
         _restore_workflow(original)
 
@@ -2608,6 +2674,7 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
+    wf.compute_token_provider = "claude"
     wf.claude_max_token = "keep-me"
     wf.claude_max_token_source = "user"
     wf.input_cents_per_1k = 0.0
@@ -2625,7 +2692,7 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
         assert wf.claude_max_token == "keep-me"
         # mark activity NOT executed
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_claude_token_rate_limited_activity" not in activity_names
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
     finally:
         _restore_workflow(original)
 
@@ -2634,6 +2701,7 @@ async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_to
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
+    wf.compute_token_provider = "claude"
     wf.claude_max_token = "old-token"
     wf.claude_max_token_source = "pool"
     wf.claude_max_token_pool_id = "pool-old"
@@ -2641,7 +2709,8 @@ async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_to
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_claude_max_token_activity"] = {
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "claude",
         "accessToken": "fresh-token",
         "source": "pool",
         "poolTokenId": "pool-fresh",
@@ -2659,8 +2728,71 @@ async def test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_to
         assert wf.claude_max_token_source == "pool"
         assert wf.claude_max_token_pool_id == "pool-fresh"
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "fetch_claude_max_token_activity" in activity_names
-        assert "mark_claude_token_rate_limited_activity" not in activity_names
+        assert "fetch_compute_token_activity" in activity_names
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "gpt-token"
+    wf.gpt_code_token_source = "pool"
+    wf.gpt_code_token_pool_id = "gpt-pool-1"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "claude",
+        "accessToken": "next-claude-token",
+        "source": "pool",
+        "poolTokenId": "claude-pool-2",
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="google/gemini-3-flash-preview",
+            call_site="test",
+            gpt_token_error="auth_error",
+        )
+        assert wf.compute_token_provider == "claude"
+        assert wf.claude_max_token == "next-claude-token"
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "mark_compute_token_rate_limited_activity" in activity_names
+        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
+        assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1"]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_transient_error_keeps_gpt_token():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "user-1"
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "keep-gpt"
+    wf.gpt_code_token_source = "user"
+    wf.input_cents_per_1k = 0.0
+    wf.output_cents_per_1k = 0.0
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=5,
+            tokens_out_delta=2,
+            actual_model="openai/gpt-5.4",
+            call_site="test",
+            gpt_token_error="stall",
+        )
+        assert wf.compute_token_provider == "gpt"
+        assert wf.gpt_code_token == "keep-gpt"
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
     finally:
         _restore_workflow(original)
 
@@ -2759,6 +2891,10 @@ async def run_all_tests():
     await r.record_async("wf_track_llm_cost_no_pricing", test_workflow_track_llm_cost_zero_when_no_pricing)
     await r.record_async("wf_track_usage_empty", test_workflow_track_usage_empty_is_no_op)
     await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
+    await r.record_async(
+        "wf_track_usage_direct_compute_token",
+        test_workflow_track_usage_direct_compute_token_is_zero_cost,
+    )
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
     await r.record_async(
@@ -2819,6 +2955,8 @@ async def run_all_tests():
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
     await r.record_async("wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token)
     await r.record_async("wf_on_tokens_successful_claude_rotation", test_workflow_on_tokens_successful_claude_rotation_refreshes_cached_token)
+    await r.record_async("wf_on_tokens_rotates_gpt", test_workflow_on_tokens_rotates_gpt_token_on_auth_error)
+    await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)
     await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
     await r.record_async("wf_query_parent_state_exception", test_workflow_query_parent_state_exception_returns_empty)
 

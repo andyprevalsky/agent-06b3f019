@@ -7,6 +7,7 @@ export function useComputeSync(
   fetchIntegrations: () => Promise<void>,
 ) {
   const [claudeCodeSyncLoading, setClaudeCodeSyncLoading] = useState(false);
+  const [gptCodeSyncLoading, setGptCodeSyncLoading] = useState(false);
   const [claudeCodeStatus, setClaudeCodeStatus] = useState<string | null>(null);
 
   useEffect(() => {
@@ -33,9 +34,25 @@ export function useComputeSync(
     }
   }, [handlers.claudeCode, fetchIntegrations]);
 
+  const handleGptCodeSync = useCallback(async () => {
+    if (!handlers.gptCode) return;
+    setGptCodeSyncLoading(true);
+    try {
+      const result = await handlers.gptCode.syncCredentials();
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to sync GPT credentials');
+      }
+      await fetchIntegrations();
+    } finally {
+      setGptCodeSyncLoading(false);
+    }
+  }, [handlers.gptCode, fetchIntegrations]);
+
   return {
     claudeCodeSyncLoading,
+    gptCodeSyncLoading,
     claudeCodeStatus,
     handleClaudeCodeSync,
+    handleGptCodeSync,
   } as const;
 }

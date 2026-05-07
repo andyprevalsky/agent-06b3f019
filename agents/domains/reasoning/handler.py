@@ -30,6 +30,14 @@ async def execute_reasoning_activity(
     agent_id: str | None = None,
     stream_id: str | None = None,
     claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    claude_token_user_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    gpt_token_user_id: str | None = None,
 ) -> dict:
     """Execute a reasoning task using LLM with streaming.
 
@@ -44,6 +52,14 @@ async def execute_reasoning_activity(
             stream_id=stream_id,
             heartbeat_fn=_safe_heartbeat,
             claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
         )
     except Exception as e:
         logger.error(f"[Reasoning] Error calling LLM: {e}")

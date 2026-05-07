@@ -9,6 +9,7 @@ interface SyncHandlers {
   handleAtlasPasswordsSync: (keychainPassword: string) => Promise<void>;
   handlePasswordRequest: () => Promise<true | undefined>;
   handleClaudeCodeSync: () => Promise<void>;
+  handleGptCodeSync: () => Promise<void>;
   handleIMessageSync: () => Promise<void>;
   handleLinkedInSync: () => Promise<void>;
   handleEmailConnect: (provider: 'gmail') => Promise<void>;
@@ -75,6 +76,11 @@ export function useIntegrationActions(handlers: SyncHandlers) {
         h.handleClaudeCodeSync,
         setError,
         'Failed to sync Claude Code credentials',
+      ),
+      onGptCodeSync: wrapAction(
+        h.handleGptCodeSync,
+        setError,
+        'Failed to sync GPT credentials',
       ),
       onIMessageSync: wrapAction(h.handleIMessageSync, setError, 'Failed to sync iMessage'),
       onLinkedInSync: wrapAction(h.handleLinkedInSync, setError, 'Failed to start LinkedIn sync'),

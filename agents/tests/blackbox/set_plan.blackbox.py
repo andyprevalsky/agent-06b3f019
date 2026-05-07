@@ -499,10 +499,29 @@ class _FakeWFInstance:
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.claude_max_token = None
+        self.gpt_code_token = "gpt-token-1"
+        self.gpt_code_account_id = "acct-1"
+        self.gpt_code_token_source = "pool"
+        self.gpt_code_token_pool_id = "pool-token-1"
         self.refreshes = 0
 
     async def _refresh_claude_token(self, user_id):
         self.refreshes += 1
+
+    def _active_claude_token(self):
+        return None
+
+    def _active_gpt_token(self):
+        return self.gpt_code_token
+
+    def _active_gpt_account_id(self):
+        return self.gpt_code_account_id
+
+    def _active_gpt_source(self):
+        return self.gpt_code_token_source
+
+    def _active_gpt_pool_id(self):
+        return self.gpt_code_token_pool_id
 
     async def _track_usage(self, *a, **kw):
         pass
@@ -533,7 +552,8 @@ async def test_handler_happy_path_first_try():
     import domains.set_plan.handler as h
 
     original_runner = h.run_planner_attempt
-    h.run_planner_attempt = AsyncMock(return_value=valid_plan)
+    runner_mock = AsyncMock(return_value=valid_plan)
+    h.run_planner_attempt = runner_mock
     try:
         wf = _FakeWFInstance()
         events = await _collect_events(
@@ -545,6 +565,13 @@ async def test_handler_happy_path_first_try():
 
     statuses = [e.status for e in events]
     assert MessageStatus.FINISHED in statuses
+    runner_mock.assert_awaited_once()
+    planner_kwargs = runner_mock.await_args.kwargs
+    assert planner_kwargs["claude_max_token"] is None
+    assert planner_kwargs["gpt_token"] == "gpt-token-1"
+    assert planner_kwargs["gpt_account_id"] == "acct-1"
+    assert planner_kwargs["gpt_token_source"] == "pool"
+    assert planner_kwargs["gpt_token_pool_id"] == "pool-token-1"
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert finished.title == "Test Plan"
     assert finished.data["type"] == "plan_artifact"

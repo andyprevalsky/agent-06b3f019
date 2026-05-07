@@ -39,6 +39,7 @@ async def stream_assistant_chunk(
     sequence: int = 0,
     sub_agent_id: str = None,
     is_claude: bool = False,
+    is_gpt: bool = False,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -54,6 +55,7 @@ async def stream_assistant_chunk(
         sequence: Sequence number for ordering
         sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
         is_claude: Whether the model is a Claude/Anthropic model
+        is_gpt: Whether the model is direct GPT/Codex
     """
     try:
         config = load_config()
@@ -77,7 +79,9 @@ async def stream_assistant_chunk(
         # Include is_claude marker for frontend thinking animation theming
         if is_claude:
             record["is_claude"] = True
-        
+        if is_gpt:
+            record["is_gpt"] = True
+
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
@@ -583,4 +587,3 @@ async def post_agent_message(
             f"Failed to post message: agent_id={agent_id}, error={str(e)}"
         )
         raise
-

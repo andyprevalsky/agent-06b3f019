@@ -60,11 +60,66 @@ async def test_fetch_agent_tools_boundary():
     )
 
 
+async def test_legacy_tool_fetch_agent_tools_happy_path():
+    """Legacy tools.fetch_tools path returns name/description pairs."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.fetch_tools import fetch_agent_tools
+
+        result = await fetch_agent_tools("agent-1")
+
+    assert result == [
+        {"name": "Web Search", "description": "Search the web"},
+        {"name": "Grep", "description": "Search text patterns"},
+    ]
+
+
+async def test_legacy_tool_fetch_agent_tools_default_description():
+    """Missing descriptions get a stable default in the legacy path."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"agent": {"tools": [{"name": "Only Name"}]}},
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.fetch_tools import fetch_agent_tools
+
+        result = await fetch_agent_tools("agent-2")
+
+    assert result == [{"name": "Only Name", "description": "No description available"}]
+
+
+async def test_legacy_tool_fetch_agent_tools_error_returns_empty():
+    """The legacy tool fetcher fails closed to an empty tool list."""
+    setup_mock({"/api/agents/": {"status": 500, "json": {}}})
+    with patch("temporalio.activity.heartbeat"):
+        from tools.fetch_tools import fetch_agent_tools
+
+        result = await fetch_agent_tools("agent-3")
+
+    assert result == []
+
+
 async def run_all_tests():
     print("fetch-tools blackbox tests:")
     r = BlackboxResult()
     await r.record_async("fetch_agent_tools_happy_path", test_fetch_agent_tools_happy_path)
     await r.record_async("fetch_agent_tools_boundary", test_fetch_agent_tools_boundary)
+    await r.record_async(
+        "legacy_tool_fetch_agent_tools_happy_path",
+        test_legacy_tool_fetch_agent_tools_happy_path,
+    )
+    await r.record_async(
+        "legacy_tool_fetch_agent_tools_default_description",
+        test_legacy_tool_fetch_agent_tools_default_description,
+    )
+    await r.record_async(
+        "legacy_tool_fetch_agent_tools_error_returns_empty",
+        test_legacy_tool_fetch_agent_tools_error_returns_empty,
+    )
     teardown_mock()
     return r.all_passed
 

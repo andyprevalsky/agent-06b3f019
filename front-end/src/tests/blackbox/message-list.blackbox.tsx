@@ -24,6 +24,12 @@ import type { AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import type { Message, AgentDetail } from '@/lib/api';
 
+vi.mock('@/components/ThinkingAnimation', () => ({
+  default: ({ gradient }: { gradient?: string[] }) => (
+    <div data-testid="thinking-animation" data-has-gradient={gradient?.length ? 'true' : 'false'} />
+  ),
+}));
+
 // jsdom doesn't implement scrollIntoView — stub it so auto-scroll effect is inert.
 beforeAll(() => {
   if (!Element.prototype.scrollIntoView) {
@@ -534,6 +540,24 @@ describe('MessageList', () => {
     renderList(ctx, { showThinkingIndicator: false });
     // No "Thinking" word from the MessageList-level thinking banner
     expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+  });
+
+  it('uses the orange direct-token thinking animation for GPT streaming bubbles', async () => {
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        ['sb-1', { text: 'thinking with gpt', sequence: 1, done: false, isGpt: true }],
+      ]),
+    });
+    renderList(ctx);
+    await waitFor(
+      () =>
+        expect(screen.getByTestId('thinking-animation')).toHaveAttribute(
+          'data-has-gradient',
+          'true',
+        ),
+      { timeout: 1200 },
+    );
   });
 
   it('does not render status banners inside a sub-agent panel', () => {

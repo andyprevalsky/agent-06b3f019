@@ -5,6 +5,7 @@
  * model contract; if you change one, change the other.
  *
  * claudeAuth = direct Anthropic Messages API call (user/pool OAuth token).
+ * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
  * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
  */
 
@@ -14,6 +15,8 @@ export interface PoolSpec {
   name: PoolName;
   /** Anthropic model ID used when a Claude OAuth token is supplied. */
   claudeAuthModel: string;
+  /** OpenAI model ID used when a ChatGPT/Codex OAuth token is supplied. */
+  gptAuthModel: string;
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
 }
@@ -22,16 +25,19 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   'rose-1-lite': {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-4-6',
+    gptAuthModel: 'gpt-5.4',
     waterfall: ['google/gemini-3-flash-preview', 'moonshotai/kimi-k2.5'],
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-opus-4-7',
+    gptAuthModel: 'gpt-5.5',
     waterfall: ['anthropic/claude-opus-4.7', 'google/gemini-3.1-pro-preview'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
     claudeAuthModel: 'claude-opus-4-7',
+    gptAuthModel: 'gpt-5.5',
     waterfall: ['anthropic/claude-opus-4.7', 'openai/gpt-5.4'],
   },
 };

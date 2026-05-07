@@ -238,14 +238,15 @@ async def test_resolve_pointers_in_text_db_fetch():
 async def test_resolve_pointers_db_fetch_sends_user_scope():
     """DB fetch includes user scope when pointer resolution has user_id."""
     _clear_cache()
+    captured = {}
 
     def handler(req):
         if "/api/agents/messages/batch" in str(req.url):
             import json as _json
 
             body = _json.loads(req.content.decode("utf-8"))
-            assert req.headers.get("X-User-Id") == "user-123"
-            assert body["user_id"] == "user-123"
+            captured["x_user_id"] = req.headers.get("x-user-id")
+            captured["body_user_id"] = body.get("user_id")
             return httpx.Response(200, json={
                 "messages": [
                     {
@@ -266,6 +267,8 @@ async def test_resolve_pointers_db_fetch_sends_user_scope():
 
     assert "<resolved-ref" in result
     assert "Fetched with user scope" in result
+    assert captured["x_user_id"] == "user-123"
+    assert captured["body_user_id"] == "user-123"
 
 
 async def test_resolve_pointers_in_text_db_missing():
