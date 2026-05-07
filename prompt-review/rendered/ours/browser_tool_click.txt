@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "click",
+    "description": "Click an element by CSS or XPath selector.\n\nIMPORTANT: Use observe() first to find the element and get its selector.\n\nSelector formats:\n- CSS: \"button#login\", \".submit-btn\", \"[data-testid='submit']\"\n- XPath: \"//button[@id='login']\", \"//a[contains(text(), 'Sign in')]\"\n\nExamples:\n- click(selector=\"button#login\")\n- click(selector=\"[data-testid='submit']\")\n- click(selector=\"//button[contains(text(), 'Login')]\")\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector or XPath (prefix XPath with //) to identify the element"
+        }
+      },
+      "required": [
+        "selector"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

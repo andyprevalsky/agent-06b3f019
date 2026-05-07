@@ -1,0 +1,23 @@
+## User Profile
+Name: <USER_NAME>
+Phone: <USER_PHONE>
+Delivery Address:
+<STREET_ADDRESS>
+<CITY>, <STATE>, <POSTAL_CODE>
+<COUNTRY>
+
+## Connected Integrations
+These integrations are connected and available.
+- Gmail: <USER_EMAIL>
+
+## Authenticated Browser Sessions
+Stored auth credentials are available for these sites. When using spawn_browser_agent
+for these domains, the agent will be logged into the user's account; no authentication is required. Prefer authenticated sites when they are suitable for the task.
+amazon.com, gmail.com
+
+## Recent Communications
+[SMS] 2026-05-06 12:00 | From: <CONTACT_PHONE>
+Representative recent message shown to the agent.
+
+## User Network
+<CONTACT_FIRST> <CONTACT_LAST> | <CONTACT_PHONE> | frequent | 42 msgs | friend | <COMPANY>

@@ -1,0 +1,4 @@
+
+- Use type='file_pointer' for file outputs (NOT 'str') - enables file transfer.
+- Pass attachments via original_filename only (not id or storage_path).
+- Files in context are already available - don't re-download them.

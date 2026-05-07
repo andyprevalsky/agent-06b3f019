@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Review</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1>Prompt Review</h1>
+      <span class="progress" id="progress">— / —</span>
+      <span class="status" id="status">loading…</span>
+    </div>
+    <div class="topbar-right">
+      <button class="btn ghost" id="toggle-empty-btn" title="Show columns with no equivalent">show empty</button>
+      <button class="btn ghost" id="prev-btn" title="Previous (←)">‹ prev</button>
+      <button class="btn ghost" id="next-btn" title="Next (→)">next ›</button>
+      <button class="btn primary" id="save-next-btn" title="Mark complete &amp; next (⌘+Enter)">save &amp; next</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="filter-row">
+        <input type="search" id="filter" placeholder="filter prompts…" />
+      </div>
+      <ul class="prompt-list" id="prompt-list"></ul>
+    </aside>
+
+    <section class="content">
+      <div class="row-meta" id="row-meta">
+        <div class="row-meta-id" id="row-id">—</div>
+        <div class="row-meta-summary" id="row-summary">—</div>
+        <div class="row-meta-path" id="row-path">—</div>
+      </div>
+
+      <div class="cols">
+        <article class="col col-new">
+          <header class="col-head">
+            <span class="col-tag tag-new">NEW</span>
+            <span class="col-sub" id="col-new-sub">your edits — saved locally</span>
+            <span class="edited-flag" id="col-new-edited" title="has local edits">edited</span>
+            <button class="btn ghost btn-revert" id="col-new-revert" title="clear edits">clear</button>
+          </header>
+          <textarea class="col-body editable" id="col-new" spellcheck="false" placeholder="type a replacement prompt here…"></textarea>
+        </article>
+
+        <article class="col col-current">
+          <header class="col-head">
+            <span class="col-tag tag-current">CURRENT</span>
+            <span class="col-sub" id="col-current-sub">our prompt today</span>
+          </header>
+          <div class="col-body markdown" id="col-current"></div>
+        </article>
+
+        <article class="col col-before">
+          <header class="col-head">
+            <span class="col-tag tag-before">~1 MONTH AGO</span>
+            <span class="col-sub" id="col-before-sub">git history</span>
+          </header>
+          <div class="col-body markdown" id="col-before"></div>
+        </article>
+
+        <article class="col col-claude">
+          <header class="col-head">
+            <span class="col-tag tag-claude">CLAUDE CODE</span>
+            <span class="col-sub" id="col-claude-sub">closest match</span>
+            <span class="weak-flag" id="col-claude-weak" title="weak match — no strong correlary in this repo">weak</span>
+          </header>
+          <div class="col-body markdown" id="col-claude"></div>
+        </article>
+
+        <article class="col col-openclaw">
+          <header class="col-head">
+            <span class="col-tag tag-openclaw">OPENCLAW</span>
+            <span class="col-sub" id="col-openclaw-sub">closest match</span>
+            <span class="weak-flag" id="col-openclaw-weak" title="weak match">weak</span>
+          </header>
+          <div class="col-body markdown" id="col-openclaw"></div>
+        </article>
+
+        <article class="col col-hermes">
+          <header class="col-head">
+            <span class="col-tag tag-hermes">HERMES</span>
+            <span class="col-sub" id="col-hermes-sub">closest match</span>
+            <span class="weak-flag" id="col-hermes-weak" title="weak match">weak</span>
+          </header>
+          <div class="col-body markdown" id="col-hermes"></div>
+        </article>
+      </div>
+
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

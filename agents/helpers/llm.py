@@ -37,6 +37,7 @@ from providers.rose import (
 )
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
+from utils.prompts import format_required_output_schema_user_message
 from utils.tool_schemas import (
     create_agent_action_model,
 )
@@ -469,10 +470,43 @@ def convert_context_to_messages(  # noqa: C901
     return messages
 
 
+def inject_llm_only_user_preamble(
+    messages: List[Dict[str, Any]],
+    preamble: str,
+) -> List[Dict[str, Any]]:
+    """Prepend LLM-only text to the first user message without touching persisted context."""
+    text = preamble.strip()
+    if not text:
+        return messages
+
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = f"{text}\n\n{content}" if content else text
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    existing = block.get("text") or ""
+                    block["text"] = f"{text}\n\n{existing}" if existing else text
+                    break
+            else:
+                content.insert(0, {"type": "text", "text": text})
+        else:
+            msg["content"] = text
+        return messages
+
+    messages.append({"role": "user", "content": text})
+    return messages
+
+
 async def build_llm_messages(  # noqa: C901
     context: List[Dict],
     system_prompt: str,
     pre_resolved_ids: Optional[set] = None,
+    llm_only_user_preamble: str = "",
+    user_id: Optional[str] = None,
 ) -> List[Dict]:
     """Build messages list for LLM from context, with attachment support.
 
@@ -874,6 +908,9 @@ async def build_llm_messages(  # noqa: C901
         else:
             i += 1
 
+    if llm_only_user_preamble:
+        messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
+
     # Defensive: pair every assistant tool_call with a tool result before sending
     # to the LLM. Mirrors claude-code-src's ensureToolResultPairing — when an
     # activity (set_plan, spawn_agent, spawn_claude_code_agent, …) crashes or
@@ -884,7 +921,11 @@ async def build_llm_messages(  # noqa: C901
     messages = _ensure_tool_result_pairing(messages)
 
     # Resolve context pointers to <resolved-ref> blocks
-    messages = await resolve_pointers_in_messages(messages, local_context=context)
+    messages = await resolve_pointers_in_messages(
+        messages,
+        local_context=context,
+        user_id=user_id,
+    )
 
     return messages
 
@@ -2055,6 +2096,8 @@ async def call_llm(
     skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
+    local_context: Optional[List[Dict[str, Any]]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
@@ -2074,7 +2117,11 @@ async def call_llm(
         _safe_heartbeat(f"Calling LLM with {len(messages)} messages")
 
         # Resolve context pointers
-        messages = await resolve_pointers_in_messages(messages)
+        messages = await resolve_pointers_in_messages(
+            messages,
+            local_context=local_context,
+            user_id=user_id,
+        )
 
         config = load_config()
         model = model or config.openrouter.model
@@ -2832,6 +2879,9 @@ async def call_llm_activity(  # noqa: C901
     extra_user_message: Optional[str] = None,
     required_tool: Optional[str] = None,
     skip_cache_write: bool = False,
+    include_attempt_completion_result: bool = False,
+    llm_only_user_preamble: str = "",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -2862,6 +2912,8 @@ async def call_llm_activity(  # noqa: C901
         skip_cache_write: If True, skips message-level cache breakpoint (avoids
             writing a cache entry for the unique trailing message) but keeps
             system+tools markers so the shared prefix can still be read from cache.
+        include_attempt_completion_result: Include attempt_completion.result in
+            the tool schema for unverified handoff flows.
 
     Returns:
         Dict with:
@@ -2881,8 +2933,18 @@ async def call_llm_activity(  # noqa: C901
                 await asyncio.sleep(0.5)
                 pending = _pending_llm_context.get(_context_key)
             if pending is not None:
-                context, _sys_prompt, pre_resolved_ids = pending
-                messages = await build_llm_messages(context, _sys_prompt, pre_resolved_ids=pre_resolved_ids)
+                if len(pending) >= 4:
+                    context, _sys_prompt, pre_resolved_ids, pending_user_id = pending
+                else:
+                    context, _sys_prompt, pre_resolved_ids = pending
+                    pending_user_id = user_id
+                messages = await build_llm_messages(
+                    context,
+                    _sys_prompt,
+                    pre_resolved_ids=pre_resolved_ids,
+                    llm_only_user_preamble=llm_only_user_preamble,
+                    user_id=pending_user_id or user_id,
+                )
             elif system_prompt:
                 # Cross-machine fallback: activity landed on a different worker.
                 # Fetch messages from backend; files download live via activity.in_activity().
@@ -2891,8 +2953,14 @@ async def call_llm_activity(  # noqa: C901
                 logger.info("Cross-machine LLM context fallback", agent_id=_context_key)
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
-                messages = await build_llm_messages(context, system_prompt, pre_resolved_ids=None)
-                _pending_llm_context[_context_key] = (context, system_prompt, None)
+                messages = await build_llm_messages(
+                    context,
+                    system_prompt,
+                    pre_resolved_ids=None,
+                    llm_only_user_preamble=llm_only_user_preamble,
+                    user_id=user_id,
+                )
+                _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
             else:
                 raise ValueError(
                     f"No pending LLM context for agent {_context_key} and no system_prompt provided"
@@ -2900,12 +2968,17 @@ async def call_llm_activity(  # noqa: C901
         else:
             # Legacy: pre-built messages list passed directly
             messages = messages_or_agent_id
+            if llm_only_user_preamble:
+                messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
 
         if extra_user_message:
             messages.append({"role": "user", "content": extra_user_message})
 
         # Create dynamic action model
-        AgentActionModel = create_agent_action_model(tool_names)
+        AgentActionModel = create_agent_action_model(
+            tool_names,
+            include_attempt_completion_result=include_attempt_completion_result,
+        )
 
         # _is_claude detected from actual_model in stream response, not from input model/token
         _is_claude = [False]  # Mutable list so closures can update it
@@ -3301,6 +3374,12 @@ async def call_planner_llm_activity(
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
+    schema_preamble = format_required_output_schema_user_message(
+        response_schema,
+        for_decomposition=True,
+    )
+    if schema_preamble:
+        full_messages = inject_llm_only_user_preamble(full_messages, schema_preamble)
 
     # Resolve context pointers
     full_messages = await resolve_pointers_in_messages(full_messages)

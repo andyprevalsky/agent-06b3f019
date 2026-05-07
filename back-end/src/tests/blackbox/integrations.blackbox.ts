@@ -1915,19 +1915,16 @@ async function testClaudeCodeUpload_happyPath() {
 }
 
 async function testClaudeCodeToken_notFound() {
-  // TEMP: onboarding gate in getClaudeCodeToken is disabled — anon users get pool token (200).
-  // Restore 404 assertion when service.ts guard is uncommented.
   const { accessToken } = await createAnonSession();
+  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: authHeaders(accessToken),
+    headers: {
+      ...authHeaders(accessToken),
+      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
+    },
   });
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as { accessToken: string; source: string };
-  assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
-  assert(
-    typeof body.accessToken === 'string' && body.accessToken.length > 0,
-    'Expected pool accessToken'
-  );
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code token not found');
 }
 
 async function testClaudeCodeRateLimited_forbidden() {
@@ -2936,15 +2933,16 @@ async function testClaudeCodeCredentials_upload() {
 
 // 17. Claude Code credentials get token: returns 404 for anon user without onboarding
 async function testClaudeCodeCredentials_getToken() {
-  // TEMP: onboarding gate in getClaudeCodeToken is disabled — anon users get pool token (200).
-  // Restore 404 assertion when service.ts guard is uncommented.
   const { accessToken } = await createAnonSession();
+  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: authHeaders(accessToken),
+    headers: {
+      ...authHeaders(accessToken),
+      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
+    },
   });
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as { accessToken: string; source: string };
-  assert(body.source === 'pool', `Expected source=pool, got ${body.source}`);
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code credentials get token');
 }
 
 // 18. Claude Code token rate-limited: with API key (internal auth)
@@ -3696,6 +3694,40 @@ async function testRotation_defaultCooldownIsBounded() {
   }
 }
 
+async function testClaudeCodeUpload_clearsRateLimitCooldown() {
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+
+  try {
+    await prisma.integration.update({
+      where: { id: userInt.id },
+      data: {
+        rateLimitedUntil: new Date(Date.now() + 60 * 60 * 1000),
+        lastUsedAt: new Date(),
+        failureReason: 'previous token exhausted',
+      },
+    });
+
+    const encryptedCredentials = buildCredentialPayload(
+      `sk-ant-oat-resynced-${crypto.randomBytes(8).toString('hex')}`
+    );
+    const encrypted = encryptPayload({ encryptedCredentials });
+    const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+      method: 'POST',
+      headers: authHeaders(caller.accessToken),
+      body: JSON.stringify(encrypted),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    assert(row?.rateLimitedUntil === null, 'upload must clear stale rateLimitedUntil');
+    assert(row?.lastUsedAt === null, 'upload must clear stale lastUsedAt');
+    assert(row?.failureReason === null, 'upload must clear stale failureReason');
+  } finally {
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
 // =====================================================================
 // Claude Code CLI exhaustion detection
 // ---------------------------------------------------------------------
@@ -3853,6 +3885,48 @@ async function testClaudeCodeAuthFailure_marksPoolTokenLongCooldown() {
     assert(
       msFromNow > 60 * 60 * 1000,
       `auth-failure cooldown should be > 1h, got ${Math.round(msFromNow / 60000)} min`
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const poolInt = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
+
+  try {
+    const banner =
+      'Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: poolInt.id } });
+    const until = row?.rateLimitedUntil;
+    assert(
+      until instanceof Date,
+      'pool integration must be rate-limited after billing-failure banner'
+    );
+    const msFromNow = until!.getTime() - Date.now();
+    assert(
+      msFromNow > 60 * 60 * 1000,
+      `billing-failure cooldown should be > 1h, got ${Math.round(msFromNow / 60000)} min`
     );
   } finally {
     await cleanupSessions([session.taskId]);
@@ -4154,15 +4228,16 @@ async function testPasswordRequest_happy() {
 
 // 10. Claude Code credentials token for user without onboarding
 async function testClaudeCodeToken_noOnboarding() {
-  // TEMP: onboarding gate in getClaudeCodeToken is disabled — no-onboarding users get pool token (200).
-  // Restore 404/400 assertion when service.ts guard is uncommented.
   const session = await createAnonSession();
+  const existingPools = await existingPoolIds();
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: authHeaders(session.accessToken),
+    headers: {
+      ...authHeaders(session.accessToken),
+      ...(existingPools.length > 0 ? { 'X-Exclude-Pool-Tokens': existingPools.join(',') } : {}),
+    },
   });
-  if (res.status !== 200) {
-    throw new Error(`Expected 200 (gate disabled) for no onboarding, got ${res.status}`);
-  }
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding');
 }
 
 // ==================== RUNNER ====================
@@ -4662,6 +4737,10 @@ async function runAll() {
       fn: testRotation_defaultCooldownIsBounded,
     },
     {
+      name: 'claude-code upload -- clears stale rate-limit cooldown',
+      fn: testClaudeCodeUpload_clearsRateLimitCooldown,
+    },
+    {
       name: 'claude-code exhaustion -- pool token marked rate-limited at parsed reset time',
       fn: testClaudeCodeExhaustion_marksPoolToken,
     },
@@ -4676,6 +4755,10 @@ async function runAll() {
     {
       name: 'claude-code auth-failure -- pool token marked rate-limited with long cooldown',
       fn: testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
+    },
+    {
+      name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',
+      fn: testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
     },
   ];
 

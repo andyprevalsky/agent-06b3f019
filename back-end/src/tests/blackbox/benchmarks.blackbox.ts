@@ -149,6 +149,7 @@ const KNOWN_TASK_NAMES = [
   'family-office-angel-outreach',
   'build-boxing-payment',
   'job-applications',
+  'cache-coverage',
 ];
 
 const KNOWN_TAGS = [

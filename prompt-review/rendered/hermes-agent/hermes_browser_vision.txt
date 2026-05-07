@@ -1,0 +1,21 @@
+{
+  "name": "browser_vision",
+  "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page - especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "question": {
+        "type": "string",
+        "description": "What you want to know about the page visually. Be specific about what you're looking for."
+      },
+      "annotate": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, overlay numbered [N] labels on interactive elements. Each [N] maps to ref @eN for subsequent browser commands. Useful for QA and spatial reasoning about page layout."
+      }
+    },
+    "required": [
+      "question"
+    ]
+  }
+}

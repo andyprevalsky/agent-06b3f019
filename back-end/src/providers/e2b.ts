@@ -58,29 +58,30 @@ export async function createClaudeCodeSession(
     CLAUDE_CODE_GOAL: goal,
   };
 
-  // Try user's own credentials first, then rotate through the pool, then fall
-  // back to ANTHROPIC_API_KEY. The agent's outer loop already rotates through
-  // pool tokens when Anthropic returns 429 — we mirror that here so the inner
-  // CLI doesn't keep replaying a known-exhausted token.
+  // Try user's own credentials first, then rotate through the pool. The agent's
+  // outer loop already rotates through pool tokens when Anthropic returns 429;
+  // we mirror that here so the inner CLI doesn't keep replaying a known-
+  // exhausted token.
   let credentialMeta: ClaudeCodeCredentialResult | null = null;
   if (userId) {
     credentialMeta = await fetchClaudeCodeCredentialsWithMeta(userId);
     if (credentialMeta) {
-      envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
+      if (credentialMeta.credentials) {
+        envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
+      }
+      if (credentialMeta.credentialMode === 'oauth_token' && credentialMeta.accessToken) {
+        envs.CLAUDE_CODE_OAUTH_TOKEN = credentialMeta.accessToken;
+      }
       log.info(
-        `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'})`
+        `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'}, mode ${credentialMeta.credentialMode})`
       );
     }
   }
 
   if (!credentialMeta) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(
-        'No Claude Code credentials available: no synced user credentials, no available pool tokens (all rate-limited or none configured), and ANTHROPIC_API_KEY is not set'
-      );
-    }
-    envs.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    log.info(`Using shared ANTHROPIC_API_KEY for agent ${agentId}`);
+    throw new Error(
+      'No Claude Code OAuth credentials available: no synced user credentials and no available pool tokens (all rate-limited, invalid, or none configured)'
+    );
   }
 
   // Add GitHub config if repo specified

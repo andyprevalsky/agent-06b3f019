@@ -23,7 +23,36 @@ from domains.set_plan.config import (
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from tools.prompts import TOOL_PROMPTS
-from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
+
+PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
+PLANNER_CONTEXT_HEAD_CHARS = 3000
+PLANNER_CONTEXT_TAIL_CHARS = 1500
+
+
+def _strip_reference_annotation(text: str, message_id: str | None) -> str:
+    if not message_id:
+        return text
+    ref_suffix = f"\n\nReference: @ref:message:{message_id}"
+    if text.endswith(ref_suffix):
+        return text[: -len(ref_suffix)]
+    return text
+
+
+def _compact_planner_context_text(text: str) -> str:
+    """Keep planner context bounded while preserving both ends of long outputs."""
+    if len(text) <= PLANNER_CONTEXT_FULL_TEXT_LIMIT:
+        return text
+
+    omitted = len(text) - PLANNER_CONTEXT_HEAD_CHARS - PLANNER_CONTEXT_TAIL_CHARS
+    if omitted <= 0:
+        return text
+
+    return (
+        text[:PLANNER_CONTEXT_HEAD_CHARS]
+        + f"\n\n[Planner context shortened: {omitted} chars omitted from middle of {len(text)} total chars.]\n\n"
+        + text[-PLANNER_CONTEXT_TAIL_CHARS:]
+    )
 
 
 def _validate_dep_indices(deps: dict[str, list[str]], n: int) -> str | None:
@@ -112,20 +141,22 @@ def convert_dependencies_list_to_dict(deps_list: list[dict[str, Any]]) -> dict[s
 
 
 def get_planner_tools_description() -> str:
-    """Get description of tools the planner can assign to tasks.
+    """Get execute-tool descriptions for the planner.
 
-    Single source of truth: TOOL_PROMPTS (per-tool prompt files).
-    Falls back to Pydantic docstrings for any tool not in TOOL_PROMPTS.
+    Single source of truth: execute-phase tools and their prompt fragments.
+    Planner-only spawn aliases are documented in the planner prompt itself.
     """
-    lines = []
-    for name in PLANNER_ASSIGNABLE_TOOLS:
+    sections = []
+    for name in EXECUTE_PHASE_TOOLS:
         if name in TOOL_PROMPTS:
-            lines.append(f"- {name}: {TOOL_PROMPTS[name]}")
+            description = TOOL_PROMPTS[name].strip()
         elif name in TOOL_MODELS:
             model = TOOL_MODELS[name]
-            doc = (model.__doc__ or "").strip()
-            lines.append(f"- {name}: {doc if doc else 'No description'}")
-    return "\n".join(lines) if lines else "Standard execution tools available."
+            description = (model.__doc__ or "").strip() or "No description"
+        else:
+            continue
+        sections.append(f"### {name}\n{description}")
+    return "\n\n".join(sections) if sections else "Standard execution tools available."
 
 
 def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
@@ -226,6 +257,8 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     for msg in context:
         role = msg.get("role", "").upper()
         text = msg.get("text", "")
+        message_id = msg.get("message_id")
+        text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -249,6 +282,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         elif role == "ASSISTANT":
             base_messages.append({"role": "assistant", "content": text})
         elif role in ("TOOL", "SYSTEM"):
+            text = _compact_planner_context_text(text)
             base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
 
     # Prepend goal message

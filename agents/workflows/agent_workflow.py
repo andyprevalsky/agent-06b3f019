@@ -72,7 +72,7 @@ with workflow.unsafe.imports_passed_through():
     from utils.format_tool_display import format_tool_display
     from tools.prompts import TOOL_PROMPTS
     from utils.prompts import build_system_prompt, build_verifier_prompt
-    from utils.tool_schemas import ALL_PHASE_TOOLS, EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
 
@@ -633,12 +633,11 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
         # If no schema was provided at create time, generate one synchronously NOW.
-        # The schema appears in both the main system prompt (`# Required Output`)
-        # and the verifier system prompt (`# Structured Output Required`); if it
-        # arrives lazily mid-run, every LLM call before generation has a different
-        # dynamic_sys_hash than every call after, busting the prompt cache. By
-        # awaiting it before any LLM call, the dynamic prefix stays stable across
-        # the entire agent.
+        # The schema is injected into the first user message at LLM-call time
+        # and also appears in the verifier system prompt; if it arrives lazily
+        # mid-run, every LLM call before generation has different context than
+        # every call after. Awaiting it here keeps the run stable from the first
+        # model call.
         if response_schema is None and self.goal:
             try:
                 generated = await workflow.execute_activity(
@@ -697,10 +696,6 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
-        # Unified tool list for LLM schema generation — makes the Anthropic
-        # tools array identical across phases so system+tools cache prefix
-        # is shared between PLAN and EXECUTE calls.
-        all_tools = ALL_PHASE_TOOLS
 
         # Determine whether to skip PLAN phase and/or DAG
         skip_plan = start_phase in ("execute", "execute_continued")
@@ -721,7 +716,7 @@ class AgentWorkflow:
                 system_prompt=self.build_system_prompt,
                 verifier_prompt_generator=self._make_verifier_prompt_generator(),
                 model=model,
-                tools=all_tools,
+                tools=plan_tools,
                 is_inside_temporal_activity=False,
                 check_paused=self._check_paused,
                 wait_for_messages=self._wait_for_messages,
@@ -797,7 +792,7 @@ class AgentWorkflow:
                     claude_token=self.claude_max_token,
                     on_tokens=self._on_tokens,
                     system_prompt_text=execute_system_prompt,
-                    tool_names=all_tools,
+                    tool_names=execute_tools,
                 )
 
                 # DAG completed or failed - both hand off to run_agent
@@ -846,7 +841,7 @@ class AgentWorkflow:
             system_prompt=self.build_system_prompt,
             verifier_prompt_generator=self._make_verifier_prompt_generator(),
             model=model,
-            tools=all_tools,
+            tools=execute_tools,
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=self._check_paused,

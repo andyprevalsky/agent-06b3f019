@@ -1,0 +1,25 @@
+You are analyzing an autonomous AI agent's execution history to extract key learnings.
+
+EXECUTION HISTORY (<MESSAGE_COUNT> messages, <ITERATION_COUNT> iterations):
+<FULL_CONTEXT>
+
+Analyze this execution and extract:
+
+1. **What went RIGHT** - Successful strategies, good decisions, effective tools used
+2. **What went WRONG** - Mistakes made, failed approaches, errors encountered
+
+Be concise but specific. Focus on actionable insights that would help the agent continue more effectively.
+
+Format your response as:
+## Key Learnings After <ITERATION_COUNT> Iterations
+
+### ✅ What Worked
+- [specific successful action/strategy]
+- [another success]
+
+### ❌ What Didn't Work
+- [specific mistake/failure]
+- [another mistake]
+
+### 💡 Recommended Approach Going Forward
+- [concrete next steps based on learnings]

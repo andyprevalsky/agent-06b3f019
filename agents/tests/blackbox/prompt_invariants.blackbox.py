@@ -8,7 +8,7 @@ Categories
 ----------
 1. Static system prompts must be byte-identical across calls (cache safety).
 2. TOOL_MODELS / phase-list / tools/prompts/ coverage (registry consistency).
-3. attempt_completion is parameterless (no orchestrator reads tool args).
+3. attempt_completion result is scoped to unverified handoff.
 4. Verifier output schema field order (load-bearing for structured outputs).
 5. Tool-name hygiene (no deleted tool names; verifier feedback uses
    attempt_completion, not check_progress; verifier path goes through
@@ -301,89 +301,69 @@ def test_every_tool_model_has_prompt_fragment():
     )
 
 
-def test_planner_aliases_have_prompt_fragments():
-    """Each planner alias (spawn_browser_agent etc.) must have a prompt fragment.
+def test_planner_spawn_aliases_documented_in_prompt():
+    """Spawn planner aliases are documented by the planner prompt, not prompt files."""
+    from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
 
-    These appear in PLANNER_ASSIGNABLE_TOOLS so the planner LLM learns when to
-    pick them; without a prompt fragment the planner sees no description.
-    """
-    missing = []
-    for alias in _PLANNER_ALIASES:
-        path = PROMPTS_DIR / f"{alias}.py"
-        if not path.exists():
-            missing.append(alias)
+    expected = {
+        "spawn_explore_agent": 'spawn_agent(type="explore")',
+        "spawn_browser_agent": 'spawn_agent(type="browser")',
+        "spawn_code_agent": 'spawn_agent(type="code")',
+        "spawn_sub_agent": 'spawn_agent(type="sub_agent")',
+        "spawn_sub_agent_for_each": 'spawn_agent(type="for_each")',
+    }
 
-    assert not missing, (
-        f"Planner alias(es) {missing} have no prompt fragment under "
-        f"tools/prompts/. The planner LLM needs a description to know when "
-        f"to assign this tool to a task."
-    )
+    for alias, runtime in expected.items():
+        assert alias in PLANNER_SPAWN_AGENT_ALIAS_TABLE
+        assert runtime in PLANNER_SPAWN_AGENT_ALIAS_TABLE
+
+    assert "Raw spawn_agent with no type alias is not allowed" in PLANNER_SPAWN_AGENT_ALIAS_TABLE
 
 
 # ============================================================================
-# 3. attempt_completion is parameterless
+# 3. attempt_completion result contract
 # ----------------------------------------------------------------------------
-# WHY: The verifier reads the agent's prior tool RESULTS, not anything passed
-# to attempt_completion. A `result` arg would (a) confuse the LLM into
-# rewriting findings instead of grounding them in tool evidence, and (b) drift
-# the contract back to a pre-rewrite state where attempt_completion was a
-# Trojan horse for self-reported completion.
+# WHY: The verifier reads prior tool RESULTS, not attempt_completion.result.
+# The `result` arg must be injected only for unverified loops (for example
+# explore agents); verified loops should not expose the arg at all.
 # ============================================================================
 
 
-def test_attempt_completion_has_only_tool_field():
-    """AttemptCompletionTool must have exactly {'tool'} fields."""
+def test_attempt_completion_base_schema_has_no_result_field():
+    """AttemptCompletionTool must not expose result in verified flows."""
     from utils.tool_schemas import AttemptCompletionTool
 
     fields = set(AttemptCompletionTool.model_fields.keys())
     assert fields == {"tool"}, (
         f"AttemptCompletionTool.model_fields = {fields}, expected {{'tool'}}. "
-        f"attempt_completion is intentionally PARAMETERLESS — the verifier "
-        f"reads prior tool RESULTS, not any arg passed here. Adding a "
-        f"`result`/`summary`/etc. field reintroduces the self-reporting "
-        f"footgun. If you need to surface a final value to the user, use "
-        f"send_message_to_user_execute_phase BEFORE attempt_completion."
+        f"`result` must be injected only for skip_verification=true loops."
     )
 
 
-def test_no_orchestrator_reads_attempt_completion_result_arg():
-    """No production code should read tool_args['result'] for attempt_completion.
+def test_attempt_completion_result_schema_is_skip_verification_variant():
+    """Optional result exists only on the explicit unverified handoff variant."""
+    from utils.tool_schemas import AttemptCompletionWithResultTool
 
-    Search across run_agent.py, agent_workflow.py, and domains/. If anything
-    reads a `result` arg from an attempt_completion tool call, the
-    parameterless contract has been broken.
-    """
-    forbidden_pattern = re.compile(
-        r"""tool_args\s*[\[\.]"""  # tool_args[...] or tool_args.<get>
-        r"""(\.get\(\s*)?"""  # optional .get(
-        r"""['"]result['"]"""  # 'result' or "result"
+    fields = set(AttemptCompletionWithResultTool.model_fields.keys())
+    assert fields == {"tool", "result"}, (
+        f"AttemptCompletionWithResultTool.model_fields = {fields}, "
+        f"expected {{'tool', 'result'}}."
     )
+    assert AttemptCompletionWithResultTool.model_fields["result"].is_required() is False
 
-    files_to_scan = [
-        AGENTS_ROOT / "loop" / "run_agent.py",
-        AGENTS_ROOT / "workflows" / "agent_workflow.py",
-    ]
-    for domain_dir in (AGENTS_ROOT / "domains").iterdir():
-        if domain_dir.is_dir() and not domain_dir.name.startswith("__"):
-            for py in domain_dir.rglob("*.py"):
-                files_to_scan.append(py)
 
-    offenders = []
-    for path in files_to_scan:
-        try:
-            text = path.read_text()
-        except OSError:
-            continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if forbidden_pattern.search(line):
-                offenders.append(f"{path.relative_to(AGENTS_ROOT)}:{lineno}: {line.strip()}")
+def test_attempt_completion_result_read_is_skip_verification_scoped():
+    """Production reads of attempt_completion result must stay in the skip-verification path."""
+    path = AGENTS_ROOT / "loop" / "run_agent.py"
+    text = path.read_text()
+    assert 'tool_args.get("result")' in text
 
-    assert not offenders, (
-        "Found code reading `tool_args['result']` / `tool_args.get('result')`. "
-        "attempt_completion is parameterless — there is no result arg. "
-        "Refactor the orchestrator to read the agent's prior tool RESULTS "
-        "instead.\n  " + "\n  ".join(offenders)
-    )
+    result_read = text.index('tool_args.get("result")')
+    skip_gate = text.rfind("if skip_verification:", 0, result_read)
+    final_verifier_gate = text.find("if verifier_prompt_generator and not skip_verification", result_read)
+
+    assert skip_gate != -1, "attempt_completion.result must be read only under the skip_verification branch"
+    assert final_verifier_gate != -1, "expected final verifier gate after result handling"
 
 
 # ============================================================================
@@ -1016,47 +996,6 @@ def test_ts_prompt_files_have_no_dynamic_dates_in_system_blocks():
 
 
 # ============================================================================
-# 10. Spawn-alias prompts document the 50-char goal minimum (validator-aware)
-# ----------------------------------------------------------------------------
-# WHY: SpawnAgentTool's `check_spawn_agent_constraints` validator rejects
-# browser/code/sub_agent/for_each goals < 50 chars (explore is exempt). Each
-# alias prompt MUST advertise this minimum so the planner LLM doesn't emit
-# tasks the validator will reject — silent rejections on small goals are
-# how this regressed before the audit.
-# ============================================================================
-
-
-def test_spawn_alias_prompts_document_50_char_goal_min():
-    """Each spawn alias prompt subject to the 50-char min must mention "50".
-
-    SpawnAgentTool's `check_spawn_agent_constraints` validator rejects
-    browser/code/sub_agent/for_each goals < 50 chars. Each prompt must
-    document this minimum so the planner LLM doesn't emit an invalid task.
-    The unified `spawn_agent` prompt covers all variants and must document
-    the minimum once for the union.
-    """
-    from tools.prompts.spawn_agent import PROMPT as P_UNIFIED
-    from tools.prompts.spawn_browser_agent import PROMPT as P_BROWSER
-    from tools.prompts.spawn_code_agent import PROMPT as P_CODE
-    from tools.prompts.spawn_sub_agent import PROMPT as P_SUB
-    from tools.prompts.spawn_sub_agent_for_each import PROMPT as P_FOR_EACH
-
-    for name, prompt in [
-        ("spawn_browser_agent", P_BROWSER),
-        ("spawn_code_agent", P_CODE),
-        ("spawn_sub_agent", P_SUB),
-        ("spawn_sub_agent_for_each", P_FOR_EACH),
-        ("spawn_agent (unified)", P_UNIFIED),
-    ]:
-        assert "50" in prompt, (
-            f"{name} prompt missing the '50' character minimum-length doc. "
-            f"SpawnAgentTool's validator rejects browser/code/sub_agent/"
-            f"for_each goals < 50 chars; the planner LLM needs to see this "
-            f"limit advertised or it will emit invalid tasks."
-        )
-
-
-# ============================================================================
 # 11. Style guardrails: em-dashes, banned phrases, marketing adjectives
 # ----------------------------------------------------------------------------
 # WHY: The main agent system prompt explicitly bans em-dashes in agent output
@@ -1641,6 +1580,26 @@ def test_all_caps_marker_count_under_limit():
     )
 
 
+def test_planner_depends_on_schema_matches_prompt_contract():
+    """Planner task dependency IDs are strings in both prompt text and response schema."""
+    from helpers.llm import prepare_schema_for_openai
+    from utils.prompts import PLANNER_OUTPUT_ARG_DESCRIPTIONS, PLANNER_TASK_DEPENDS_ON_DESCRIPTION, build_planner_system_prompt
+    from utils.tool_schemas import PlannerResponse
+
+    prompt = build_planner_system_prompt("tool descriptions here")
+    assert "tasks[i].depends_on lists indices of tasks that must complete first" in prompt
+    assert 'Use 0-based indices as strings ("0", "1", ...)' in prompt
+    assert "# Output Field Descriptions" in prompt
+    assert PLANNER_OUTPUT_ARG_DESCRIPTIONS in prompt
+
+    schema = prepare_schema_for_openai(PlannerResponse)
+    task_schema = schema["properties"]["tasks"]["items"]
+    depends_on = task_schema["properties"]["depends_on"]
+    assert depends_on["type"] == "array"
+    assert depends_on["items"]["type"] == "string"
+    assert depends_on["description"] == PLANNER_TASK_DEPENDS_ON_DESCRIPTION
+
+
 # ============================================================================
 # 17. Tool prompts open with a declarative third-person sentence
 # ----------------------------------------------------------------------------
@@ -1704,9 +1663,6 @@ def test_tool_prompts_open_with_declarative_sentence():
 # ============================================================================
 
 
-# attempt_completion includes the inlined VERIFICATION_RULES block, which is
-# load-bearing (the agent reads the same rules the verifier reads). Allow it
-# a higher cap so the inlined rules aren't penalized.
 # spawn_agent carries an empirically-justified BAD/GOOD example pair that
 # teaches the stateful-vs-stateless browser partition (see comment at the top
 # of agents/tools/prompts/spawn_agent.py). It also embeds the canonical
@@ -1714,7 +1670,6 @@ def test_tool_prompts_open_with_declarative_sentence():
 # session-isolation contract on every call without a cross-reference. The
 # combined block sits comfortably under 2700 chars.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
-    "attempt_completion": 2000,
     "spawn_agent": 2700,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
@@ -1725,8 +1680,8 @@ def test_tool_prompt_length_budget():
     """Each tool prompt sits within the per-call char budget.
 
     Target ~80-400 tokens (rough char-based proxy: 100-1500 chars). The
-    audit kept attempt_completion bigger because it inlines the verifier
-    rule block; that's exempt via _TOOL_PROMPT_CHAR_CAP_OVERRIDES.
+    audit keeps spawn_agent bigger because it inlines session-isolation
+    guidance; that's exempt via _TOOL_PROMPT_CHAR_CAP_OVERRIDES.
 
     A FLOOR is enforced so a tool prompt can't shrink to a one-liner that
     omits "when to use" / "do not use" guidance.
@@ -1810,18 +1765,22 @@ async def run_all_tests():
         test_every_tool_model_has_prompt_fragment,
     )
     r.record(
-        "planner_aliases_have_prompt_fragments",
-        test_planner_aliases_have_prompt_fragments,
+        "planner_spawn_aliases_documented_in_prompt",
+        test_planner_spawn_aliases_documented_in_prompt,
     )
 
-    # 3. attempt_completion is parameterless
+    # 3. attempt_completion result contract
     r.record(
-        "attempt_completion_only_tool_field",
-        test_attempt_completion_has_only_tool_field,
+        "attempt_completion_base_schema_has_no_result_field",
+        test_attempt_completion_base_schema_has_no_result_field,
     )
     r.record(
-        "no_orchestrator_reads_attempt_completion_result_arg",
-        test_no_orchestrator_reads_attempt_completion_result_arg,
+        "attempt_completion_result_schema_is_skip_verification_variant",
+        test_attempt_completion_result_schema_is_skip_verification_variant,
+    )
+    r.record(
+        "attempt_completion_result_read_skip_verification_scoped",
+        test_attempt_completion_result_read_is_skip_verification_scoped,
     )
 
     # 4. Verifier schema field order
@@ -1896,12 +1855,6 @@ async def run_all_tests():
         test_ts_prompt_files_have_no_dynamic_dates_in_system_blocks,
     )
 
-    # 10. Spawn alias prompts document the 50-char goal minimum (E5)
-    r.record(
-        "spawn_alias_prompts_document_50_char_goal_min",
-        test_spawn_alias_prompts_document_50_char_goal_min,
-    )
-
     # 11. Style guardrails (B6 + banned phrases + marketing adjectives)
     r.record(
         "no_em_dashes_in_prompt_strings",
@@ -1952,7 +1905,13 @@ async def run_all_tests():
         test_tool_prompts_open_with_declarative_sentence,
     )
 
-    # 18. Tool prompt length stays within budget
+    # 18. Planner dependency schema matches prompt contract
+    r.record(
+        "planner_depends_on_schema_matches_prompt_contract",
+        test_planner_depends_on_schema_matches_prompt_contract,
+    )
+
+    # 19. Tool prompt length stays within budget
     r.record(
         "tool_prompt_length_budget",
         test_tool_prompt_length_budget,

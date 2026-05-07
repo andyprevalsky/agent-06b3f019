@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "pressKey",
+    "description": "Press a keyboard key.\n\nUse this to press special keys like Enter, Tab, Escape, or keyboard shortcuts.\n\nCommon keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown\n\nFor key combinations, use format like 'Control+a' or 'Shift+Tab'.\n\nExamples:\n- pressKey(key=\"Enter\") - Submit a form\n- pressKey(key=\"Tab\") - Move to next field\n- pressKey(key=\"Control+a\") - Select all\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a')"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

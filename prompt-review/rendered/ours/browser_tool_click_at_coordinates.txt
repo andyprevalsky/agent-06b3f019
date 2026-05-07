@@ -1,0 +1,34 @@
+{
+  "type": "function",
+  "function": {
+    "name": "clickAtCoordinates",
+    "description": "FALLBACK: Click at specific X,Y pixel coordinates on the page.\n\nUse this ONLY when:\n- Selector-based click() fails\n- You have exact coordinates from a screenshot\n- The element cannot be found with observe()\n\nCoordinates are relative to the top-left corner of the viewport.\n\nExamples:\n- clickAtCoordinates(x=500, y=300)\n- clickAtCoordinates(x=100, y=200, button=\"right\")\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "description": "X coordinate in pixels from left edge of viewport"
+        },
+        "y": {
+          "type": "number",
+          "description": "Y coordinate in pixels from top edge of viewport"
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "description": "Mouse button to click. Default: left"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

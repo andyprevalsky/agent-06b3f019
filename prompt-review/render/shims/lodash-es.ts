@@ -1,0 +1,11 @@
+export const isEqual = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+    export const debounce = (fn: any) => fn;
+    export const throttle = (fn: any) => fn;
+    export const sortBy = (arr: any[], fn: any) => [...arr].sort((a,b) => (fn(a)>fn(b)?1:fn(a)<fn(b)?-1:0));
+    export const uniq = (arr: any[]) => [...new Set(arr)];
+    export const groupBy = (arr: any[], fn: any) => { const r: any = {}; for (const x of arr) { const k = fn(x); (r[k]||(r[k]=[])).push(x); } return r; };
+    export const keyBy = (arr: any[], fn: any) => { const r: any = {}; for (const x of arr) { r[fn(x)] = x; } return r; };
+    export const mapValues = (obj: any, fn: any) => { const r: any = {}; for (const k in obj) r[k] = fn(obj[k]); return r; };
+    export const pick = (obj: any, keys: string[]) => { const r: any = {}; for (const k of keys) if (k in obj) r[k] = obj[k]; return r; };
+    export const omit = (obj: any, keys: string[]) => { const r: any = {}; for (const k in obj) if (!keys.includes(k)) r[k] = obj[k]; return r; };
+    export default { isEqual, debounce, throttle, sortBy, uniq, groupBy, keyBy, mapValues, pick, omit };

@@ -27,12 +27,13 @@ import structlog
 from providers.rose.errors import (
     RoseAllFailed,
     RoseError,
+    RoseInvalidRequest,
     RoseStallError,
     RoseStepError,
 )
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
-from providers.rose.transforms import transform_messages_for_openai
+from providers.rose.transforms import is_anthropic_model, transform_messages_for_openai
 from providers.rose.transport import get_error_body, post_openrouter_stream
 from providers.rose.types import StreamChunk
 
@@ -103,6 +104,25 @@ async def waterfall_complete(
     step_errors: List[RoseStepError] = []
 
     for idx, model in enumerate(pool_spec.waterfall):
+        if response_format is not None and is_anthropic_model(model):
+            error = RoseInvalidRequest(
+                "Skipping OpenRouter Anthropic structured-output request: "
+                "Bedrock rejects response_format as output_config.format"
+            )
+            step_errors.append(RoseStepError(model=model, error=error))
+            logger.warning(
+                "rose.waterfall.step_skipped",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                pool=pool_spec.name,
+                step=idx + 1,
+                total=len(pool_spec.waterfall),
+                model=model,
+                reason="anthropic_openrouter_response_format_unsupported",
+            )
+            continue
+
         logger.info(
             "rose.waterfall.step",
             request_id=request_id,
@@ -149,7 +169,7 @@ async def waterfall_complete(
                 error=str(exc),
             )
             step_errors.append(RoseStepError(model=model, error=exc))
-        except asyncio.TimeoutError as exc:
+        except asyncio.TimeoutError:
             msg = f"per-step timeout ({per_step_timeout_s}s)"
             logger.warning(
                 "rose.waterfall.step_timeout",

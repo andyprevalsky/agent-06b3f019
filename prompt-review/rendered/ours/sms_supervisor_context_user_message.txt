@@ -1,0 +1,12 @@
+Current state (as of 2026-05-06T12:00:00.000Z):
+
+# Agent Hierarchy
+[a1b2c3] Book boxing class - running
+  [d4e5f6] Check class availability - waiting for approval
+
+# Pending Requests
+- attn_123 from [d4e5f6]: Approve payment for monthly membership
+
+# Recent Activity
+- [a1b2c3] Agent started
+- [d4e5f6] Found 6pm Tuesday class

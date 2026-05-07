@@ -1,0 +1,4 @@
+
+You are in the EXECUTE phase. You cannot directly request user input in this phase. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
+
+In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".

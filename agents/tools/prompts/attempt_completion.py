@@ -1,18 +1,10 @@
 """Prompt for attempt_completion tool."""
 
-from utils.prompts import VERIFICATION_RULES
-
-PROMPT = (
-    """Signals that the current phase or task is complete; takes no parameters and any args are ignored.
+PROMPT = """Use this tool when you are finished with your task and are ready for the grader to review your work.
 
 Usage:
-- In PLAN phase, call when the plan is ready and no more clarifications are needed.
-- In EXECUTE phase, call when the goal is fully accomplished AND output schema data is visible in a prior tool result.
-- Do not call until all required work is reflected in tool results.
-- Do not call if required output_schema fields are still missing data.
-- MUST be the only tool in that turn; do not batch with other tool calls.
+- When you are in RESEARCH phase, call after set_plan succeeds and no more clarifications are needed.
+- When you are in EXECUTE phase, call when the goal is fully accomplished.
 
-# Verification (canonical rules - same block the main system prompt cites)
+MANDATORY: This must be the only tool call in the turn it is emitted; do not batch it with other tool calls.
 """
-    + VERIFICATION_RULES.strip()
-)

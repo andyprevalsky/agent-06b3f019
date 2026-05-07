@@ -36,10 +36,7 @@ async def test_spawn_sub_agent_happy_path():
 
         result = await spawn_sub_agent_activity(
             user_id="user-42",
-            sub_agents=[{
-                "goal": "Research competitors",
-                "verifier": {"type": "FLOAT_LLM_JUDGE"},
-            }],
+            sub_agents=[{"goal": "Research competitors"}],
             parent_agent_id="agent-parent",
             parent_workflow_id="wf-parent",
             depth=0,
@@ -59,10 +56,7 @@ async def test_spawn_sub_agent_boundary():
 
         await spawn_sub_agent_activity(
             user_id="user-99",
-            sub_agents=[{
-                "goal": "Find leads",
-                "verifier": {"type": "FLOAT_LLM_JUDGE"},
-            }],
+            sub_agents=[{"goal": "Find leads"}],
             parent_agent_id="agent-parent-2",
             parent_workflow_id="wf-parent-2",
             depth=1,
@@ -195,7 +189,7 @@ def test_build_spawn_payload_defaults():
 
     payload = build_spawn_payload(
         user_id="u-1",
-        agent_cfg={"goal": "G", "verifier": {"type": "FLOAT_LLM_JUDGE"}},
+        agent_cfg={"goal": "G"},
         parent_agent_id="p-1",
         parent_workflow_id="wf-1",
         depth=2,
@@ -212,6 +206,7 @@ def test_build_spawn_payload_defaults():
     assert payload["source"] == "WEB"
     assert payload["model"] == "rose-labs/rose-1-lite"
     assert payload["max_iterations"] == 25
+    assert "verifier" not in payload
     assert "attachments" not in payload  # empty list → omitted
     assert "context_gates" not in payload
 
@@ -222,7 +217,7 @@ def test_build_spawn_payload_bad_start_phase_defaults_to_plan():
 
     payload = build_spawn_payload(
         user_id="u-1",
-        agent_cfg={"goal": "G", "verifier": {}, "start_phase": "weird"},
+        agent_cfg={"goal": "G", "start_phase": "weird"},
         parent_agent_id="p-1",
         parent_workflow_id="wf-1",
         depth=0,
@@ -245,7 +240,6 @@ def test_build_spawn_payload_execute_phase():
         user_id="u-1",
         agent_cfg={
             "goal": "G",
-            "verifier": {},
             "start_phase": "execute",
             "output_schema": {"fields": []},
             "context_gates": {"network": False},
@@ -426,7 +420,7 @@ async def test_execute_tool_max_depth_exceeded():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "g", "verifier": {}}},
+                {"sub_agent": {"goal": "g"}},
                 "tc-deep",
             )
         )
@@ -452,7 +446,7 @@ async def test_execute_tool_empty_agents_list_yields_error():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "g", "verifier": {}}},
+                {"sub_agent": {"goal": "g"}},
                 "tc-empty",
             )
         )
@@ -479,7 +473,7 @@ async def test_execute_tool_child_info_has_error_key():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "g", "verifier": {}}},
+                {"sub_agent": {"goal": "g"}},
                 "tc-err",
             )
         )
@@ -504,7 +498,7 @@ async def test_execute_tool_exception_path_yields_error():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "g", "verifier": {}}},
+                {"sub_agent": {"goal": "g"}},
                 "tc-exc",
             )
         )
@@ -547,7 +541,7 @@ async def test_execute_tool_happy_path_completes_and_tracks_child():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "Do the thing", "verifier": {}}},
+                {"sub_agent": {"goal": "Do the thing"}},
                 "tc-happy",
             )
         )
@@ -594,7 +588,7 @@ async def test_execute_tool_happy_path_no_parent_bus_id_sets_it():
         await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "x", "verifier": {}}},
+                {"sub_agent": {"goal": "x"}},
                 "tc-bus",
             )
         )
@@ -630,7 +624,7 @@ async def test_execute_tool_failed_child_yields_failure_events():
         events = await _collect_events(
             manager.execute_tool(
                 parent,
-                {"sub_agent": {"goal": "x", "verifier": {}}},
+                {"sub_agent": {"goal": "x"}},
                 "tc-failed",
             )
         )
@@ -673,7 +667,6 @@ async def test_execute_tool_posts_assistant_events_for_file_pointers():
                 {
                     "sub_agent": {
                         "goal": "x",
-                        "verifier": {},
                         "output_schema": {"fields": [{"name": "report", "type": "file_pointer"}]},
                     }
                 },
@@ -703,10 +696,7 @@ async def test_spawn_with_prefetched_attachments():
         }
         result = await spawn_sub_agent_activity(
             user_id="user-42",
-            sub_agents=[{
-                "goal": "Research competitors",
-                "verifier": {"type": "FLOAT_LLM_JUDGE"},
-            }],
+            sub_agents=[{"goal": "Research competitors"}],
             parent_agent_id="agent-parent",
             parent_workflow_id="wf-parent",
             depth=0,

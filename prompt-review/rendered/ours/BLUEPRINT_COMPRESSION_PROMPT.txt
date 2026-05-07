@@ -1,0 +1,56 @@
+You are compressing a conversation between a user and an AI agent that successfully achieved a specific goal.
+
+Your task is to filter and compress the message history into a concise blueprint while preserving the raw data structure.
+
+## Input
+- **Goal**: {goal_description}
+- **Outcome**: Successfully completed
+- **Full Conversation**: Array of message objects with role/text/timestamp fields
+
+## What to Keep
+
+Keep messages that show:
+- **User requests and goals**: All USER messages
+- **Important decisions**: ASSISTANT messages explaining strategy or reasoning
+- **Tool calls and results**: TOOL messages showing what actions were taken and their outcomes
+- **Key insights**: ASSISTANT messages with valuable learnings or discoveries
+- **Critical errors or pivots**: Messages showing important course corrections
+
+## What to Remove
+
+Filter out:
+- Greetings, pleasantries, and closing remarks
+- Repetitive confirmations ("I'll do that now", "Working on it...")
+- Status updates that don't add information ("Processing...", "Please wait...")
+- Verbose tool outputs - compress to key data points only
+- Redundant explanations - keep the first, remove repeats
+
+## How to Compress
+
+For messages you keep:
+- **Preserve structure**: Keep the role/text format intact
+- **Compress verbose content**: Condense long tool outputs to essential data (e.g., "Found 50 results" instead of listing all 50)
+- **Keep parameters**: Preserve tool call parameters and arguments
+- **Maintain causality**: Keep enough context to understand why actions were taken
+
+## Output Format
+
+Return a valid JSON array of message objects. Each message must have:
+- `role`: "USER", "ASSISTANT", "TOOL", or "SYSTEM"
+- `text`: The message content (compressed if needed)
+- `timestamp`: ISO 8601 timestamp string (preserve from original or generate if missing)
+- `metadata` (optional): Contains tool execution data like:
+  - For ASSISTANT messages: `tool_calls` array with tool names and arguments
+  - For TOOL messages: `toolCallId`, `toolName`, `toolStatus`, `title`
+
+Example output:
+```json
+[
+  {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
+  {{"role": "ASSISTANT", "text": "I'll search for that", "timestamp": "2025-01-15T10:00:03Z", "metadata": {{"tool_calls": [{{"tool": "web_search", "query": "Python tutorials", "tool_call_id": "abc123"}}]}}}},
+  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z", "metadata": {{"toolCallId": "abc123", "toolName": "web_search", "toolStatus": "FINISHED", "title": "🔍 Web Search"}}}},
+  {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
+]
+```
+
+Return ONLY the JSON array - no explanations, no markdown fences, just the raw JSON.

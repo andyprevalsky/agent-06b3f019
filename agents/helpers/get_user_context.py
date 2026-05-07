@@ -471,9 +471,8 @@ def _format_user_context(  # noqa: C901
                     integration_lines.append(f"- {name}")
         if integration_lines:
             sections.append(
-                "CONNECTED INTEGRATIONS\n"
-                "These integrations are connected and available. Use the message_person tool\n"
-                "to send emails (no SMTP credentials needed - Gmail is already connected):\n"
+                "## Connected Integrations\n"
+                "These integrations are connected and available.\n"
                 + "\n".join(integration_lines)
             )
 
@@ -482,9 +481,10 @@ def _format_user_context(  # noqa: C901
         sites_str = ", ".join(authenticated_sites)
 
         sections.append(
-            "AUTHENTICATED BROWSER SESSIONS\n"
-            "You have stored auth credentials for these sites. When using spawn_browser_agent\n"
-            "for these domains, the user is already logged in - no authentication required:\n"
+            "## Authenticated Browser Sessions\n"
+            "Stored auth credentials are available for these sites. When using spawn_browser_agent\n"
+            "for these domains, the agent will be logged into the user's account; no authentication is required. "
+            "Prefer authenticated sites when they are suitable for the task.\n"
             f"{sites_str}"
         )
 
@@ -496,7 +496,6 @@ def _format_user_context(  # noqa: C901
     # Include user's phone number (for SMS communication)
     if user_settings.get("phone"):
         profile_parts.append(f"Phone: {user_settings['phone']}")
-        profile_parts.append(f"When sending SMS messages to the user, use: {user_settings['phone']}")
 
     addr_lines = [
         user_settings.get("addressLine1", ""),
@@ -514,7 +513,7 @@ def _format_user_context(  # noqa: C901
         profile_parts.append(f"Delivery Address:\n{delivery_address}")
 
     if profile_parts:
-        sections.append("USER PROFILE\n" + "\n".join(profile_parts))
+        sections.append("## User Profile\n" + "\n".join(profile_parts))
 
     # Section: Recent Communications
     if recent_messages:
@@ -549,7 +548,7 @@ def _format_user_context(  # noqa: C901
                     f'\n\n… (showing {RECENT_MESSAGES_CONTEXT_LIMIT} most recent — '
                     'use grep with source="messages" to search by keyword, person_id, or time range)'
                 )
-            sections.append("RECENT COMMUNICATIONS\n\n" + messages_body)
+            sections.append("## Recent Communications\n" + messages_body)
 
     # Section: Network (top contacts by message volume)
     if frequent_contacts:
@@ -601,13 +600,21 @@ def _format_user_context(  # noqa: C901
                     f'\n… (showing top {NETWORK_CONTEXT_LIMIT} by message volume — '
                     'use grep with source="network" to search all contacts)'
                 )
-            sections.append("YOUR NETWORK\n" + network_body)
+            sections.append("## User Network\n" + network_body)
 
     # Combine all sections
     if not sections:
         return ""
 
-    return "USER CONTEXT:\n\n" + "\n\n".join(sections)
+    section_order = [
+        "## User Profile",
+        "## Connected Integrations",
+        "## Authenticated Browser Sessions",
+        "## Recent Communications",
+        "## User Network",
+    ]
+    sections.sort(key=lambda section: section_order.index(section.split("\n", 1)[0]))
+    return "\n\n".join(sections)
 
 
 # ============================================================================

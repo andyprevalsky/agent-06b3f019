@@ -56,6 +56,7 @@ from providers.rose.transforms import (
 )
 from providers.rose.transport import get_error_body, post_anthropic_stream
 from providers.rose.types import ClaudeAuthContext, StreamChunk
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 logger = structlog.get_logger()
 
@@ -106,6 +107,41 @@ def _add_tool_cache_breakpoint(body: Dict[str, Any]) -> None:
         tools[-1]["cache_control"] = {"type": "ephemeral"}
 
 
+def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[str]) -> List[Dict[str, Any]]:
+    """Build Anthropic system blocks from boundary-split prompt sections.
+
+    A single boundary preserves the legacy contract: static prompt is cached,
+    dynamic prompt is uncached. Multiple boundaries mean the prompt builder has
+    intentionally marked several stable system blocks, so each non-empty block
+    receives a global cache marker.
+    """
+    blocks: List[Dict[str, Any]] = []
+    if static_system:
+        blocks.append({
+            "type": "text",
+            "text": static_system,
+            "cache_control": {"type": "ephemeral", "scope": "global"},
+        })
+
+    if not dynamic_system:
+        return blocks
+
+    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in dynamic_system:
+        blocks.append({"type": "text", "text": dynamic_system})
+        return blocks
+
+    for part in dynamic_system.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY):
+        text = part.strip()
+        if not text:
+            continue
+        blocks.append({
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral", "scope": "global"},
+        })
+    return blocks
+
+
 def build_anthropic_body(
     *,
     pool_spec: PoolSpec,
@@ -143,15 +179,7 @@ def build_anthropic_body(
         "stream": True,
     }
 
-    system_blocks: List[Dict[str, Any]] = []
-    if static_system:
-        system_blocks.append({
-            "type": "text",
-            "text": static_system,
-            "cache_control": {"type": "ephemeral", "scope": "global"},
-        })
-    if dynamic_system:
-        system_blocks.append({"type": "text", "text": dynamic_system})
+    system_blocks = _build_system_blocks(static_system, dynamic_system)
     body["system"] = [_IDENTITY_BLOCK, _DISCLAIMER_BLOCK, *system_blocks]
 
     if not skip_cache_write and anthropic_messages:
