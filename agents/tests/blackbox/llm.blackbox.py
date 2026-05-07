@@ -2550,6 +2550,69 @@ async def test_build_llm_messages_filters_inprogress_keeps_latest_finished():
     assert not any("in-progress" in str(m.get("content", "")) for m in msgs)
 
 
+async def test_build_llm_messages_strips_cloud_agent_lifecycle_tools():
+    """Cloud-agent lifecycle TOOL rows are UI-only and never sent to LLMs."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "start the task", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "toolCallId": "tc-cloud",
+                "toolStatus": "IN_PROGRESS",
+                "toolName": "cloud_agent",
+                "title": "Creating Cloud Agent",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolCallId": "tc-cloud",
+                "toolStatus": "IN_PROGRESS",
+                "toolName": "cloud_agent",
+                "title": "Preparing Cloud Agent",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:03Z",
+            "metadata": {
+                "toolCallId": "tc-cloud",
+                "toolStatus": "IN_PROGRESS",
+                "toolName": "cloud_agent",
+                "title": "Starting Reasoning",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:04Z",
+            "metadata": {
+                "toolCallId": "tc-cloud",
+                "toolStatus": "FINISHED",
+                "toolName": "cloud_agent",
+                "title": "Cloud Agent Ready",
+            },
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        msgs = await build_llm_messages(context, "sys")
+
+    rendered = "\n".join(str(m.get("content", "")) for m in msgs)
+    assert "start the task" in rendered
+    assert "Creating Cloud Agent" not in rendered
+    assert "Preparing Cloud Agent" not in rendered
+    assert "Starting Reasoning" not in rendered
+    assert "Cloud Agent Ready" not in rendered
+
+
 async def test_call_llm_structured_streaming_tool_detection_callback():
     """on_tool_detected fires when accumulated JSON contains a tool call."""
     import httpx
@@ -3754,6 +3817,7 @@ async def run_all_tests():
     await r.record_async("build_llm_messages_skips_empty_file_output_assistant", test_build_llm_messages_skips_empty_file_output_assistant)
     await r.record_async("build_llm_messages_assistant_tool_call_validation_errors", test_build_llm_messages_assistant_tool_call_validation_errors)
     await r.record_async("build_llm_messages_filters_inprogress_keeps_latest_finished", test_build_llm_messages_filters_inprogress_keeps_latest_finished)
+    await r.record_async("build_llm_messages_strips_cloud_agent_lifecycle_tools", test_build_llm_messages_strips_cloud_agent_lifecycle_tools)
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
     await r.record_async("call_llm_structured_streaming_model_detected_callback", test_call_llm_structured_streaming_model_detected_callback)
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)

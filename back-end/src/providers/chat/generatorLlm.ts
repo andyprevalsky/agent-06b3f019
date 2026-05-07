@@ -11,6 +11,7 @@ import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast'
 import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
 import type { ChatLlmUsage } from './routerLlm';
+import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 
 const log = createLogger('GeneratorLLM');
 
@@ -317,9 +318,9 @@ export async function callGeneratorLlm(params: {
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
-      // Skip IN_PROGRESS messages (empty text) - only send FINISHED results to LLM
+      // Skip UI-only lifecycle tools and IN_PROGRESS messages.
       // This matches worker behavior in agents/helpers/llm.py lines 236-238
-      if (!msg.text || msg.text.trim() === '') {
+      if (isCloudAgentLifecycleTool(msg.metadata) || !msg.text || msg.text.trim() === '') {
         continue;
       }
       // Convert TOOL to system message with content (matches worker pattern)

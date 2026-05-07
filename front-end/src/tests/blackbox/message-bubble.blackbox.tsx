@@ -193,6 +193,27 @@ describe('MessageBubble', () => {
     expect(inner).not.toBeNull();
   });
 
+  it.each([
+    ['Creating Cloud Agent', 'IN_PROGRESS'],
+    ['Preparing Cloud Agent', 'IN_PROGRESS'],
+    ['Starting Reasoning', 'IN_PROGRESS'],
+    ['Cloud Agent Ready', 'FINISHED'],
+  ] as const)('renders %s cloud lifecycle tool without expandable output', async (title, toolStatus) => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: `${title} body should stay hidden.`,
+      metadata: {
+        toolCallId: 'tc-cloud-agent',
+        toolName: 'cloud_agent',
+        title,
+        toolStatus,
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
+    expect(screen.queryByText(`${title} body should stay hidden.`)).not.toBeInTheDocument();
+  });
+
   it('renders TOOL ERROR in red with error title', async () => {
     const msg = baseMessage({
       role: 'TOOL',

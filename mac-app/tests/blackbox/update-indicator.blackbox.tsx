@@ -137,6 +137,16 @@ describe('UpdateIndicator — module boundary', () => {
     expect(h.onUpdateProgress).toHaveBeenCalledTimes(1);
   });
 
+  it('renders without crashing when the preload bridge is unavailable', () => {
+    clearIpcMock();
+
+    expect(() => {
+      renderWithProviders(<UpdateIndicator />);
+    }).not.toThrow();
+
+    expect(screen.queryByText(/New update available/i)).not.toBeInTheDocument();
+  });
+
   it('does not re-subscribe on re-render (listenerAttachedRef guard)', () => {
     const h = setupHarness();
     const { rerender } = renderWithProviders(<UpdateIndicator />);
