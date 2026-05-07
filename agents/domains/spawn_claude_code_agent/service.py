@@ -653,6 +653,50 @@ def _extract_codex_command_numbers(final_output: str) -> list[int]:
     return [int(match.group(1)) for match in re.finditer(r"(?m)^\s*(\d+)\s*$", command_output)]
 
 
+def _extract_codex_sequence_numbers(final_output: str) -> list[int]:
+    """Extract a complete numeric sequence from Codex's final answer.
+
+    The terminal view can wrap command output mid-number, so a value like 1132
+    may appear as two standalone lines: "113" and "2". Prefer Codex's explicit
+    final sequence block, where comma separation survives wrapping.
+    """
+    if not final_output:
+        return []
+
+    for match in re.finditer(
+        r"(?is)(?:exact\s+full\s+sequence|full\s+sequence).*?(\[[\s\d,]+\])",
+        final_output,
+    ):
+        numbers = [int(n) for n in re.findall(r"\d+", match.group(1))]
+        if len(numbers) >= 2:
+            return numbers
+
+    for match in re.finditer(
+        r"(?is)(?:exact\s+full\s+sequence|full\s+sequence).*?```(?:\w+)?\s*([\s\d,]+?)```",
+        final_output,
+    ):
+        block = match.group(1)
+        if "," not in block:
+            continue
+        numbers = [int(n) for n in re.findall(r"\d+", block)]
+        if len(numbers) >= 2:
+            return numbers
+
+    return []
+
+
+def _is_valid_collatz_sequence(numbers: list[int], total_steps: Optional[int]) -> bool:
+    if not numbers or numbers[-1] != 1:
+        return False
+    if total_steps is not None and len(numbers) - 1 != total_steps:
+        return False
+    for current, following in zip(numbers, numbers[1:]):
+        expected = current // 2 if current % 2 == 0 else current * 3 + 1
+        if following != expected:
+            return False
+    return True
+
+
 def _synthesize_codex_structured_response(
     final_output: str,
     output_schema: Optional[Dict[str, Any]],
@@ -667,7 +711,8 @@ def _synthesize_codex_structured_response(
 
     paths = sorted(set(_ABSOLUTE_PATH_RE.findall(final_output)))
     script_paths = [path for path in paths if path.endswith(".py")]
-    numbers = _extract_codex_command_numbers(final_output)
+    sequence_numbers = _extract_codex_sequence_numbers(final_output)
+    numbers = sequence_numbers or _extract_codex_command_numbers(final_output)
     steps_match = re.search(
         r"(?:Total steps|Step count|[\"']total_steps[\"'])\s*:\s*(\d+)",
         final_output,
@@ -694,6 +739,8 @@ def _synthesize_codex_structured_response(
             structured[name] = {"path": path}
         elif field_type.startswith("list") and "sequence" in descriptor:
             if not numbers:
+                return None
+            if "collatz" in descriptor and not _is_valid_collatz_sequence(numbers, total_steps):
                 return None
             structured[name] = numbers
         elif field_type in {"integer", "int", "number"} and "step" in descriptor:

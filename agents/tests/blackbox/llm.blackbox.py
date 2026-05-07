@@ -1673,6 +1673,70 @@ async def test_call_llm_verifier_claude_token_and_schema():
     assert result["output"]["summary"] == "ok"
 
 
+async def test_call_llm_verifier_fills_missing_output_from_structured_tool_response():
+    """Verifier keeps strict schema while recovering copied fields from tool evidence."""
+    import httpx
+    from config import load_config
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import _call_llm_verifier
+
+    payload = {
+        "choices": [
+            {
+                "delta": {
+                    "content": json.dumps({
+                        "reasoning": "complete; all fields are visible in the tool result",
+                        "score": 1.0,
+                        "output": {
+                            "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+                            "total_steps": 7,
+                        },
+                    })
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+    }
+    body = _sse_body([payload])
+
+    def handler(req):
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    config = load_config()
+    structured_response = {
+        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+        "python_script_path": "/home/user/collatz_3.py",
+        "total_steps": 7,
+    }
+
+    with patch("temporalio.activity.heartbeat"):
+        result, _usage = await _call_llm_verifier(
+            messages=[
+                {"role": "system", "content": "verify"},
+                {
+                    "role": "user",
+                    "content": "Tool finished\n\nStructured Response: "
+                    + json.dumps(structured_response)
+                    + "\n\nEvaluate the agent's progress as JSON.",
+                },
+            ],
+            model="rose",
+            config=config,
+            response_schema={
+                "fields": [
+                    {"name": "collatz_sequence", "type": "list[int]"},
+                    {"name": "python_script_path", "type": "str"},
+                    {"name": "total_steps", "type": "int"},
+                ]
+            },
+        )
+
+    assert result["score"] == 1.0
+    assert result["output"]["python_script_path"] == "/home/user/collatz_3.py"
+    assert result["output"]["total_steps"] == 7
+
+
 async def test_check_progress_happy_path():
     """check_progress streams a score and returns structured_response when score >= 1."""
     import httpx
@@ -3645,6 +3709,7 @@ async def run_all_tests():
     await r.record_async("call_llm_structured_streaming_model_detected_callback", test_call_llm_structured_streaming_model_detected_callback)
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
+    await r.record_async("call_llm_verifier_fills_structured_tool_output", test_call_llm_verifier_fills_missing_output_from_structured_tool_response)
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
     await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)

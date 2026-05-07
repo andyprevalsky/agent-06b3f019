@@ -2651,7 +2651,13 @@ async def _call_llm_verifier(  # noqa: C901
     if not json_content:
         raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
 
-    parsed = response_model.model_validate(json.loads(json_content)).model_dump()
+    parsed_json = json.loads(json_content)
+    parsed_json = _fill_missing_verifier_output_from_messages(
+        parsed_json,
+        response_schema,
+        messages,
+    )
+    parsed = response_model.model_validate(parsed_json).model_dump()
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -2667,6 +2673,92 @@ async def _call_llm_verifier(  # noqa: C901
     }
 
     return parsed, usage
+
+
+def _extract_structured_responses_from_verifier_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract JSON objects copied into verifier context as `Structured Response` blocks."""
+    decoder = json.JSONDecoder()
+    responses: List[Dict[str, Any]] = []
+
+    def iter_text_parts(content: Any) -> List[str]:
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            return parts
+        return []
+
+    for message in messages:
+        for text in iter_text_parts(message.get("content")):
+            start = 0
+            while True:
+                marker_index = text.find("Structured Response:", start)
+                if marker_index == -1:
+                    break
+                json_start = marker_index + len("Structured Response:")
+                try:
+                    candidate, consumed = decoder.raw_decode(text[json_start:].lstrip())
+                except json.JSONDecodeError:
+                    start = json_start
+                    continue
+                if isinstance(candidate, dict):
+                    responses.append(candidate)
+                start = json_start + consumed
+
+    return responses
+
+
+def _fill_missing_verifier_output_from_messages(
+    parsed_json: Any,
+    response_schema: Optional[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+) -> Any:
+    """Fill missing verifier output fields from grounded tool structured responses.
+
+    The verifier is still required to return valid JSON. This only completes
+    fields it omitted when the same field is present in a prior tool result
+    serialized into the verifier context.
+    """
+    if not response_schema or not response_schema.get("fields") or not isinstance(parsed_json, dict):
+        return parsed_json
+
+    required_names = [
+        field.get("name")
+        for field in response_schema.get("fields", [])
+        if isinstance(field, dict) and isinstance(field.get("name"), str)
+    ]
+    if not required_names:
+        return parsed_json
+
+    output = parsed_json.get("output")
+    if not isinstance(output, dict):
+        output = {}
+        parsed_json["output"] = output
+
+    missing_names = [name for name in required_names if name not in output]
+    if not missing_names:
+        return parsed_json
+
+    candidates = _extract_structured_responses_from_verifier_messages(messages)
+    filled: List[str] = []
+    for name in missing_names:
+        for candidate in reversed(candidates):
+            source = candidate.get("output") if isinstance(candidate.get("output"), dict) else candidate
+            if isinstance(source, dict) and name in source:
+                output[name] = source[name]
+                filled.append(name)
+                break
+
+    if filled:
+        logger.info(
+            "Filled missing verifier output fields from structured tool response",
+            fields=filled,
+        )
+
+    return parsed_json
 
 
 def _build_verifier_response_model(

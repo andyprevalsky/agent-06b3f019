@@ -248,7 +248,7 @@ def test_codex_structured_response_synthesizes_all_fields():
     sample = (
         "[Codex file_change completed] add /home/user/collatz_27.py\n"
         "[Codex command completed] /bin/bash -lc 'python3 /home/user/collatz_27.py'\n"
-        "[Codex command output]\n27\n82\n41\n1\nTotal steps: 3\n"
+        "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\nTotal steps: 7\n"
         "[Codex exit_code] 0\n"
     )
     schema = {
@@ -261,8 +261,8 @@ def test_codex_structured_response_synthesizes_all_fields():
 
     structured = _synthesize_codex_structured_response(sample, schema)
     assert structured == {
-        "collatz_sequence": [27, 82, 41, 1],
-        "total_steps": 3,
+        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+        "total_steps": 7,
         "python_script": {"path": "/home/user/collatz_27.py"},
     }
 
@@ -273,8 +273,8 @@ def test_codex_structured_response_uses_json_step_field():
 
     sample = (
         "[Codex file_change completed] add /home/user/collatz_27.py\n"
-        "[Codex command output]\n27\n82\n41\n1\n3\n[Codex exit_code] 0\n"
-        '[Codex] {"total_steps": 3, "python_script": "[collatz_27.py](/home/user/collatz_27.py)"}\n'
+        "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\n7\n[Codex exit_code] 0\n"
+        '[Codex] {"total_steps": 7, "python_script": "[collatz_27.py](/home/user/collatz_27.py)"}\n'
     )
     schema = {
         "fields": [
@@ -285,9 +285,38 @@ def test_codex_structured_response_uses_json_step_field():
     }
 
     structured = _synthesize_codex_structured_response(sample, schema)
-    assert structured["collatz_sequence"] == [27, 82, 41, 1]
-    assert structured["total_steps"] == 3
+    assert structured["collatz_sequence"] == [3, 10, 5, 16, 8, 4, 2, 1]
+    assert structured["total_steps"] == 7
     assert structured["python_script"] == {"path": "/home/user/collatz_27.py"}
+
+
+def test_codex_structured_response_prefers_unwrapped_final_sequence():
+    """Codex fallback should not split terminal-wrapped sequence values."""
+    from domains.spawn_claude_code_agent.service import _synthesize_codex_structured_response
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command output]\n"
+        "377\n113\n2\n566\n283\n1\nTotal steps: 111\n[Codex exit_code] 0\n"
+        "[Codex] Exact full sequence:\n"
+        "```python\n"
+        "[27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1]\n"
+        "```\n"
+        "Total steps: `111`\n"
+    )
+    schema = {
+        "fields": [
+            {"name": "collatz_sequence", "type": "list[int]", "description": "Exact Collatz sequence"},
+            {"name": "total_steps", "type": "int", "description": "total step count"},
+            {"name": "python_script_path", "type": "file_pointer", "description": "created script file"},
+        ]
+    }
+
+    structured = _synthesize_codex_structured_response(sample, schema)
+    assert structured is not None
+    assert structured["collatz_sequence"][49:53] == [377, 1132, 566, 283]
+    assert structured["total_steps"] == 111
+    assert structured["python_script_path"] == {"path": "/home/user/collatz_27.py"}
 
 
 # ── build_context_summary ────────────────────────────────────────────

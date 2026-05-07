@@ -425,6 +425,25 @@ def test_build_planner_messages_compacts_long_tool_context():
     assert "Z" * 100 in tool_msg["content"]
 
 
+def test_build_planner_messages_compacts_large_tool_outputs():
+    """Raw tool output must not blow up planner context on replans."""
+    from domains.set_plan.service import PLANNER_CONTEXT_CHAR_BUDGET, build_planner_messages
+
+    large_result = "alpha " + ("tool-output " * 20_000) + " omega"
+    context = [{"role": "USER", "text": "Compare cities"}]
+    for i in range(80):
+        context.append({"role": "TOOL", "text": f"Result {i}: {large_result}"})
+
+    base_messages, user_messages = build_planner_messages(context)
+
+    total_chars = sum(len(m["content"]) for m in base_messages)
+    assert total_chars <= PLANNER_CONTEXT_CHAR_BUDGET
+    assert base_messages[0]["content"].startswith("GOAL: Compare cities")
+    assert user_messages == ["Compare cities"]
+    assert any("planner context compacted" in m["content"].lower() for m in base_messages)
+    assert any("omega" in m["content"] for m in base_messages)
+
+
 def test_build_planner_messages_skips_empty_text():
     """Messages with empty text are skipped."""
     from domains.set_plan.service import build_planner_messages
@@ -711,6 +730,7 @@ async def run_all_tests():
     r.record(
         "build_planner_messages_compacts_long_tool_context", test_build_planner_messages_compacts_long_tool_context
     )
+    r.record("build_planner_messages_compacts_tool_outputs", test_build_planner_messages_compacts_large_tool_outputs)
     r.record("build_planner_messages_empty_text", test_build_planner_messages_skips_empty_text)
     r.record("build_planner_messages_no_http", test_build_planner_messages_no_outbound_http)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)
