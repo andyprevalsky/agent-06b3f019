@@ -44,6 +44,13 @@ const electronHandlers = {
       window.api.claudeCode?.syncCredentials() ??
       Promise.resolve({ success: false, message: 'Not available' }),
   },
+  gptCode: {
+    isAvailable: true,
+    hasCredentials: () => window.api.gptCode?.hasCredentials() ?? Promise.resolve(false),
+    syncCredentials: () =>
+      window.api.gptCode?.syncCredentials() ??
+      Promise.resolve({ success: false, message: 'Not available' }),
+  },
   browserCookies: {
     isAvailable: true,
     getInstalledBrowsers: async () => {

@@ -28,7 +28,7 @@ from helpers.file_resolution import resolve_file_pointers_from_extracted, transf
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
-from providers.rose import ClaudeAuthContext, RoseClient
+from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.prompts import build_verifier_prompt
@@ -95,6 +95,10 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     agent_id: str,
     iteration: int,
     token_state: ClaudeTokenState,
+    gpt_token: Optional[str],
+    gpt_account_id: Optional[str],
+    gpt_token_source: Optional[str],
+    gpt_token_pool_id: Optional[str],
     browser_use_mode: Optional[str],
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
@@ -134,6 +138,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
+    use_gpt = browser_use_mode == "gpt" and bool(gpt_token)
     claude_auth = (
         ClaudeAuthContext(
             token=token_state.access_token or "",
@@ -145,8 +150,20 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         if use_claude
         else None
     )
+    gpt_auth = (
+        GptAuthContext(
+            token=gpt_token or "",
+            source=gpt_token_source or "user",  # type: ignore[arg-type]
+            user_id=user_id,
+            account_id=gpt_account_id,
+            pool_token_id=gpt_token_pool_id,
+            max_rotations=0,
+        )
+        if use_gpt
+        else None
+    )
 
-    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, **rose_kwargs)
+    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
 
     if not use_claude:
         return llm_result
@@ -239,6 +256,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     write_lock_resume_state: Optional[Dict[str, Any]] = None,
     system_name: str = "Rose",
     use_claude_mode: bool = True,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -254,7 +275,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     config = load_config()
     start_time = safe_time()
 
-    browser_use_mode = "claude" if use_claude_mode else None
+    browser_use_mode = "gpt" if gpt_token else ("claude" if use_claude_mode else None)
 
     # Claude auth token state
     token_state = ClaudeTokenState()
@@ -898,16 +919,22 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     agent_id=agent_id,
                     iteration=iteration,
                     token_state=token_state,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
                     browser_use_mode=browser_use_mode,
                 )
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
                     browser_use_mode = None
                     token_state.fallen_back_to_waterfall = True
+                if llm_result.get("mode") != "gpt" and browser_use_mode == "gpt":
+                    browser_use_mode = None
 
                 usage = llm_result.get("usage", {})
                 response_mode = llm_result.get("mode", "")
-                if response_mode != "claude":
+                if response_mode not in ("claude", "gpt"):
                     total_input_tokens += usage.get("prompt_tokens", 0)
                     total_output_tokens += usage.get("completion_tokens", 0)
 
@@ -1134,13 +1161,23 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             token_state.access_token,
                             "verifier_browser",
                             agent_id,
+                            None,
+                            None,
+                            user_id,
+                            gpt_token,
+                            gpt_account_id,
+                            gpt_token_source,
+                            gpt_token_pool_id,
+                            user_id,
                         ],
                         start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                     )
 
                     v_usage = progress_result.get("usage", {})
-                    total_input_tokens += v_usage.get("prompt_tokens", 0)
-                    total_output_tokens += v_usage.get("completion_tokens", 0)
+                    verifier_actual_model = v_usage.get("actual_model", "")
+                    if not (str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")):
+                        total_input_tokens += v_usage.get("prompt_tokens", 0)
+                        total_output_tokens += v_usage.get("completion_tokens", 0)
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
@@ -1605,6 +1642,31 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         try:
             write_lock_enabled = getattr(workflow_instance, "write_lock_enabled", True)
             system_name = getattr(workflow_instance, "system_name", "Rose")
+            active_claude_token = (
+                workflow_instance._active_claude_token()
+                if hasattr(workflow_instance, "_active_claude_token")
+                else getattr(workflow_instance, "claude_max_token", None)
+            )
+            active_gpt_token = (
+                workflow_instance._active_gpt_token()
+                if hasattr(workflow_instance, "_active_gpt_token")
+                else getattr(workflow_instance, "gpt_code_token", None)
+            )
+            active_gpt_account_id = (
+                workflow_instance._active_gpt_account_id()
+                if hasattr(workflow_instance, "_active_gpt_account_id")
+                else getattr(workflow_instance, "gpt_code_account_id", None)
+            )
+            active_gpt_source = (
+                workflow_instance._active_gpt_source()
+                if hasattr(workflow_instance, "_active_gpt_source")
+                else getattr(workflow_instance, "gpt_code_token_source", None)
+            )
+            active_gpt_pool_id = (
+                workflow_instance._active_gpt_pool_id()
+                if hasattr(workflow_instance, "_active_gpt_pool_id")
+                else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+            )
 
             write_lock_resume_state = None
             result = None
@@ -1634,6 +1696,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             start_url,
                             write_lock_resume_state,
                             system_name,
+                            bool(active_claude_token) and not bool(active_gpt_token),
+                            active_gpt_token,
+                            active_gpt_account_id,
+                            active_gpt_source,
+                            active_gpt_pool_id,
                         ],
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),

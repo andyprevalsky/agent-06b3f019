@@ -23,7 +23,7 @@ import {
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
-import { fetchClaudeCodeAccessToken, fetchPoolToken } from '../claudeCredentials';
+import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('ChatHandler');
@@ -51,32 +51,37 @@ export async function handleChatMessage(config: {
   agentId: string;
   userId: string;
   model: string;
-  claudeToken?: string;
 }): Promise<ChatResult> {
   log.info('[ChatHandler] Processing message', {
     agentId: config.agentId,
     model: config.model,
   });
 
-  // Fetch Claude token for direct Anthropic passthrough (enables prompt caching)
+  // Fetch one provider-typed compute token for direct passthrough. Selection is
+  // provider-neutral across Claude/GPT; Rose uses the returned type to choose
+  // the matching direct API path and falls through to OpenRouter if it fails.
   let claudeToken: string | null = null;
+  let gptToken: string | null = null;
+  let gptAccountId: string | undefined;
   try {
-    const userToken = await fetchClaudeCodeAccessToken(config.userId);
-    if (userToken) {
-      claudeToken = userToken;
-      log.info('[ChatHandler] Using user Claude token', { userId: config.userId });
-    } else {
-      const poolResult = await fetchPoolToken();
-      if (poolResult) {
-        claudeToken = poolResult.accessToken;
-        log.info('[ChatHandler] Using pool Claude token', {
-          userId: config.userId,
-          poolTokenId: poolResult.poolTokenId,
-        });
-      }
+    const computeToken = await fetchComputeTokenForUser(config.userId);
+    if (computeToken?.type === 'claude') {
+      claudeToken = computeToken.accessToken;
+    }
+    if (computeToken?.type === 'gpt') {
+      gptToken = computeToken.accessToken;
+      gptAccountId = computeToken.accountId;
+    }
+    if (computeToken) {
+      log.info('[ChatHandler] Using compute token', {
+        userId: config.userId,
+        type: computeToken.type,
+        source: computeToken.source,
+        poolTokenId: computeToken.poolTokenId,
+      });
     }
   } catch (error) {
-    log.warn('[ChatHandler] Failed to fetch Claude token, falling back to waterfall', {
+    log.warn('[ChatHandler] Failed to fetch compute token, falling back to waterfall', {
       userId: config.userId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -104,6 +109,8 @@ export async function handleChatMessage(config: {
     messages,
     model: config.model,
     claudeToken,
+    gptToken,
+    gptAccountId,
   });
 
   const { decision, webSearchToolCallId } = routerResponse;
@@ -240,6 +247,8 @@ export async function handleChatMessage(config: {
     messages: updatedMessages,
     model: config.model,
     claudeToken,
+    gptToken,
+    gptAccountId,
   });
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);

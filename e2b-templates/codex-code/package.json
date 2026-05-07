@@ -1,0 +1,12 @@
+{
+  "name": "codex-code",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "ws-server.mjs",
+  "scripts": {
+    "test:ws": "node ws-server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

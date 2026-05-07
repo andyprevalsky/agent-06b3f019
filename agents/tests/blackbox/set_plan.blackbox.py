@@ -425,6 +425,25 @@ def test_build_planner_messages_compacts_long_tool_context():
     assert "Z" * 100 in tool_msg["content"]
 
 
+def test_build_planner_messages_compacts_large_tool_outputs():
+    """Raw tool output must not blow up planner context on replans."""
+    from domains.set_plan.service import PLANNER_CONTEXT_CHAR_BUDGET, build_planner_messages
+
+    large_result = "alpha " + ("tool-output " * 20_000) + " omega"
+    context = [{"role": "USER", "text": "Compare cities"}]
+    for i in range(80):
+        context.append({"role": "TOOL", "text": f"Result {i}: {large_result}"})
+
+    base_messages, user_messages = build_planner_messages(context)
+
+    total_chars = sum(len(m["content"]) for m in base_messages)
+    assert total_chars <= PLANNER_CONTEXT_CHAR_BUDGET
+    assert base_messages[0]["content"].startswith("GOAL: Compare cities")
+    assert user_messages == ["Compare cities"]
+    assert any("planner context compacted" in m["content"].lower() for m in base_messages)
+    assert any("omega" in m["content"] for m in base_messages)
+
+
 def test_build_planner_messages_skips_empty_text():
     """Messages with empty text are skipped."""
     from domains.set_plan.service import build_planner_messages
@@ -499,10 +518,29 @@ class _FakeWFInstance:
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.claude_max_token = None
+        self.gpt_code_token = "gpt-token-1"
+        self.gpt_code_account_id = "acct-1"
+        self.gpt_code_token_source = "pool"
+        self.gpt_code_token_pool_id = "pool-token-1"
         self.refreshes = 0
 
     async def _refresh_claude_token(self, user_id):
         self.refreshes += 1
+
+    def _active_claude_token(self):
+        return None
+
+    def _active_gpt_token(self):
+        return self.gpt_code_token
+
+    def _active_gpt_account_id(self):
+        return self.gpt_code_account_id
+
+    def _active_gpt_source(self):
+        return self.gpt_code_token_source
+
+    def _active_gpt_pool_id(self):
+        return self.gpt_code_token_pool_id
 
     async def _track_usage(self, *a, **kw):
         pass
@@ -533,7 +571,8 @@ async def test_handler_happy_path_first_try():
     import domains.set_plan.handler as h
 
     original_runner = h.run_planner_attempt
-    h.run_planner_attempt = AsyncMock(return_value=valid_plan)
+    runner_mock = AsyncMock(return_value=valid_plan)
+    h.run_planner_attempt = runner_mock
     try:
         wf = _FakeWFInstance()
         events = await _collect_events(
@@ -545,6 +584,13 @@ async def test_handler_happy_path_first_try():
 
     statuses = [e.status for e in events]
     assert MessageStatus.FINISHED in statuses
+    runner_mock.assert_awaited_once()
+    planner_kwargs = runner_mock.await_args.kwargs
+    assert planner_kwargs["claude_max_token"] is None
+    assert planner_kwargs["gpt_token"] == "gpt-token-1"
+    assert planner_kwargs["gpt_account_id"] == "acct-1"
+    assert planner_kwargs["gpt_token_source"] == "pool"
+    assert planner_kwargs["gpt_token_pool_id"] == "pool-token-1"
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert finished.title == "Test Plan"
     assert finished.data["type"] == "plan_artifact"
@@ -684,6 +730,7 @@ async def run_all_tests():
     r.record(
         "build_planner_messages_compacts_long_tool_context", test_build_planner_messages_compacts_long_tool_context
     )
+    r.record("build_planner_messages_compacts_tool_outputs", test_build_planner_messages_compacts_large_tool_outputs)
     r.record("build_planner_messages_empty_text", test_build_planner_messages_skips_empty_text)
     r.record("build_planner_messages_no_http", test_build_planner_messages_no_outbound_http)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)

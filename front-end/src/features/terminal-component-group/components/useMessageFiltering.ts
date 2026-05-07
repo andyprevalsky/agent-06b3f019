@@ -62,6 +62,7 @@ export interface FilteredStreamingState {
   tools: Map<string, StreamingTool>;
   charCount: number;
   isClaude: boolean;
+  isGpt: boolean;
 }
 
 interface UseFilteredStreamingOptions {
@@ -96,12 +97,14 @@ export function useFilteredStreaming({
 
     let charCount = 0;
     let isClaude = false;
+    let isGpt = false;
     bubbles.forEach((b) => {
       charCount += b.text.length;
       if (b.isClaude) isClaude = true;
+      if (b.isGpt) isGpt = true;
     });
 
-    return { bubbles, plan, attention, tools, charCount, isClaude };
+    return { bubbles, plan, attention, tools, charCount, isClaude, isGpt };
   }, [target, streamingBubbles, streamingPlan, streamingAttention, streamingTools]);
 }
 

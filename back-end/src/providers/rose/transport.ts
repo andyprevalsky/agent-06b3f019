@@ -12,6 +12,7 @@ const log = createLogger('RoseTransport');
 
 export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 /**
  * The combination of `claude-code-20250219` + `oauth-2025-04-20` is what
@@ -59,6 +60,21 @@ function openrouterHeaders(openrouterKey: string): Record<string, string> {
     'HTTP-Referer': 'https://roselabs.ai',
     'X-Title': 'Rose Chat',
   };
+}
+
+function codexHeaders(gptToken: string, accountId?: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${gptToken}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'codex_cli_rs/0.0.0 (Rose Chat)',
+    originator: 'codex_cli_rs',
+    ...(accountId ? { 'ChatGPT-Account-ID': accountId } : {}),
+  };
+}
+
+function codexExtraHeadersFromBody(body: Record<string, unknown>): Record<string, string> {
+  const cacheScope = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key.trim() : '';
+  return cacheScope ? { session_id: cacheScope, 'x-client-request-id': cacheScope } : {};
 }
 
 interface PostOptions {
@@ -156,6 +172,51 @@ export async function postOpenRouterStream(
   if (!response.ok) {
     errorBody = await response.text();
     log.warn('openrouter.error', {
+      request_id: options.requestId,
+      status: response.status,
+      body: errorBody.substring(0, 500),
+    });
+  }
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    body: response.body,
+    errorBody,
+  };
+}
+
+export async function postCodexStream(
+  options: PostOptions & {
+    gptToken: string;
+    accountId?: string;
+    abortSignal?: AbortSignal;
+  }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  log.info('codex.start', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+  });
+  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+    fetch(CODEX_API_URL, {
+      method: 'POST',
+      headers: {
+        ...codexHeaders(options.gptToken, options.accountId),
+        ...codexExtraHeadersFromBody(options.body),
+      },
+      body: JSON.stringify(options.body),
+      signal,
+    })
+  );
+
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    errorBody = await response.text();
+    log.warn('codex.error', {
       request_id: options.requestId,
       status: response.status,
       body: errorBody.substring(0, 500),

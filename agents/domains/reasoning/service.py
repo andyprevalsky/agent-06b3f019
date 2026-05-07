@@ -57,6 +57,14 @@ async def execute_reasoning(
     stream_id: str | None = None,
     heartbeat_fn: Callable[[str], None] | None = None,
     claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    claude_token_user_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    gpt_token_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute a reasoning task using LLM with streaming.
 
@@ -82,6 +90,12 @@ async def execute_reasoning(
 
     sequence = [0]
     last_text = [""]
+    is_claude = [False]
+    is_gpt = [False]
+
+    def on_model_detected(actual_model: str) -> None:
+        is_claude[0] = actual_model.endswith("-claude")
+        is_gpt[0] = actual_model.endswith("-gpt")
 
     async def on_chunk(text_so_far: str, tokens: int) -> None:
         """Stream chunks to frontend via Supabase Realtime."""
@@ -96,6 +110,8 @@ async def execute_reasoning(
                     delta=delta,
                     done=False,
                     sequence=sequence[0],
+                    is_claude=is_claude[0],
+                    is_gpt=is_gpt[0],
                 )
                 sequence[0] += 1
             last_text[0] = text_so_far
@@ -110,6 +126,15 @@ async def execute_reasoning(
         agent_id=agent_id,
         call_site="dag_reasoning",
         claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        claude_token_user_id=claude_token_user_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        gpt_token_user_id=gpt_token_user_id,
+        on_model_detected=on_model_detected,
     )
 
     content = result.response if result and result.response else ""
@@ -123,6 +148,8 @@ async def execute_reasoning(
                 delta=final_delta,
                 done=True,
                 sequence=sequence[0],
+                is_claude=is_claude[0],
+                is_gpt=is_gpt[0],
             )
         except Exception as e:
             logger.warning(f"Final stream chunk failed (non-fatal): {e}")

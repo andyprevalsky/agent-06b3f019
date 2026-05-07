@@ -54,6 +54,14 @@ def _compact_planner_context_text(text: str) -> str:
         + text[-PLANNER_CONTEXT_TAIL_CHARS:]
     )
 
+PLANNER_MESSAGE_CHAR_LIMITS = {
+    "USER": 16_000,
+    "ASSISTANT": 12_000,
+    "TOOL": 3_000,
+    "SYSTEM": 3_000,
+}
+PLANNER_CONTEXT_CHAR_BUDGET = 200_000
+
 
 def _validate_dep_indices(deps: dict[str, list[str]], n: int) -> str | None:
     """Validate task indices and predecessor references in the dependency graph."""
@@ -242,6 +250,53 @@ def build_plan_message(plan_data: PlanData) -> str:
 # ========================================
 
 
+def _compact_planner_text(role: str, text: str) -> str:
+    """Bound individual messages before they enter the planner prompt."""
+    limit = PLANNER_MESSAGE_CHAR_LIMITS.get(role, 6_000)
+    if len(text) <= limit:
+        return text
+
+    head_len = max(1, int(limit * 0.75))
+    tail_len = max(1, limit - head_len)
+    omitted = len(text) - head_len - tail_len
+    return (
+        f"{text[:head_len]}\n\n"
+        f"[... planner context compacted {omitted} chars ...]\n\n"
+        f"{text[-tail_len:]}"
+    )
+
+
+def _enforce_planner_context_budget(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep planner context under a hard char budget, preserving goal + recency."""
+    if sum(len(m.get("content", "")) for m in messages) <= PLANNER_CONTEXT_CHAR_BUDGET:
+        return messages
+    if not messages:
+        return messages
+
+    goal = messages[0]
+    budget = max(0, PLANNER_CONTEXT_CHAR_BUDGET - len(goal.get("content", "")))
+    kept_reversed: list[dict[str, Any]] = []
+    used = 0
+
+    for msg in reversed(messages[1:]):
+        content_len = len(msg.get("content", ""))
+        if used + content_len > budget:
+            continue
+        kept_reversed.append(msg)
+        used += content_len
+
+    kept_reversed.reverse()
+    dropped = len(messages) - 1 - len(kept_reversed)
+    if dropped <= 0:
+        return [goal] + kept_reversed
+
+    notice = {
+        "role": "user",
+        "content": f"[SYSTEM]: Planner context compacted: omitted {dropped} older message(s) to stay under budget.",
+    }
+    return [goal, notice] + kept_reversed
+
+
 def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract conversation context and user messages for the planner.
 
@@ -278,9 +333,9 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         if not text:
             continue
         if role == "USER":
-            base_messages.append({"role": "user", "content": text})
+            base_messages.append({"role": "user", "content": _compact_planner_text(role, text)})
         elif role == "ASSISTANT":
-            base_messages.append({"role": "assistant", "content": text})
+            base_messages.append({"role": "assistant", "content": _compact_planner_text(role, text)})
         elif role in ("TOOL", "SYSTEM"):
             text = _compact_planner_context_text(text)
             base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
@@ -289,7 +344,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     goal = user_messages[0] if user_messages else DEFAULT_GOAL
     base_messages.insert(0, {"role": "user", "content": f"GOAL: {goal}\n\nPlan this goal into tasks."})
 
-    return base_messages, user_messages
+    return _enforce_planner_context_budget(base_messages), user_messages
 
 
 async def run_planner_attempt(
@@ -300,6 +355,10 @@ async def run_planner_attempt(
     user_context: str,
     response_schema: dict[str, Any] | None,
     claude_max_token: str | None,
+    gpt_token: str | None,
+    gpt_account_id: str | None,
+    gpt_token_source: str | None,
+    gpt_token_pool_id: str | None,
     user_messages: list[str],
     tool_call_id: str,
     attempt: int,
@@ -320,6 +379,14 @@ async def run_planner_attempt(
         claude_max_token,
         agent_id,
         tool_call_id,
+        getattr(workflow_instance, "claude_max_token_source", None),
+        getattr(workflow_instance, "claude_max_token_pool_id", None),
+        getattr(workflow_instance, "user_id", None),
+        gpt_token,
+        gpt_account_id,
+        gpt_token_source,
+        gpt_token_pool_id,
+        getattr(workflow_instance, "user_id", None),
     ]
 
     # Schema generation is now done synchronously at workflow startup so the

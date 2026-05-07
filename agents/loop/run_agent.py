@@ -119,6 +119,14 @@ async def run_agent(  # noqa: C901
     # Dynamic token getter - called before each LLM call to get latest token
     # (workflow invalidates cached token on fallback, so getter returns None after that)
     get_claude_token: Optional[Callable[[], Optional[str]]] = None,
+    get_claude_token_source: Optional[Callable[[], Optional[str]]] = None,
+    get_claude_token_pool_id: Optional[Callable[[], Optional[str]]] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    get_gpt_token: Optional[Callable[[], Optional[str]]] = None,
+    get_gpt_account_id: Optional[Callable[[], Optional[str]]] = None,
+    get_gpt_token_source: Optional[Callable[[], Optional[str]]] = None,
+    get_gpt_token_pool_id: Optional[Callable[[], Optional[str]]] = None,
     # Override the call_site label used when emitting llm.cache. Defaults to
     # "plan_loop"/"execute_loop" based on is_plan_loop. Sub-agents that share
     # this loop (e.g. explore_agent) set this to surface as their own row in
@@ -373,6 +381,12 @@ async def run_agent(  # noqa: C901
 
         # Resolve Claude token dynamically (getter returns latest; may be None after fallback)
         current_claude_token = get_claude_token() if get_claude_token else claude_token
+        current_claude_token_source = get_claude_token_source() if get_claude_token_source else None
+        current_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
+        current_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
+        current_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
+        current_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
+        current_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
         # 7. Call LLM with structured streaming
         try:
@@ -426,6 +440,14 @@ async def run_agent(  # noqa: C901
                             reasoning_max_tokens=reasoning_max_tokens,
                             agent_id=agent_id,
                             claude_token=current_claude_token,
+                            claude_token_source=current_claude_token_source,
+                            claude_token_pool_id=current_claude_token_pool_id,
+                            claude_token_user_id=user_id,
+                            gpt_token=current_gpt_token,
+                            gpt_account_id=current_gpt_account_id,
+                            gpt_token_source=current_gpt_token_source,
+                            gpt_token_pool_id=current_gpt_token_pool_id,
+                            gpt_token_user_id=user_id,
                             call_site=cache_call_site,
                         )
                         break  # Success
@@ -502,6 +524,14 @@ async def run_agent(  # noqa: C901
                         False,
                         skip_verification,
                         schema_preamble,
+                        current_claude_token_source,
+                        current_claude_token_pool_id,
+                        user_id,
+                        current_gpt_token,
+                        current_gpt_account_id,
+                        current_gpt_token_source,
+                        current_gpt_token_pool_id,
+                        user_id,
                         user_id,
                     ],
                     start_to_close_timeout=timedelta(seconds=180),
@@ -563,6 +593,8 @@ async def run_agent(  # noqa: C901
                         cache_creation_input_tokens=iter_cache_write,
                         call_site=cache_call_site,
                         claude_token_error=usage.get("claude_token_error"),
+                        gpt_token_error=usage.get("gpt_token_error"),
+                        claude_token_rotated=usage.get("claude_token_rotated", False),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
@@ -1034,6 +1066,12 @@ async def run_agent(  # noqa: C901
                 # Use response_schema passed from caller (already fetched with agent config)
                 # Resolve Claude token for verifier (same as main LLM call)
                 verifier_claude_token = get_claude_token() if get_claude_token else claude_token
+                verifier_claude_token_source = get_claude_token_source() if get_claude_token_source else None
+                verifier_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
+                verifier_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
+                verifier_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
+                verifier_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
+                verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
                 verifier_result = await _run_verifier(
                     execute_activity=execute_activity,
@@ -1046,6 +1084,14 @@ async def run_agent(  # noqa: C901
                     response_schema=response_schema,
                     get_response_schema=get_response_schema,
                     claude_token=verifier_claude_token,
+                    claude_token_source=verifier_claude_token_source,
+                    claude_token_pool_id=verifier_claude_token_pool_id,
+                    claude_token_user_id=user_id,
+                    gpt_token=verifier_gpt_token,
+                    gpt_account_id=verifier_gpt_account_id,
+                    gpt_token_source=verifier_gpt_token_source,
+                    gpt_token_pool_id=verifier_gpt_token_pool_id,
+                    gpt_token_user_id=user_id,
                     is_plan_loop=is_plan_loop,
                 )
 
@@ -1068,6 +1114,8 @@ async def run_agent(  # noqa: C901
                             cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                             call_site="verifier_plan" if is_plan_loop else "verifier_execute",
                             claude_token_error=v_usage.get("claude_token_error"),
+                            gpt_token_error=v_usage.get("gpt_token_error"),
+                            claude_token_rotated=v_usage.get("claude_token_rotated", False),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -1189,6 +1237,12 @@ async def run_agent(  # noqa: C901
                 last_checked = await poll_and_update_context(poll_messages, context, last_checked)
             logger.info("Running final verifier to capture failure context...")
             final_verifier_claude_token = get_claude_token() if get_claude_token else claude_token
+            final_verifier_claude_token_source = get_claude_token_source() if get_claude_token_source else None
+            final_verifier_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
+            final_verifier_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
+            final_verifier_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
+            final_verifier_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
+            final_verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
             final_verifier_result = await _run_verifier(
                 execute_activity=execute_activity,
                 context=context,
@@ -1200,6 +1254,14 @@ async def run_agent(  # noqa: C901
                 response_schema=response_schema,
                 get_response_schema=get_response_schema,
                 claude_token=final_verifier_claude_token,
+                claude_token_source=final_verifier_claude_token_source,
+                claude_token_pool_id=final_verifier_claude_token_pool_id,
+                claude_token_user_id=user_id,
+                gpt_token=final_verifier_gpt_token,
+                gpt_account_id=final_verifier_gpt_account_id,
+                gpt_token_source=final_verifier_gpt_token_source,
+                gpt_token_pool_id=final_verifier_gpt_token_pool_id,
+                gpt_token_user_id=user_id,
                 is_plan_loop=is_plan_loop,
             )
 
@@ -1222,6 +1284,8 @@ async def run_agent(  # noqa: C901
                         cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
                         call_site="verifier_plan" if is_plan_loop else "verifier_execute",
                         claude_token_error=v_usage.get("claude_token_error"),
+                        gpt_token_error=v_usage.get("gpt_token_error"),
+                        claude_token_rotated=v_usage.get("claude_token_rotated", False),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -1299,6 +1363,9 @@ async def _compress_context(
                     cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
                     call_site="context_compression",
                     claude_token_error=usage.get("claude_token_error"),
+                    claude_token_rotated=usage.get("claude_token_rotated", False),
+                    gpt_token_error=usage.get("gpt_token_error"),
+                    gpt_token_rotated=usage.get("gpt_token_rotated", False),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")
@@ -1317,6 +1384,14 @@ async def _run_verifier(
     response_schema: Optional[Dict] = None,
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict]]]] = None,
     claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
     is_plan_loop: bool = False,
 ) -> Dict:
     """Run verifier to check completion."""
@@ -1366,6 +1441,14 @@ async def _run_verifier(
             claude_token,
             "verifier_plan" if is_plan_loop else "verifier_execute",
             agent_id,
+            claude_token_source,
+            claude_token_pool_id,
+            claude_token_user_id,
+            gpt_token,
+            gpt_account_id,
+            gpt_token_source,
+            gpt_token_pool_id,
+            gpt_token_user_id,
         ],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),

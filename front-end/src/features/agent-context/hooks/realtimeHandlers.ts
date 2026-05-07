@@ -171,6 +171,7 @@ export function handleAssistantStream(
         timeoutId,
         subAgentId: chunk.subAgentId ?? existing?.subAgentId,
         isClaude: chunk.is_claude ?? existing?.isClaude ?? false,
+        isGpt: chunk.is_gpt ?? existing?.isGpt ?? false,
       });
     }
 

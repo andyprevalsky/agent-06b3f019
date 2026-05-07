@@ -8,9 +8,11 @@
  *   2. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
  *      buffering the metadata chunk so a pre-content failure can fall through
  *      cleanly.
- *   3. Falls through to the pool's OpenRouter waterfall on any typed
+ *   3. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
+ *      using the same pre-content fall-through contract.
+ *   4. Falls through to the pool's OpenRouter waterfall on any typed
  *      RoseError before first content.
- *   4. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
+ *   5. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
  *      CompletionChunk DTO chat callers iterate.
  *
  * No top-level deadline / heartbeat — those are agent-side concerns
@@ -24,6 +26,7 @@ import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isFallThroughError, RoseError } from './errors';
+import { gptAuthComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
@@ -81,6 +84,7 @@ export async function createStreamingCompletion(
     request_id: requestId,
     pool,
     has_claude_token: !!options.claude_token,
+    has_gpt_token: !!options.gpt_token,
     body: logJson({
       model: options.model,
       message_count: options.messages.length,
@@ -163,6 +167,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
 
   // 1. claudeAuth attempt (with fall-through buffering)
   let claudeAuthFailed: RoseError | null = null;
+  let gptAuthFailed: RoseError | null = null;
   if (opts.options.claude_token) {
     try {
       yield* runWithFallThrough({
@@ -188,7 +193,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     } catch (err) {
       if (err instanceof PreContentFallThroughError) {
         claudeAuthFailed = err.cause;
-        log.info('fall_through_to_waterfall', {
+        log.info('fall_through_from_claude_auth', {
           request_id: opts.requestId,
           reason: err.cause.name,
         });
@@ -198,7 +203,47 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     }
   }
 
-  // 2. Waterfall — this is the terminal pipeline; unwrap the internal
+  // 2. gptAuth attempt (with fall-through buffering)
+  if (opts.options.gpt_token) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          gptAuthComplete({
+            poolSpec,
+            messages: opts.options.messages,
+            responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
+            temperature: opts.options.temperature,
+            effort: opts.options.effort,
+            gptToken: opts.options.gpt_token!,
+            accountId: opts.options.gpt_account_id,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+          }),
+        emit: emitChunk,
+      });
+      log.info('gpt_auth.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+        claude_auth_failed: claudeAuthFailed?.name ?? null,
+      });
+      return;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        gptAuthFailed = err.cause;
+        log.info('fall_through_from_gpt_auth', {
+          request_id: opts.requestId,
+          reason: err.cause.name,
+        });
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // 3. Waterfall — this is the terminal pipeline; unwrap the internal
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
   try {
@@ -227,6 +272,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     pool: opts.pool,
     elapsed_ms: Date.now() - startedAt,
     claude_auth_failed: claudeAuthFailed?.name ?? null,
+    gpt_auth_failed: gptAuthFailed?.name ?? null,
   });
 }
 

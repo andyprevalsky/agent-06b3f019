@@ -195,7 +195,31 @@ class SpawnAgentManager(ToolManager):
 
             # Run explore agent activity with pause polling
             model = getattr(workflow_instance, "model", EXPLORE_DEFAULT_MODEL)
-            claude_token = getattr(workflow_instance, "claude_max_token", None)
+            claude_token = (
+                workflow_instance._active_claude_token()
+                if hasattr(workflow_instance, "_active_claude_token")
+                else getattr(workflow_instance, "claude_max_token", None)
+            )
+            gpt_token = (
+                workflow_instance._active_gpt_token()
+                if hasattr(workflow_instance, "_active_gpt_token")
+                else getattr(workflow_instance, "gpt_code_token", None)
+            )
+            gpt_account_id = (
+                workflow_instance._active_gpt_account_id()
+                if hasattr(workflow_instance, "_active_gpt_account_id")
+                else getattr(workflow_instance, "gpt_code_account_id", None)
+            )
+            gpt_token_source = (
+                workflow_instance._active_gpt_source()
+                if hasattr(workflow_instance, "_active_gpt_source")
+                else getattr(workflow_instance, "gpt_code_token_source", None)
+            )
+            gpt_token_pool_id = (
+                workflow_instance._active_gpt_pool_id()
+                if hasattr(workflow_instance, "_active_gpt_pool_id")
+                else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+            )
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -215,6 +239,10 @@ class SpawnAgentManager(ToolManager):
                         task_id,
                         tool_call_id,
                         claude_token,
+                        gpt_token,
+                        gpt_account_id,
+                        gpt_token_source,
+                        gpt_token_pool_id,
                         attachment_texts,
                     ],
                     start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,

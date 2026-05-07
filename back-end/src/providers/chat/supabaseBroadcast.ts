@@ -28,7 +28,8 @@ export async function broadcastAssistantStream(
   delta: string,
   done: boolean = false,
   sequence: number = 0,
-  isClaude: boolean = false
+  isClaude: boolean = false,
+  isGpt: boolean = false
 ): Promise<void> {
   log.info('[Broadcast] ASSISTANT_STREAM', {
     agentId,
@@ -37,6 +38,7 @@ export async function broadcastAssistantStream(
     done,
     sequence,
     isClaude,
+    isGpt,
   });
   const payload: Record<string, unknown> = {
     agentId: agentId,
@@ -46,6 +48,7 @@ export async function broadcastAssistantStream(
     sequence: sequence,
   };
   payload.is_claude = isClaude;
+  payload.is_gpt = isGpt;
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'ASSISTANT_STREAM',

@@ -428,11 +428,17 @@ async def test_compress_context_calls_execute_activity_and_returns_single_system
         tokens_recorded.append((in_, out_, model, kwargs))
 
     context = [{"role": "USER", "text": "hi"}]
-    result = await _compress_context(mock_execute_activity, context, "rose-lite", on_tokens=on_tokens)
+    result = await _compress_context(
+        mock_execute_activity,
+        context,
+        "rose-lite",
+        on_tokens=on_tokens,
+    )
 
     assert len(result) == 1
     assert result[0]["role"] == "SYSTEM"
     assert result[0]["text"] == "key insights"
+    assert captured_args[0][1] == [context, len(context), "rose-lite"]
     assert len(tokens_recorded) == 1
     assert tokens_recorded[0][0] == 3
     assert tokens_recorded[0][1] == 2

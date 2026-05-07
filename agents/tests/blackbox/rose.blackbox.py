@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -26,6 +27,7 @@ import httpx
 
 from providers.rose import (
     ClaudeAuthContext,
+    GptAuthContext,
     POOL_REGISTRY,
     RoseAllFailed,
     RoseAuthError,
@@ -40,15 +42,22 @@ from providers.rose import (
     all_pool_names,
     claude_auth_from_token,
     classify_claude_token_error,
+    classify_gpt_token_error,
     get_pool,
+    gpt_auth_from_token,
     is_rose_model,
     parse_anthropic_sse,
     parse_openai_sse,
+    parse_responses_sse,
     pool_for_model,
 )
 from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
+)
+from providers.rose.gpt_auth import build_codex_responses_body
+from providers.rose.schema import (
+    build_anthropic_tools_from_response_model,
 )
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
@@ -64,6 +73,7 @@ from providers.rose.transforms import (
     transform_schema_for_anthropic,
 )
 from providers.rose.waterfall import build_openrouter_body, waterfall_complete
+from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 
 
 # =====================================================================
@@ -109,6 +119,15 @@ def test_claude_auth_from_token_builds_context():
     assert ctx.fetch_fresh is None
 
 
+def test_gpt_auth_from_token_builds_context():
+    ctx = gpt_auth_from_token("gt-xyz", "acct_123")
+    assert isinstance(ctx, GptAuthContext)
+    assert ctx.token == "gt-xyz"
+    assert ctx.account_id == "acct_123"
+    assert ctx.source == "user"
+    assert ctx.max_rotations == 0
+
+
 def test_classify_claude_token_error_each_branch():
     assert classify_claude_token_error(RoseAuthError("a")) == "auth_error"
     assert classify_claude_token_error(RoseRateLimitError("b")) == "rate_limit"
@@ -117,6 +136,7 @@ def test_classify_claude_token_error_each_branch():
     assert classify_claude_token_error(RoseServerError("e")) == "server_error"
     # Unknown subclass falls back to server_error
     assert classify_claude_token_error(RoseError("z")) == "server_error"
+    assert classify_gpt_token_error(RoseRateLimitError("b")) == "rate_limit"
 
 
 # =====================================================================
@@ -129,9 +149,11 @@ def test_pool_registry_lookup():
     ultra = get_pool("rose-1-ultra")
     assert lite.name == "rose-1-lite"
     assert lite.claude_auth_model.startswith("claude-")
+    assert lite.gpt_auth_model.startswith("gpt-")
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
+    assert ultra.gpt_auth_model.startswith("gpt-")
     assert lite.waterfall != ultra.waterfall
 
 
@@ -412,6 +434,127 @@ def test_transform_schema_recurses_into_anyOf_oneOf_allOf_defs():
 def test_transform_schema_passthrough_non_dict():
     assert transform_schema_for_anthropic("not-a-dict") == "not-a-dict"
     assert transform_schema_for_anthropic(None) is None
+
+
+def _walk_schema(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for value in obj.values():
+            yield from _walk_schema(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_schema(item)
+
+
+def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by_default():
+    AgentAction = create_agent_action_model(ALL_PHASE_TOOLS)
+
+    tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-6",
+    )
+
+    assert tools is not None
+    assert len(tools) == len(ALL_PHASE_TOOLS)
+    by_name = {tool["name"]: tool for tool in tools}
+    assert set(by_name) == set(ALL_PHASE_TOOLS)
+
+    wait_for = by_name["wait_for"]
+    assert "strict" not in wait_for
+    wait_schema = wait_for["input_schema"]
+    assert "tool" not in wait_schema["properties"]
+    assert "tool" not in wait_schema["required"]
+    # Pydantic runtime validators/defaults remain authoritative. The native
+    # Anthropic schema should not force defaults/nulls into tool arguments.
+    assert wait_schema["required"] == []
+    assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
+    assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
+
+    spawn_agent = by_name["spawn_agent"]["input_schema"]
+    assert spawn_agent["required"] == ["type", "goal"]
+    assert "output_schema" in spawn_agent["properties"]
+
+    for tool in tools:
+        assert "strict" not in tool
+
+
+def test_pydantic_response_model_adds_strict_only_for_opted_in_tools():
+    from pydantic import BaseModel
+    from typing import ClassVar, Literal, Optional
+
+    class LooseTool(BaseModel):
+        """Loose test tool."""
+
+        tool: Literal["loose_tool"]
+        value: int
+
+    class StrictTool(BaseModel):
+        """Strict test tool."""
+
+        anthropic_strict_tool: ClassVar[bool] = True
+        tool: Literal["strict_tool"]
+        value: int
+        optional_value: Optional[int] = None
+
+    class AgentAction(BaseModel):
+        response: str
+        tool_calls: list[LooseTool | StrictTool]
+
+    unsupported = {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "maxLength",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+    }
+
+    unsupported_model_tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-4",
+    )
+    assert unsupported_model_tools is not None
+    assert all("strict" not in tool for tool in unsupported_model_tools)
+
+    tools = build_anthropic_tools_from_response_model(
+        AgentAction,
+        model="claude-sonnet-4-6",
+    )
+    assert tools is not None
+    by_name = {tool["name"]: tool for tool in tools}
+    assert "strict" not in by_name["loose_tool"]
+    assert by_name["strict_tool"]["strict"] is True
+    for node in _walk_schema(by_name["strict_tool"]["input_schema"]):
+        assert not (unsupported & set(node)), node
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False, node
+
+
+def test_pydantic_response_model_without_tool_calls_builds_synthetic_native_tool():
+    from pydantic import BaseModel, Field
+
+    class ProgressScore(BaseModel):
+        reasoning: str
+        score: float = Field(ge=0, le=1)
+
+    tools = build_anthropic_tools_from_response_model(
+        ProgressScore,
+        model="claude-sonnet-4-6",
+    )
+
+    assert tools is not None
+    assert len(tools) == 1
+    tool = tools[0]
+    assert tool["name"] == "submit_response"
+    assert "strict" not in tool
+    schema = tool["input_schema"]
+    assert schema["type"] == "object"
+    assert set(schema["required"]) == {"reasoning", "score"}
+    assert schema["properties"]["score"]["minimum"] == 0
+    assert schema["properties"]["score"]["maximum"] == 1
 
 
 # =====================================================================
@@ -849,6 +992,11 @@ async def test_claude_auth_401_rotates_and_exhausts():
     """401 → _RotateToken('auth_error'); with max_rotations=0, raises after one
     rotate attempt."""
     calls = {"n": 0}
+    marked: list[tuple[str, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, failure_reason))
+        return True
 
     def handler(req):
         calls["n"] += 1
@@ -857,7 +1005,13 @@ async def test_claude_auth_401_rotates_and_exhausts():
     set_mock_handler(handler)
 
     spec = get_pool("rose-1-lite")
-    auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=0)
+    auth = ClaudeAuthContext(
+        token="t",
+        source="user",
+        user_id="",
+        mark_rate_limited=mark,
+        max_rotations=0,
+    )
     raised = False
     try:
         await _drain(claude_auth_complete(
@@ -871,6 +1025,184 @@ async def test_claude_auth_401_rotates_and_exhausts():
         raised = True
     assert raised
     assert calls["n"] == 1
+    assert marked == [("t", "auth_error")]
+
+
+async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token():
+    """Usage-window 429 marks the exact reset time and rotates immediately."""
+    reset_at = "2099-05-05T20:15:00Z"
+    seen_tokens: list[str] = []
+    marked: list[tuple[str, int, str | None, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, cooldown_seconds, rate_limited_until, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id):
+        assert user_id == "u-1"
+        return ClaudeAuthContext(
+            token="fresh-token",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-2",
+            mark_rate_limited=mark,
+            fetch_fresh=fetch_fresh,
+            max_rotations=1,
+        )
+
+    sse_body = "\n".join(
+        _ev("message_start", {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 3}},
+        })
+        + _ev("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        + _ev("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "ok"},
+        })
+        + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + _ev("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1},
+        })
+        + _ev("message_stop", {"type": "message_stop"})
+    )
+
+    def handler(req):
+        seen_tokens.append(req.headers.get("authorization", ""))
+        if len(seen_tokens) == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": f"Claude Code usage limit reached. Your limit resets at {reset_at}."
+                    }
+                },
+                headers={"anthropic-ratelimit-unified-reset": reset_at},
+            )
+        return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    auth = ClaudeAuthContext(
+        token="old-token",
+        source="pool",
+        user_id="u-1",
+        pool_token_id="pool-1",
+        mark_rate_limited=mark,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    chunks = await _drain(claude_auth_complete(
+        pool_spec=get_pool("rose-1-lite"),
+        messages=[{"role": "user", "content": "hi"}],
+        auth=auth,
+        request_id="r-rotate-429",
+        max_tokens=16,
+    ))
+
+    assert marked == [("old-token", 300, reset_at, "rate_limit")]
+    assert seen_tokens == ["Bearer old-token", "Bearer fresh-token"]
+    assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks)
+
+
+async def test_claude_auth_429_transient_retries_before_rotating():
+    """Transient 429s retry the same token before cooldown/rotation."""
+    calls = {"n": 0}
+    marked: list[tuple[str, str | None, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
+        return True
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(
+            429,
+            json={"error": {"message": "too many requests, slow down"}},
+        )
+
+    set_mock_handler(handler)
+
+    auth = ClaudeAuthContext(
+        token="transient-token",
+        source="pool",
+        user_id="u-1",
+        mark_rate_limited=mark,
+        max_rotations=0,
+    )
+
+    raised = False
+    with patch("providers.rose.claude_auth.random.uniform", return_value=0), patch(
+        "providers.rose.claude_auth.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        try:
+            await _drain(claude_auth_complete(
+                pool_spec=get_pool("rose-1-lite"),
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth,
+                request_id="r-transient-429",
+                max_tokens=16,
+            ))
+        except RoseRateLimitError as exc:
+            raised = True
+            assert "rate_limit" in str(exc)
+
+    assert raised
+    assert calls["n"] == 3
+    assert marked == [("transient-token", None, "rate_limit")]
+
+
+async def test_claude_auth_403_usage_limit_marks_body_reset_time():
+    """Usage-limit 403 is a rate-limit rotation, not a permanent auth error."""
+    reset_at = "2099-05-05T21:30:00Z"
+    marked: list[tuple[str, str | None, str | None]] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
+        return True
+
+    def handler(req):
+        return httpx.Response(
+            403,
+            json={
+                "error": {
+                    "message": f"Claude Code usage limit reached. Your limit resets at {reset_at}."
+                }
+            },
+        )
+
+    set_mock_handler(handler)
+
+    auth = ClaudeAuthContext(
+        token="limited-token",
+        source="user",
+        user_id="u-1",
+        mark_rate_limited=mark,
+        max_rotations=0,
+    )
+    raised = False
+    try:
+        await _drain(claude_auth_complete(
+            pool_spec=get_pool("rose-1-lite"),
+            messages=[{"role": "user", "content": "hi"}],
+            auth=auth,
+            request_id="r-usage-limit",
+            max_tokens=16,
+        ))
+    except RoseRateLimitError as exc:
+        raised = True
+        assert "rate_limit" in str(exc)
+
+    assert raised
+    assert marked == [("limited-token", reset_at, "rate_limit")]
 
 
 # =====================================================================
@@ -1157,6 +1489,222 @@ async def test_parse_openai_sse_empty_stream_raises_stall():
     assert raised
 
 
+async def test_parse_responses_sse_content_and_usage():
+    lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"Hello"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":" GPT"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2}}}}',
+        "",
+        "data: [DONE]",
+    ]
+    chunks = [c async for c in parse_responses_sse(
+        _FakeStream(lines),
+        actual_model="gpt-5.4-mini-gpt",
+        pool_name="gpt-token",
+        request_id="r1",
+    )]
+    assert chunks[0].kind == "metadata"
+    assert chunks[0].data["pool_name"] == "gpt-token"
+    assert "".join(c.data.get("text", "") for c in chunks if c.kind == "content") == "Hello GPT"
+    usage = [c for c in chunks if c.kind == "usage"][0].data
+    assert usage["prompt_tokens"] == 7
+    assert usage["completion_tokens"] == 3
+    assert usage["total_tokens"] == 10
+    assert usage["cache_read_input_tokens"] == 2
+
+
+async def test_parse_responses_sse_function_call_item():
+    lines = [
+        "event: response.output_item.done",
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        "",
+        "data: [DONE]",
+    ]
+    chunks = [c async for c in parse_responses_sse(
+        _FakeStream(lines),
+        actual_model="gpt-5.4-gpt",
+        pool_name="gpt-token",
+        request_id="r-tool",
+    )]
+    tool = [c for c in chunks if c.kind == "tool_call"][0]
+    assert tool.data == {"id": "call_1", "name": "lookup", "arguments": '{"q":"x"}'}
+    assert [c for c in chunks if c.kind == "usage"][0].data["total_tokens"] == 5
+
+
+async def test_parse_responses_sse_failed_context_length_is_invalid_request():
+    lines = [
+        "event: response.failed",
+        'data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"too many tokens"}}}',
+        "",
+        "data: [DONE]",
+    ]
+    raised = False
+    try:
+        await _drain(parse_responses_sse(
+            _FakeStream(lines),
+            actual_model="gpt-5.5-gpt",
+            pool_name="gpt-token",
+            request_id="r-context",
+        ))
+    except RoseInvalidRequest:
+        raised = True
+    assert raised
+
+
+def test_build_codex_responses_body_contract():
+    pool = get_pool("rose-1-lite")
+    body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {"role": "system", "content": "be exact"},
+            {"role": "user", "content": "hi"},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "unit_test",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Search",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }
+        ],
+        temperature=0.2,
+        effort="high",
+        request_id="rid",
+    )
+    same_prompt_different_request = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {"role": "system", "content": "be exact"},
+            {"role": "user", "content": "different live input"},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "unit_test",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        temperature=0.2,
+        effort="high",
+        request_id="different-rid",
+    )
+    assert body["model"] == pool.gpt_auth_model
+    assert body["stream"] is True
+    assert body["store"] is False
+    assert "max_tokens" not in body
+    assert "max_output_tokens" not in body
+    assert "temperature" not in body
+    assert body["instructions"] == "be exact"
+    assert body["input"][0]["content"][0]["type"] == "input_text"
+    assert body["tools"][0]["name"] == "lookup"
+    assert body["text"]["format"]["name"] == "unit_test"
+    assert body["reasoning"]["effort"] == "high"
+    assert body["prompt_cache_key"].startswith("rose:")
+    assert body["prompt_cache_key"] == same_prompt_different_request["prompt_cache_key"]
+    no_system_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "hi"}],
+        request_id="no-system",
+    )
+    assert no_system_body["instructions"] == "You are a helpful assistant."
+    max_effort_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "hi"}],
+        effort="max",
+        request_id="max-effort",
+    )
+    assert max_effort_body["reasoning"]["effort"] == "xhigh"
+
+
+def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
+    pool = get_pool("rose-1-lite")
+    body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {"role": "system", "content": "be exact"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc", "detail": "high"}},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "calling",
+                "codex_reasoning_items": [{"id": "rs_1", "encrypted_content": "secret", "summary": []}],
+                "codex_message_items": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "id": "msg_1",
+                        "phase": "final",
+                        "content": [{"type": "output_text", "text": "prior"}],
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call_lookup",
+                        "function": {"name": "lookup", "arguments": {"q": "x"}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_lookup", "content": '{"ok":true}'},
+            {"role": "user", "content": "continue"},
+        ],
+        request_id="rid-tool-history",
+    )
+    input_items = body["input"]
+    assert input_items[0]["content"][1] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,abc",
+        "detail": "high",
+    }
+    assert {"type": "reasoning", "encrypted_content": "secret", "summary": []} in input_items
+    assert any(item.get("type") == "message" and item.get("id") == "msg_1" for item in input_items)
+    assert any(item.get("type") == "function_call" and item.get("call_id") == "call_lookup" for item in input_items)
+    assert any(item.get("type") == "function_call_output" and item.get("call_id") == "call_lookup" for item in input_items)
+
+
+def test_build_codex_responses_body_converts_orphan_tool_rows_to_context():
+    pool = get_pool("rose-1-lite")
+    body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {"role": "system", "content": "be exact"},
+            {"role": "user", "content": "summarize prior tool output"},
+            {"role": "tool", "tool_call_id": "missing_call", "content": "population: 123"},
+        ],
+        request_id="rid-orphan-tool",
+    )
+    input_items = body["input"]
+    assert not any(item.get("type") == "function_call_output" for item in input_items)
+    assert input_items[-1] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "[TOOL]: population: 123"}],
+    }
+
+
 # =====================================================================
 # waterfall
 # =====================================================================
@@ -1391,6 +1939,283 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     assert metadata.data.get("claude_token_error") == "auth_error"
 
 
+async def test_client_splits_pydantic_model_to_claude_native_tools():
+    AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
+
+    sse_lines = []
+    sse_lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 10}},
+    })
+    sse_lines += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "wait_for",
+            "input": {},
+        },
+    })
+    sse_lines += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": '{"condition":"package ships"}',
+        },
+    })
+    sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    sse_lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use"},
+        "usage": {"output_tokens": 5},
+    })
+    sse_lines += _ev("message_stop", {"type": "message_stop"})
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "wait until the package ships"}],
+        response_model=AgentAction,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-pydantic-native-tools",
+    ):
+        chunks.append(chunk)
+
+    assert "format" not in seen_body.get("output_config", {})
+    tools = {tool["name"]: tool for tool in seen_body["tools"]}
+    assert set(tools) == {"wait_for", "attempt_completion"}
+    assert "strict" not in tools["wait_for"]
+    wait_schema = tools["wait_for"]["input_schema"]
+    assert "tool" not in wait_schema["properties"]
+    assert wait_schema["required"] == []
+    assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
+    assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
+
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "wait_for"
+    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+
+
+async def test_client_splits_pydantic_model_to_gpt_native_tools():
+    AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
+
+    sse_lines = []
+    sse_lines += _ev("response.output_item.done", {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "call_id": "call_wait",
+            "name": "wait_for",
+            "arguments": '{"condition":"package ships"}',
+        },
+    })
+    sse_lines += _ev("response.completed", {
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            }
+        },
+    })
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "chatgpt.com/backend-api/codex/responses" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "wait until the package ships"}],
+        response_model=AgentAction,
+        gpt_auth=gpt_auth_from_token("valid-token", "acct_123"),
+        call_site="test-gpt-pydantic-native-tools",
+    ):
+        chunks.append(chunk)
+
+    assert "text" not in seen_body
+    assert seen_body["tool_choice"] == "required"
+    tools = {tool["name"]: tool for tool in seen_body["tools"]}
+    assert set(tools) == {"wait_for", "attempt_completion"}
+    assert tools["wait_for"]["parameters"]["required"] == []
+
+    metadata = next(c for c in chunks if c.kind == "metadata")
+    assert metadata.data["actual_model"].endswith("-gpt")
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "wait_for"
+    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+
+
+async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
+    from pydantic import BaseModel, Field
+
+    class ProgressScore(BaseModel):
+        reasoning: str
+        score: float = Field(ge=0, le=1)
+
+    sse_lines = []
+    sse_lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 10}},
+    })
+    sse_lines += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_submit",
+            "name": "submit_response",
+            "input": {},
+        },
+    })
+    sse_lines += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": '{"reasoning":"done","score":1}',
+        },
+    })
+    sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    sse_lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use"},
+        "usage": {"output_tokens": 5},
+    })
+    sse_lines += _ev("message_stop", {"type": "message_stop"})
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "score progress"}],
+        response_model=ProgressScore,
+        claude_auth=claude_auth_from_token("valid-token"),
+        call_site="test-pydantic-submit-tool",
+    ):
+        chunks.append(chunk)
+
+    assert "format" not in seen_body.get("output_config", {})
+    assert seen_body["tool_choice"] == {"type": "any"}
+    assert "thinking" not in seen_body
+    assert len(seen_body["tools"]) == 1
+    tool = seen_body["tools"][0]
+    assert tool["name"] == "submit_response"
+    assert "__rose_force_tool_choice" not in tool
+    assert tool["input_schema"]["properties"]["score"]["minimum"] == 0
+    assert tool["input_schema"]["properties"]["score"]["maximum"] == 1
+
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "submit_response"
+    assert json.loads(tool_call.data["arguments"]) == {"reasoning": "done", "score": 1}
+
+
+async def test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool():
+    from pydantic import BaseModel, Field
+
+    class ProgressScore(BaseModel):
+        reasoning: str
+        score: float = Field(ge=0, le=1)
+
+    sse_lines = []
+    sse_lines += _ev("response.output_item.done", {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "call_id": "call_submit",
+            "name": "submit_response",
+            "arguments": '{"reasoning":"done","score":1}',
+        },
+    })
+    sse_lines += _ev("response.completed", {
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            }
+        },
+    })
+    sse_body = "\n".join(sse_lines)
+
+    seen_body = {}
+
+    def handler(req):
+        if "chatgpt.com/backend-api/codex/responses" in str(req.url):
+            body = json.loads(req.content.decode())
+            seen_body.update(body)
+            return httpx.Response(
+                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="waterfall should not be called")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    async for chunk in client.complete(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "score progress"}],
+        response_model=ProgressScore,
+        gpt_auth=gpt_auth_from_token("valid-token", "acct_123"),
+        call_site="test-gpt-pydantic-submit-tool",
+    ):
+        chunks.append(chunk)
+
+    assert "text" not in seen_body
+    assert seen_body["tool_choice"] == "required"
+    assert len(seen_body["tools"]) == 1
+    tool = seen_body["tools"][0]
+    assert tool["name"] == "submit_response"
+    assert "__rose_force_tool_choice" not in tool
+    assert tool["parameters"]["properties"]["score"]["minimum"] == 0
+    assert tool["parameters"]["properties"]["score"]["maximum"] == 1
+
+    tool_call = next(c for c in chunks if c.kind == "tool_call")
+    assert tool_call.data["name"] == "submit_response"
+    assert json.loads(tool_call.data["arguments"]) == {"reasoning": "done", "score": 1}
+
+
 async def test_client_deadline_enforced():
     """A long-stalling stream gets capped by the top-level deadline."""
 
@@ -1591,6 +2416,7 @@ async def run_all_tests():
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)
     r.record("claude_auth_from_token_builds", test_claude_auth_from_token_builds_context)
+    r.record("gpt_auth_from_token_builds", test_gpt_auth_from_token_builds_context)
     r.record("classify_claude_token_error", test_classify_claude_token_error_each_branch)
 
     r.record("pool_registry_lookup", test_pool_registry_lookup)
@@ -1617,6 +2443,9 @@ async def run_all_tests():
     r.record("schema_collapses_addl_props", test_transform_schema_collapses_object_additionalProperties)
     r.record("schema_recurses_into_combinators", test_transform_schema_recurses_into_anyOf_oneOf_allOf_defs)
     r.record("schema_passthrough_non_dict", test_transform_schema_passthrough_non_dict)
+    r.record("pydantic_to_anthropic_native_tools", test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by_default)
+    r.record("pydantic_to_anthropic_selective_strict", test_pydantic_response_model_adds_strict_only_for_opted_in_tools)
+    r.record("pydantic_to_anthropic_synthetic_submit_tool", test_pydantic_response_model_without_tool_calls_builds_synthetic_native_tool)
 
     r.record("tool_config_explicit_tools", test_apply_tool_config_with_explicit_tools_and_choice)
     r.record("tool_config_choice_auto_specific", test_apply_tool_config_choice_auto_and_specific_tool)
@@ -1642,6 +2471,15 @@ async def run_all_tests():
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
     await r.record_async("claude_auth_401_rotates", test_claude_auth_401_rotates_and_exhausts)
+    await r.record_async(
+        "claude_auth_429_usage_window_rotates_with_reset",
+        test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token,
+    )
+    await r.record_async(
+        "claude_auth_429_transient_retries",
+        test_claude_auth_429_transient_retries_before_rotating,
+    )
+    await r.record_async("claude_auth_403_usage_limit_reset", test_claude_auth_403_usage_limit_marks_body_reset_time)
 
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
     await r.record_async("anth_sse_tool_use", test_parse_anthropic_sse_tool_use_block)
@@ -1653,6 +2491,15 @@ async def run_all_tests():
     await r.record_async("openai_sse_tool_call_assembly", test_parse_openai_sse_tool_call_assembly_across_deltas)
     await r.record_async("openai_sse_reasoning_alias", test_parse_openai_sse_reasoning_content_alias)
     await r.record_async("openai_sse_empty_stalls", test_parse_openai_sse_empty_stream_raises_stall)
+    await r.record_async("responses_sse_content_usage", test_parse_responses_sse_content_and_usage)
+    await r.record_async("responses_sse_function_call_item", test_parse_responses_sse_function_call_item)
+    await r.record_async(
+        "responses_sse_failed_context_length",
+        test_parse_responses_sse_failed_context_length_is_invalid_request,
+    )
+    r.record("codex_responses_body_contract", test_build_codex_responses_body_contract)
+    r.record("codex_body_tool_history_multimodal", test_build_codex_responses_body_preserves_tool_history_and_multimodal)
+    r.record("codex_body_orphan_tool_context", test_build_codex_responses_body_converts_orphan_tool_rows_to_context)
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
@@ -1663,6 +2510,10 @@ async def run_all_tests():
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
+    await r.record_async("client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools)
+    await r.record_async("client_pydantic_submit_tool_split", test_client_splits_plain_pydantic_model_to_forced_submit_tool)
+    await r.record_async("client_gpt_pydantic_submit_tool_split", test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
 
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)

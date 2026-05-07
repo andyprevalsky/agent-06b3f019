@@ -431,7 +431,12 @@ def _match_partial_to_full(
             path=partial.path,
             filename=filename,
         )
-        return full_fp
+        resolved = dict(full_fp)
+        # Preserve the remote session path alongside the uploaded FilePointer
+        # so parent verifiers for session_file_pointer fields can still extract
+        # the absolute /home/user/... path from grounded tool metadata.
+        resolved.setdefault("path", partial.path)
+        return resolved
 
     logger.warning(
         "[FileResolution] Could not find matching file for partial pointer",

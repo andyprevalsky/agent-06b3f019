@@ -15,7 +15,7 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, create_model
 from temporalio import activity
 
 from config import load_config
@@ -30,10 +30,17 @@ from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_t
 from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
+    ClaudeAuthContext,
+    GptAuthContext,
     RoseClient,
     RoseError,
     claude_auth_from_token,
+    gpt_auth_from_token,
     pool_for_model,
+)
+from providers.rose.schema import (
+    SYNTHETIC_OUTPUT_TOOL_NAME,
+    build_openai_response_format,
 )
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
@@ -64,6 +71,117 @@ def _safe_time() -> float:
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _build_claude_auth_context(
+    claude_token: Optional[str],
+    *,
+    source: Optional[str] = None,
+    user_id: Optional[str] = None,
+    pool_token_id: Optional[str] = None,
+    max_rotations: int = 0,
+) -> Optional[ClaudeAuthContext]:
+    """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
+    if not claude_token:
+        return None
+
+    if source not in ("user", "pool") or not user_id:
+        return claude_auth_from_token(claude_token)
+
+    async def _mark_rate_limited(
+        ctx: ClaudeAuthContext,
+        cooldown_seconds: int,
+        rate_limited_until: Optional[str] = None,
+        failure_reason: Optional[str] = None,
+    ) -> bool:
+        return await mark_compute_token_rate_limited_activity(
+            "claude",
+            ctx.source,
+            user_id=ctx.user_id,
+            pool_token_id=ctx.pool_token_id,
+            cooldown_seconds=cooldown_seconds,
+            rate_limited_until=rate_limited_until,
+            failure_reason=failure_reason,
+        )
+
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ClaudeAuthContext]:
+        result = await fetch_claude_max_token_activity(fetch_user_id)
+        if not result or not result.get("accessToken"):
+            return None
+        return _build_claude_auth_context(
+            result.get("accessToken"),
+            source=result.get("source"),
+            user_id=fetch_user_id,
+            pool_token_id=result.get("poolTokenId"),
+            max_rotations=max_rotations,
+        )
+
+    return ClaudeAuthContext(
+        token=claude_token,
+        source=source,
+        user_id=user_id,
+        pool_token_id=pool_token_id if source == "pool" else None,
+        mark_rate_limited=_mark_rate_limited,
+        fetch_fresh=_fetch_fresh if max_rotations > 0 else None,
+        max_rotations=max_rotations,
+    )
+
+
+def _build_gpt_auth_context(
+    gpt_token: Optional[str],
+    *,
+    account_id: Optional[str] = None,
+    source: Optional[str] = None,
+    user_id: Optional[str] = None,
+    pool_token_id: Optional[str] = None,
+    max_rotations: int = 0,
+) -> Optional[GptAuthContext]:
+    """Build the gptAuth context RoseClient.complete needs."""
+    if not gpt_token:
+        return None
+
+    if source not in ("user", "pool") or not user_id:
+        return gpt_auth_from_token(gpt_token, account_id)
+
+    async def _mark_rate_limited(
+        ctx: GptAuthContext,
+        cooldown_seconds: int,
+        rate_limited_until: Optional[str] = None,
+        failure_reason: Optional[str] = None,
+    ) -> bool:
+        return await mark_compute_token_rate_limited_activity(
+            "gpt",
+            ctx.source,
+            user_id=ctx.user_id,
+            pool_token_id=ctx.pool_token_id,
+            cooldown_seconds=cooldown_seconds,
+            rate_limited_until=rate_limited_until,
+            failure_reason=failure_reason,
+        )
+
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[GptAuthContext]:
+        result = await fetch_compute_token_activity(fetch_user_id)
+        if not result or result.get("type") != "gpt" or not result.get("accessToken"):
+            return None
+        return _build_gpt_auth_context(
+            result.get("accessToken"),
+            account_id=result.get("accountId"),
+            source=result.get("source"),
+            user_id=fetch_user_id,
+            pool_token_id=result.get("poolTokenId"),
+            max_rotations=max_rotations,
+        )
+
+    return GptAuthContext(
+        token=gpt_token,
+        source=source,
+        user_id=user_id,
+        account_id=account_id,
+        pool_token_id=pool_token_id if source == "pool" else None,
+        mark_rate_limited=_mark_rate_limited if max_rotations > 0 else None,
+        fetch_fresh=_fetch_fresh if max_rotations > 0 else None,
+        max_rotations=max_rotations,
+    )
 
 
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
@@ -1095,6 +1213,14 @@ async def call_llm_structured_streaming(  # noqa: C901
         Callable[[int], Awaitable[None]]
     ] = None,  # Called with total accumulated bytes (reasoning + json)
     claude_token: Optional[str] = None,  # User's Claude OAuth token — passed to Rose endpoint for direct Anthropic call
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
@@ -1155,13 +1281,6 @@ async def call_llm_structured_streaming(  # noqa: C901
             f"📤 [{request_id}] [{call_site}] Streaming Rose model in-process: {model} pool={pool} skip_cache_write={skip_cache_write}"
         )
 
-        # Build JSON schema from Pydantic model
-        schema = prepare_schema_for_openai(response_model)
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {"name": response_model.__name__, "schema": schema, "strict": True},
-        }
-
         # Stream state
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
         accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
@@ -1172,6 +1291,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         pool_name = "unknown"
         pool_size = 0  # No longer surfaced by RoseClient; preserved in usage shape for compat
         claude_token_error: Optional[str] = None  # Set when claudeAuth fell through to waterfall
+        gpt_token_error: Optional[str] = None  # Set when gptAuth fell through to waterfall
         final_finish_reason = ""  # From usage chunk (parsers normalize to OpenAI vocabulary)
         was_cancelled = False
         chunk_count = 0
@@ -1183,6 +1303,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         # we rebuild the {reasoning, response, tool_calls} envelope into
         # `accumulated_json` after the stream so the existing parser works.
         using_claude_auth = False
+        using_native_direct_tools = False
         text_buffer = ""
         tool_use_blocks: List[Dict[str, Any]] = []
 
@@ -1206,17 +1327,31 @@ async def call_llm_structured_streaming(  # noqa: C901
         ttft_logged = False
 
         rose_client = RoseClient()
+        claude_auth_context = _build_claude_auth_context(
+            claude_token,
+            source=claude_token_source,
+            user_id=claude_token_user_id,
+            pool_token_id=claude_token_pool_id,
+        )
+        gpt_auth_context = _build_gpt_auth_context(
+            gpt_token,
+            account_id=gpt_account_id,
+            source=gpt_token_source,
+            user_id=gpt_token_user_id,
+            pool_token_id=gpt_token_pool_id,
+        )
 
         try:
             async for chunk in rose_client.complete(
                 pool=pool,
                 messages=messages,
-                response_format=response_format,
+                response_model=response_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=model_seed,
                 skip_cache_write=skip_cache_write,
-                claude_auth=claude_auth_from_token(claude_token),
+                claude_auth=claude_auth_context,
+                gpt_auth=gpt_auth_context,
                 agent_id=agent_id,
                 request_id=request_id,
                 call_site=call_site,
@@ -1236,6 +1371,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     if chunk.data.get("actual_model"):
                         actual_model = chunk.data["actual_model"]
                         using_claude_auth = actual_model.endswith("-claude")
+                        using_native_direct_tools = (
+                            using_claude_auth or actual_model.endswith("-gpt")
+                        )
                         logger.info(
                             f"🎯 Rose model selected: {actual_model} (claudeAuth={using_claude_auth})"
                         )
@@ -1246,6 +1384,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     if chunk.data.get("claude_token_error") and not claude_token_error:
                         claude_token_error = chunk.data["claude_token_error"]
                         logger.warning(f"⚠️ Claude token error from Rose: {claude_token_error}")
+                    if chunk.data.get("gpt_token_error") and not gpt_token_error:
+                        gpt_token_error = chunk.data["gpt_token_error"]
+                        logger.warning(f"⚠️ GPT token error from Rose: {gpt_token_error}")
                     continue
 
                 if kind == "usage":
@@ -1258,7 +1399,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     continue
 
                 if kind == "tool_call":
-                    # Native Anthropic tool from claudeAuth — buffer for envelope rebuild.
+                    # Native direct-token tool call — buffer for envelope rebuild.
                     args_raw = chunk.data.get("arguments", "")
                     try:
                         parsed_args = json.loads(args_raw) if args_raw else {}
@@ -1284,7 +1425,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                         )
                         await on_tool_detected(tool_name, tool_call_id)
 
-                    # send_message_to_user on the claudeAuth path arrives complete; emit
+                    # send_message_to_user on the native direct-token path arrives complete; emit
                     # the full message immediately rather than streaming partials.
                     if on_attention_stream and tool_name == "send_message_to_user":
                         attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
@@ -1310,8 +1451,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                     accumulated_reasoning += reasoning_delta
 
                 if content:
-                    if using_claude_auth:
-                        # claudeAuth text precedes any tool_use blocks; treat as
+                    if using_native_direct_tools:
+                        # Native direct-token text precedes any tool_use blocks; treat as
                         # the eventual response text and emit incrementally.
                         text_buffer += content
                         if first_response_chunk is None:
@@ -1347,7 +1488,7 @@ async def call_llm_structured_streaming(  # noqa: C901
 
                 # Tool detection on waterfall path — regex-scan accumulated_json.
                 if (
-                    not using_claude_auth
+                    not using_native_direct_tools
                     and on_tool_detected
                     and '"tool_calls"' in accumulated_json
                 ):
@@ -1387,7 +1528,7 @@ async def call_llm_structured_streaming(  # noqa: C901
 
                 # Attention streaming on waterfall path — progressive partial emit.
                 if (
-                    not using_claude_auth
+                    not using_native_direct_tools
                     and on_attention_stream
                     and '"send_message_to_user"' in accumulated_json
                 ):
@@ -1415,8 +1556,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                             )
 
                 # Streaming text deltas to caller.
-                if using_claude_auth:
-                    # claudeAuth: text_buffer is the response text directly.
+                if using_native_direct_tools:
+                    # Native direct-token path: text_buffer is the response text directly.
                     if text_buffer and text_buffer != last_emitted_text:
                         last_emitted_text = text_buffer
                         pending_delta = len(text_buffer) - len(last_emitted_for_chunk)
@@ -1439,7 +1580,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                         phase = "reasoning"
                     elif detected_tools_ordered:
                         phase = f"tool:{detected_tools_ordered[-1][0]}"
-                    elif using_claude_auth and text_buffer:
+                    elif using_native_direct_tools and text_buffer:
                         phase = "response"
                     elif '"response"' in accumulated_json:
                         phase = "response"
@@ -1463,14 +1604,14 @@ async def call_llm_structured_streaming(  # noqa: C901
             )
             raise ValueError(f"Rose streaming failed: {exc}") from exc
 
-        # On the claudeAuth path, rebuild the response-model JSON once the
+        # On the native direct-token path, rebuild the response-model JSON once the
         # stream is fully drained. The shape depends on the caller's schema:
         #   - Agent envelope `{reasoning, response, tool_calls}`: merge native
         #     text + tool_use blocks via reconstruct_agent_response.
         #   - Any other schema (PlannerResponse, ReasoningResponse, etc.): serialize
         #     the first tool's `input` dict directly. The verifier path at
         #     `_call_llm_verifier` does the same.
-        if not was_cancelled and using_claude_auth:
+        if not was_cancelled and using_native_direct_tools:
             model_fields = set(response_model.model_fields.keys())
             is_agent_envelope = {"response", "tool_calls"}.issubset(model_fields)
             if tool_use_blocks:
@@ -1506,6 +1647,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
+                    "gpt_token_error": gpt_token_error,
+                    "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
                     "cancelled": True,
                 }
             else:
@@ -1517,6 +1660,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "pool_name": pool_name,
                     "pool_size": pool_size,
                     "claude_token_error": claude_token_error,
+                    "gpt_token_error": gpt_token_error,
+                    "claude_token_rotated": False,
                     "cancelled": True,
                 }
             return empty_response, usage, detected_tools_ordered
@@ -1563,6 +1708,14 @@ async def call_llm_structured_streaming(  # noqa: C901
                 on_attention_stream=on_attention_stream,
                 on_raw_progress=on_raw_progress,
                 claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                claude_token_user_id=claude_token_user_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=gpt_token_user_id,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -1575,11 +1728,11 @@ async def call_llm_structured_streaming(  # noqa: C901
             )
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
-        # The claudeAuth path streams text_buffer directly (no reasoning prefix),
+        # The native direct-token path streams text_buffer directly (no reasoning prefix),
         # so the final flush must match: otherwise delta-tracking consumers (e.g.
         # call_llm_activity) see the final chunk jump to "reasoning + text" and
         # compute the wrong slice offset.
-        if using_claude_auth:
+        if using_native_direct_tools:
             response_text = text_buffer or None
         else:
             response_text = _extract_response_from_partial_json(
@@ -1773,6 +1926,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_name": pool_name,
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
+                "gpt_token_error": gpt_token_error,
+                "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
                 "cancelled": False,
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
@@ -1787,6 +1942,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "pool_name": pool_name,
                 "pool_size": pool_size,
                 "claude_token_error": claude_token_error,
+                "gpt_token_error": gpt_token_error,
+                "claude_token_rotated": False,
                 "cancelled": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -2092,7 +2249,16 @@ async def call_llm(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     response_format: Optional[Dict] = None,
+    response_model: Optional[Type[BaseModel]] = None,
     claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
@@ -2120,23 +2286,32 @@ async def call_llm(
         messages = await resolve_pointers_in_messages(
             messages,
             local_context=local_context,
-            user_id=user_id,
+            user_id=user_id or claude_token_user_id or gpt_token_user_id,
         )
 
         config = load_config()
         model = model or config.openrouter.model
+
+        if response_format is not None and response_model is not None:
+            raise ValueError("call_llm accepts either response_model or response_format, not both")
+
+        effective_response_format = response_format
+        if response_model is not None:
+            effective_response_format = build_openai_response_format(response_model)
 
         dump_llm_context(
             call_site=call_site,
             messages=messages,
             agent_id=agent_id,
             model=model,
-            response_format=response_format,
+            response_format=effective_response_format,
             extra={
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "skip_cache_write": skip_cache_write,
                 "has_claude_token": claude_token is not None,
+                "has_gpt_token": gpt_token is not None,
+                "response_model": response_model.__name__ if response_model else None,
             },
         )
 
@@ -2151,15 +2326,29 @@ async def call_llm(
             )
 
             rose_client = RoseClient()
+            claude_auth_context = _build_claude_auth_context(
+                claude_token,
+                source=claude_token_source,
+                user_id=claude_token_user_id,
+                pool_token_id=claude_token_pool_id,
+            )
+            gpt_auth_context = _build_gpt_auth_context(
+                gpt_token,
+                account_id=gpt_account_id,
+                source=gpt_token_source,
+                user_id=gpt_token_user_id,
+                pool_token_id=gpt_token_pool_id,
+            )
             try:
                 rose_response = await rose_client.collect(
                     pool=pool,
                     messages=messages,
-                    response_format=response_format,
+                    response_model=response_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     skip_cache_write=skip_cache_write,
-                    claude_auth=claude_auth_from_token(claude_token),
+                    claude_auth=claude_auth_context,
+                    gpt_auth=gpt_auth_context,
                     agent_id=agent_id,
                     request_id=request_id,
                     call_site=call_site,
@@ -2173,6 +2362,11 @@ async def call_llm(
                 raise ValueError(f"Rose call failed: {exc}") from exc
 
             content = rose_response.content
+            if response_model is not None:
+                content = _content_from_structured_rose_response(
+                    rose_response.tool_calls,
+                    response_model,
+                ) or content
             usage = rose_response.usage or {}
 
             result = {
@@ -2186,6 +2380,11 @@ async def call_llm(
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "actual_model": rose_response.actual_model or model,
+                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "claude_token_error": rose_response.claude_token_error,
+                    "gpt_token_error": rose_response.gpt_token_error,
                 },
             }
 
@@ -2210,7 +2409,7 @@ async def call_llm(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=response_format,
+            response_format=effective_response_format,
         )
 
         # Log full response to debug
@@ -2222,6 +2421,8 @@ async def call_llm(
         )
 
         content = response.choices[0].message.content or ""
+        if response_model is not None and content:
+            content = response_model.model_validate_json(content).model_dump_json()
 
         result = {
             "content": content,
@@ -2249,6 +2450,31 @@ async def call_llm(
         raise
 
 
+def _content_from_structured_rose_response(
+    tool_calls: List[Dict[str, Any]],
+    response_model: Type[BaseModel],
+) -> Optional[str]:
+    for tool_call in tool_calls:
+        if tool_call.get("name") != SYNTHETIC_OUTPUT_TOOL_NAME:
+            continue
+        arguments = tool_call.get("arguments") or ""
+        if not isinstance(arguments, str) or not arguments:
+            continue
+        try:
+            validated = response_model.model_validate_json(arguments)
+            return validated.model_dump_json()
+        except Exception:
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict) and set(parsed) == {"value"}:
+                    validated = response_model.model_validate(parsed["value"])
+                    return validated.model_dump_json()
+            except Exception:
+                pass
+            return arguments
+    return None
+
+
 # NOTE: decide_next_action was removed - it was dead code (never called)
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
@@ -2259,6 +2485,14 @@ async def _call_llm_verifier(  # noqa: C901
     config: Any,
     response_schema: Optional[Dict[str, Any]] = None,
     claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -2291,6 +2525,7 @@ async def _call_llm_verifier(  # noqa: C901
         f"all verifier paths must go through check_progress, which forces rose-1-ultra."
     )
 
+    response_model = _build_verifier_response_model(response_schema)
     response_format = _build_verifier_json_schema(response_schema)
 
     dump_llm_context(
@@ -2307,20 +2542,35 @@ async def _call_llm_verifier(  # noqa: C901
     actual_model = "unknown"
     pool_name = "unknown"
     claude_token_error: Optional[str] = None
+    gpt_token_error: Optional[str] = None
     tool_use_blocks: List[Dict[str, Any]] = []
     chunk_count = 0
     stream_usage: Optional[Dict[str, Any]] = None
 
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     rose_client = RoseClient()
+    claude_auth_context = _build_claude_auth_context(
+        claude_token,
+        source=claude_token_source,
+        user_id=claude_token_user_id,
+        pool_token_id=claude_token_pool_id,
+    )
+    gpt_auth_context = _build_gpt_auth_context(
+        gpt_token,
+        account_id=gpt_account_id,
+        source=gpt_token_source,
+        user_id=gpt_token_user_id,
+        pool_token_id=gpt_token_pool_id,
+    )
     try:
         async for chunk in rose_client.complete(
             pool=pool,
             messages=messages,
-            response_format=response_format,
+            response_model=response_model,
             temperature=0.3,
             max_tokens=4096,
-            claude_auth=claude_auth_from_token(claude_token),
+            claude_auth=claude_auth_context,
+            gpt_auth=gpt_auth_context,
             agent_id=agent_id,
             request_id=verifier_request_id,
             call_site=call_site,
@@ -2336,6 +2586,9 @@ async def _call_llm_verifier(  # noqa: C901
                 if chunk.data.get("claude_token_error") and not claude_token_error:
                     claude_token_error = chunk.data["claude_token_error"]
                     logger.warning(f"⚠️ Verifier claude token error: {claude_token_error}")
+                if chunk.data.get("gpt_token_error") and not gpt_token_error:
+                    gpt_token_error = chunk.data["gpt_token_error"]
+                    logger.warning(f"⚠️ Verifier GPT token error: {gpt_token_error}")
             elif kind == "content":
                 accumulated_json += chunk.data.get("text", "")
             elif kind == "reasoning":
@@ -2398,7 +2651,13 @@ async def _call_llm_verifier(  # noqa: C901
     if not json_content:
         raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
 
-    parsed = json.loads(json_content)
+    parsed_json = json.loads(json_content)
+    parsed_json = _fill_missing_verifier_output_from_messages(
+        parsed_json,
+        response_schema,
+        messages,
+    )
+    parsed = response_model.model_validate(parsed_json).model_dump()
 
     usage = {
         "prompt_tokens": prompt_toks,
@@ -2407,11 +2666,242 @@ async def _call_llm_verifier(  # noqa: C901
         "actual_model": actual_model,
         "pool_name": pool_name,
         "claude_token_error": claude_token_error,
+        "gpt_token_error": gpt_token_error,
+        "claude_token_rotated": stream_usage.get("claude_token_rotated", False) if stream_usage else False,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }
 
     return parsed, usage
+
+
+def _extract_structured_responses_from_verifier_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract JSON objects copied into verifier context as `Structured Response` blocks."""
+    decoder = json.JSONDecoder()
+    responses: List[Dict[str, Any]] = []
+
+    def iter_text_parts(content: Any) -> List[str]:
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            return parts
+        return []
+
+    for message in messages:
+        for text in iter_text_parts(message.get("content")):
+            start = 0
+            while True:
+                marker_index = text.find("Structured Response:", start)
+                if marker_index == -1:
+                    break
+                json_start = marker_index + len("Structured Response:")
+                try:
+                    candidate, consumed = decoder.raw_decode(text[json_start:].lstrip())
+                except json.JSONDecodeError:
+                    start = json_start
+                    continue
+                if isinstance(candidate, dict):
+                    responses.append(candidate)
+                start = json_start + consumed
+
+    return responses
+
+
+def _fill_missing_verifier_output_from_messages(
+    parsed_json: Any,
+    response_schema: Optional[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+) -> Any:
+    """Fill missing verifier output fields from grounded tool structured responses.
+
+    The verifier is still required to return valid JSON. This only completes
+    fields it omitted when the same field is present in a prior tool result
+    serialized into the verifier context.
+    """
+    if not response_schema or not response_schema.get("fields") or not isinstance(parsed_json, dict):
+        return parsed_json
+
+    required_names = [
+        field.get("name")
+        for field in response_schema.get("fields", [])
+        if isinstance(field, dict) and isinstance(field.get("name"), str)
+    ]
+    if not required_names:
+        return parsed_json
+
+    output = parsed_json.get("output")
+    if not isinstance(output, dict):
+        output = {}
+        parsed_json["output"] = output
+
+    missing_names = [name for name in required_names if name not in output]
+    if not missing_names:
+        return parsed_json
+
+    candidates = _extract_structured_responses_from_verifier_messages(messages)
+    filled: List[str] = []
+    for name in missing_names:
+        for candidate in reversed(candidates):
+            source = candidate.get("output") if isinstance(candidate.get("output"), dict) else candidate
+            if isinstance(source, dict) and name in source:
+                output[name] = source[name]
+                filled.append(name)
+                break
+
+    if filled:
+        logger.info(
+            "Filled missing verifier output fields from structured tool response",
+            fields=filled,
+        )
+
+    return parsed_json
+
+
+def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
+    if not response_schema or not isinstance(response_schema.get("fields"), list):
+        return []
+    return [
+        field.get("name")
+        for field in response_schema.get("fields", [])
+        if isinstance(field, dict) and isinstance(field.get("name"), str) and field.get("name")
+    ]
+
+
+def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
+    if value is None:
+        return False
+    if field_type in ("file_pointer", "session_file_pointer"):
+        return isinstance(value, dict) and any(value.get(key) for key in ("id", "path", "storage_path"))
+    if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
+        return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
+    return True
+
+
+def _structured_response_satisfies_schema(
+    structured_response: Any,
+    response_schema: Optional[Dict[str, Any]],
+) -> bool:
+    if not isinstance(structured_response, dict):
+        return False
+    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
+    if not fields:
+        return False
+    for field in fields:
+        if not isinstance(field, dict):
+            return False
+        name = field.get("name")
+        if not isinstance(name, str) or name not in structured_response:
+            return False
+        if not _has_schema_value(structured_response.get(name), field.get("type")):
+            return False
+    return True
+
+
+def _completed_code_task_structured_response(
+    context: List[Dict[str, Any]],
+    response_schema: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a completed code subtask's structured output when it covers the schema.
+
+    This is deliberately narrow: only finished spawn_claude_code_agent task
+    completion messages qualify. The child code tool already ran its own
+    verifier or evidence-based fallback, so the parent verifier can accept the
+    grounded structured response instead of retrying on verifier transport
+    timeouts.
+    """
+    if not context or not response_schema:
+        return None
+
+    for message in reversed(context):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_claude_code_agent":
+            continue
+        if metadata.get("toolStatus") != "FINISHED" or metadata.get("action_type") != "task_complete":
+            continue
+        structured_response = metadata.get("structured_response")
+        if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
+            structured_response = structured_response["output"]
+        if _structured_response_satisfies_schema(structured_response, response_schema):
+            return structured_response
+
+    return None
+
+
+def _build_verifier_response_model(
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> Type[BaseModel]:
+    """Build the verifier's Pydantic contract for RoseClient.complete."""
+    fields: Dict[str, Any] = {}
+    openai_strict = True
+
+    if response_schema and response_schema.get("fields"):
+        output_fields: Dict[str, Any] = {}
+        for field in response_schema["fields"]:
+            if field.get("type") in ("object", "list[object]"):
+                openai_strict = False
+            annotation = _verifier_field_annotation(field.get("type"))
+            output_fields[field["name"]] = (
+                annotation,
+                Field(..., description=field.get("description", "")),
+            )
+        output_model = create_model("VerifierOutput", **output_fields)
+        fields["output"] = (output_model, ...)
+
+    fields["reasoning"] = (
+        str,
+        Field(
+            ...,
+            description=(
+                "Detailed walk-through anchored in tool messages. When score < 1.0, "
+                "name the missing fields or missing goal evidence."
+            ),
+        ),
+    )
+    fields["score"] = (
+        float,
+        Field(..., description="Final numeric commitment from 0.0 to 1.0."),
+    )
+
+    name = "ProgressScoreWithOutput" if response_schema else "ProgressScore"
+    model = create_model(name, **fields)
+    setattr(model, "rose_openai_strict", openai_strict)
+    return model
+
+
+def _verifier_field_annotation(field_type: Optional[str]) -> Any:
+    if field_type == "str":
+        return str
+    if field_type == "int":
+        return int
+    if field_type == "float":
+        return float
+    if field_type == "bool":
+        return bool
+    if field_type == "list[str]":
+        return List[str]
+    if field_type == "list[int]":
+        return List[int]
+    if field_type == "object":
+        return Dict[str, Any]
+    if field_type == "list[object]":
+        return List[Dict[str, Any]]
+    if field_type == "file_pointer":
+        return FilePointer
+    if field_type == "list[file_pointer]":
+        return List[FilePointer]
+    if field_type == "session_file_pointer":
+        return Dict[str, str]
+    if field_type == "list[session_file_pointer]":
+        return List[Dict[str, str]]
+    return str
 
 
 def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2626,7 +3116,10 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     }
     required.append("reasoning")
 
-    properties["score"] = {"type": "number", "minimum": 0, "maximum": 1}
+    properties["score"] = {
+        "type": "number",
+        "description": "Final numeric commitment from 0.0 to 1.0.",
+    }
     required.append("score")
 
     return {
@@ -2659,6 +3152,14 @@ async def check_progress(  # noqa: C901
     claude_token: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal. Canonical entry point — all
@@ -2757,6 +3258,37 @@ async def check_progress(  # noqa: C901
         # claude-code verifier_context). No filtering here — see docstring.
         _safe_heartbeat("Checking progress with LLM judge")
 
+        if call_site == "verifier_execute" and schema_for_call:
+            completed_code_output = _completed_code_task_structured_response(context, schema_for_call)
+            if completed_code_output is not None:
+                field_names = _schema_field_names(schema_for_call)
+                reasoning = (
+                    "A completed code sandbox task returned a grounded structured response "
+                    f"covering the required fields: {', '.join(field_names)}."
+                )
+                logger.info(
+                    "Progress satisfied by completed code task structured response",
+                    fields=field_names,
+                    call_site=call_site,
+                )
+                return {
+                    "score": 1.0,
+                    "reasoning": reasoning,
+                    "message": f"{reasoning}\n\nScore: 1.0",
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "actual_model": "structured_response",
+                        "pool_name": "completed_code_task",
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "claude_token_error": None,
+                        "gpt_token_error": None,
+                    },
+                    "structured_response": completed_code_output,
+                }
+
         config = load_config()
         system_prompt = verifier_system_prompt
 
@@ -2794,6 +3326,14 @@ async def check_progress(  # noqa: C901
                     config,
                     schema_for_call,
                     claude_token=claude_token,
+                    claude_token_source=claude_token_source,
+                    claude_token_pool_id=claude_token_pool_id,
+                    claude_token_user_id=claude_token_user_id,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
+                    gpt_token_user_id=gpt_token_user_id,
                     call_site=call_site,
                     agent_id=agent_id,
                 )
@@ -2858,6 +3398,7 @@ async def check_progress(  # noqa: C901
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
                 "claude_token_error": None,
+                "gpt_token_error": None,
             },
             "structured_response": None,
         }
@@ -2881,6 +3422,14 @@ async def call_llm_activity(  # noqa: C901
     skip_cache_write: bool = False,
     include_attempt_completion_result: bool = False,
     llm_only_user_preamble: str = "",
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -2980,15 +3529,23 @@ async def call_llm_activity(  # noqa: C901
             include_attempt_completion_result=include_attempt_completion_result,
         )
 
-        # _is_claude detected from actual_model in stream response, not from input model/token
+        # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it
+        _is_gpt = [False]
 
         def on_model_detected(actual_model: str):
             # "-claude" suffix = user's own Claude token ($0, skipped the waterfall)
             # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
+            is_user_gpt = actual_model.endswith("-gpt")
             _is_claude[0] = is_user_claude
-            logger.info(f"🎨 Claude detection: actual_model={actual_model}, is_claude={is_user_claude}")
+            _is_gpt[0] = is_user_gpt
+            logger.info(
+                "🎨 Direct-token detection",
+                actual_model=actual_model,
+                is_claude=is_user_claude,
+                is_gpt=is_user_gpt,
+            )
 
         # Streaming callback - posts directly to Supabase Realtime
         sequence = [0]
@@ -3007,6 +3564,7 @@ async def call_llm_activity(  # noqa: C901
                         sequence=sequence[0],
                         sub_agent_id=task_id,
                         is_claude=_is_claude[0],
+                        is_gpt=_is_gpt[0],
                     )
                     sequence[0] += 1
                 last_text[0] = text_so_far
@@ -3033,6 +3591,14 @@ async def call_llm_activity(  # noqa: C901
             agent_id=agent_id,
             on_tool_detected=on_tool_detected_callback,
             claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
             on_model_detected=on_model_detected,
             call_site=call_site,
             skip_cache_write=skip_cache_write,
@@ -3052,6 +3618,7 @@ async def call_llm_activity(  # noqa: C901
                     sequence=sequence[0],
                     sub_agent_id=task_id,
                     is_claude=_is_claude[0],
+                    is_gpt=_is_gpt[0],
                 )
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {e}")
@@ -3266,11 +3833,95 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
 
 
 @activity.defn
+async def fetch_gpt_code_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a GPT/Codex OAuth token for a user from the backend."""
+    config = load_config()
+    _safe_heartbeat("Fetching GPT token")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{config.backend.api_url}/api/integrations/gpt-code/credentials/token",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                },
+                timeout=15.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                token = data.get("accessToken")
+                if token:
+                    source = data.get("source", "user")
+                    logger.info(f"✅ GPT token fetched for user {user_id} (source={source})")
+                    return {
+                        "accessToken": token,
+                        "accountId": data.get("accountId"),
+                        "source": source,
+                        "poolTokenId": data.get("poolTokenId"),
+                    }
+            elif response.status_code == 404:
+                logger.info(f"GPT credentials not found for user {user_id}")
+            else:
+                logger.warning(f"GPT token fetch failed: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch GPT token: {e}")
+
+    return None
+
+
+@activity.defn
+async def fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch one provider-typed compute token across Claude/GPT from the backend."""
+    config = load_config()
+    _safe_heartbeat("Fetching compute token")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                },
+                timeout=15.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                token = data.get("accessToken")
+                provider_type = data.get("type")
+                if token and provider_type in ("claude", "gpt"):
+                    logger.info(
+                        "✅ Compute token fetched",
+                        user_id=user_id,
+                        type=provider_type,
+                        source=data.get("source", "user"),
+                    )
+                    return {
+                        "type": provider_type,
+                        "accessToken": token,
+                        "accountId": data.get("accountId"),
+                        "source": data.get("source", "user"),
+                        "poolTokenId": data.get("poolTokenId"),
+                    }
+            elif response.status_code == 404:
+                logger.info(f"Compute credentials not found for user {user_id}")
+            else:
+                logger.warning(f"Compute token fetch failed: {response.status_code}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch compute token: {e}")
+
+    return None
+
+
+@activity.defn
 async def mark_claude_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
+    rate_limited_until: Optional[str] = None,
+    failure_reason: Optional[str] = None,
 ) -> bool:
     """
     Mark the current Claude token as rate-limited in the backend for a cooldown period.
@@ -3284,14 +3935,16 @@ async def mark_claude_token_rate_limited_activity(
     rateLimitedUntil passes. This is NOT a permanent disable.
     """
     config = load_config()
-    rate_limited_until = (
+    effective_rate_limited_until = rate_limited_until or (
         datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
     ).isoformat().replace("+00:00", "Z")
 
     body: Dict[str, Any] = {
         "source": source,
-        "rateLimitedUntil": rate_limited_until,
+        "rateLimitedUntil": effective_rate_limited_until,
     }
+    if failure_reason:
+        body["failureReason"] = failure_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
     if source == "user":
@@ -3311,7 +3964,7 @@ async def mark_claude_token_rate_limited_activity(
             )
             if response.status_code == 200:
                 logger.info(
-                    f"✅ Marked {source} Claude token rate-limited until {rate_limited_until}"
+                    f"✅ Marked {source} Claude token rate-limited until {effective_rate_limited_until}"
                 )
                 return True
             logger.warning(
@@ -3319,6 +3972,116 @@ async def mark_claude_token_rate_limited_activity(
             )
     except Exception as e:
         logger.warning(f"Error marking token rate-limited: {e}")
+
+    return False
+
+
+@activity.defn
+async def mark_compute_token_rate_limited_activity(
+    token_type: str,
+    source: str,
+    user_id: str,
+    pool_token_id: Optional[str] = None,
+    cooldown_seconds: int = 5 * 60,
+    rate_limited_until: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+) -> bool:
+    """Mark the selected provider-typed compute token rate-limited in backend."""
+    config = load_config()
+    effective_rate_limited_until = rate_limited_until or (
+        datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+    ).isoformat().replace("+00:00", "Z")
+
+    body: Dict[str, Any] = {
+        "type": token_type,
+        "source": source,
+        "rateLimitedUntil": effective_rate_limited_until,
+    }
+    if failure_reason:
+        body["failureReason"] = failure_reason
+    if source == "pool" and pool_token_id:
+        body["poolTokenId"] = pool_token_id
+    if source == "user":
+        body["userId"] = user_id
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/integrations/compute-code/token/rate-limited",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                logger.info(
+                    "✅ Marked compute token rate-limited",
+                    type=token_type,
+                    source=source,
+                    rate_limited_until=effective_rate_limited_until,
+                    failure_reason=failure_reason,
+                )
+                return True
+            logger.warning(
+                f"Failed to mark compute token rate-limited: {response.status_code} {response.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Error marking compute token rate-limited: {e}")
+
+    return False
+
+
+@activity.defn
+async def mark_gpt_token_rate_limited_activity(
+    source: str,
+    user_id: str,
+    pool_token_id: Optional[str] = None,
+    cooldown_seconds: int = 5 * 60,
+    rate_limited_until: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+) -> bool:
+    """Mark the current GPT token as rate-limited in the backend."""
+    config = load_config()
+    effective_rate_limited_until = rate_limited_until or (
+        datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+    ).isoformat().replace("+00:00", "Z")
+
+    body: Dict[str, Any] = {
+        "source": source,
+        "rateLimitedUntil": effective_rate_limited_until,
+    }
+    if failure_reason:
+        body["failureReason"] = failure_reason
+    if source == "pool" and pool_token_id:
+        body["poolTokenId"] = pool_token_id
+    if source == "user":
+        body["userId"] = user_id
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/integrations/gpt-code/token/rate-limited",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "X-User-Id": user_id,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                logger.info(
+                    f"✅ Marked {source} GPT token rate-limited until {effective_rate_limited_until}"
+                )
+                return True
+            logger.warning(
+                f"Failed to mark GPT token rate-limited: {response.status_code} {response.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Error marking GPT token rate-limited: {e}")
 
     return False
 
@@ -3334,6 +4097,14 @@ async def call_planner_llm_activity(
     claude_max_token: Optional[str] = None,
     agent_id: Optional[str] = None,
     tool_call_id: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -3382,7 +4153,10 @@ async def call_planner_llm_activity(
         full_messages = inject_llm_only_user_preamble(full_messages, schema_preamble)
 
     # Resolve context pointers
-    full_messages = await resolve_pointers_in_messages(full_messages)
+    full_messages = await resolve_pointers_in_messages(
+        full_messages,
+        user_id=claude_token_user_id or gpt_token_user_id,
+    )
 
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
     logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
@@ -3420,6 +4194,14 @@ async def call_planner_llm_activity(
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
             claude_token=claude_max_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
             skip_cache_write=False,
             call_site="planner",
             effort="max",

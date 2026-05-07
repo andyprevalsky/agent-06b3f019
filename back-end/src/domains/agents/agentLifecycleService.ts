@@ -8,7 +8,6 @@ import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPri
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { setResponseSchema } from '../../providers/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
-import { fetchClaudeTokenForUser } from '../../providers/claudeCredentials';
 import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
@@ -171,26 +170,23 @@ async function startChatMode(
       });
     });
 
-  const claudeToken = (await fetchClaudeTokenForUser(userId)) ?? undefined;
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model, claudeToken }).catch(
-    (err: unknown) => {
-      log.error('Chat handler error', {
-        agent_id: agentDbId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      repo
-        .failAgentIfStillActive(
-          agentDbId,
-          'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
-        )
-        .catch((updateErr: unknown) =>
-          log.error('Failed to update agent status', {
-            agent_id: agentDbId,
-            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-          })
-        );
-    }
-  );
+  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
+    log.error('Chat handler error', {
+      agent_id: agentDbId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    repo
+      .failAgentIfStillActive(
+        agentDbId,
+        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+      )
+      .catch((updateErr: unknown) =>
+        log.error('Failed to update agent status', {
+          agent_id: agentDbId,
+          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+        })
+      );
+  });
 }
 /* c8 ignore stop */
 

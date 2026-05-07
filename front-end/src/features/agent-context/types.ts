@@ -9,6 +9,8 @@ export interface StreamingBubble {
   subAgentId?: string;
   /** True when the streaming model is Claude (Anthropic) */
   isClaude?: boolean;
+  /** True when the streaming model is direct GPT/Codex */
+  isGpt?: boolean;
 }
 
 export interface StreamingPlan {

@@ -24,6 +24,7 @@ interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
   isIMessageAvailable: boolean;
   isClaudeCodeAvailable: boolean;
+  isGptCodeAvailable: boolean;
   isFullySignedIn: boolean;
   accordion: ReturnType<typeof useAccordion>;
   data: ReturnType<typeof useIntegrationData>;
@@ -36,10 +37,39 @@ interface IntegrationSectionsProps {
   actions: ReturnType<typeof useIntegrationActions>;
 }
 
+function ComputeIntegrationSection({
+  isClaudeCodeAvailable,
+  isGptCodeAvailable,
+  accordion,
+  data,
+  compute,
+  actions,
+}: Pick<
+  IntegrationSectionsProps,
+  'isClaudeCodeAvailable' | 'isGptCodeAvailable' | 'accordion' | 'data' | 'compute' | 'actions'
+>) {
+  return (
+    <ComputeSection
+      expanded={accordion.computeExpanded}
+      onToggle={() => accordion.toggleSection('compute')}
+      isClaudeCodeAvailable={isClaudeCodeAvailable}
+      isGptCodeAvailable={isGptCodeAvailable}
+      claudeCodeSynced={data.claudeCodeSynced}
+      gptCodeSynced={data.gptCodeSynced}
+      claudeCodeSyncLoading={compute.claudeCodeSyncLoading}
+      gptCodeSyncLoading={compute.gptCodeSyncLoading}
+      claudeCodeStatus={compute.claudeCodeStatus}
+      onClaudeCodeSync={() => void actions.onClaudeCodeSync()}
+      onGptCodeSync={() => void actions.onGptCodeSync()}
+    />
+  );
+}
+
 export default function IntegrationSections({
   isBrowserCookiesAvailable,
   isIMessageAvailable,
   isClaudeCodeAvailable,
+  isGptCodeAvailable,
   isFullySignedIn,
   accordion,
   data,
@@ -96,14 +126,13 @@ export default function IntegrationSections({
       />
 
       {isFullySignedIn && (
-        <ComputeSection
-          expanded={accordion.computeExpanded}
-          onToggle={() => accordion.toggleSection('compute')}
+        <ComputeIntegrationSection
           isClaudeCodeAvailable={isClaudeCodeAvailable}
-          claudeCodeSynced={data.claudeCodeSynced}
-          claudeCodeSyncLoading={compute.claudeCodeSyncLoading}
-          claudeCodeStatus={compute.claudeCodeStatus}
-          onClaudeCodeSync={() => void actions.onClaudeCodeSync()}
+          isGptCodeAvailable={isGptCodeAvailable}
+          accordion={accordion}
+          data={data}
+          compute={compute}
+          actions={actions}
         />
       )}
 

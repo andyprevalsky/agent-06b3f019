@@ -95,7 +95,7 @@ export function MessageListView(props: MessageListViewProps) {
       {thinkingVisible && (
         <ThinkingIndicator
           compact={compact}
-          isClaudeStreaming={streaming.isClaude}
+          isClaudeStreaming={streaming.isClaude || streaming.isGpt}
           streamingCharCount={streaming.charCount}
           animatedCharCount={animatedCharCount}
         />

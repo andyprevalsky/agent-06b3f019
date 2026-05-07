@@ -7,13 +7,18 @@ Model contract (P1):
 
     rose-1-lite:
         claudeAuth = claude-sonnet-4-6
+        gptAuth    = gpt-5.4
         waterfall  = google/gemini-3-flash-preview -> moonshotai/kimi-k2.5
 
     rose-1-ultra:
         claudeAuth = claude-opus-4-7
+        gptAuth    = gpt-5.5
         waterfall  = anthropic/claude-opus-4.7 -> google/gemini-3.1-pro-preview
-                     (opus via OpenRouter — different stack from claudeAuth's
-                      direct Anthropic call, so a real fallback)
+
+    rose-1-browser-use:
+        claudeAuth = claude-opus-4-7
+        gptAuth    = gpt-5.5
+        waterfall  = anthropic/claude-opus-4.7 -> openai/gpt-5.4
 
 Note: today's research/.../claude-token.ts hardcodes claudeAuth to
 claude-sonnet-4-6 for *both* pools. The ultra->opus mapping below is a
@@ -30,11 +35,14 @@ PoolName = Literal["rose-1-lite", "rose-1-ultra", "rose-1-browser-use"]
 
 @dataclass(frozen=True)
 class PoolSpec:
-    """One pool's claudeAuth model + ordered waterfall fallback list."""
+    """One pool's direct-token models + ordered waterfall fallback list."""
 
     name: PoolName
     claude_auth_model: str
     """Anthropic model ID used when a Claude OAuth token is supplied."""
+
+    gpt_auth_model: str
+    """OpenAI model ID used when a ChatGPT/Codex OAuth token is supplied."""
 
     waterfall: Tuple[str, ...]
     """Provider-prefixed model IDs tried in order if claudeAuth fails (or
@@ -46,6 +54,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-lite": PoolSpec(
         name="rose-1-lite",
         claude_auth_model="claude-sonnet-4-6",
+        gpt_auth_model="gpt-5.4",
         waterfall=(
             "google/gemini-3-flash-preview",
             "moonshotai/kimi-k2.5",
@@ -54,6 +63,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
         claude_auth_model="claude-opus-4-7",
+        gpt_auth_model="gpt-5.5",
         waterfall=(
             "anthropic/claude-opus-4.7",
             "google/gemini-3.1-pro-preview",
@@ -65,6 +75,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
         claude_auth_model="claude-opus-4-7",
+        gpt_auth_model="gpt-5.5",
         waterfall=(
             "anthropic/claude-opus-4.7",
             "openai/gpt-5.4",

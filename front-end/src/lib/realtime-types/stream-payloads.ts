@@ -23,6 +23,8 @@ export interface AssistantStreamPayload {
   subAgentId?: string;
   /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
   is_claude?: boolean;
+  /** True when the streaming model is direct GPT/Codex - used for thinking animation theming */
+  is_gpt?: boolean;
 }
 
 // -----------------------------------------------------------------------------

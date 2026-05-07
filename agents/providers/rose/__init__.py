@@ -6,7 +6,7 @@ which model pool they use (see pools.py).
 
 Public API:
 
-    from providers.rose import RoseClient, ClaudeAuthContext, Message, ToolSchema
+    from providers.rose import RoseClient, ClaudeAuthContext, GptAuthContext, Message, ToolSchema
 
     client = RoseClient()
     async for chunk in client.complete(
@@ -39,16 +39,20 @@ from providers.rose.client import RoseClient
 from providers.rose.legacy_adapter import (
     claude_auth_from_token,
     classify_claude_token_error,
+    classify_gpt_token_error,
+    gpt_auth_from_token,
     is_rose_model,
     pool_for_model,
 )
 from providers.rose.pools import POOL_REGISTRY, PoolName, PoolSpec, all_pool_names, get_pool
-from providers.rose.streaming import parse_anthropic_sse, parse_openai_sse
+from providers.rose.streaming import parse_anthropic_sse, parse_openai_sse, parse_responses_sse
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
     ClaudeTokenSource,
     FetchFreshTokenFn,
+    GptAuthContext,
+    GptTokenSource,
     MarkRateLimitedFn,
     Message,
     MessageRole,
@@ -77,6 +81,8 @@ __all__ = [
     # legacy adapter
     "claude_auth_from_token",
     "classify_claude_token_error",
+    "gpt_auth_from_token",
+    "classify_gpt_token_error",
     "is_rose_model",
     "pool_for_model",
     # pools
@@ -88,10 +94,13 @@ __all__ = [
     # streaming
     "parse_anthropic_sse",
     "parse_openai_sse",
+    "parse_responses_sse",
     # types
     "ChunkKind",
     "ClaudeAuthContext",
     "ClaudeTokenSource",
+    "GptAuthContext",
+    "GptTokenSource",
     "FetchFreshTokenFn",
     "MarkRateLimitedFn",
     "Message",

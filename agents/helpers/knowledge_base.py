@@ -1,8 +1,9 @@
 """GoalBlueprints tool for learning from successful task completions."""
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
+from pydantic import BaseModel, Field
 from temporalio import activity
 
 from helpers.llm import call_llm
@@ -47,7 +48,7 @@ For messages you keep:
 
 ## Output Format
 
-Return a valid JSON array of message objects. Each message must have:
+Return a valid JSON object with one `messages` array. Each message must have:
 - `role`: "USER", "ASSISTANT", "TOOL", or "SYSTEM"
 - `text`: The message content (compressed if needed)
 - `timestamp`: ISO 8601 timestamp string (preserve from original or generate if missing)
@@ -57,15 +58,23 @@ Return a valid JSON array of message objects. Each message must have:
 
 Example output:
 ```json
-[
-  {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
-  {{"role": "ASSISTANT", "text": "I'll search for that", "timestamp": "2025-01-15T10:00:03Z", "metadata": {{"tool_calls": [{{"tool": "web_search", "query": "Python tutorials", "tool_call_id": "abc123"}}]}}}},
-  {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z", "metadata": {{"toolCallId": "abc123", "toolName": "web_search", "toolStatus": "FINISHED", "title": "🔍 Web Search"}}}},
-  {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
-]
+{{
+  "messages": [
+    {{"role": "USER", "text": "Search for Python tutorials", "timestamp": "2025-01-15T10:00:00Z"}},
+    {{"role": "ASSISTANT", "text": "I'll search for that", "timestamp": "2025-01-15T10:00:03Z", "metadata": {{"tool_calls": [{{"tool": "web_search", "query": "Python tutorials", "tool_call_id": "abc123"}}]}}}},
+    {{"role": "TOOL", "text": "web_search(query='Python tutorials') → Found RealPython.com (4.8★), LearnPython.org, Official Docs", "timestamp": "2025-01-15T10:00:05Z", "metadata": {{"toolCallId": "abc123", "toolName": "web_search", "toolStatus": "FINISHED", "title": "🔍 Web Search"}}}},
+    {{"role": "ASSISTANT", "text": "Found 3 high-quality resources. RealPython.com is best for beginners.", "timestamp": "2025-01-15T10:00:10Z"}}
+  ]
+}}
 ```
 
-Return ONLY the JSON array - no explanations, no markdown fences, just the raw JSON."""
+Return ONLY the JSON object - no explanations, no markdown fences, just the raw JSON."""
+
+
+class CompressedBlueprintResponse(BaseModel):
+    messages: List[Dict[str, Any]] = Field(
+        description="Compressed blueprint messages preserving role, text, timestamp, and optional metadata"
+    )
 
 
 def extract_goal_from_context(context: List[Dict]) -> str:
@@ -246,7 +255,7 @@ async def save_blueprint_deprecated(user_id: str, blueprint: List[Dict]) -> Dict
             model="rose-labs/rose-1-lite",
             temperature=0.3,  # Lower temperature for more focused compression
             max_tokens=4000,  # Allow enough tokens for compressed messages
-            response_format={"type": "json_object"},  # Request JSON output
+            response_model=CompressedBlueprintResponse,
             call_site="save_blueprint",
         )
 
@@ -260,7 +269,12 @@ async def save_blueprint_deprecated(user_id: str, blueprint: List[Dict]) -> Dict
         else:
             try:
                 # Parse JSON response
-                compressed_blueprint = json.loads(compressed_blueprint_str)
+                parsed_response = json.loads(compressed_blueprint_str)
+                if isinstance(parsed_response, dict) and isinstance(parsed_response.get("messages"), list):
+                    compressed_blueprint = parsed_response["messages"]
+                else:
+                    # Backward-compatible fallback for older/model-loose array output.
+                    compressed_blueprint = parsed_response
 
                 # Validate it's a list
                 if not isinstance(compressed_blueprint, list):

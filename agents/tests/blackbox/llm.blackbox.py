@@ -336,6 +336,28 @@ def test_build_verifier_json_schema():
     assert result["json_schema"]["name"] == "ProgressScore"
 
 
+def test_verifier_score_schema_has_no_numeric_bounds():
+    """Verifier score guidance stays descriptive so Anthropic output_config accepts it."""
+    from helpers.llm import _build_verifier_json_schema, _build_verifier_response_model
+
+    unsupported = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            assert unsupported.isdisjoint(obj)
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    response_format = _build_verifier_json_schema()
+    pydantic_schema = _build_verifier_response_model().model_json_schema()
+
+    walk(response_format["json_schema"]["schema"])
+    walk(pydantic_schema)
+
+
 def test_build_verifier_json_schema_with_response_schema():
     """_build_verifier_json_schema with response schema adds output property."""
     from helpers.llm import _build_verifier_json_schema
@@ -591,6 +613,37 @@ async def test_mark_claude_token_rate_limited_user_success():
     assert "rateLimitedUntil" in body
 
 
+async def test_mark_claude_token_rate_limited_uses_explicit_reset_time():
+    """Exact Anthropic usage-limit reset timestamps are passed through."""
+    setup_mock({
+        "/api/integrations/claude-code/token/rate-limited": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import mark_claude_token_rate_limited_activity
+
+        result = await mark_claude_token_rate_limited_activity(
+            source="pool",
+            user_id="u-1",
+            pool_token_id="pool-42",
+            cooldown_seconds=60,
+            rate_limited_until="2026-05-05T20:15:00Z",
+        )
+
+    assert result is True
+    call = assert_captured_call(
+        url_contains="/api/integrations/claude-code/token/rate-limited",
+        method="POST",
+    )
+    body = json.loads(call["requestBody"])
+    assert body["source"] == "pool"
+    assert body["poolTokenId"] == "pool-42"
+    assert body["rateLimitedUntil"] == "2026-05-05T20:15:00Z"
+
+
 async def test_mark_claude_token_rate_limited_pool_success():
     """Pool source includes poolTokenId in body."""
     setup_mock({
@@ -613,6 +666,33 @@ async def test_mark_claude_token_rate_limited_pool_success():
     assert body["source"] == "pool"
     assert body["poolTokenId"] == "pool-42"
     assert "userId" not in body
+
+
+async def test_mark_claude_token_rate_limited_forwards_failure_reason():
+    """Auth-error marks include failureReason so backend can disable pool tokens."""
+    setup_mock({
+        "/api/integrations/claude-code/token/rate-limited": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import mark_claude_token_rate_limited_activity
+
+        result = await mark_claude_token_rate_limited_activity(
+            source="pool",
+            user_id="u-1",
+            pool_token_id="pool-42",
+            failure_reason="auth_error",
+        )
+
+    assert result is True
+    call = get_captured_requests()[0]
+    body = json.loads(call["requestBody"])
+    assert body["source"] == "pool"
+    assert body["poolTokenId"] == "pool-42"
+    assert body["failureReason"] == "auth_error"
 
 
 async def test_mark_claude_token_rate_limited_failure():
@@ -667,6 +747,37 @@ async def test_set_response_schema_activity_success():
     urls = [c["url"] for c in captures]
     assert any("generate-response-schema" in u for u in urls)
     assert any("/api/agents/agent-abc" in u for u in urls)
+
+
+async def test_set_response_schema_activity_uses_internal_auth_only():
+    """set_response_schema_activity does not forward compute-token scoped user headers."""
+    setup_mock({
+        "/api/agents/generate-response-schema": {
+            "status": 200,
+            "json": {
+                "schema": {"fields": [{"name": "summary", "type": "str"}]},
+                "tokensIn": 10,
+                "tokensOut": 5,
+            },
+        },
+        "/api/agents/": {
+            "status": 200,
+            "json": {"ok": True},
+        },
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity("agent-abc", ["goal"])
+
+    assert result is not None
+    captures = get_captured_requests()
+    schema_requests = [c for c in captures if "generate-response-schema" in c["url"]]
+    assert schema_requests
+    headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
+    assert "x-api-key" in headers
+    assert "x-user-id" not in headers
 
 
 async def test_set_response_schema_activity_empty_goal():
@@ -794,6 +905,51 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
     if isinstance(content, list):
         for block in content:
             assert "cache_control" not in block, "message breakpoint should be stripped"
+
+
+async def test_call_llm_rose_response_model_uses_submit_tool():
+    """call_llm response_model routes Rose claudeAuth through native submit_response tool."""
+    import httpx
+    from pydantic import BaseModel
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm
+
+    class SimpleResult(BaseModel):
+        answer: str
+        ok: bool
+
+    sse = _anthropic_sse_body(
+        tool_calls=[
+            {
+                "name": "submit_response",
+                "input": {"answer": "done", "ok": True},
+            }
+        ],
+        stop_reason="tool_use",
+    )
+    captured: dict = {}
+
+    def handler(req):
+        if "api.anthropic.com" in str(req.url):
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        result = await call_llm(
+            messages=[{"role": "user", "content": "return result"}],
+            model="rose",
+            response_model=SimpleResult,
+            claude_token="ct-123",
+            call_site="test-submit-model",
+        )
+
+    body = captured["body"]
+    assert "format" not in body.get("output_config", {})
+    assert body["tool_choice"] == {"type": "any"}
+    assert body["tools"][0]["name"] == "submit_response"
+    assert json.loads(result["content"]) == {"answer": "done", "ok": True}
 
 
 async def test_call_llm_rose_http_error_raises():
@@ -1517,6 +1673,70 @@ async def test_call_llm_verifier_claude_token_and_schema():
     assert result["output"]["summary"] == "ok"
 
 
+async def test_call_llm_verifier_fills_missing_output_from_structured_tool_response():
+    """Verifier keeps strict schema while recovering copied fields from tool evidence."""
+    import httpx
+    from config import load_config
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import _call_llm_verifier
+
+    payload = {
+        "choices": [
+            {
+                "delta": {
+                    "content": json.dumps({
+                        "reasoning": "complete; all fields are visible in the tool result",
+                        "score": 1.0,
+                        "output": {
+                            "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+                            "total_steps": 7,
+                        },
+                    })
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+    }
+    body = _sse_body([payload])
+
+    def handler(req):
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    config = load_config()
+    structured_response = {
+        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+        "python_script_path": "/home/user/collatz_3.py",
+        "total_steps": 7,
+    }
+
+    with patch("temporalio.activity.heartbeat"):
+        result, _usage = await _call_llm_verifier(
+            messages=[
+                {"role": "system", "content": "verify"},
+                {
+                    "role": "user",
+                    "content": "Tool finished\n\nStructured Response: "
+                    + json.dumps(structured_response)
+                    + "\n\nEvaluate the agent's progress as JSON.",
+                },
+            ],
+            model="rose",
+            config=config,
+            response_schema={
+                "fields": [
+                    {"name": "collatz_sequence", "type": "list[int]"},
+                    {"name": "python_script_path", "type": "str"},
+                    {"name": "total_steps", "type": "int"},
+                ]
+            },
+        )
+
+    assert result["score"] == 1.0
+    assert result["output"]["python_script_path"] == "/home/user/collatz_3.py"
+    assert result["output"]["total_steps"] == 7
+
+
 async def test_check_progress_happy_path():
     """check_progress streams a score and returns structured_response when score >= 1."""
     import httpx
@@ -1590,6 +1810,55 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_check_progress_accepts_completed_code_task_structured_response():
+    """Parent execute verifier accepts a finished code child structured response without an LLM call."""
+    from helpers.llm import check_progress
+
+    async def verifier_should_not_run(*_args, **_kwargs):
+        raise AssertionError("verifier should not run for completed code task output")
+
+    structured_response = {
+        "collatz_sequence": [27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1],
+        "total_steps": 111,
+        "python_script": {
+            "id": "file-1",
+            "path": "/home/user/collatz_27.py",
+            "storage_path": "uploads/collatz_27.py",
+        },
+    }
+    context = [
+        {"role": "USER", "text": "compute Collatz sequence from 27"},
+        {
+            "role": "TOOL",
+            "text": "Status: SUCCESS",
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "structured_response": structured_response,
+            },
+        },
+    ]
+
+    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            response_schema={
+                "fields": [
+                    {"name": "collatz_sequence", "type": "list[int]"},
+                    {"name": "total_steps", "type": "int"},
+                    {"name": "python_script", "type": "file_pointer"},
+                ]
+            },
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 1.0
+    assert result["structured_response"] == structured_response
+    assert result["usage"]["actual_model"] == "structured_response"
+
+
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
@@ -1609,7 +1878,8 @@ async def test_call_planner_llm_activity_happy_path():
     # claude_max_token is set → routes through Anthropic claudeAuth path.
     body = _anthropic_sse_body(text=plan_json, input_tokens=100, output_tokens=50)
 
-    captured = {"calls": []}
+    pointer_id = "bbbb1111-0000-0000-0000-000000000000"
+    captured = {"calls": [], "batch_user_id": None}
 
     def handler(req):
         url = str(req.url)
@@ -1618,6 +1888,11 @@ async def test_call_planner_llm_activity_happy_path():
         except Exception:
             parsed_body = None
         captured["calls"].append({"url": url, "headers": dict(req.headers), "body": parsed_body})
+        if "/api/agents/messages/batch" in url:
+            captured["batch_user_id"] = req.headers.get("x-user-id")
+            return httpx.Response(200, json={
+                "messages": [{"id": pointer_id, "text": "scoped referenced text", "role": "USER"}]
+            })
         if "api.anthropic.com" in url:
             return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
         # Broadcast/realtime endpoints: return 200 empty
@@ -1627,13 +1902,14 @@ async def test_call_planner_llm_activity_happy_path():
 
     with patch("temporalio.activity.heartbeat"):
         result = await call_planner_llm_activity(
-            messages=[{"role": "user", "content": "plan me this"}],
+            messages=[{"role": "user", "content": f"plan me this @ref:message:{pointer_id}"}],
             model="rose",
             tools_description="web_search: search the web",
             user_context="user is testing",
             claude_max_token="ct-planner-123",
             agent_id="agent-planner",
             tool_call_id="tc-planner",
+            claude_token_user_id="planner-user",
         )
 
     assert result["result"]["title"] == "Test Plan"
@@ -1654,6 +1930,8 @@ async def test_call_planner_llm_activity_happy_path():
     assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
     # claude_token is forwarded as the Anthropic Bearer token, not in the body.
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
+    assert captured["batch_user_id"] == "planner-user"
+    assert "scoped referenced text" in json.dumps(planner_body)
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
     assert planner_body["model"] == "claude-sonnet-4-6"
     assert planner_body["stream"] is True
@@ -2935,7 +3213,16 @@ async def test_check_progress_retries_on_transient_failure_then_succeeds():
 
     call_count = [0]
 
-    async def fake_verifier(messages, model, config, response_schema, claude_token=None, call_site="", agent_id=None):
+    async def fake_verifier(
+        messages,
+        model,
+        config,
+        response_schema,
+        claude_token=None,
+        call_site="",
+        agent_id=None,
+        **_kwargs,
+    ):
         call_count[0] += 1
         if call_count[0] == 1:
             raise ValueError("transient parse error")
@@ -3433,6 +3720,7 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_none_cases", test_extract_nested_agent_json_blob_none_cases)
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
+    r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
     r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
@@ -3443,14 +3731,18 @@ async def run_all_tests():
     await r.record_async("fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error)
     await r.record_async("fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field)
     await r.record_async("mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success)
+    await r.record_async("mark_claude_token_rate_limited_explicit_reset", test_mark_claude_token_rate_limited_uses_explicit_reset_time)
     await r.record_async("mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success)
+    await r.record_async("mark_claude_token_rate_limited_failure_reason", test_mark_claude_token_rate_limited_forwards_failure_reason)
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
+    await r.record_async("set_response_schema_activity_uses_internal_auth_only", test_set_response_schema_activity_uses_internal_auth_only)
     await r.record_async("set_response_schema_activity_empty_goal", test_set_response_schema_activity_empty_goal)
     await r.record_async("set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned)
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
     await r.record_async("call_llm_rose_with_claude_token_and_skip_cache_write", test_call_llm_rose_with_claude_token_and_skip_cache_write)
+    await r.record_async("call_llm_rose_response_model_submit_tool", test_call_llm_rose_response_model_uses_submit_tool)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
     await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)
@@ -3466,8 +3758,10 @@ async def run_all_tests():
     await r.record_async("call_llm_structured_streaming_model_detected_callback", test_call_llm_structured_streaming_model_detected_callback)
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
+    await r.record_async("call_llm_verifier_fills_structured_tool_output", test_call_llm_verifier_fills_missing_output_from_structured_tool_response)
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
     await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
+    await r.record_async("check_progress_accepts_completed_code_task_structured_response", test_check_progress_accepts_completed_code_task_structured_response)
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)

@@ -27,6 +27,7 @@ import integrationsRouter from './domains/integrations/routes';
 import authRouter from './domains/auth/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
+import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
@@ -50,7 +51,7 @@ const SYSTEM_TOOLS = [
   { name: 'spawn_browser_agent', description: 'Spawn autonomous browser agent for web tasks' },
   {
     name: 'spawn_claude_code_agent',
-    description: 'Spawn Claude Code agent in E2B sandbox for coding tasks',
+    description: 'Spawn Claude Code or Codex agent in E2B sandbox for coding tasks',
   },
   { name: 'call_phone_number', description: 'Place an automated phone call to a target number' },
   { name: 'knowledge_base', description: 'Search and retrieve from the user knowledge base' },
@@ -319,6 +320,7 @@ app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
 app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
+app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/billing', billingRouter);

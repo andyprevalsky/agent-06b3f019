@@ -228,7 +228,7 @@ async def _stream_one_step(
             if status >= 400:
                 error_body = get_error_body(response)
                 raise RoseError(
-                    f"OpenRouter {model} returned {status}: {error_body[:200]}",
+                    f"OpenRouter {model} returned {status}: {error_body[:2000]}",
                     status=status,
                 )
             async for chunk in parse_openai_sse(

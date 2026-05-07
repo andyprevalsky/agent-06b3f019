@@ -162,6 +162,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
     task_id: str = "",
     init_tool_call_id: str = "",
     claude_token: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
     attachment_texts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
@@ -199,6 +203,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
         cache_creation_input_tokens: int = 0,
         call_site: str = "explore_agent",
         claude_token_error: Optional[str] = None,
+        gpt_token_error: Optional[str] = None,
+        claude_token_rotated: bool = False,
+        gpt_token_rotated: bool = False,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(
@@ -335,6 +342,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
         skip_blueprint_query=True,
         skip_status_updates=True,
         claude_token=claude_token,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        get_gpt_token_source=(lambda: gpt_token_source),
+        get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
         on_tokens=on_tokens,
         call_site_override="explore_agent",
     )
