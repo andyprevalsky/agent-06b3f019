@@ -50,8 +50,8 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
-    from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from loop.run_agent import run_agent
+    from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
@@ -511,6 +511,7 @@ class AgentWorkflow:
                     "Agent initializing — fetching context, system prompt, and tool config.",
                     "TOOL",
                     {
+                        "toolCallId": "tc-agent-init",
                         "toolName": "agent_init",
                         "toolStatus": "IN_PROGRESS",
                         "title": "Initializing",
@@ -1414,6 +1415,8 @@ class AgentWorkflow:
 
             if tool_name in NEW_SIGNATURE_TOOLS:
                 tool_call_dict = {"tool": tool_name, **tool_args}
+                if tool_name == "attempt_completion":
+                    tool_call_dict["_phase"] = self.current_phase
 
                 result = await executor(
                     execute_activity=workflow.execute_activity,

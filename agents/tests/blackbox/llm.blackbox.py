@@ -113,9 +113,7 @@ def test_convert_context_to_messages_with_declared_tool_call():
             "role": "ASSISTANT",
             "text": "thinking",
             "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "tool_calls": [{"tool": "web_search", "tool_call_id": "tc-123", "query": "x"}]
-            },
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-123", "query": "x"}]},
         },
         {
             "role": "TOOL",
@@ -511,12 +509,14 @@ def test_build_verifier_json_schema_mixed_open_and_closed():
 
 async def test_fetch_claude_max_token_activity():
     """fetch_claude_max_token_activity GETs /api/integrations/claude-code/credentials/token."""
-    setup_mock({
-        "/api/integrations/claude-code/credentials/token": {
-            "status": 200,
-            "json": {"accessToken": "test-claude-token-123", "source": "user", "poolTokenId": None},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/credentials/token": {
+                "status": 200,
+                "json": {"accessToken": "test-claude-token-123", "source": "user", "poolTokenId": None},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_claude_max_token_activity
@@ -537,12 +537,14 @@ async def test_fetch_claude_max_token_activity():
 
 async def test_fetch_claude_max_token_activity_not_found():
     """fetch_claude_max_token_activity returns None on 404."""
-    setup_mock({
-        "/api/integrations/claude-code/credentials/token": {
-            "status": 404,
-            "json": {"error": "Not found"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/credentials/token": {
+                "status": 404,
+                "json": {"error": "Not found"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_claude_max_token_activity
@@ -554,12 +556,14 @@ async def test_fetch_claude_max_token_activity_not_found():
 
 async def test_fetch_claude_max_token_activity_server_error():
     """fetch_claude_max_token_activity returns None on 500."""
-    setup_mock({
-        "/api/integrations/claude-code/credentials/token": {
-            "status": 500,
-            "json": {"error": "server"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/credentials/token": {
+                "status": 500,
+                "json": {"error": "server"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_claude_max_token_activity
@@ -571,12 +575,14 @@ async def test_fetch_claude_max_token_activity_server_error():
 
 async def test_fetch_claude_max_token_activity_missing_token_field():
     """fetch_claude_max_token_activity returns None when accessToken missing in 200 response."""
-    setup_mock({
-        "/api/integrations/claude-code/credentials/token": {
-            "status": 200,
-            "json": {"source": "user"},  # no accessToken
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/credentials/token": {
+                "status": 200,
+                "json": {"source": "user"},  # no accessToken
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_claude_max_token_activity
@@ -588,19 +594,19 @@ async def test_fetch_claude_max_token_activity_missing_token_field():
 
 async def test_mark_claude_token_rate_limited_user_success():
     """mark_claude_token_rate_limited_activity POSTs with user source."""
-    setup_mock({
-        "/api/integrations/claude-code/token/rate-limited": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/token/rate-limited": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import mark_claude_token_rate_limited_activity
 
-        result = await mark_claude_token_rate_limited_activity(
-            source="user", user_id="u-1", cooldown_seconds=60
-        )
+        result = await mark_claude_token_rate_limited_activity(source="user", user_id="u-1", cooldown_seconds=60)
 
     assert result is True
     call = assert_captured_call(
@@ -615,12 +621,14 @@ async def test_mark_claude_token_rate_limited_user_success():
 
 async def test_mark_claude_token_rate_limited_uses_explicit_reset_time():
     """Exact Anthropic usage-limit reset timestamps are passed through."""
-    setup_mock({
-        "/api/integrations/claude-code/token/rate-limited": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/token/rate-limited": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import mark_claude_token_rate_limited_activity
@@ -646,19 +654,19 @@ async def test_mark_claude_token_rate_limited_uses_explicit_reset_time():
 
 async def test_mark_claude_token_rate_limited_pool_success():
     """Pool source includes poolTokenId in body."""
-    setup_mock({
-        "/api/integrations/claude-code/token/rate-limited": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/token/rate-limited": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import mark_claude_token_rate_limited_activity
 
-        result = await mark_claude_token_rate_limited_activity(
-            source="pool", user_id="u-1", pool_token_id="pool-42"
-        )
+        result = await mark_claude_token_rate_limited_activity(source="pool", user_id="u-1", pool_token_id="pool-42")
 
     assert result is True
     call = get_captured_requests()[0]
@@ -670,12 +678,14 @@ async def test_mark_claude_token_rate_limited_pool_success():
 
 async def test_mark_claude_token_rate_limited_forwards_failure_reason():
     """Auth-error marks include failureReason so backend can disable pool tokens."""
-    setup_mock({
-        "/api/integrations/claude-code/token/rate-limited": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/token/rate-limited": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import mark_claude_token_rate_limited_activity
@@ -697,39 +707,41 @@ async def test_mark_claude_token_rate_limited_forwards_failure_reason():
 
 async def test_mark_claude_token_rate_limited_failure():
     """Non-200 status returns False."""
-    setup_mock({
-        "/api/integrations/claude-code/token/rate-limited": {
-            "status": 500,
-            "json": {"error": "boom"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/integrations/claude-code/token/rate-limited": {
+                "status": 500,
+                "json": {"error": "boom"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import mark_claude_token_rate_limited_activity
 
-        result = await mark_claude_token_rate_limited_activity(
-            source="user", user_id="u-1"
-        )
+        result = await mark_claude_token_rate_limited_activity(source="user", user_id="u-1")
 
     assert result is False
 
 
 async def test_set_response_schema_activity_success():
     """set_response_schema_activity generates and saves schema."""
-    setup_mock({
-        "/api/agents/generate-response-schema": {
-            "status": 200,
-            "json": {
-                "schema": {"fields": [{"name": "summary", "type": "str"}]},
-                "tokensIn": 100,
-                "tokensOut": 50,
+    setup_mock(
+        {
+            "/api/agents/generate-response-schema": {
+                "status": 200,
+                "json": {
+                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
+                    "tokensIn": 100,
+                    "tokensOut": 50,
+                },
             },
-        },
-        "/api/agents/": {  # PATCH .../agents/{id}
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+            "/api/agents/": {  # PATCH .../agents/{id}
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import set_response_schema_activity
@@ -751,20 +763,22 @@ async def test_set_response_schema_activity_success():
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
     """set_response_schema_activity does not forward compute-token scoped user headers."""
-    setup_mock({
-        "/api/agents/generate-response-schema": {
-            "status": 200,
-            "json": {
-                "schema": {"fields": [{"name": "summary", "type": "str"}]},
-                "tokensIn": 10,
-                "tokensOut": 5,
+    setup_mock(
+        {
+            "/api/agents/generate-response-schema": {
+                "status": 200,
+                "json": {
+                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
+                    "tokensIn": 10,
+                    "tokensOut": 5,
+                },
             },
-        },
-        "/api/agents/": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import set_response_schema_activity
@@ -792,12 +806,14 @@ async def test_set_response_schema_activity_empty_goal():
 
 async def test_set_response_schema_activity_no_schema_returned():
     """Returns None when backend returns no schema field."""
-    setup_mock({
-        "/api/agents/generate-response-schema": {
-            "status": 200,
-            "json": {"tokensIn": 0, "tokensOut": 0},  # no schema
-        },
-    })
+    setup_mock(
+        {
+            "/api/agents/generate-response-schema": {
+                "status": 200,
+                "json": {"tokensIn": 0, "tokensOut": 0},  # no schema
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import set_response_schema_activity
@@ -809,12 +825,14 @@ async def test_set_response_schema_activity_no_schema_returned():
 
 async def test_set_response_schema_activity_http_error():
     """Returns None on HTTP error."""
-    setup_mock({
-        "/api/agents/generate-response-schema": {
-            "status": 500,
-            "json": {"error": "boom"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/agents/generate-response-schema": {
+                "status": 500,
+                "json": {"error": "boom"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import set_response_schema_activity
@@ -826,25 +844,27 @@ async def test_set_response_schema_activity_http_error():
 
 async def test_call_llm_rose_path():
     """call_llm routes Rose models through the in-process Rose client (waterfall via OpenRouter)."""
-    sse = _sse_body([
+    sse = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": "hello from rose"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30,
+                },
+            }
+        ]
+    )
+    setup_mock(
         {
-            "choices": [
-                {"delta": {"content": "hello from rose"}, "finish_reason": "stop"}
-            ],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
-                "total_tokens": 30,
+            "openrouter.ai/api/v1/chat/completions": {
+                "status": 200,
+                "text": sse,
+                "headers": {"Content-Type": "text/event-stream"},
             },
         }
-    ])
-    setup_mock({
-        "openrouter.ai/api/v1/chat/completions": {
-            "status": 200,
-            "text": sse,
-            "headers": {"Content-Type": "text/event-stream"},
-        },
-    })
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import call_llm
@@ -865,13 +885,15 @@ async def test_call_llm_rose_path():
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
     """call_llm with claude_token routes to Anthropic claudeAuth path; skip_cache_write keeps system markers."""
     sse = _anthropic_sse_body(text="ok")
-    setup_mock({
-        "api.anthropic.com/v1/messages": {
-            "status": 200,
-            "text": sse,
-            "headers": {"Content-Type": "text/event-stream"},
-        },
-    })
+    setup_mock(
+        {
+            "api.anthropic.com/v1/messages": {
+                "status": 200,
+                "text": sse,
+                "headers": {"Content-Type": "text/event-stream"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import call_llm
@@ -954,12 +976,14 @@ async def test_call_llm_rose_response_model_uses_submit_tool():
 
 async def test_call_llm_rose_http_error_raises():
     """Persistent 5xx from every waterfall step raises RoseAllFailed."""
-    setup_mock({
-        "openrouter.ai/api/v1/chat/completions": {
-            "status": 500,
-            "json": {"error": "boom"},
-        },
-    })
+    setup_mock(
+        {
+            "openrouter.ai/api/v1/chat/completions": {
+                "status": 500,
+                "json": {"error": "boom"},
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.llm import call_llm
@@ -985,11 +1009,7 @@ async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
             "role": "ASSISTANT",
             "text": "",
             "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "latest updates"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "latest updates"}]},
         },
         {
             "role": "TOOL",
@@ -1023,6 +1043,30 @@ async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
     assert "Found 3 recent updates" in tool_msg["content"]
 
 
+async def test_build_llm_messages_preserves_codex_reasoning_metadata_separately():
+    """Encrypted GPT reasoning state should be replayable without entering visible assistant text."""
+    from helpers.llm import build_llm_messages
+
+    reasoning_item = {"id": "rs_1", "encrypted_content": "enc-secret", "summary": []}
+    context = [
+        {"role": "USER", "text": "Continue", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "visible reasoning summary\n\nvisible answer",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"codex_reasoning_items": [reasoning_item]},
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        messages = await build_llm_messages(context, "System prompt")
+
+    assistant = [m for m in messages if m.get("role") == "assistant"][0]
+    assert assistant["content"].endswith("visible reasoning summary\n\nvisible answer")
+    assert assistant["codex_reasoning_items"] == [reasoning_item]
+    assert "enc-secret" not in assistant["content"]
+
+
 async def test_build_llm_messages_unmatched_terminal_tool_becomes_user():
     """Terminal TOOL message without matching assistant declaration should become a user message."""
     from helpers.llm import build_llm_messages
@@ -1033,11 +1077,7 @@ async def test_build_llm_messages_unmatched_terminal_tool_becomes_user():
             "role": "ASSISTANT",
             "text": "",
             "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}]},
         },
         {
             "role": "TOOL",
@@ -1069,11 +1109,7 @@ async def test_build_llm_messages_terminal_tool_missing_id_raises():
             "role": "ASSISTANT",
             "text": "",
             "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "alpha"}]},
         },
         {
             "role": "TOOL",
@@ -1243,13 +1279,17 @@ async def test_build_llm_messages_skips_empty_file_output_assistant():
             },
         },
         {
-            "role": "TOOL", "text": "ok A", "timestamp": "2024-01-01T00:00:02Z",
+            "role": "TOOL",
+            "text": "ok A",
+            "timestamp": "2024-01-01T00:00:02Z",
             "metadata": {"toolCallId": tc_a, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
         },
         # Empty file-output ASSISTANT row (browser screenshot)
         {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:03Z", "metadata": {}, "file_pointer": fp},
         {
-            "role": "TOOL", "text": "ok B", "timestamp": "2024-01-01T00:00:04Z",
+            "role": "TOOL",
+            "text": "ok B",
+            "timestamp": "2024-01-01T00:00:04Z",
             "metadata": {"toolCallId": tc_b, "toolName": "spawn_browser_agent", "toolStatus": "FINISHED"},
         },
         {"role": "ASSISTANT", "text": "", "timestamp": "2024-01-01T00:00:05Z", "metadata": {}, "file_pointer": fp},
@@ -1269,14 +1309,11 @@ async def test_build_llm_messages_skips_empty_file_output_assistant():
     # Verify NO empty assistant message ended up in the final list — file-output
     # rows should be filtered out entirely.
     empty_assistants = [
-        m for m in msgs
-        if m.get("role") == "assistant"
-        and not m.get("tool_calls")
-        and not (m.get("content") or "").strip()
+        m
+        for m in msgs
+        if m.get("role") == "assistant" and not m.get("tool_calls") and not (m.get("content") or "").strip()
     ]
-    assert not empty_assistants, (
-        f"Empty file-output assistant rows must be skipped; got {empty_assistants}"
-    )
+    assert not empty_assistants, f"Empty file-output assistant rows must be skipped; got {empty_assistants}"
 
     # Verify that in the produced sequence, both tool messages appear before any
     # assistant-without-tool_calls message — confirming the tool_result run is
@@ -1495,9 +1532,7 @@ async def test_call_llm_structured_streaming_happy_path():
         "pool_size": 1,
         "choices": [
             {
-                "delta": {
-                    "content": '```json\n{"response": "hello", "tool_calls": []}\n```'
-                },
+                "delta": {"content": '```json\n{"response": "hello", "tool_calls": []}\n```'},
                 "finish_reason": "stop",
             }
         ],
@@ -1556,9 +1591,7 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     payload = {
         "choices": [
             {
-                "delta": {
-                    "content": '{"response": "done", "tool_calls": []}'
-                },
+                "delta": {"content": '{"response": "done", "tool_calls": []}'},
                 "finish_reason": "stop",
             }
         ],
@@ -1603,9 +1636,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     from config import load_config
 
     payload = {
-        "choices": [
-            {"delta": {"content": '{"reasoning": "looks good", "score": 0.75}'}}
-        ],
+        "choices": [{"delta": {"content": '{"reasoning": "looks good", "score": 0.75}'}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
     }
     body = _sse_body([payload])
@@ -1684,14 +1715,16 @@ async def test_call_llm_verifier_fills_missing_output_from_structured_tool_respo
         "choices": [
             {
                 "delta": {
-                    "content": json.dumps({
-                        "reasoning": "complete; all fields are visible in the tool result",
-                        "score": 1.0,
-                        "output": {
-                            "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
-                            "total_steps": 7,
-                        },
-                    })
+                    "content": json.dumps(
+                        {
+                            "reasoning": "complete; all fields are visible in the tool result",
+                            "score": 1.0,
+                            "output": {
+                                "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+                                "total_steps": 7,
+                            },
+                        }
+                    )
                 }
             }
         ],
@@ -1745,11 +1778,7 @@ async def test_check_progress_happy_path():
 
     payload = {
         "choices": [
-            {
-                "delta": {
-                    "content": '{"reasoning": "complete", "score": 1.0, "output": {"summary": "finished"}}'
-                }
-            }
+            {"delta": {"content": '{"reasoning": "complete", "score": 1.0, "output": {"summary": "finished"}}'}}
         ],
         "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
     }
@@ -1782,13 +1811,7 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     from helpers.llm import check_progress
 
     payload = {
-        "choices": [
-            {
-                "delta": {
-                    "content": '{"reasoning": "partial", "score": 0.4, "output": {"summary": "x"}}'
-                }
-            }
-        ],
+        "choices": [{"delta": {"content": '{"reasoning": "partial", "score": 0.4, "output": {"summary": "x"}}'}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     }
     body = _sse_body([payload])
@@ -1818,7 +1841,120 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
         raise AssertionError("verifier should not run for completed code task output")
 
     structured_response = {
-        "collatz_sequence": [27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1],
+        "collatz_sequence": [
+            27,
+            82,
+            41,
+            124,
+            62,
+            31,
+            94,
+            47,
+            142,
+            71,
+            214,
+            107,
+            322,
+            161,
+            484,
+            242,
+            121,
+            364,
+            182,
+            91,
+            274,
+            137,
+            412,
+            206,
+            103,
+            310,
+            155,
+            466,
+            233,
+            700,
+            350,
+            175,
+            526,
+            263,
+            790,
+            395,
+            1186,
+            593,
+            1780,
+            890,
+            445,
+            1336,
+            668,
+            334,
+            167,
+            502,
+            251,
+            754,
+            377,
+            1132,
+            566,
+            283,
+            850,
+            425,
+            1276,
+            638,
+            319,
+            958,
+            479,
+            1438,
+            719,
+            2158,
+            1079,
+            3238,
+            1619,
+            4858,
+            2429,
+            7288,
+            3644,
+            1822,
+            911,
+            2734,
+            1367,
+            4102,
+            2051,
+            6154,
+            3077,
+            9232,
+            4616,
+            2308,
+            1154,
+            577,
+            1732,
+            866,
+            433,
+            1300,
+            650,
+            325,
+            976,
+            488,
+            244,
+            122,
+            61,
+            184,
+            92,
+            46,
+            23,
+            70,
+            35,
+            106,
+            53,
+            160,
+            80,
+            40,
+            20,
+            10,
+            5,
+            16,
+            8,
+            4,
+            2,
+            1,
+        ],
         "total_steps": 111,
         "python_script": {
             "id": "file-1",
@@ -1866,15 +2002,15 @@ async def test_call_planner_llm_activity_happy_path():
     from helpers.llm import call_planner_llm_activity
 
     # Build a valid PlannerResponse JSON the verifier can parse
-    plan_json = json.dumps({
-        "title": "Test Plan",
-        "content": "Do the thing",
-        "tasks": [
-            {"task_idx": "0", "goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}
-        ],
-        "dependencies_graph": [{"task_idx": "0", "depends_on": []}],
-        "join": "all",
-    })
+    plan_json = json.dumps(
+        {
+            "title": "Test Plan",
+            "content": "Do the thing",
+            "tasks": [{"task_idx": "0", "goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}],
+            "dependencies_graph": [{"task_idx": "0", "depends_on": []}],
+            "join": "all",
+        }
+    )
     # claude_max_token is set → routes through Anthropic claudeAuth path.
     body = _anthropic_sse_body(text=plan_json, input_tokens=100, output_tokens=50)
 
@@ -1890,9 +2026,9 @@ async def test_call_planner_llm_activity_happy_path():
         captured["calls"].append({"url": url, "headers": dict(req.headers), "body": parsed_body})
         if "/api/agents/messages/batch" in url:
             captured["batch_user_id"] = req.headers.get("x-user-id")
-            return httpx.Response(200, json={
-                "messages": [{"id": pointer_id, "text": "scoped referenced text", "role": "USER"}]
-            })
+            return httpx.Response(
+                200, json={"messages": [{"id": pointer_id, "text": "scoped referenced text", "role": "USER"}]}
+            )
         if "api.anthropic.com" in url:
             return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
         # Broadcast/realtime endpoints: return 200 empty
@@ -1916,17 +2052,11 @@ async def test_call_planner_llm_activity_happy_path():
     assert len(result["result"]["tasks"]) == 1
     assert result["usage"]["llm"][0]["tokens_in"] == 100
     assert result["usage"]["llm"][0]["tokens_out"] == 50
-    anthropic_calls = [
-        c for c in captured["calls"] if "api.anthropic.com" in c["url"] and c["body"]
-    ]
-    assert len(anthropic_calls) >= 1, (
-        f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
-    )
+    anthropic_calls = [c for c in captured["calls"] if "api.anthropic.com" in c["url"] and c["body"]]
+    assert len(anthropic_calls) >= 1, f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
     planner_body = anthropic_calls[0]["body"]
     # Planner uses skip_cache_write → system blocks KEEP cache_control for reads.
-    user_system_blocks = [
-        b for b in planner_body.get("system", []) if "cache_control" in b
-    ]
+    user_system_blocks = [b for b in planner_body.get("system", []) if "cache_control" in b]
     assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
     # claude_token is forwarded as the Anthropic Bearer token, not in the body.
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
@@ -2015,9 +2145,7 @@ async def test_call_llm_activity_with_agent_id_reads_shared_context():
 
     set_mock_handler(handler)
 
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.llm.activity.in_activity", return_value=False
-    ):
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.activity.in_activity", return_value=False):
         result = await call_llm_activity(
             messages_or_agent_id=agent_id_key,
             model="rose",
@@ -2093,9 +2221,7 @@ async def test_call_llm_activity_cross_machine_fallback():
 
     set_mock_handler(handler)
 
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.llm.activity.in_activity", return_value=False
-    ):
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.activity.in_activity", return_value=False):
         result = await call_llm_activity(
             messages_or_agent_id=agent_id_key,
             model="rose",
@@ -2402,11 +2528,7 @@ async def test_convert_context_to_messages_assistant_with_tool_calls():
             "role": "ASSISTANT",
             "text": "searching",
             "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "web_search", "tool_call_id": "tc-5", "query": "answer"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-5", "query": "answer"}]},
         },
         {
             "role": "TOOL",
@@ -2451,25 +2573,25 @@ async def test_call_llm_rose_with_usage_and_cache_fields():
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm
 
-    sse = _sse_body([
-        {
-            "choices": [{"delta": {"content": "hi back"}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 50,
-                "completion_tokens": 30,
-                "total_tokens": 80,
-                "cache_read_input_tokens": 10,
-                "cache_creation_input_tokens": 5,
+    sse = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": "hi back"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 30,
+                    "total_tokens": 80,
+                    "cache_read_input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                },
             },
-        },
-    ])
+        ]
+    )
 
     def handler(req):
         url = str(req.url)
         if "openrouter.ai/api/v1/chat/completions" in url:
-            return httpx.Response(
-                200, text=sse, headers={"Content-Type": "text/event-stream"}
-            )
+            return httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
@@ -2622,7 +2744,9 @@ async def test_call_llm_structured_streaming_tool_detection_callback():
 
     chunks = [
         {
-            "choices": [{"delta": {"content": '{"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}]}'}}],
+            "choices": [
+                {"delta": {"content": '{"response": "", "tool_calls": [{"tool": "web_search", "query": "x"}]}'}}
+            ],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
             "actual_model": "claude-sonnet-4-6",
         },
@@ -2667,7 +2791,13 @@ async def test_call_llm_structured_streaming_attention_streaming():
 
     chunks = [
         {
-            "choices": [{"delta": {"content": '{"response": "", "tool_calls": [{"tool": "send_message_to_user", "message": "Hello there!", "is_question": false}]}'}}],
+            "choices": [
+                {
+                    "delta": {
+                        "content": '{"response": "", "tool_calls": [{"tool": "send_message_to_user", "message": "Hello there!", "is_question": false}]}'
+                    }
+                }
+            ],
             "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
         },
     ]
@@ -2742,12 +2872,14 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
     from helpers.llm import _call_llm_verifier
     from config import load_config
 
-    waterfall_body = _sse_body([
-        {
-            "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 0.5}'}}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
-        }
-    ])
+    waterfall_body = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 0.5}'}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+            }
+        ]
+    )
 
     def handler(req):
         url = str(req.url)
@@ -2755,9 +2887,7 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
             # 401 from Anthropic → RoseAuthError → fall through to waterfall.
             return httpx.Response(401, json={"error": {"message": "expired"}})
         if "openrouter.ai/api/v1/chat/completions" in url:
-            return httpx.Response(
-                200, text=waterfall_body, headers={"Content-Type": "text/event-stream"}
-            )
+            return httpx.Response(200, text=waterfall_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
@@ -3106,6 +3236,116 @@ async def test_call_llm_structured_streaming_thinking_model_reasoning_json():
     assert "thinking reply" in (response.response or "")
 
 
+async def test_call_llm_structured_streaming_gpt_native_streams_reasoning_to_chunks():
+    """GPT Responses visible reasoning should stream and persist like claudeAuth thinking."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    lines: list[str] = []
+
+    def _ev(event: str, data: dict) -> None:
+        lines.append(f"event: {event}")
+        lines.append(f"data: {json.dumps(data)}")
+        lines.append("")
+
+    _ev(
+        "response.output_item.added",
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted-secret",
+            },
+        },
+    )
+    _ev(
+        "response.reasoning_summary_text.delta",
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "Visible reasoning summary. "},
+    )
+    _ev(
+        "response.reasoning_summary_text.delta",
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "More reasoning."},
+    )
+    _ev(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [{"text": "Visible reasoning summary. More reasoning."}],
+                "encrypted_content": "encrypted-secret",
+            },
+        },
+    )
+    _ev("response.output_text.delta", {"type": "response.output_text.delta", "delta": "Final answer."})
+    _ev(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "web_search",
+                "arguments": '{"query":"verify"}',
+            },
+        },
+    )
+    _ev(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 5, "output_tokens": 6, "total_tokens": 11}},
+        },
+    )
+    lines.append("data: [DONE]")
+    lines.append("")
+
+    def handler(req):
+        assert "chatgpt.com/backend-api/codex/responses" in str(req.url)
+        return httpx.Response(200, text="\n".join(lines))
+
+    set_mock_handler(handler)
+    AgentAction = create_agent_action_model(["web_search"])
+    chunks_received: list[str] = []
+
+    async def on_chunk(text, tokens):
+        chunks_received.append(text)
+
+    response, usage, detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "q"}],
+        model="rose",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        gpt_token="gpt-token",
+        gpt_account_id="acct-1",
+        gpt_token_source="user",
+        gpt_token_user_id="user-1",
+        call_site="gpt-native-reasoning-stream",
+    )
+
+    assert chunks_received
+    assert "Visible reasoning summary" in chunks_received[0]
+    assert "Final answer." in chunks_received[-1]
+    assert response.response.startswith("Visible reasoning summary.")
+    assert "Final answer." in response.response
+    assert response.tool_calls[0].tool == "web_search"
+    assert getattr(response, "codex_reasoning_items") == [
+        {
+            "id": "rs_1",
+            "encrypted_content": "encrypted-secret",
+            "summary": [{"text": "Visible reasoning summary. More reasoning."}],
+        }
+    ]
+
+
 async def test_call_llm_structured_streaming_single_call_dedup():
     """send_message_to_user is deduplicated when model emits twice."""
     import httpx
@@ -3113,13 +3353,15 @@ async def test_call_llm_structured_streaming_single_call_dedup():
     from helpers.llm import call_llm_structured_streaming
     from utils.tool_schemas import create_agent_action_model
 
-    content = json.dumps({
-        "response": "test",
-        "tool_calls": [
-            {"tool": "send_message_to_user", "message": "first", "is_question": False},
-            {"tool": "send_message_to_user", "message": "second", "is_question": False},
-        ],
-    })
+    content = json.dumps(
+        {
+            "response": "test",
+            "tool_calls": [
+                {"tool": "send_message_to_user", "message": "first", "is_question": False},
+                {"tool": "send_message_to_user", "message": "second", "is_question": False},
+            ],
+        }
+    )
     payload = {
         "choices": [{"delta": {"content": content}}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
@@ -3227,12 +3469,9 @@ async def test_call_llm_structured_streaming_no_json_content_raises():
         )
     except Exception as e:
         msg = str(e)
-        assert (
-            "No JSON" in msg
-            or "Failed to parse" in msg
-            or "waterfall" in msg
-            or "stream closed" in msg
-        ), f"unexpected error: {msg}"
+        assert "No JSON" in msg or "Failed to parse" in msg or "waterfall" in msg or "stream closed" in msg, (
+            f"unexpected error: {msg}"
+        )
         raised = True
     assert raised
 
@@ -3299,9 +3538,11 @@ async def test_check_progress_retries_on_transient_failure_then_succeeds():
     async def fast_sleep(_d):
         return None
 
-    with patch("helpers.llm._call_llm_verifier", fake_verifier), \
-         patch("helpers.llm.asyncio.sleep", fast_sleep), \
-         patch("temporalio.activity.heartbeat"):
+    with (
+        patch("helpers.llm._call_llm_verifier", fake_verifier),
+        patch("helpers.llm.asyncio.sleep", fast_sleep),
+        patch("temporalio.activity.heartbeat"),
+    ):
         result = await check_progress(
             context=[],
             verifier_system_prompt="verify",
@@ -3351,8 +3592,7 @@ async def test_build_llm_messages_system_role_gets_prefix():
     # First is system, then user + system-as-user
     assert messages[0]["role"] == "system"
     assert any(
-        m["role"] == "user" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"]
-        for m in messages
+        m["role"] == "user" and isinstance(m.get("content"), str) and "[SYSTEM]:" in m["content"] for m in messages
     ), f"Expected a [SYSTEM]: user message, got: {messages}"
 
 
@@ -3372,7 +3612,11 @@ async def test_build_llm_messages_non_terminal_tool_becomes_user_text():
     ]
     with _patch("helpers.llm.activity.in_activity", return_value=False):
         messages = await build_llm_messages(context, "sys")
-    tool_as_user = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str) and "[TOOL]:" in m["content"]]
+    tool_as_user = [
+        m
+        for m in messages
+        if m.get("role") == "user" and isinstance(m.get("content"), str) and "[TOOL]:" in m["content"]
+    ]
     assert tool_as_user, f"Expected a [TOOL]:-prefixed user message, got: {messages}"
 
 
@@ -3427,9 +3671,11 @@ async def test_set_response_schema_activity_empty_goal_short_circuits():
     from helpers.llm import set_response_schema_activity
 
     clear_captures()
+
     # No handler set: default 404s. But we should see zero captures.
     def handler(req):
         import httpx as _hx
+
         return _hx.Response(500, text="should never be called")
 
     set_mock_handler(handler)
@@ -3455,7 +3701,7 @@ async def test_extract_nested_agent_json_blob_rfind_strategy():
     """_extract_nested_agent_json_blob uses rfind fallback when no fenced block present."""
     from helpers.llm import _extract_nested_agent_json_blob
 
-    text = "prefix garbage {\"tool_calls\": [{\"tool\": \"web_search\", \"query\": \"hi\"}]} trailing"
+    text = 'prefix garbage {"tool_calls": [{"tool": "web_search", "query": "hi"}]} trailing'
     result = _extract_nested_agent_json_blob(text)
     assert isinstance(result, dict)
     assert "tool_calls" in result
@@ -3470,10 +3716,16 @@ async def test_call_llm_structured_streaming_attention_stream_without_question_f
 
     # Build an accumulated stream that includes send_message_to_user with message field
     payload_1 = {
-        "choices": [{"delta": {"content": '{"response": "thinking", "tool_calls": [{"tool": "send_message_to_user", "message": "Hello there"}]'}}],
+        "choices": [
+            {
+                "delta": {
+                    "content": '{"response": "thinking", "tool_calls": [{"tool": "send_message_to_user", "message": "Hello there"}]'
+                }
+            }
+        ],
     }
     payload_2 = {
-        "choices": [{"delta": {"content": '}'}}],
+        "choices": [{"delta": {"content": "}"}}],
         "usage": {"prompt_tokens": 3, "completion_tokens": 10, "total_tokens": 13},
     }
     body = _sse_body([payload_1, payload_2])
@@ -3516,20 +3768,22 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
 
     # Deliver a complete JSON body (stream_interrupted path requires RemoteProtocolError - harder to mock)
     # This exercises the normal path with stream_usage capture.
-    body = _sse_body([
-        {
-            "actual_model": "claude-sonnet-4",
-            "pool_name": "test-pool",
-            "choices": [{"delta": {"content": '{"reasoning": "done", "score": 0.9}'}}],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-                "cache_read_input_tokens": 2,
-                "cache_creation_input_tokens": 1,
-            },
-        }
-    ])
+    body = _sse_body(
+        [
+            {
+                "actual_model": "claude-sonnet-4",
+                "pool_name": "test-pool",
+                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 0.9}'}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "cache_read_input_tokens": 2,
+                    "cache_creation_input_tokens": 1,
+                },
+            }
+        ]
+    )
 
     def handler(req):
         return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
@@ -3561,12 +3815,14 @@ async def test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning():
     from config import load_config
 
     # Reasoning-only stream: content is empty, reasoning contains the JSON
-    body = _sse_body([
-        {
-            "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "score": 0.6}'}}],
-            "usage": {"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7},
-        }
-    ])
+    body = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "score": 0.6}'}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7},
+            }
+        ]
+    )
 
     def handler(req):
         return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
@@ -3590,13 +3846,15 @@ async def test_build_verifier_json_schema_with_list_str_field():
     """_build_verifier_json_schema handles list[str] field mapping."""
     from helpers.llm import _build_verifier_json_schema
 
-    schema = _build_verifier_json_schema({
-        "fields": [
-            {"name": "tags", "type": "list[str]"},
-            {"name": "counts", "type": "list[int]"},
-            {"name": "flag", "type": "bool"},
-        ]
-    })
+    schema = _build_verifier_json_schema(
+        {
+            "fields": [
+                {"name": "tags", "type": "list[str]"},
+                {"name": "counts", "type": "list[int]"},
+                {"name": "flag", "type": "bool"},
+            ]
+        }
+    )
     # Schema has an "output" field in properties
     props = schema["json_schema"]["schema"]["properties"]
     output_props = props["output"]["properties"]
@@ -3616,7 +3874,9 @@ async def test_call_llm_structured_streaming_non_dict_choices_continues():
 
     payload_empty_choices = {"choices": [], "actual_model": "claude-sonnet-4"}
     payload_real = {
-        "choices": [{"delta": {"content": '{"reasoning": "done", "response": "ok", "tool_calls": []}'}, "finish_reason": "stop"}],
+        "choices": [
+            {"delta": {"content": '{"reasoning": "done", "response": "ok", "tool_calls": []}'}, "finish_reason": "stop"}
+        ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
     body = _sse_body([payload_empty_choices, payload_real])
@@ -3657,9 +3917,7 @@ def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
         {
             "role": "assistant",
             "content": "ok",
-            "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "spawn_agent", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "spawn_agent", "arguments": "{}"}}],
         },
         {"role": "user", "content": "next turn"},
         {"role": "assistant", "content": "continuing"},
@@ -3695,17 +3953,13 @@ def test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids():
         {
             "role": "assistant",
             "content": "first",
-            "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}],
         },
         {"role": "tool", "tool_call_id": "tc1", "content": "result"},
         {
             "role": "assistant",
             "content": "second",
-            "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}],
         },
     ]
     fixed = _ensure_tool_result_pairing(msgs)
@@ -3727,9 +3981,7 @@ def test_ensure_tool_result_pairing_idempotent():
         {
             "role": "assistant",
             "content": "ok",
-            "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}],
         },
         {"role": "user", "content": "next"},
         {"role": "assistant", "content": "done"},
@@ -3749,9 +4001,7 @@ def test_ensure_tool_result_pairing_preserves_well_formed_messages():
         {
             "role": "assistant",
             "content": "ok",
-            "tool_calls": [
-                {"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "foo", "arguments": "{}"}}],
         },
         {"role": "tool", "tool_call_id": "tc1", "name": "foo", "content": "result"},
         {"role": "assistant", "content": "done"},
@@ -3767,17 +4017,28 @@ async def run_all_tests():
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
     r.record("convert_context_to_messages_empty", test_convert_context_to_messages_empty)
-    r.record("convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call)
+    r.record(
+        "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
+    )
     r.record("convert_context_to_messages_verifier_message", test_convert_context_to_messages_verifier_message)
-    r.record("convert_context_to_messages_skip_subagent_and_inprogress", test_convert_context_to_messages_skip_subagent_and_inprogress)
+    r.record(
+        "convert_context_to_messages_skip_subagent_and_inprogress",
+        test_convert_context_to_messages_skip_subagent_and_inprogress,
+    )
     r.record("extract_completed_tool_calls", test_extract_completed_tool_calls)
     r.record("extract_completed_tool_calls_partial", test_extract_completed_tool_calls_partial)
     r.record("extract_completed_tool_calls_no_array", test_extract_completed_tool_calls_no_array)
     r.record("extract_response_from_partial_json_empty", test_extract_response_from_partial_json_empty)
-    r.record("extract_response_from_partial_json_reasoning_only", test_extract_response_from_partial_json_reasoning_only)
+    r.record(
+        "extract_response_from_partial_json_reasoning_only", test_extract_response_from_partial_json_reasoning_only
+    )
     r.record("extract_response_from_partial_json_complete_json", test_extract_response_from_partial_json_complete_json)
-    r.record("extract_response_from_partial_json_markdown_block", test_extract_response_from_partial_json_markdown_block)
-    r.record("extract_response_from_partial_json_partial_fields", test_extract_response_from_partial_json_partial_fields)
+    r.record(
+        "extract_response_from_partial_json_markdown_block", test_extract_response_from_partial_json_markdown_block
+    )
+    r.record(
+        "extract_response_from_partial_json_partial_fields", test_extract_response_from_partial_json_partial_fields
+    )
     r.record("extract_nested_agent_json_blob_raw", test_extract_nested_agent_json_blob_raw)
     r.record("extract_nested_agent_json_blob_fenced", test_extract_nested_agent_json_blob_fenced)
     r.record("extract_nested_agent_json_blob_none_cases", test_extract_nested_agent_json_blob_none_cases)
@@ -3791,105 +4052,228 @@ async def run_all_tests():
     r.record("build_verifier_json_schema_mixed_open_and_closed", test_build_verifier_json_schema_mixed_open_and_closed)
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
-    await r.record_async("fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error)
-    await r.record_async("fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field)
-    await r.record_async("mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success)
-    await r.record_async("mark_claude_token_rate_limited_explicit_reset", test_mark_claude_token_rate_limited_uses_explicit_reset_time)
-    await r.record_async("mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success)
-    await r.record_async("mark_claude_token_rate_limited_failure_reason", test_mark_claude_token_rate_limited_forwards_failure_reason)
+    await r.record_async(
+        "fetch_claude_max_token_activity_server_error", test_fetch_claude_max_token_activity_server_error
+    )
+    await r.record_async(
+        "fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field
+    )
+    await r.record_async(
+        "mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success
+    )
+    await r.record_async(
+        "mark_claude_token_rate_limited_explicit_reset", test_mark_claude_token_rate_limited_uses_explicit_reset_time
+    )
+    await r.record_async(
+        "mark_claude_token_rate_limited_pool_success", test_mark_claude_token_rate_limited_pool_success
+    )
+    await r.record_async(
+        "mark_claude_token_rate_limited_failure_reason", test_mark_claude_token_rate_limited_forwards_failure_reason
+    )
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
-    await r.record_async("set_response_schema_activity_uses_internal_auth_only", test_set_response_schema_activity_uses_internal_auth_only)
+    await r.record_async(
+        "set_response_schema_activity_uses_internal_auth_only",
+        test_set_response_schema_activity_uses_internal_auth_only,
+    )
     await r.record_async("set_response_schema_activity_empty_goal", test_set_response_schema_activity_empty_goal)
-    await r.record_async("set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned)
+    await r.record_async(
+        "set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned
+    )
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
-    await r.record_async("call_llm_rose_with_claude_token_and_skip_cache_write", test_call_llm_rose_with_claude_token_and_skip_cache_write)
+    await r.record_async(
+        "call_llm_rose_with_claude_token_and_skip_cache_write",
+        test_call_llm_rose_with_claude_token_and_skip_cache_write,
+    )
     await r.record_async("call_llm_rose_response_model_submit_tool", test_call_llm_rose_response_model_uses_submit_tool)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
-    await r.record_async("build_llm_messages_preserves_tool_calls_and_tool_role", test_build_llm_messages_preserves_tool_calls_and_tool_role)
-    await r.record_async("build_llm_messages_unmatched_terminal_tool_becomes_user", test_build_llm_messages_unmatched_terminal_tool_becomes_user)
-    await r.record_async("build_llm_messages_terminal_tool_missing_id_raises", test_build_llm_messages_terminal_tool_missing_id_raises)
-    await r.record_async("build_llm_messages_system_and_non_terminal_tool", test_build_llm_messages_system_and_non_terminal_tool)
+    await r.record_async(
+        "build_llm_messages_preserves_tool_calls_and_tool_role",
+        test_build_llm_messages_preserves_tool_calls_and_tool_role,
+    )
+    await r.record_async(
+        "build_llm_messages_preserves_codex_reasoning_metadata_separately",
+        test_build_llm_messages_preserves_codex_reasoning_metadata_separately,
+    )
+    await r.record_async(
+        "build_llm_messages_unmatched_terminal_tool_becomes_user",
+        test_build_llm_messages_unmatched_terminal_tool_becomes_user,
+    )
+    await r.record_async(
+        "build_llm_messages_terminal_tool_missing_id_raises", test_build_llm_messages_terminal_tool_missing_id_raises
+    )
+    await r.record_async(
+        "build_llm_messages_system_and_non_terminal_tool", test_build_llm_messages_system_and_non_terminal_tool
+    )
     await r.record_async("build_llm_messages_assistant_merging", test_build_llm_messages_assistant_merging)
     await r.record_async("build_llm_messages_skip_subagent", test_build_llm_messages_skip_subagent)
-    await r.record_async("build_llm_messages_attachment_large_falls_back_to_metadata", test_build_llm_messages_attachment_large_falls_back_to_metadata)
-    await r.record_async("build_llm_messages_skips_empty_file_output_assistant", test_build_llm_messages_skips_empty_file_output_assistant)
-    await r.record_async("build_llm_messages_assistant_tool_call_validation_errors", test_build_llm_messages_assistant_tool_call_validation_errors)
-    await r.record_async("build_llm_messages_filters_inprogress_keeps_latest_finished", test_build_llm_messages_filters_inprogress_keeps_latest_finished)
-    await r.record_async("build_llm_messages_strips_cloud_agent_lifecycle_tools", test_build_llm_messages_strips_cloud_agent_lifecycle_tools)
+    await r.record_async(
+        "build_llm_messages_attachment_large_falls_back_to_metadata",
+        test_build_llm_messages_attachment_large_falls_back_to_metadata,
+    )
+    await r.record_async(
+        "build_llm_messages_skips_empty_file_output_assistant",
+        test_build_llm_messages_skips_empty_file_output_assistant,
+    )
+    await r.record_async(
+        "build_llm_messages_assistant_tool_call_validation_errors",
+        test_build_llm_messages_assistant_tool_call_validation_errors,
+    )
+    await r.record_async(
+        "build_llm_messages_filters_inprogress_keeps_latest_finished",
+        test_build_llm_messages_filters_inprogress_keeps_latest_finished,
+    )
+    await r.record_async(
+        "build_llm_messages_strips_cloud_agent_lifecycle_tools",
+        test_build_llm_messages_strips_cloud_agent_lifecycle_tools,
+    )
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
-    await r.record_async("call_llm_structured_streaming_model_detected_callback", test_call_llm_structured_streaming_model_detected_callback)
+    await r.record_async(
+        "call_llm_structured_streaming_model_detected_callback",
+        test_call_llm_structured_streaming_model_detected_callback,
+    )
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
-    await r.record_async("call_llm_verifier_fills_structured_tool_output", test_call_llm_verifier_fills_missing_output_from_structured_tool_response)
+    await r.record_async(
+        "call_llm_verifier_fills_structured_tool_output",
+        test_call_llm_verifier_fills_missing_output_from_structured_tool_response,
+    )
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
-    await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
-    await r.record_async("check_progress_accepts_completed_code_task_structured_response", test_check_progress_accepts_completed_code_task_structured_response)
+    await r.record_async(
+        "check_progress_below_threshold_returns_partial_structured_response",
+        test_check_progress_below_threshold_returns_partial_structured_response,
+    )
+    await r.record_async(
+        "check_progress_accepts_completed_code_task_structured_response",
+        test_check_progress_accepts_completed_code_task_structured_response,
+    )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
-    await r.record_async("call_llm_activity_agent_id_shared_ctx", test_call_llm_activity_with_agent_id_reads_shared_context)
+    await r.record_async(
+        "call_llm_activity_agent_id_shared_ctx", test_call_llm_activity_with_agent_id_reads_shared_context
+    )
     await r.record_async("call_llm_activity_missing_ctx", test_call_llm_activity_missing_context_raises)
     await r.record_async("call_llm_activity_cross_machine_fb", test_call_llm_activity_cross_machine_fallback)
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)
     await r.record_async("verifier_schema_list_file_pointer", test_build_verifier_json_schema_list_file_pointer_type)
-    await r.record_async("verifier_schema_session_file_pointer", test_build_verifier_json_schema_session_file_pointer_type)
-    await r.record_async("verifier_schema_list_session_file_pointer", test_build_verifier_json_schema_list_session_file_pointer_type)
+    await r.record_async(
+        "verifier_schema_session_file_pointer", test_build_verifier_json_schema_session_file_pointer_type
+    )
+    await r.record_async(
+        "verifier_schema_list_session_file_pointer", test_build_verifier_json_schema_list_session_file_pointer_type
+    )
     await r.record_async("verifier_schema_unknown_fallback", test_build_verifier_json_schema_unknown_type_fallback)
     await r.record_async("verifier_schema_object_type", test_build_verifier_json_schema_object_type_open_shape)
-    await r.record_async("verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_open_shape)
-    await r.record_async("verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects)
+    await r.record_async(
+        "verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_open_shape
+    )
+    await r.record_async(
+        "verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects
+    )
     r.record("verifier_ctx_screenshot_multimodal", test_build_verifier_context_messages_screenshot_emits_multimodal)
     r.record("verifier_ctx_screenshot_strips_b64", test_build_verifier_context_messages_screenshot_strips_b64_from_text)
     r.record("verifier_ctx_no_screenshot_text_only", test_build_verifier_context_messages_no_screenshot_stays_text)
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)
-    await r.record_async("convert_ctx_assistant_with_tool_calls", test_convert_context_to_messages_assistant_with_tool_calls)
+    await r.record_async(
+        "convert_ctx_assistant_with_tool_calls", test_convert_context_to_messages_assistant_with_tool_calls
+    )
     await r.record_async("safe_time", test_safe_time_returns_float)
     await r.record_async("safe_heartbeat", test_safe_heartbeat_no_raise_when_no_activity)
     await r.record_async("call_llm_rose_cache_fields", test_call_llm_rose_with_usage_and_cache_fields)
-    await r.record_async("convert_ctx_in_progress_tool", test_convert_context_to_messages_non_terminal_tool_becomes_user)
+    await r.record_async(
+        "convert_ctx_in_progress_tool", test_convert_context_to_messages_non_terminal_tool_becomes_user
+    )
     await r.record_async("stream_tool_detection_cb", test_call_llm_structured_streaming_tool_detection_callback)
     await r.record_async("stream_attention_streaming", test_call_llm_structured_streaming_attention_streaming)
     await r.record_async("call_llm_openrouter_path", test_call_llm_openrouter_path)
     await r.record_async("verifier_claude_token_error", test_call_llm_verifier_claude_token_error_surfaces)
     await r.record_async("verifier_reasoning_fallback_to_json", test_call_llm_verifier_reasoning_fallback_to_json)
     await r.record_async("verifier_no_json_raises", test_call_llm_verifier_no_json_raises)
-    await r.record_async("call_llm_activity_no_stream_id", test_call_llm_activity_no_stream_id_skips_streaming_callbacks)
+    await r.record_async(
+        "call_llm_activity_no_stream_id", test_call_llm_activity_no_stream_id_skips_streaming_callbacks
+    )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
     await r.record_async("stream_nested_tool_recovery", test_call_llm_structured_streaming_nested_tool_recovery)
-    await r.record_async("stream_thinking_model_reasoning_json", test_call_llm_structured_streaming_thinking_model_reasoning_json)
+    await r.record_async(
+        "stream_thinking_model_reasoning_json", test_call_llm_structured_streaming_thinking_model_reasoning_json
+    )
+    await r.record_async(
+        "stream_gpt_native_reasoning_to_chunks",
+        test_call_llm_structured_streaming_gpt_native_streams_reasoning_to_chunks,
+    )
     await r.record_async("stream_single_call_dedup", test_call_llm_structured_streaming_single_call_dedup)
-    await r.record_async("stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises)
+    await r.record_async(
+        "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
+    )
     await r.record_async("stream_no_json_content_raises", test_call_llm_structured_streaming_no_json_content_raises)
     await r.record_async("check_progress_empty_context", test_check_progress_empty_context_runs_verifier)
     # Final coverage bumps (W3-*)
-    await r.record_async("check_progress_retries_on_transient_failure", test_check_progress_retries_on_transient_failure_then_succeeds)
-    await r.record_async("check_progress_error_returns_fallback_score", test_check_progress_error_returns_fallback_score)
+    await r.record_async(
+        "check_progress_retries_on_transient_failure", test_check_progress_retries_on_transient_failure_then_succeeds
+    )
+    await r.record_async(
+        "check_progress_error_returns_fallback_score", test_check_progress_error_returns_fallback_score
+    )
     await r.record_async("build_llm_messages_system_role_prefix", test_build_llm_messages_system_role_gets_prefix)
-    await r.record_async("build_llm_messages_non_terminal_tool_user_text", test_build_llm_messages_non_terminal_tool_becomes_user_text)
-    await r.record_async("mark_claude_token_rate_limited_pool_body", test_mark_claude_token_rate_limited_pool_body_includes_pool_id)
-    await r.record_async("fetch_claude_max_token_missing_access_token_field", test_fetch_claude_max_token_activity_missing_access_token_field)
-    await r.record_async("set_response_schema_empty_goal_short_circuits", test_set_response_schema_activity_empty_goal_short_circuits)
-    await r.record_async("extract_response_regex_fallback_unclosed", test_extract_response_from_partial_json_regex_fallback_unclosed_response)
+    await r.record_async(
+        "build_llm_messages_non_terminal_tool_user_text", test_build_llm_messages_non_terminal_tool_becomes_user_text
+    )
+    await r.record_async(
+        "mark_claude_token_rate_limited_pool_body", test_mark_claude_token_rate_limited_pool_body_includes_pool_id
+    )
+    await r.record_async(
+        "fetch_claude_max_token_missing_access_token_field",
+        test_fetch_claude_max_token_activity_missing_access_token_field,
+    )
+    await r.record_async(
+        "set_response_schema_empty_goal_short_circuits", test_set_response_schema_activity_empty_goal_short_circuits
+    )
+    await r.record_async(
+        "extract_response_regex_fallback_unclosed",
+        test_extract_response_from_partial_json_regex_fallback_unclosed_response,
+    )
     await r.record_async("extract_nested_agent_json_blob_rfind", test_extract_nested_agent_json_blob_rfind_strategy)
-    await r.record_async("stream_attention_stream_without_question", test_call_llm_structured_streaming_attention_stream_without_question_field)
-    await r.record_async("verifier_stream_interrupted_parses_partial", test_call_llm_verifier_stream_interrupted_still_parses_partial)
-    await r.record_async("verifier_jsondecode_error_accumulated_reasoning", test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning)
+    await r.record_async(
+        "stream_attention_stream_without_question",
+        test_call_llm_structured_streaming_attention_stream_without_question_field,
+    )
+    await r.record_async(
+        "verifier_stream_interrupted_parses_partial", test_call_llm_verifier_stream_interrupted_still_parses_partial
+    )
+    await r.record_async(
+        "verifier_jsondecode_error_accumulated_reasoning",
+        test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning,
+    )
     await r.record_async("verifier_schema_with_list_str_field", test_build_verifier_json_schema_with_list_str_field)
-    await r.record_async("stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues)
-    r.record("ensure_tool_result_pairing_inserts_synthetic", test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use)
-    r.record("ensure_tool_result_pairing_strips_orphan_tool_result", test_ensure_tool_result_pairing_strips_orphan_tool_result)
-    r.record("ensure_tool_result_pairing_dedupes_cross_message_ids", test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids)
+    await r.record_async(
+        "stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues
+    )
+    r.record(
+        "ensure_tool_result_pairing_inserts_synthetic",
+        test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use,
+    )
+    r.record(
+        "ensure_tool_result_pairing_strips_orphan_tool_result",
+        test_ensure_tool_result_pairing_strips_orphan_tool_result,
+    )
+    r.record(
+        "ensure_tool_result_pairing_dedupes_cross_message_ids",
+        test_ensure_tool_result_pairing_dedupes_cross_message_tool_use_ids,
+    )
     r.record("ensure_tool_result_pairing_idempotent", test_ensure_tool_result_pairing_idempotent)
-    r.record("ensure_tool_result_pairing_preserves_well_formed", test_ensure_tool_result_pairing_preserves_well_formed_messages)
+    r.record(
+        "ensure_tool_result_pairing_preserves_well_formed",
+        test_ensure_tool_result_pairing_preserves_well_formed_messages,
+    )
     teardown_mock()
     return r.summary()
 

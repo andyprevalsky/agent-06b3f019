@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from domains.attempt_completion.config import EVENT_MESSAGE, EVENT_TITLE, TOOL_NAME
+from domains.attempt_completion.config import (
+    EVENT_MESSAGE,
+    EVENT_TITLE,
+    PLAN_EVENT_MESSAGE,
+    PLAN_EVENT_TITLE,
+    TOOL_NAME,
+)
 from domains.attempt_completion.service import build_completion_result
 from helpers.handle_tool_event import handle_tool_event
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
@@ -47,11 +53,15 @@ class AttemptCompletionManager(ToolManager):
         user-visible completion event. Verified flows remain machine-checkable:
         the verifier reads prior tool-call results, not this payload.
         """
+        phase = tool_call.get("_phase")
+        event_title = PLAN_EVENT_TITLE if phase == "PLAN" else EVENT_TITLE
+        event_message = PLAN_EVENT_MESSAGE if phase == "PLAN" else EVENT_MESSAGE
+
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=EVENT_TITLE,
-                message=EVENT_MESSAGE,
+                title=event_title,
+                message=event_message,
                 status=MessageStatus.FINISHED,
             ),
             agent_id=agent_id,

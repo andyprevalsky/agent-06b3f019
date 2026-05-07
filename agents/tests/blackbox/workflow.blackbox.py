@@ -2329,6 +2329,13 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         assert "notify_sms_event_activity" in activity_names
         assert "set_response_schema_activity" in activity_names
         assert "mark_finished" in activity_names
+        init_posts = [
+            c
+            for c in fake.activity_calls
+            if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"
+        ]
+        assert init_posts
+        assert init_posts[0][1][3]["toolCallId"] == "tc-agent-init"
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)

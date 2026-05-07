@@ -34,9 +34,9 @@ export function getContextPercentage(agent: AgentDetail, models: Model[]): numbe
 // ── Message deduplication ─────────────────────────────────────────────────
 
 export function deduplicateToolMessages(messages: Message[]): Message[] {
-  const sortedMessages = [...messages].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-  );
+  const sortedMessages = messages
+    .filter((m) => m.role !== 'TOOL' || m.metadata?.toolName !== 'agent_init')
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];

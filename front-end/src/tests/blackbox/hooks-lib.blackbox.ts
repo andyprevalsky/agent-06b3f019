@@ -223,6 +223,26 @@ describe('derivations.ts', () => {
       expect(out).toHaveLength(1);
       errSpy.mockRestore();
     });
+
+    it('hides internal agent init liveness tools', () => {
+      const msgs = [
+        {
+          message_id: 'init',
+          role: 'TOOL',
+          timestamp: ts(1),
+          text: 'Agent initializing',
+          metadata: {
+            toolCallId: 'tc-agent-init',
+            toolName: 'agent_init',
+            title: 'Initializing',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        { message_id: 'user', role: 'USER', timestamp: ts(2), text: 'hi', metadata: {} },
+      ] as any;
+      const out = deduplicateToolMessages(msgs);
+      expect(out.map((m) => m.message_id)).toEqual(['user']);
+    });
   });
 
   describe('sortAgents', () => {
@@ -736,6 +756,47 @@ describe('realtimeHandlers', () => {
     expect(bubble?.text).toBe('Hello World');
     expect(bubble?.done).toBe(true);
     expect(refSet.has('Hello World')).toBe(true);
+  });
+
+  it('handleAssistantStream: GPT reasoning stream stays ephemeral and tagged', () => {
+    const s = mkSetters();
+    const refSet = new Set<string>();
+    const ref = { current: refSet };
+
+    handleAssistantStream(
+      {
+        agentId: 'me',
+        stream_id: 'gpt-reasoning',
+        sequence: 0,
+        delta: 'thinking ',
+        done: false,
+        is_gpt: true,
+      } as any,
+      'me',
+      ref,
+      s.setStreamingBubbles as any,
+    );
+    handleAssistantStream(
+      {
+        agentId: 'me',
+        stream_id: 'gpt-reasoning',
+        sequence: 1,
+        delta: 'through',
+        done: true,
+      } as any,
+      'me',
+      ref,
+      s.setStreamingBubbles as any,
+    );
+
+    const bubble = s.state.streamingBubbles.get('gpt-reasoning');
+    expect(bubble).toMatchObject({
+      text: 'thinking through',
+      done: true,
+      isGpt: true,
+    });
+    expect(s.state.messages).toEqual([]);
+    expect(refSet.has('thinking through')).toBe(true);
   });
 
   it('handlePlanStream: stores plan for correct agent', () => {

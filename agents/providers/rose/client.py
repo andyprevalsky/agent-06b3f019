@@ -78,6 +78,7 @@ def _safe_heartbeat(message: str) -> None:
     otherwise silently skip. Matches the pattern in `helpers/llm.py`."""
     with contextlib.suppress(Exception):
         from temporalio import activity
+
         activity.heartbeat(message)
 
 
@@ -125,9 +126,7 @@ class RoseClient:
         started = time.monotonic()
 
         openrouter_response_format = (
-            build_openai_response_format(response_model)
-            if response_model is not None
-            else None
+            build_openai_response_format(response_model) if response_model is not None else None
         )
         claude_auth_tools = None
         claude_auth_tool_choice = None
@@ -141,9 +140,7 @@ class RoseClient:
             )
         if claude_auth is not None:
             claude_auth_tools = direct_auth_tools
-            if claude_auth_tools and any(
-                tool_requires_forced_choice(tool) for tool in claude_auth_tools
-            ):
+            if claude_auth_tools and any(tool_requires_forced_choice(tool) for tool in claude_auth_tools):
                 claude_auth_tool_choice = "any"
         if gpt_auth is not None:
             gpt_auth_tools = direct_auth_tools
@@ -176,17 +173,13 @@ class RoseClient:
             while True:
                 r = remaining()
                 if r <= 0:
-                    raise RoseDeadlineError(
-                        f"rose.complete deadline exceeded after {deadline_s}s"
-                    )
+                    raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
                 # Cap the per-chunk wait at the deadline's remaining budget;
                 # the inner layers already enforce their own 60s idle timeout.
                 try:
                     chunk = await asyncio.wait_for(it.__anext__(), timeout=r)
                 except asyncio.TimeoutError as exc:
-                    raise RoseDeadlineError(
-                        f"rose.complete deadline exceeded after {deadline_s}s"
-                    ) from exc
+                    raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s") from exc
                 except StopAsyncIteration:
                     return
                 now = time.monotonic()
@@ -220,9 +213,7 @@ class RoseClient:
             prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
             completion_tokens = usage_data.get("completion_tokens", 0) or 0
             total_input = prompt_tokens + cache_read + cache_write
-            cache_pct = (
-                round(cache_read / total_input * 100) if total_input > 0 else 0
-            )
+            cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
             logger.info(
                 "llm.cache",
                 call_site=call_site,
@@ -241,21 +232,23 @@ class RoseClient:
         try:
             if claude_auth is not None:
                 try:
-                    async for chunk in _guarded(_try_claude_auth(
-                        pool_spec=pool_spec,
-                        messages=messages,
-                        tools=claude_auth_tools,
-                        tool_choice=claude_auth_tool_choice,
-                        response_format=None,
-                        max_tokens=max_tokens,
-                        skip_cache_write=skip_cache_write,
-                        auth=claude_auth,
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        thinking=thinking,
-                        effort=effort,
-                    )):
+                    async for chunk in _guarded(
+                        _try_claude_auth(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            tools=claude_auth_tools,
+                            tool_choice=claude_auth_tool_choice,
+                            response_format=None,
+                            max_tokens=max_tokens,
+                            skip_cache_write=skip_cache_write,
+                            auth=claude_auth,
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            thinking=thinking,
+                            effort=effort,
+                        )
+                    ):
                         if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                             _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
@@ -299,19 +292,21 @@ class RoseClient:
 
             if gpt_auth is not None:
                 try:
-                    async for chunk in _guarded(_try_gpt_auth(
-                        pool_spec=pool_spec,
-                        messages=messages,
-                        tools=gpt_auth_tools,
-                        tool_choice=gpt_auth_tool_choice,
-                        response_format=None if gpt_auth_tools else openrouter_response_format,
-                        temperature=temperature,
-                        effort=effort,
-                        auth=gpt_auth,
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                    )):
+                    async for chunk in _guarded(
+                        _try_gpt_auth(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            tools=gpt_auth_tools,
+                            tool_choice=gpt_auth_tool_choice,
+                            response_format=None if gpt_auth_tools else openrouter_response_format,
+                            temperature=temperature,
+                            effort=effort,
+                            auth=gpt_auth,
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                        )
+                    ):
                         if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                             _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
@@ -341,20 +336,22 @@ class RoseClient:
                         gpt_token_error=gpt_token_error,
                     )
 
-            async for chunk in _guarded(waterfall_complete(
-                pool_spec=pool_spec,
-                messages=messages,
-                tools=None,
-                tool_choice=None,
-                response_format=openrouter_response_format,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                seed=seed,
-                openrouter_key=self._or_key(),
-                request_id=rid,
-                agent_id=agent_id,
-                call_site=call_site,
-            )):
+            async for chunk in _guarded(
+                waterfall_complete(
+                    pool_spec=pool_spec,
+                    messages=messages,
+                    tools=None,
+                    tool_choice=None,
+                    response_format=openrouter_response_format,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    seed=seed,
+                    openrouter_key=self._or_key(),
+                    request_id=rid,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                )
+            ):
                 if claude_token_error is not None and chunk.kind == "metadata":
                     chunk = StreamChunk(
                         kind="metadata",
@@ -522,6 +519,8 @@ def _fold(result: RoseResponse, chunk: StreamChunk) -> None:
         result.content += chunk.data.get("text", "")
     elif kind == "reasoning":
         result.reasoning += chunk.data.get("text", "")
+    elif kind == "codex_reasoning_item":
+        result.codex_reasoning_items.append(dict(chunk.data))
     elif kind == "tool_call":
         result.tool_calls.append(dict(chunk.data))
     elif kind == "usage":

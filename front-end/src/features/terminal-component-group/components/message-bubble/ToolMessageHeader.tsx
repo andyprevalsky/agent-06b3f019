@@ -1,5 +1,13 @@
 /**
- * Title row for a tool card — icon + label + optional expand chevron.
+ * STATE MACHINE: ToolMessageHeader
+ *
+ * [STATIC]
+ *   - shows icon + title
+ *
+ * [TOGGLEABLE] (hasMessage && isExpandable)
+ *   - header receives click handler
+ *   - chevron is shown when showChevron is true
+ *   - title wraps inside the tool row instead of forcing horizontal overflow
  */
 import { cn } from '@/lib/utils';
 import { ChevronRight } from 'lucide-react';
@@ -45,7 +53,7 @@ export function ToolMessageHeader({
   return (
     <div
       className={cn(
-        'flex items-center gap-2',
+        'flex min-w-0 max-w-full items-center gap-2',
         canToggle && 'cursor-pointer hover:opacity-80 transition-opacity',
       )}
       onClick={canToggle ? onToggle : undefined}
@@ -57,7 +65,7 @@ export function ToolMessageHeader({
         actionType={data.actionType}
         error={data.error}
       />
-      <span className={titleClassName}>
+      <span className={cn('min-w-0 break-words', titleClassName)}>
         {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
       </span>
       {showChevron && (

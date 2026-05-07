@@ -377,6 +377,27 @@ describe('MessageList', () => {
     expect(screen.queryByText('Orphaned tool')).not.toBeInTheDocument();
   });
 
+  it('hides internal agent initialization liveness tools', () => {
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('init', {
+          role: 'TOOL',
+          text: 'Agent initializing',
+          metadata: {
+            toolCallId: 'tc-agent-init',
+            toolName: 'agent_init',
+            title: 'Initializing',
+            toolStatus: 'IN_PROGRESS',
+          },
+        }),
+        msg('u1', { role: 'USER', text: 'visible user message' }),
+      ],
+    });
+    renderList(ctx);
+    expect(screen.queryByText('Initializing')).not.toBeInTheDocument();
+    expect(screen.getByText('visible user message')).toBeInTheDocument();
+  });
+
   it('keeps IN_PROGRESS wait_for tool even when an ASSISTANT came later', () => {
     const now = Date.now();
     const ctx = makeAgentCtx({

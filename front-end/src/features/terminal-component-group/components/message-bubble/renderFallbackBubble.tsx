@@ -31,8 +31,8 @@ export function renderFallbackBubble({ props, routing, toolData }: Args): ReactE
 
   if (toolData) {
     return (
-      <div className={cn('flex', !compact && 'gap-3')}>
-        <div className="flex-1">
+      <div className={cn('flex min-w-0 max-w-full', !compact && 'gap-3')}>
+        <div className="min-w-0 max-w-full flex-1">
           <ToolMessage data={toolData} shouldType={shouldType} onComplete={onTypingComplete} />
         </div>
       </div>

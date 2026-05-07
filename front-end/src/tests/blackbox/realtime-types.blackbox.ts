@@ -701,7 +701,14 @@ describe('extractDeletePayload', () => {
 
 describe('extractAssistantStreamPayload', () => {
   it('returns the record for a valid ASSISTANT_STREAM payload', () => {
-    const record = { agentId: 'a', stream_id: 's', delta: 'hi', done: false, sequence: 1 };
+    const record = {
+      agentId: 'a',
+      stream_id: 's',
+      delta: 'hi',
+      done: false,
+      sequence: 1,
+      is_gpt: true,
+    };
     expect(extractAssistantStreamPayload(wrap(record))).toEqual(record);
   });
 

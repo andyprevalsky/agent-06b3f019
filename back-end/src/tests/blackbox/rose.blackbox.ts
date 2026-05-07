@@ -470,9 +470,15 @@ async function testGptAuth_buildBodyPreservesToolHistoryAndMultimodal() {
     input.some((item) => item.type === 'reasoning' && item.encrypted_content === 'secret'),
     'reasoning replayed'
   );
+  const replayedReasoning = input.filter((item) => item.type === 'reasoning');
+  assertEqual(replayedReasoning.length, 1, 'encrypted reasoning kept as one separate item');
   assert(
     input.some((item) => item.type === 'message' && item.id === 'msg_1'),
     'assistant message item replayed'
+  );
+  assert(
+    input.every((item) => item.type === 'reasoning' || !('encrypted_content' in item)),
+    'encrypted reasoning not mixed into visible message/tool items'
   );
   assert(
     input.some((item) => item.type === 'function_call' && item.call_id === 'call_lookup'),
@@ -531,6 +537,35 @@ async function testStreaming_responsesFunctionCallItem() {
   assertEqual(tool?.data.name, 'lookup', 'tool call name');
   assertEqual(tool?.data.arguments, '{"q":"x"}', 'tool call args');
   assertEqual(chunks.find((chunk) => chunk.kind === 'usage')?.data.total_tokens, 5, 'usage total');
+}
+
+async function testStreaming_responsesReasoningDeltaEvents() {
+  const chunks = await collectRose(
+    parseResponsesSSE(
+      sseResponse([
+        'event: response.reasoning_summary_text.delta',
+        'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"thinking"}',
+        '',
+        'event: response.reasoning_text.delta',
+        'data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":" deeper"}',
+        '',
+        'event: response.output_text.delta',
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+        'data: [DONE]',
+        '',
+      ]).body!,
+      { actualModel: 'gpt-5.4-gpt', poolName: 'gpt-token', requestId: 'r-reasoning' }
+    )
+  );
+  const reasoning = chunks
+    .filter((chunk) => chunk.kind === 'reasoning')
+    .map((chunk) => chunk.data.text)
+    .join('');
+  assertEqual(reasoning, 'thinking deeper', 'Responses reasoning deltas routed');
 }
 
 async function testStreaming_responsesFailedContextLengthIsInvalidRequest() {
@@ -1895,6 +1930,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / responses function_call item → tool_call',
       fn: testStreaming_responsesFunctionCallItem,
+    },
+    {
+      name: 'streaming / responses reasoning delta events → reasoning chunk',
+      fn: testStreaming_responsesReasoningDeltaEvents,
     },
     {
       name: 'client / reasoning chunk → CompletionChunk.delta.reasoning',

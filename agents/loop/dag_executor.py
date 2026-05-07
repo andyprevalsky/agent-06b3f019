@@ -32,6 +32,10 @@ from tools.base import EventType, MessageStatus, ToolEvent
 
 logger = structlog.get_logger()
 
+DAG_REASONING_UI_TOOL_NAME = "thought"
+DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
+DAG_REASONING_FINISHED_TITLE = "Thought"
+
 # Planning-time aliases → Execution-time tool names
 # Planner uses separate names (spawn_browser_agent, etc.) that map to unified spawn_agent
 TOOL_ALIASES = {
@@ -497,12 +501,12 @@ async def _execute_single_task(
             await handle_tool_event_fn(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Reasoning",
+                    title=DAG_REASONING_IN_PROGRESS_TITLE,
                     message=task.goal,
                     status=MessageStatus.IN_PROGRESS,
                 ),
                 tool_call_id,
-                "reasoning",
+                DAG_REASONING_UI_TOOL_NAME,
             )
 
             # Trim context to the same window the reasoning activity will use
@@ -590,12 +594,12 @@ async def _execute_single_task(
             await handle_tool_event_fn(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Reasoning",
+                    title=DAG_REASONING_FINISHED_TITLE,
                     message=reasoning_content,
                     status=MessageStatus.FINISHED,
                 ),
                 tool_call_id,
-                "reasoning",
+                DAG_REASONING_UI_TOOL_NAME,
             )
 
             # Post reasoning to DB as ASSISTANT message

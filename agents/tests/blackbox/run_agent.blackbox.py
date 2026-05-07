@@ -247,8 +247,13 @@ async def test_attempt_completion_plan_loop_requires_set_plan():
         )
 
     assert result["status"] == "max_iterations"  # not completed
-    # Verify an error event was emitted for the attempt_completion
-    assert any(ev["tool_name"] == "attempt_completion" for ev in handle_events)
+    # Verify an error event was emitted for the attempt_completion, not the
+    # normal PLAN-complete transition message.
+    attempt_events = [ev for ev in handle_events if ev["tool_name"] == "attempt_completion"]
+    assert attempt_events
+    event = attempt_events[0]["event"]
+    assert event.title == "❌ Plan required"
+    assert event.message == "You must call set_plan before attempt_completion in PLAN phase"
 
 
 async def test_plan_loop_completes_when_set_plan_then_attempt_completion():

@@ -89,6 +89,28 @@ def test_no_hanging_tool_calls_ignores_older_assistant_delivered_late():
     assert invariant.failure_reason is None
 
 
+def test_realtime_log_collector_records_and_filters_frames():
+    from benchmarks.logs import SupabaseRealtimeLogCollector
+
+    collector = SupabaseRealtimeLogCollector(private=False)
+    collector.record_broadcast(
+        "agent-1",
+        "ASSISTANT_STREAM",
+        {"payload": {"record": {"agentId": "agent-1", "stream_id": "s1", "delta": "thinking", "is_gpt": True}}},
+    )
+    collector.record_broadcast(
+        "agent-2",
+        "TOOL_STREAM",
+        {"payload": {"record": {"agentId": "agent-2", "tool_call_id": "tc-2"}}},
+    )
+
+    logs = collector.get_logs_for_agent("agent-1")
+    assert len(logs) == 1
+    assert '"event":"ASSISTANT_STREAM"' in logs[0]
+    assert '"is_gpt":true' in logs[0]
+    assert "agent-2" not in logs[0]
+
+
 async def run_all_tests():
     print("realtime_monitor blackbox tests:")
     r = BlackboxResult()
@@ -108,6 +130,10 @@ async def run_all_tests():
     r.record(
         "no_hanging_tool_calls_ignores_older_assistant_delivered_late",
         test_no_hanging_tool_calls_ignores_older_assistant_delivered_late,
+    )
+    r.record(
+        "realtime_log_collector_records_and_filters_frames",
+        test_realtime_log_collector_records_and_filters_frames,
     )
     return r.summary()
 

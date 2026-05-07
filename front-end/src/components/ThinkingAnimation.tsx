@@ -69,8 +69,38 @@ const classNames = (...values: Array<string | undefined>) =>
   values.filter(Boolean).join(' ').trim();
 
 const RGB_REGEX = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/g;
+const DEFAULT_THINKING_ANIMATION_URL = '/thinking_animations.txt';
+
+const animationDataCache = new Map<string, Promise<XmlFrameData>>();
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+
+const normalizeAnimationUrl = (dataUrl: string) =>
+  dataUrl === './thinking_animations.txt' ? DEFAULT_THINKING_ANIMATION_URL : dataUrl;
+
+const fetchAnimationData = (dataUrl: string) => {
+  const resolvedDataUrl = normalizeAnimationUrl(dataUrl);
+  const cachedData = animationDataCache.get(resolvedDataUrl);
+  if (cachedData) {
+    return cachedData;
+  }
+
+  const request = fetch(resolvedDataUrl)
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to fetch ${resolvedDataUrl} (${response.status})`);
+      }
+      return response.text();
+    })
+    .then((text) => JSON.parse(text) as XmlFrameData)
+    .catch((error) => {
+      animationDataCache.delete(resolvedDataUrl);
+      throw error;
+    });
+
+  animationDataCache.set(resolvedDataUrl, request);
+  return request;
+};
 
 const hexToRgb = (hex: string) => {
   const normalized = hex.replace('#', '');
@@ -160,7 +190,7 @@ function applyGradient(data: XmlFrameData | null, palette: string[]): XmlFrameDa
 export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAnimationProps>(
   (
     {
-      dataUrl = './thinking_animations.txt',
+      dataUrl = DEFAULT_THINKING_ANIMATION_URL,
       data,
       autoplay = true,
       loop = true,
@@ -191,26 +221,17 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
       }
 
       let cancelled = false;
-      const controller = new AbortController();
-
       setIsFetching(true);
       setFetchError(null);
 
-      fetch(dataUrl, { signal: controller.signal })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error(`Failed to fetch ${dataUrl} (${response.status})`);
-          }
-          return response.text();
-        })
-        .then((text) => {
+      fetchAnimationData(dataUrl)
+        .then((parsed) => {
           if (cancelled) return;
-          const parsed = JSON.parse(text) as XmlFrameData;
           setRawData(parsed);
           setFetchError(null);
         })
         .catch((error) => {
-          if (controller.signal.aborted || cancelled) return;
+          if (cancelled) return;
           const message = error instanceof Error ? error.message : String(error);
           setFetchError(message);
           setRawData(null);
@@ -223,7 +244,6 @@ export const ThinkingAnimation = forwardRef<ThinkingAnimationHandle, ThinkingAni
 
       return () => {
         cancelled = true;
-        controller.abort();
       };
     }, [data, dataUrl]);
 

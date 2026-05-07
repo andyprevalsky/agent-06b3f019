@@ -4,6 +4,24 @@
  */
 
 const MARKDOWN_STYLES = `
+  .prose {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+
+  .prose p,
+  .prose li,
+  .prose a,
+  .prose span,
+  .prose strong,
+  .prose em,
+  .prose code:not(pre code) {
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+
   .prose code:not(pre code) {
     background-color: rgb(226 232 240);
     padding: 0.125rem 0.375rem;
@@ -67,6 +85,15 @@ const MARKDOWN_STYLES = `
   }
   .dark .prose pre code {
     color: rgb(226 232 240);
+  }
+
+  .prose.tool-message-markdown pre {
+    overflow-x: hidden;
+    white-space: pre-wrap;
+  }
+  .prose.tool-message-markdown pre code {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 
   .prose p {
