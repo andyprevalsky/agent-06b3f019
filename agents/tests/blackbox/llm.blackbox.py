@@ -1870,7 +1870,7 @@ async def test_call_planner_llm_activity_happy_path():
         "title": "Test Plan",
         "content": "Do the thing",
         "tasks": [
-            {"goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}
+            {"task_idx": "0", "goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}
         ],
         "dependencies_graph": [{"task_idx": "0", "depends_on": []}],
         "join": "all",

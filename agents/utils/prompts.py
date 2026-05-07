@@ -80,6 +80,10 @@ CRITICAL_CONSTRAINTS_RULE = """
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
 PLANNER_RESPONSE_CONTENT_DESCRIPTION = "Markdown explanation of the plan."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
+PLANNER_TASK_IDX_DESCRIPTION = (
+    "The 0-based array index of this task, encoded as a string. "
+    "This must equal the task's position in tasks and is included only to make dependency lookups easy."
+)
 PLANNER_TASK_GOAL_DESCRIPTION = (
     "Self-contained task brief for the spawned agent. "
     + SELF_CONTAINED_GOAL_RULE.strip()
@@ -123,6 +127,7 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
 - content: {PLANNER_RESPONSE_CONTENT_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
+- tasks[].task_idx: {PLANNER_TASK_IDX_DESCRIPTION}
 - tasks[].goal: {PLANNER_TASK_GOAL_DESCRIPTION}
 - tasks[].tool_name: {PLANNER_TASK_TOOL_NAME_DESCRIPTION}
 - tasks[].depends_on: {PLANNER_TASK_DEPENDS_ON_DESCRIPTION}
@@ -475,6 +480,7 @@ def build_planner_system_prompt(
 
 MANDATORY DECOMPOSITION INVARIANTS:
 - Each sub-task maps to exactly one tool call
+- tasks[i].task_idx is the 0-based array index encoded as a string and must equal i
 - tasks[i].depends_on lists indices of tasks that must complete first
 - dependencies_graph is a list of objects, each with task_idx and depends_on
 - dependencies_graph must mirror tasks[i].depends_on exactly

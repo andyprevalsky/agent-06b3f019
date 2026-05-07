@@ -187,6 +187,12 @@ def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
 
     # Verify tasks[i].depends_on matches dependencies_graph
     for i, task_obj in enumerate(task_objects):
+        task_idx = task_obj.get("task_idx")
+        if not isinstance(task_idx, str) or not task_idx.isdigit():
+            return f"Task {i} has invalid task_idx={task_idx!r}. It must be the 0-based array index as a string."
+        if task_idx != str(i):
+            return f"Task {i} has task_idx={task_idx!r}. It must equal its 0-based array position '{i}'."
+
         task_deps = task_obj.get("depends_on", [])
         graph_deps = deps.get(str(i), [])
         task_deps_str = sorted([str(d) for d in task_deps])
