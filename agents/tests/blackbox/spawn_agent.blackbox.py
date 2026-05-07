@@ -1255,6 +1255,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert len(save_calls) == 1
     assert save_calls[0]["task_id"] == "task-1"
     assert save_calls[0]["agent_id"] == "a"
+    assert save_calls[0]["status"].value == "FINISHED"
 
 
 async def test_spawn_explore_agent_activity_execute_tool_dispatch():
