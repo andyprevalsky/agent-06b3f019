@@ -17,6 +17,7 @@ import {
   attachRecorder,
   createAgent,
   deleteAgent,
+  expectProdSessionRecognized,
   hasUncaughtErrors,
   injectProdSession,
   loadBenchmarkTask,
@@ -33,28 +34,15 @@ test.describe('agent-realtime', () => {
     const agentId = await createAgent(task.prompt);
 
     try {
+      if (IS_PROD) {
+        await injectProdSession(page);
+      }
       await page.goto(`${FRONTEND_URL}/?agent-id=${agentId}`, {
         waitUntil: 'domcontentloaded',
       });
 
       if (IS_PROD) {
-        // Prod: inject a pre-generated JWT session, then reload so the app
-        // picks it up from localStorage on boot (no dev auto-login available).
-        await injectProdSession(page);
-        await page.reload({ waitUntil: 'domcontentloaded' });
-
-        // Wait for auth hook to recognise the injected session.
-        await expect
-          .poll(
-            () =>
-              rec.console.some(
-                (m) =>
-                  m.text.includes('[Auth] State changed') &&
-                  m.text.includes('isFullySignedIn: true'),
-              ),
-            { timeout: 15_000, message: 'Injected prod session was not recognised by auth hook' },
-          )
-          .toBe(true);
+        await expectProdSessionRecognized(page);
       } else {
         // Dev: auto-login fires automatically for the real test user (+19729777432).
         await expect
@@ -131,7 +119,13 @@ test.describe('agent-realtime', () => {
         'Agent channel emitted CHANNEL_ERROR',
       ).toEqual([]);
 
-      const anonRegression = rec.console.filter(
+      const firstSignedInIndex = rec.console.findIndex(
+        (m) =>
+          m.text.includes('[Auth] State changed') && m.text.includes('isFullySignedIn: true'),
+      );
+      const authMessagesAfterSignIn =
+        firstSignedInIndex === -1 ? [] : rec.console.slice(firstSignedInIndex + 1);
+      const anonRegression = authMessagesAfterSignIn.filter(
         (m) => m.text.includes('[Auth] State changed') && m.text.includes('isAnonymous: true'),
       );
       expect(

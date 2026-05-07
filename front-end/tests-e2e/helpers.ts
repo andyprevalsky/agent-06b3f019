@@ -62,9 +62,39 @@ export async function clearAppSession(page: Page): Promise<void> {
  */
 export async function injectProdSession(page: Page): Promise<void> {
   if (!PROD_SESSION) throw new Error('PROD_SESSION env var not set — run with --prod flag');
+  await page.addInitScript((session) => {
+    window.localStorage.setItem('rose-session', session);
+  }, PROD_SESSION);
+  if (page.url() !== 'about:blank') {
+    await page.evaluate((session) => {
+      window.localStorage.setItem('rose-session', session);
+    }, PROD_SESSION);
+  }
+}
+
+export async function expectProdSessionRecognized(page: Page): Promise<void> {
+  await injectProdSession(page);
   await page.evaluate((session) => {
     window.localStorage.setItem('rose-session', session);
   }, PROD_SESSION);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForLoadState('networkidle').catch(() => {});
+  const sessionState = await page.evaluate(() => {
+    const raw = window.localStorage.getItem('rose-session');
+    if (!raw) return { hasSession: false, isAnonymous: null };
+    try {
+      const session = JSON.parse(raw);
+      return {
+        hasSession: !!session?.access_token,
+        isAnonymous: session?.user?.is_anonymous ?? null,
+      };
+    } catch {
+      return { hasSession: false, isAnonymous: null };
+    }
+  });
+  if (!sessionState.hasSession || sessionState.isAnonymous !== false) {
+    throw new Error(`Prod session not recognised: ${JSON.stringify(sessionState)}`);
+  }
 }
 
 /**
