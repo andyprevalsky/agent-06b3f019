@@ -1,6 +1,6 @@
 """Tool for compressing agent context and generating completion summaries."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import structlog
 from temporalio import activity
@@ -102,7 +102,21 @@ def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
 
 
 @activity.defn
-async def compress_context(context: List[Dict], iteration_count: int, model: str = "rose-labs/rose-1-lite") -> Dict:
+async def compress_context(
+    context: List[Dict],
+    iteration_count: int,
+    model: str = "rose-labs/rose-1-lite",
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict:
     """
     Use LLM to compress context into key learnings.
 
@@ -156,8 +170,19 @@ Format your response as:
             model=model,
             temperature=0.3,
             max_tokens=1000,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
             skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="context_compression",
+            agent_id=agent_id,
+            user_id=claude_token_user_id or gpt_token_user_id,
         )
 
         learnings = result.get("content", "")

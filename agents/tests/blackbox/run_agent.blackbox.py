@@ -443,10 +443,63 @@ async def test_compress_context_calls_execute_activity_and_returns_single_system
     assert len(result) == 1
     assert result[0]["role"] == "SYSTEM"
     assert result[0]["text"] == "key insights"
-    assert captured_args[0][1] == [context, len(context), "rose-lite"]
+    assert captured_args[0][1] == [
+        context,
+        len(context),
+        "rose-lite",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
     assert len(tokens_recorded) == 1
     assert tokens_recorded[0][0] == 3
     assert tokens_recorded[0][1] == 2
+
+
+async def test_compress_context_forwards_compute_token_context():
+    """_compress_context forwards cached direct auth into the compression activity."""
+    from loop.run_agent import _compress_context
+
+    captured_args = []
+
+    async def mock_execute_activity(fn, args=None, **kwargs):
+        captured_args.append((fn, args, kwargs))
+        return {"learnings": "compressed", "usage": {}}
+
+    await _compress_context(
+        mock_execute_activity,
+        [{"role": "USER", "text": "x"}],
+        "rose-lite",
+        agent_id="agent-1",
+        user_id="user-1",
+        gpt_token="gpt-token",
+        gpt_account_id="acct-1",
+        gpt_token_source="user",
+        gpt_token_pool_id="pool-1",
+    )
+
+    assert captured_args[0][1] == [
+        [{"role": "USER", "text": "x"}],
+        1,
+        "rose-lite",
+        None,
+        None,
+        None,
+        "user-1",
+        "gpt-token",
+        "acct-1",
+        "user",
+        "pool-1",
+        "user-1",
+        "agent-1",
+    ]
 
 
 async def test_compress_context_handles_string_return():
@@ -573,6 +626,7 @@ async def run_all_tests():
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async("compress_context_calls_execute_activity_and_returns_single_system_message", test_compress_context_calls_execute_activity_and_returns_single_system_message)
+    await r.record_async("compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context)
     await r.record_async("compress_context_handles_string_return", test_compress_context_handles_string_return)
     await r.record_async("run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished)
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)

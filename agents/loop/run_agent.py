@@ -315,11 +315,27 @@ async def run_agent(  # noqa: C901
 
         if context_tokens >= threshold:
             logger.info(f"Context overflow: {context_tokens} >= {threshold}")
+            compression_claude_token = get_claude_token() if get_claude_token else claude_token
+            compression_claude_token_source = get_claude_token_source() if get_claude_token_source else None
+            compression_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
+            compression_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
+            compression_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
+            compression_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
+            compression_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
             compressed = await _compress_context(
                 execute_activity=execute_activity,
                 context=context,
                 model=model,
                 on_tokens=on_tokens,
+                agent_id=agent_id,
+                user_id=user_id,
+                claude_token=compression_claude_token,
+                claude_token_source=compression_claude_token_source,
+                claude_token_pool_id=compression_claude_token_pool_id,
+                gpt_token=compression_gpt_token,
+                gpt_account_id=compression_gpt_account_id,
+                gpt_token_source=compression_gpt_token_source,
+                gpt_token_pool_id=compression_gpt_token_pool_id,
             )
 
             if on_context_overflow:
@@ -1358,11 +1374,34 @@ async def _compress_context(
     context: List[Dict],
     model: str,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
+    agent_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
 ) -> List[Dict]:
     """Compress context using LLM."""
     result = await execute_activity(
         compress_context,
-        args=[context, len(context), model],
+        args=[
+            context,
+            len(context),
+            model,
+            claude_token,
+            claude_token_source,
+            claude_token_pool_id,
+            user_id,
+            gpt_token,
+            gpt_account_id,
+            gpt_token_source,
+            gpt_token_pool_id,
+            user_id,
+            agent_id,
+        ],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
