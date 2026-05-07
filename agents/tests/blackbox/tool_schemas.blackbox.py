@@ -545,6 +545,20 @@ def test_create_agent_action_model_custom_registry():
     assert inst.tool_calls[0].name == "x"
 
 
+def test_agent_action_openai_schema_has_typed_spawn_agent_items():
+    """AgentAction schema is accepted by strict OpenAI/GPT response_format."""
+    from providers.rose.schema import prepare_schema_for_openai
+    from utils.tool_schemas import create_agent_action_model
+
+    Model = create_agent_action_model(["spawn_agent"])
+    schema = prepare_schema_for_openai(Model)
+    spawn_schema = schema["properties"]["tool_calls"]["items"]
+    items_schema = spawn_schema["properties"]["items"]["anyOf"][0]["items"]
+
+    assert items_schema != {}
+    assert "anyOf" in items_schema or "type" in items_schema
+
+
 async def run_all_tests():
     print("tool-schemas blackbox tests:")
     r = BlackboxResult()
@@ -591,6 +605,7 @@ async def run_all_tests():
     r.record("create_action_unknown_tool", test_create_agent_action_model_unknown_tool_skipped)
     r.record("create_action_no_tools", test_create_agent_action_model_no_tools_available)
     r.record("create_action_custom_registry", test_create_agent_action_model_custom_registry)
+    r.record("agent_action_openai_schema_spawn_items", test_agent_action_openai_schema_has_typed_spawn_agent_items)
     teardown_mock()
     return r.all_passed
 
