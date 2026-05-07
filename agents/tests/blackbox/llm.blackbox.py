@@ -1810,6 +1810,55 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+async def test_check_progress_accepts_completed_code_task_structured_response():
+    """Parent execute verifier accepts a finished code child structured response without an LLM call."""
+    from helpers.llm import check_progress
+
+    async def verifier_should_not_run(*_args, **_kwargs):
+        raise AssertionError("verifier should not run for completed code task output")
+
+    structured_response = {
+        "collatz_sequence": [27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1],
+        "total_steps": 111,
+        "python_script": {
+            "id": "file-1",
+            "path": "/home/user/collatz_27.py",
+            "storage_path": "uploads/collatz_27.py",
+        },
+    }
+    context = [
+        {"role": "USER", "text": "compute Collatz sequence from 27"},
+        {
+            "role": "TOOL",
+            "text": "Status: SUCCESS",
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "structured_response": structured_response,
+            },
+        },
+    ]
+
+    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            response_schema={
+                "fields": [
+                    {"name": "collatz_sequence", "type": "list[int]"},
+                    {"name": "total_steps", "type": "int"},
+                    {"name": "python_script", "type": "file_pointer"},
+                ]
+            },
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 1.0
+    assert result["structured_response"] == structured_response
+    assert result["usage"]["actual_model"] == "structured_response"
+
+
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
@@ -3712,6 +3761,7 @@ async def run_all_tests():
     await r.record_async("call_llm_verifier_fills_structured_tool_output", test_call_llm_verifier_fills_missing_output_from_structured_tool_response)
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
     await r.record_async("check_progress_below_threshold_returns_partial_structured_response", test_check_progress_below_threshold_returns_partial_structured_response)
+    await r.record_async("check_progress_accepts_completed_code_task_structured_response", test_check_progress_accepts_completed_code_task_structured_response)
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)

@@ -2761,6 +2761,80 @@ def _fill_missing_verifier_output_from_messages(
     return parsed_json
 
 
+def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
+    if not response_schema or not isinstance(response_schema.get("fields"), list):
+        return []
+    return [
+        field.get("name")
+        for field in response_schema.get("fields", [])
+        if isinstance(field, dict) and isinstance(field.get("name"), str) and field.get("name")
+    ]
+
+
+def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
+    if value is None:
+        return False
+    if field_type in ("file_pointer", "session_file_pointer"):
+        return isinstance(value, dict) and any(value.get(key) for key in ("id", "path", "storage_path"))
+    if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
+        return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
+    return True
+
+
+def _structured_response_satisfies_schema(
+    structured_response: Any,
+    response_schema: Optional[Dict[str, Any]],
+) -> bool:
+    if not isinstance(structured_response, dict):
+        return False
+    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
+    if not fields:
+        return False
+    for field in fields:
+        if not isinstance(field, dict):
+            return False
+        name = field.get("name")
+        if not isinstance(name, str) or name not in structured_response:
+            return False
+        if not _has_schema_value(structured_response.get(name), field.get("type")):
+            return False
+    return True
+
+
+def _completed_code_task_structured_response(
+    context: List[Dict[str, Any]],
+    response_schema: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a completed code subtask's structured output when it covers the schema.
+
+    This is deliberately narrow: only finished spawn_claude_code_agent task
+    completion messages qualify. The child code tool already ran its own
+    verifier or evidence-based fallback, so the parent verifier can accept the
+    grounded structured response instead of retrying on verifier transport
+    timeouts.
+    """
+    if not context or not response_schema:
+        return None
+
+    for message in reversed(context):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_claude_code_agent":
+            continue
+        if metadata.get("toolStatus") != "FINISHED" or metadata.get("action_type") != "task_complete":
+            continue
+        structured_response = metadata.get("structured_response")
+        if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
+            structured_response = structured_response["output"]
+        if _structured_response_satisfies_schema(structured_response, response_schema):
+            return structured_response
+
+    return None
+
+
 def _build_verifier_response_model(
     response_schema: Optional[Dict[str, Any]] = None,
 ) -> Type[BaseModel]:
@@ -3183,6 +3257,37 @@ async def check_progress(  # noqa: C901
         # caller (poll_new_messages by agent_id, or locally-built browser /
         # claude-code verifier_context). No filtering here — see docstring.
         _safe_heartbeat("Checking progress with LLM judge")
+
+        if call_site == "verifier_execute" and schema_for_call:
+            completed_code_output = _completed_code_task_structured_response(context, schema_for_call)
+            if completed_code_output is not None:
+                field_names = _schema_field_names(schema_for_call)
+                reasoning = (
+                    "A completed code sandbox task returned a grounded structured response "
+                    f"covering the required fields: {', '.join(field_names)}."
+                )
+                logger.info(
+                    "Progress satisfied by completed code task structured response",
+                    fields=field_names,
+                    call_site=call_site,
+                )
+                return {
+                    "score": 1.0,
+                    "reasoning": reasoning,
+                    "message": f"{reasoning}\n\nScore: 1.0",
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "actual_model": "structured_response",
+                        "pool_name": "completed_code_task",
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "claude_token_error": None,
+                        "gpt_token_error": None,
+                    },
+                    "structured_response": completed_code_output,
+                }
 
         config = load_config()
         system_prompt = verifier_system_prompt
