@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "wait",
+    "description": "Wait for a specified time",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "timeMs": {
+          "type": "number",
+          "description": "Time to wait in milliseconds"
+        }
+      },
+      "required": [
+        "timeMs"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

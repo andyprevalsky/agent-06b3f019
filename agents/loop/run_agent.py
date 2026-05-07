@@ -37,6 +37,7 @@ from helpers.llm import (
     call_llm_activity,
     call_llm_structured_streaming,
     check_progress,
+    inject_llm_only_user_preamble,
 )
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
@@ -45,6 +46,7 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
+from utils.prompts import format_required_output_schema_user_message
 from utils.tool_schemas import create_agent_action_model
 
 logger = structlog.get_logger()
@@ -199,7 +201,14 @@ async def run_agent(  # noqa: C901
 
     # Create dynamic action model for structured output
     # Use custom response_model if provided (e.g., browser agent), otherwise create from tools
-    AgentAction = response_model if response_model else create_agent_action_model(tools)
+    AgentAction = (
+        response_model
+        if response_model
+        else create_agent_action_model(
+            tools,
+            include_attempt_completion_result=skip_verification,
+        )
+    )
 
     def _log_cache_summary(status: str):
         """Log cache performance summary at end of run."""
@@ -314,11 +323,20 @@ async def run_agent(  # noqa: C901
 
         # 6. Build system prompt (calls API for fresh shared memory each iteration)
         current_system_prompt = await system_prompt()
+        current_response_schema = response_schema
+        if get_response_schema:
+            try:
+                current_response_schema = await get_response_schema()
+            except Exception as e:
+                logger.warning(f"Failed to fetch response schema for LLM preamble: {e}")
+        schema_preamble = format_required_output_schema_user_message(current_response_schema)
 
         # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
         if build_messages:
             messages = build_messages(context, current_system_prompt)
+            if schema_preamble:
+                messages = inject_llm_only_user_preamble(messages, schema_preamble)
         elif not is_inside_temporal_activity:
             # Workflow context: pre-download files, then defer message building to call_llm_activity
             # so that base64 content never crosses Temporal's 2MB payload boundary.
@@ -338,10 +356,20 @@ async def run_agent(  # noqa: C901
                 except Exception as e:
                     logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
             # Store context in shared memory — call_llm_activity will build messages inside
-            _pending_llm_context[agent_id] = (context, current_system_prompt, pre_resolved_ids)
+            _pending_llm_context[agent_id] = (
+                context,
+                current_system_prompt,
+                pre_resolved_ids,
+                user_id,
+            )
             messages = None  # Signals to use shared state path below
         else:
-            messages = await build_llm_messages(context, current_system_prompt)
+            messages = await build_llm_messages(
+                context,
+                current_system_prompt,
+                llm_only_user_preamble=schema_preamble,
+                user_id=user_id,
+            )
 
         # Resolve Claude token dynamically (getter returns latest; may be None after fallback)
         current_claude_token = get_claude_token() if get_claude_token else claude_token
@@ -469,6 +497,12 @@ async def run_agent(  # noqa: C901
                         current_claude_token,
                         call_site_label,
                         current_system_prompt,
+                        None,
+                        None,
+                        False,
+                        skip_verification,
+                        schema_preamble,
+                        user_id,
                     ],
                     start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -928,9 +962,9 @@ async def run_agent(  # noqa: C901
                 # result so the verifier sees the current iteration's artifact.
                 # Uses "text"/"timestamp" — build_llm_messages and check_progress
                 # both read "text" and depend on "timestamp" for ordering.
-                # AttemptCompletionTool takes no args (the verifier reads prior
-                # tool results, not anything passed here), so the agent's
-                # narration in `response_text` is what we surface.
+                # The verifier reads prior tool results, not
+                # attempt_completion.result. Preserve the assistant narration
+                # here for verified flows and legacy unverified fallbacks.
                 if not poll_messages:
                     context.append(
                         {
@@ -965,10 +999,16 @@ async def run_agent(  # noqa: C901
                 # Skip LLM verification if requested
                 if skip_verification:
                     logger.info("⏭️ Skipping LLM verification")
-                    # Sub-agent → parent handoff: AttemptCompletionTool takes
-                    # no args, so the agent's narration in `response_text` is
-                    # the spawn_agent return payload.
+                    # Sub-agent → parent handoff: prefer the explicit
+                    # attempt_completion.result payload. Fall back to the
+                    # assistant narration for older callers/models.
                     completion_result = response_text or ""
+                    if isinstance(tool_args, dict):
+                        result_arg = tool_args.get("result")
+                        if isinstance(result_arg, str) and result_arg.strip():
+                            completion_result = result_arg
+                        elif result_arg is not None:
+                            completion_result = str(result_arg)
                     _log_cache_summary("completed-no-verify")
                     return {
                         "status": "completed",

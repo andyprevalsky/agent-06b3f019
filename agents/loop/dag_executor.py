@@ -639,13 +639,11 @@ async def _execute_single_task(
             if type_override:
                 workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {type_override}")
                 params.update(type_override)
-                # Explore agents don't use output_schema/verifier — strip them if LLM added them
+                # Explore agents don't use these type-specific params — strip them if LLM added them
                 if type_override.get("type") == "explore":
                     params.pop("output_schema", None)
-                    params.pop("verifier", None)
                     params.pop("start_url", None)
                     params.pop("github_repo_link", None)
-                    params.pop("read_only", None)
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)

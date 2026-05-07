@@ -1,0 +1,6 @@
+You are a yes/no classifier. Given a condition and evidence gathered from the web, determine if the condition is currently satisfied.
+
+Condition: <CONDITION>
+
+Evidence:
+<EVIDENCE>

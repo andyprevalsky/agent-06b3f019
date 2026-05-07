@@ -70,7 +70,11 @@ export function decryptCredentialEnvelope(
  */
 export interface ClaudeCodeCredentialResult {
   /** Decrypted credentials JSON string (the `claudeAiOauth` envelope). */
-  credentials: string;
+  credentials?: string;
+  /** Decrypted OAuth access token, suitable for token-only callers. */
+  accessToken?: string;
+  /** How the sandbox should inject this credential. */
+  credentialMode: 'oauth_envelope' | 'oauth_token';
   /** Whether this came from the user's own integration or the shared pool. */
   source: 'user' | 'pool';
   /** Owning user (when source='user') or the foreign user the pool token belongs to (when source='pool'). */
@@ -123,8 +127,12 @@ export async function fetchClaudeCodeCredentialsWithMeta(
     if (userIntegration) {
       const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
       if (decrypted) {
-        log.info(`Serving user Claude Code credentials for ${userId}`);
-        return { credentials: decrypted, source: 'user', userId };
+        const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
+        if (result) {
+          log.info(`Serving user Claude Code credentials for ${userId}`);
+          return result;
+        }
+        log.warn(`User Claude Code integration for ${userId} has no usable OAuth token`);
       }
     } else {
       log.info(
@@ -203,9 +211,15 @@ export async function fetchPoolCredentials(
     for (const poolIntegration of poolIntegrations) {
       const decrypted = decryptIntegrationCredentials(poolIntegration, decryptionKey);
       if (!decrypted) continue;
-      if (!hasUsableClaudeCodeEnvelope(decrypted)) {
+      const result = buildClaudeCodeCredentialResult(
+        decrypted,
+        'pool',
+        poolIntegration.userId,
+        poolIntegration.id
+      );
+      if (!result) {
         log.warn(
-          `Pool integration ${poolIntegration.id} (user: ${poolIntegration.userId}) has incomplete OAuth envelope (missing refreshToken or invalid format) — skipping`
+          `Pool integration ${poolIntegration.id} (user: ${poolIntegration.userId}) has no usable OAuth token — skipping`
         );
         continue;
       }
@@ -216,18 +230,13 @@ export async function fetchPoolCredentials(
       });
 
       log.info(
-        `Serving pool Claude Code credentials from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
+        `Serving pool Claude Code credentials from integration ${poolIntegration.id} (user: ${poolIntegration.userId}, mode: ${result.credentialMode})`
       );
-      return {
-        credentials: decrypted,
-        source: 'pool',
-        userId: poolIntegration.userId,
-        poolTokenId: poolIntegration.id,
-      };
+      return result;
     }
 
     log.info(
-      `${poolIntegrations.length} pool integrations matched but none had a usable OAuth envelope — falling back to caller default`
+      `${poolIntegrations.length} pool integrations matched but none had a usable OAuth token`
     );
     return null;
   } catch (error) {
@@ -239,33 +248,44 @@ export async function fetchPoolCredentials(
 }
 
 /**
- * Validate that a decrypted Claude Code credentials JSON contains the fields
- * the CLI needs to authenticate without prompting for `/login`. The CLI expects
- * `{ claudeAiOauth: { accessToken, refreshToken, expiresAt, ... } }` — without
- * `refreshToken` it cannot recover from a rejected access token and emits the
- * "Please run /login" message that aborts the sandbox activity. This guard
- * prevents the pool from serving partial envelopes that we know will fail.
- *
- * Also rejects obvious test/seed envelopes (e.g. `seed-token-xxx` /
- * `test-refresh`) — these pass the structural length check but fail
- * authentication on the very first request. Real Anthropic OAuth tokens
- * always start with `sk-ant-oat01-`, so rejecting envelopes that lack that
- * prefix saves an entire E2B sandbox spin-up per dud token.
+ * Convert a decrypted Claude Code credentials JSON into the strongest sandbox
+ * injection mode it supports. A full OAuth envelope lets Claude Code refresh
+ * tokens from its normal config file; an access-token-only envelope can still
+ * run through CLAUDE_CODE_OAUTH_TOKEN. Obvious test/seed envelopes are rejected
+ * before they burn an E2B sandbox.
  */
-function hasUsableClaudeCodeEnvelope(credentialsJson: string): boolean {
+function buildClaudeCodeCredentialResult(
+  credentialsJson: string,
+  source: 'user' | 'pool',
+  userId: string,
+  poolTokenId?: string
+): ClaudeCodeCredentialResult | null {
   try {
     const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
     const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
-    if (!oauth) return false;
+    if (!oauth) return null;
     const accessToken = typeof oauth.accessToken === 'string' ? oauth.accessToken : '';
     const refreshToken = typeof oauth.refreshToken === 'string' ? oauth.refreshToken : '';
-    if (accessToken.length === 0 || refreshToken.length === 0) return false;
     // Real Anthropic OAuth access tokens are minted with this prefix; anything
     // else is a placeholder (seed data, tests) that will 401 immediately.
-    if (!accessToken.startsWith('sk-ant-oat')) return false;
-    return true;
+    if (!accessToken.startsWith('sk-ant-oat')) return null;
+    const common = { source, userId, poolTokenId };
+    if (refreshToken.length > 0) {
+      return {
+        ...common,
+        credentials: credentialsJson,
+        accessToken,
+        credentialMode: 'oauth_envelope',
+      };
+    }
+    return {
+      ...common,
+      credentials: credentialsJson,
+      accessToken,
+      credentialMode: 'oauth_token',
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -295,66 +315,16 @@ function resolveRateLimitedUntil(
 export async function fetchPoolToken(
   excludeIds?: string[]
 ): Promise<{ accessToken: string; poolTokenId: string } | null> {
-  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
-  if (!decryptionKey) {
-    log.info('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set, skipping pool lookup');
+  const result = await fetchPoolCredentials(excludeIds);
+  if (result?.accessToken !== undefined && result.poolTokenId !== undefined) {
+    return { accessToken: result.accessToken, poolTokenId: result.poolTokenId };
+  }
+  if (result !== null) {
+    log.warn(`Pool integration ${result.poolTokenId ?? 'unknown'} had no usable access token`);
     return null;
   }
-
-  try {
-    const now = new Date();
-    const poolIntegration = await prisma.integration.findFirst({
-      where: {
-        name: 'claude_code',
-        status: 'CONNECTED',
-        poolingEnabled: true,
-        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
-        ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
-      },
-      orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }],
-    });
-
-    if (!poolIntegration) {
-      log.info('No available pool tokens');
-      return null;
-    }
-
-    const config = poolIntegration.config as Record<string, unknown> | null;
-    const encryptedCredentials = config?.encryptedCredentials as string | undefined;
-    if (!encryptedCredentials) {
-      log.error(`Pool integration ${poolIntegration.id} missing encryptedCredentials`);
-      return null;
-    }
-
-    const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
-    if (!decrypted) {
-      log.error(`Failed to decrypt pool integration ${poolIntegration.id}`);
-      return null;
-    }
-
-    const parsed = JSON.parse(decrypted);
-    const oauth = parsed?.claudeAiOauth;
-    if (!oauth?.accessToken) {
-      log.error(`Pool integration ${poolIntegration.id} missing accessToken`);
-      return null;
-    }
-
-    // Update lastUsedAt for LRU ordering
-    await prisma.integration.update({
-      where: { id: poolIntegration.id },
-      data: { lastUsedAt: now },
-    });
-
-    log.info(
-      `Serving pool token from integration ${poolIntegration.id} (user: ${poolIntegration.userId})`
-    );
-    return { accessToken: oauth.accessToken, poolTokenId: poolIntegration.id };
-  } catch (error) {
-    log.error('Error fetching pool token', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
+  log.info('No available pool tokens');
+  return null;
 }
 
 /**
@@ -439,6 +409,10 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     const oauth = parsed?.claudeAiOauth;
     if (!oauth?.accessToken) {
       log.error(`Credentials missing accessToken for user ${userId}`);
+      return null;
+    }
+    if (typeof oauth.accessToken !== 'string' || !oauth.accessToken.startsWith('sk-ant-oat')) {
+      log.error(`Credentials for user ${userId} do not contain a real Claude OAuth access token`);
       return null;
     }
 

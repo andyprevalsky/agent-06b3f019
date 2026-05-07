@@ -1,0 +1,12 @@
+{
+  "type": "function",
+  "function": {
+    "name": "ariaTree",
+    "description": "Get the accessibility (ARIA) tree from the current page. This provides full context of what is on the page including text content and element structure. Use this to understand the page before taking actions.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+}

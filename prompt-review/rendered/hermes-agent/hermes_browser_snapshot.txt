@@ -1,0 +1,15 @@
+{
+  "name": "browser_snapshot",
+  "description": "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Snapshots over 8000 chars are truncated or LLM-summarized. Requires browser_navigate first. Note: browser_navigate already returns a compact snapshot — use this to refresh after interactions that change the page, or with full=true for complete content.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "full": {
+        "type": "boolean",
+        "description": "If true, returns complete page content. If false (default), returns compact view with interactive elements only.",
+        "default": false
+      }
+    },
+    "required": []
+  }
+}

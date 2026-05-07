@@ -59,6 +59,10 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import crypto from 'crypto';
+import { execFileSync } from 'child_process';
+import jwt from 'jsonwebtoken';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -126,6 +130,8 @@ const ctx: TestContext = { captureAvailable: false };
 const FAKE_UUID = '00000000-0000-0000-0000-000000000000';
 const FAKE_UUID_2 = '11111111-1111-1111-1111-111111111111';
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const CLAUDE_DECRYPTION_KEY_B64 = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY ?? '';
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 async function request(
   url: string,
@@ -256,6 +262,138 @@ async function checkCaptureAvailable(): Promise<boolean> {
 
 async function setup(): Promise<void> {
   ctx.captureAvailable = await checkCaptureAvailable();
+}
+
+function claudePublicKeyPem(): string {
+  if (CLAUDE_DECRYPTION_KEY_B64 === '') {
+    throw new Error('CLAUDE_CREDENTIAL_DECRYPTION_KEY not set — cannot seed token fixtures');
+  }
+  const privatePem = Buffer.from(CLAUDE_DECRYPTION_KEY_B64, 'base64').toString('utf8');
+  const keyObj = crypto.createPrivateKey(privatePem);
+  return crypto.createPublicKey(keyObj).export({ type: 'spki', format: 'pem' }) as string;
+}
+
+function encryptClaudeEnvelope(plaintext: string): string {
+  const aesKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  const encryptedPart = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  const ciphertextWithTag = Buffer.concat([encryptedPart, authTag]);
+
+  const encryptedAesKey = crypto.publicEncrypt(
+    {
+      key: claudePublicKeyPem(),
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha256',
+    },
+    aesKey
+  );
+
+  const envelope = {
+    version: 1,
+    encrypted_aes_key: encryptedAesKey.toString('base64'),
+    iv: iv.toString('base64'),
+    ciphertext: ciphertextWithTag.toString('base64'),
+  };
+  return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+}
+
+function buildCredentialPayload(accessToken: string): string {
+  return encryptClaudeEnvelope(
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken,
+        refreshToken: 'test-refresh',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      },
+    })
+  );
+}
+
+function encryptPayload(data: unknown): { data: string; iv: string; key: string } {
+  const key = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  const encrypted = cipher.update(JSON.stringify(data), 'utf8', 'hex') + cipher.final('hex');
+  return { data: encrypted, iv: iv.toString('hex'), key: key.toString('hex') };
+}
+
+function authTokenForUser(userId: string): string {
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  const supabaseUrl = process.env.SUPABASE_URL;
+  if (secret === undefined || secret === '' || supabaseUrl === undefined || supabaseUrl === '') {
+    throw new Error('SUPABASE_JWT_SECRET and SUPABASE_URL are required for smoke credential sync');
+  }
+  return jwt.sign(
+    {
+      sub: userId,
+      email: 'claude-code-smoke@example.com',
+      role: 'authenticated',
+      aud: 'authenticated',
+      iss: `${supabaseUrl}/auth/v1`,
+    },
+    secret,
+    { algorithm: 'HS256', expiresIn: '1h' }
+  );
+}
+
+function readKeychainClaudeCredentials(): string {
+  let credentialsJson: string;
+  try {
+    credentialsJson = execFileSync(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
+  } catch {
+    throw new Error(`Claude Code Keychain credentials not found (${CLAUDE_KEYCHAIN_SERVICE})`);
+  }
+
+  let parsed: { claudeAiOauth?: { accessToken?: string } };
+  try {
+    parsed = JSON.parse(credentialsJson) as { claudeAiOauth?: { accessToken?: string } };
+  } catch {
+    throw new Error('Claude Code Keychain credentials are not valid JSON');
+  }
+
+  if (parsed.claudeAiOauth?.accessToken?.startsWith('sk-ant-oat') !== true) {
+    throw new Error('Claude Code Keychain credentials are missing a valid OAuth access token');
+  }
+
+  return credentialsJson;
+}
+
+async function syncSmokeUserCredentialsFromKeychain(): Promise<void> {
+  const credentialsJson = readKeychainClaudeCredentials();
+  const encrypted = encryptPayload({
+    encryptedCredentials: encryptClaudeEnvelope(credentialsJson),
+  });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${authTokenForUser(DEV_USER_ID)}` },
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function seedClaudeIntegration(): Promise<{ integrationId: string; userId: string }> {
+  const userId = crypto.randomUUID();
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-boundary-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'claude_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+      poolingEnabled: true,
+      config: { encryptedCredentials },
+    },
+  });
+  return { integrationId: integration.id, userId };
 }
 
 // ==================== POST /create ====================
@@ -631,34 +769,43 @@ async function testErrorSurface_all401sHaveErrorField() {
 // ==================== BOUNDARY CAPTURE TESTS (Sequential) ====================
 
 async function testBoundary_createCallsE2bApi() {
+  const seeded = await seedClaudeIntegration();
   const cursor = await getCaptureCursor();
-  await request(`${BASE_URL}/api/claude-code-session/create`, {
-    method: 'POST',
-    headers: apiKeyHeaders(),
-    body: JSON.stringify({ agent_id: FAKE_UUID, goal: 'boundary test' }),
-  });
-  await new Promise((r) => setTimeout(r, 200));
-  const calls = await readCapturesAfter(cursor);
-  // E2B SDK calls https://api.e2b.app/sandboxes — assert on the captured call
-  assert(calls.length >= 1, `Expected at least 1 E2B outbound call, got ${calls.length}`);
-  const e2bCalls = calls.filter((c) => c.url.includes('e2b.app'));
-  assert(
-    e2bCalls.length >= 1,
-    `Expected at least 1 call to e2b.app, got ${e2bCalls.length}. All calls: ${calls.map((c) => c.url).join(', ')}`
-  );
-  // Assert exact URL pattern
-  assert(
-    e2bCalls[0].url.startsWith('https://api.e2b.app/'),
-    `Expected E2B URL to start with https://api.e2b.app/, got ${e2bCalls[0].url}`
-  );
-  // No unexpected non-E2B calls
-  const nonE2bCalls = calls.filter(
-    (c) => !c.url.includes('e2b.app') && !INFRA_URL_PATTERNS.some((p) => c.url.includes(p))
-  );
-  assert(
-    nonE2bCalls.length === 0,
-    `Unexpected non-E2B outbound calls: ${nonE2bCalls.map((c) => `${c.method} ${c.url}`).join(', ')}`
-  );
+  try {
+    await request(`${BASE_URL}/api/claude-code-session/create`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        agent_id: FAKE_UUID,
+        goal: 'boundary test',
+        user_id: seeded.userId,
+      }),
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const calls = await readCapturesAfter(cursor);
+    // E2B SDK calls https://api.e2b.app/sandboxes — assert on the captured call
+    assert(calls.length >= 1, `Expected at least 1 E2B outbound call, got ${calls.length}`);
+    const e2bCalls = calls.filter((c) => c.url.includes('e2b.app'));
+    assert(
+      e2bCalls.length >= 1,
+      `Expected at least 1 call to e2b.app, got ${e2bCalls.length}. All calls: ${calls.map((c) => c.url).join(', ')}`
+    );
+    // Assert exact URL pattern
+    assert(
+      e2bCalls[0].url.startsWith('https://api.e2b.app/'),
+      `Expected E2B URL to start with https://api.e2b.app/, got ${e2bCalls[0].url}`
+    );
+    // No unexpected non-E2B calls
+    const nonE2bCalls = calls.filter(
+      (c) => !c.url.includes('e2b.app') && !INFRA_URL_PATTERNS.some((p) => c.url.includes(p))
+    );
+    assert(
+      nonE2bCalls.length === 0,
+      `Unexpected non-E2B outbound calls: ${nonE2bCalls.map((c) => `${c.method} ${c.url}`).join(', ')}`
+    );
+  } finally {
+    await prisma.integration.deleteMany({ where: { id: seeded.integrationId } });
+  }
 }
 
 async function testBoundary_closeNonExistentNoOutbound() {
@@ -774,6 +921,8 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
  *  - Claude Code output never contains "4" within 90s
  */
 async function testSmoke_claudeCodeAnswersQuestion() {
+  await syncSmokeUserCredentialsFromKeychain();
+
   // 1. Create a real session with a simple math question.
   // Pass user_id so the backend resolves per-user Claude Code credentials
   // (ANTHROPIC_API_KEY fallback uses a stale key that won't authenticate).

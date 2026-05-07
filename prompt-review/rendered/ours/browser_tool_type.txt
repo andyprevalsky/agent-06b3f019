@@ -1,0 +1,29 @@
+{
+  "type": "function",
+  "function": {
+    "name": "type",
+    "description": "Type text into an element character by character (does NOT clear existing text).\n\nIMPORTANT: Use observe() first to find the element and get its selector.\n\nUse this for:\n- Search boxes that trigger autocomplete on each keystroke\n- When you want to APPEND text to existing content\n- When you need keypress events to fire\n\nExamples:\n- type(selector=\"input[type='search']\", text=\"python tutorials\")\n- type(selector=\"#message\", text=\" - additional text\")\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector or XPath for the element"
+        },
+        "text": {
+          "type": "string",
+          "description": "Text to type"
+        },
+        "delay": {
+          "type": "number",
+          "description": "Delay between keystrokes in ms. Default: 50"
+        }
+      },
+      "required": [
+        "selector",
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

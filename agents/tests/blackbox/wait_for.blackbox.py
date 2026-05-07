@@ -411,7 +411,7 @@ async def test_handler_condition_network_fetch_failure_tolerated():
 
 
 async def test_handler_condition_gates_off_skip_fetch():
-    """When context_gates disable network + recent_communications, fetch activities are skipped."""
+    """Workflow-level context_gates disable network + recent_communications fetches."""
     from domains.wait_for.handler import WaitForManager
     from tools.base import MessageStatus
 
@@ -420,6 +420,7 @@ async def test_handler_condition_gates_off_skip_fetch():
     restore = _patch_handler_workflow(fake)
     try:
         wf = _WFInstance(paused=True)  # abort early
+        wf.context_gates = {"network": False, "recent_communications": False}
         events = await _collect(
             WaitForManager().execute_tool(
                 workflow_instance=wf,
@@ -427,7 +428,6 @@ async def test_handler_condition_gates_off_skip_fetch():
                     "condition": "cond",
                     "check_interval_seconds": 30,
                     "max_checks": 1,
-                    "context_gates": {"network": False, "recent_communications": False},
                 },
                 tool_call_id="tc",
             )

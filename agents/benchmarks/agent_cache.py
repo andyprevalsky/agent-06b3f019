@@ -140,7 +140,10 @@ def _read_cache_events(log_paths: List[Path], agent_id: Optional[str], since: Op
 
                 entry: Optional[Dict[str, Any]] = None
                 try:
-                    entry = json.loads(line)
+                    parsed = json.loads(line)
+                    if not isinstance(parsed, dict):
+                        continue
+                    entry = parsed
                     if entry and entry.get("event") != "llm.cache":
                         entry = None
                 except json.JSONDecodeError:
@@ -286,9 +289,9 @@ def main() -> None:
     events = _read_cache_events(log_paths, args.agent_id, since)
 
     if not events:
-        print(f"No llm.cache events found" + (f" for {args.agent_id}" if args.agent_id else ""), file=sys.stderr)
+        print("No llm.cache events found" + (f" for {args.agent_id}" if args.agent_id else ""), file=sys.stderr)
         print(f"  Log files: {', '.join(str(p) for p in log_paths)}", file=sys.stderr)
-        print(f"  Hint: ensure the worker/backend is running with updated code that emits llm.cache events", file=sys.stderr)
+        print("  Hint: ensure the worker/backend is running with updated code that emits llm.cache events", file=sys.stderr)
         sys.exit(1)
 
     groups = _group_by_agent(events)

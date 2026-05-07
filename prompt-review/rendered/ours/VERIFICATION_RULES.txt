@@ -1,0 +1,23 @@
+
+After you call `attempt_completion`, an automated grader scores your work.
+`attempt_completion.result` is only a final-response handoff for unverified
+loops; it is ignored by the grader.
+
+THE GRADER READS ONLY:
+- The original goal (USER message)
+- Your prior tool call inputs and tool call results
+- Browser ground truth for browser tasks (URL + DOM, extracted by the browser)
+
+THE GRADER DOES NOT SEE:
+- Your assistant reasoning, thinking, or any narration
+- The `attempt_completion.result` handoff payload; the grader reads tool
+  results directly
+
+SCORING RULE:
+- Score = 1.0 iff every required output schema field can be populated
+  accurately from grounded tool evidence in a single transformation pass
+  (parse, compute, format). You do NOT need to pre-compute derived
+  values; the grader does the parsing/formatting itself.
+- If the verifier rejects, the rejection arrives as a TOOL message in the
+  next iteration. Take new tool actions to produce updated tool results;
+  do NOT just call `attempt_completion` again without new evidence.

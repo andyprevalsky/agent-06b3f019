@@ -1,0 +1,20 @@
+{
+  "name": "browser_scroll",
+  "description": "Scroll the page in a direction. Use this to reveal more content that may be below or above the current viewport. Requires browser_navigate to be called first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "direction": {
+        "type": "string",
+        "enum": [
+          "up",
+          "down"
+        ],
+        "description": "Direction to scroll"
+      }
+    },
+    "required": [
+      "direction"
+    ]
+  }
+}

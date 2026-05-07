@@ -611,6 +611,29 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert msgs[0]["content"] == "you are helpful"
 
 
+def test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    msgs = [
+        {
+            "role": "system",
+            "content": (
+                f"main{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+                f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+                f"phase{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+            ),
+        },
+        {"role": "user", "content": "hello"},
+    ]
+    out = transform_messages_for_openai(msgs)
+    assert out[0]["content"] == [
+        {"type": "text", "text": "main", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "user context", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "phase", "cache_control": {"type": "ephemeral"}},
+    ]
+    assert out[1] == {"role": "user", "content": "hello"}
+
+
 # =====================================================================
 # claude_auth — body assembly
 # =====================================================================
@@ -666,6 +689,33 @@ def test_build_anthropic_body_static_dynamic_split():
     assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
     assert dynamic_block["text"] == "Current time: April 28"
     assert "cache_control" not in dynamic_block
+
+
+def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    spec = get_pool("rose-1-lite")
+    system_content = (
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"phase prompt{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    )
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+
+    sys = body["system"]
+    assert [b["text"] for b in sys[2:]] == ["static instructions", "user context", "phase prompt"]
+    assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in sys[2:])
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
@@ -1188,6 +1238,34 @@ async def test_waterfall_falls_through_then_succeeds():
     assert state["i"] == 2
 
 
+async def test_waterfall_skips_anthropic_for_response_format():
+    """OpenRouter Anthropic rejects response_format; waterfall skips to next model."""
+    sse_ok = "\n".join(_openai_sse([
+        {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+        {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    ]))
+    models_seen: list[str] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        models_seen.append(body["model"])
+        return httpx.Response(
+            200, text=sse_ok, headers={"Content-Type": "text/event-stream"}
+        )
+
+    set_mock_handler(handler)
+    chunks = await _drain(waterfall_complete(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "hi"}],
+        response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+        openrouter_key="ork-test",
+        request_id="r-skip-anthropic-rf",
+    ))
+
+    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert any(c.kind == "content" for c in chunks)
+
+
 async def test_waterfall_all_failed_raises_with_step_errors():
     def handler(req):
         return httpx.Response(503, text="upstream down")
@@ -1452,8 +1530,8 @@ async def test_claude_auth_stream_reports_cache_hit_rate():
 
 def test_build_anthropic_body_cache_structure_from_real_prompt():
     """build_system_prompt output produces correct cache structure when passed
-    through build_anthropic_body: static block gets global scope, dynamic block
-    is uncached, last message gets breakpoint."""
+    through build_anthropic_body: main+user-context and phase blocks get
+    global cache markers, and the last message gets a breakpoint."""
     from utils.prompts import build_system_prompt
 
     spec = get_pool("rose-1-lite")
@@ -1477,18 +1555,20 @@ def test_build_anthropic_body_cache_structure_from_real_prompt():
     )
 
     sys_blocks = body["system"]
-    # identity + disclaimer + static + dynamic = 4 blocks
+    # identity + disclaimer + main/user context + phase = 4 blocks
     assert len(sys_blocks) == 4, f"Expected 4 system blocks, got {len(sys_blocks)}"
 
-    static_block = sys_blocks[2]
-    dynamic_block = sys_blocks[3]
+    main_context_block = sys_blocks[2]
+    phase_block = sys_blocks[3]
 
-    assert static_block["cache_control"] == {"type": "ephemeral", "scope": "global"}
-    assert "cache_control" not in dynamic_block
-    assert "Andy" in dynamic_block["text"]
+    for block in (main_context_block, phase_block):
+        assert block["cache_control"] == {"type": "ephemeral", "scope": "global"}
+    assert "You are a Rose Labs Agent" in main_context_block["text"]
+    assert "Andy" in main_context_block["text"]
+    assert "# Current Phase" in phase_block["text"]
     # Timestamp is now in message headers, not the system prompt dynamic section
-    assert "Current time:" not in dynamic_block["text"]
-    assert "Current time:" not in static_block["text"]
+    assert "Current time:" not in main_context_block["text"]
+    assert "Current time:" not in phase_block["text"]
 
     msgs = body["messages"]
     last_content = msgs[-1]["content"]
@@ -1551,9 +1631,11 @@ async def run_all_tests():
     r.record("reconstruct_envelope", test_reconstruct_agent_response_envelope)
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
+    r.record("openai_messages_multi_boundary_cached", test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached)
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)
     r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
+    r.record("anthropic_body_multi_boundary_cached", test_build_anthropic_body_multi_boundary_system_blocks_are_cached)
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
 
@@ -1575,6 +1657,7 @@ async def run_all_tests():
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
+    await r.record_async("waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format)
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 

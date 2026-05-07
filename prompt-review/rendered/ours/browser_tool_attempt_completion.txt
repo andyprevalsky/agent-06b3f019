@@ -1,0 +1,20 @@
+{
+  "type": "function",
+  "function": {
+    "name": "attempt_completion",
+    "description": "Signal that the task is complete and ready for verification. Call this when you believe the goal has been accomplished. A verifier will confirm - if it passes, the session closes. If not, you'll receive feedback and can continue.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "reasoning": {
+          "type": "string",
+          "description": "Summary of what was accomplished and why you believe the task is complete"
+        }
+      },
+      "required": [
+        "reasoning"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

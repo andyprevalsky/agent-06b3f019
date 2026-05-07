@@ -1,0 +1,97 @@
+{
+  "name": "sessions_spawn",
+  "description": "Spawn a clean isolated session by default with runtime=subagent or runtime=acp. mode=run is one-shot and mode=session is persistent/thread-bound where supported. Subagents inherit the parent workspace directory automatically. Use this when the work should happen in a fresh child session instead of the current one.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "Task prompt for the child session."
+      },
+      "label": {
+        "type": "string",
+        "description": "Optional session label."
+      },
+      "runtime": {
+        "type": "string",
+        "enum": [
+          "subagent",
+          "acp"
+        ],
+        "description": "Spawn runtime."
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "run",
+          "session"
+        ],
+        "description": "Run once or persistent session."
+      },
+      "thread": {
+        "type": "boolean",
+        "description": "Bind spawned session to a thread where supported."
+      },
+      "context": {
+        "type": "string",
+        "enum": [
+          "isolated",
+          "fork"
+        ],
+        "description": "Context inheritance mode (subagent runtime)."
+      },
+      "lightContext": {
+        "type": "boolean",
+        "description": "Use lightweight bootstrap context for subagent runtime."
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional model override."
+      },
+      "thinking": {
+        "type": "string",
+        "description": "Optional thinking/reasoning effort override."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Optional working directory override."
+      },
+      "runTimeoutSeconds": {
+        "type": "number",
+        "description": "Optional run timeout in seconds."
+      },
+      "attachments": {
+        "type": "array",
+        "description": "Optional inline attachment payloads for child context.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "utf8",
+                "base64"
+              ]
+            },
+            "mimeType": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "content"
+          ]
+        }
+      }
+    },
+    "required": [
+      "task"
+    ]
+  }
+}

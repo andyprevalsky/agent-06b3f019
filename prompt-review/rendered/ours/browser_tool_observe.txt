@@ -1,0 +1,24 @@
+{
+  "type": "function",
+  "function": {
+    "name": "observe",
+    "description": "Find actionable elements on the page matching your instruction.\n\nReturns a list of elements with their CSS/XPath SELECTORS that you can use with click/fill/type tools.\n\nIMPORTANT: Always call observe() first to get selectors before using click/fill/type.\n\nExamples:\n- observe(instruction=\"find the login button\") \u2192 returns [{selector: \"button#login\", method: \"click\", ...}]\n- observe(instruction=\"find all input fields\") \u2192 returns multiple elements with their selectors\n- observe(instruction=\"find the search box\") \u2192 returns [{selector: \"input[type='search']\", ...}]\n\nThis tool handles shadow DOM traversal automatically. Set iframes=true to also search inside iframes.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "instruction": {
+          "type": "string",
+          "description": "Describe what element(s) you're looking for"
+        },
+        "iframes": {
+          "type": "boolean",
+          "description": "Set to true to search inside iframes as well"
+        }
+      },
+      "required": [
+        "instruction"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

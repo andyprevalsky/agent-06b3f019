@@ -52,8 +52,7 @@ class WaitForManager(ToolManager):
         elif condition:
             check_interval = tool_call.get("check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS)
             max_checks = tool_call.get("max_checks", DEFAULT_MAX_CHECKS)
-            # Per-call context_gates override workflow-level gates
-            context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
+            context_gates = getattr(workflow_instance, "context_gates", None) or {}
             async for event in self._condition_mode(
                 workflow_instance, condition, check_interval, max_checks, tool_call_id, context_gates
             ):

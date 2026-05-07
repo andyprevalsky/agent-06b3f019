@@ -20,12 +20,12 @@ def test_build_system_prompt_plan():
 
     assert isinstance(result, str)
     assert len(result) > 100
-    assert "Identity" in result
-    assert "nurturer" in result or "You are" in result
+    assert "You are a Rose Labs Agent" in result
+    assert "RESEARCH phase" in result
 
 
 def test_build_system_prompt_execute():
-    """build_system_prompt for EXECUTE phase returns string with constraints."""
+    """build_system_prompt for EXECUTE phase returns string with execute guidance."""
     from utils.prompts import build_system_prompt
 
     result = build_system_prompt(
@@ -34,8 +34,9 @@ def test_build_system_prompt_execute():
     )
 
     assert isinstance(result, str)
-    assert "Critical Constraints" in result
-    assert "PARALLEL EXECUTION" in result
+    assert "You are a Rose Labs Agent" in result
+    assert "EXECUTE phase" in result
+    assert "attempt_completion" in result
 
 
 def test_build_system_prompt_with_user_context():

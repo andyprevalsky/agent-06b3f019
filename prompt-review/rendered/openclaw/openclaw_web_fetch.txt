@@ -1,0 +1,30 @@
+{
+  "name": "web_fetch",
+  "description": "Fetch and extract readable content from a URL (HTML → markdown/text). Use for lightweight page access without browser automation.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "HTTP or HTTPS URL to fetch."
+      },
+      "extractMode": {
+        "type": "string",
+        "enum": [
+          "markdown",
+          "text"
+        ],
+        "default": "markdown",
+        "description": "Extraction mode (\"markdown\" or \"text\")."
+      },
+      "maxChars": {
+        "type": "number",
+        "minimum": 100,
+        "description": "Maximum characters to return (truncates when exceeded)."
+      }
+    },
+    "required": [
+      "url"
+    ]
+  }
+}

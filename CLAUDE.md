@@ -18,7 +18,48 @@ claude-code-src/  → Vendored Claude Code source (READ-ONLY reference). Its
                     prompts and agent loop are extensively battle-tested;
                     our repo is still at the 0-users stage. Lift patterns
                     liberally when designing or refining our agent harness.
+openclaw/         → Cloned OpenClaw repo (READ-ONLY reference, gitignored —
+                    not committed to keep parent repo lean). Open-source
+                    agent harness; useful prior art for tool layouts, system
+                    prompts, and orchestration patterns. Re-clone with
+                    `git clone --depth 1 https://github.com/openclaw/openclaw.git`
+                    if missing locally.
+hermes-agent/     → Cloned Nous Research hermes-agent (READ-ONLY reference,
+                    gitignored). Reference implementation for tool-calling
+                    + reasoning prompts. Re-clone with
+                    `git clone --depth 1 https://github.com/nousresearch/hermes-agent.git`
+                    if missing locally.
 ```
+
+> **Reference repos policy:** `openclaw/` and `hermes-agent/` are gitignored
+> (sit alongside `claude-code-src/` but are NOT committed). Treat as
+> read-only research material — do not edit them. If they're missing on a
+> fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
+
+## Prompt review tool
+
+`prompt-review/` ships a small local web app for reviewing every prompt in
+this repo against three reference codebases side by side. Five columns:
+**current → ~1 month ago → Claude Code → OpenClaw → Hermes**. Notes are
+saved per prompt; checkpoint state persists across reloads.
+
+```bash
+bash prompt-review/run.sh                     # rebuilds data + launches on :8765
+PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
+```
+
+- Catalog: `prompt-review/catalog.json` (edit to add/remove prompts).
+  Each OUR entry has a `matches` field with hand-picked semantic pairings
+  for each reference repo (`claude`, `openclaw`, `hermes`); a value of
+  `null` means "no equivalent in that repo" and the column shows
+  "no equivalent" instead of a low-quality keyword match. Edit
+  `prompt-review/render/apply_explicit_mappings.py` to refine pairings.
+- Build: `python3 prompt-review/build.py` (extracts text + git history +
+  resolves matches via explicit mapping first, keyword fallback otherwise).
+- Notes/checkpoints: `prompt-review/checkpoints/state.json` (gitignored)
+- Weak matches (no good correlary in the reference repo) get a teal `WEAK`
+  flag in the column header. Match-source badges: blue `manual` (explicit
+  semantic pairing) vs gray `auto` (keyword fallback).
 
 **Key entry points:**
 - `front-end/src/App.tsx` - React app

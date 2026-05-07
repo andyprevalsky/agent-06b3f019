@@ -315,7 +315,7 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
-    updateExtra: { failureReason: null },
+    updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
   log.info('Claude Code credentials stored', { userId });
 }

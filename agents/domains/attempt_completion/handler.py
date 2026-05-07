@@ -42,11 +42,10 @@ class AttemptCompletionManager(ToolManager):
         The workflow/activity runs the verifier after this to confirm.
         If verification passes the loop exits; otherwise the agent continues.
 
-        ``attempt_completion`` is parameterless by contract — any args supplied
-        in ``tool_call`` are silently ignored and never surfaced in the
-        user-visible message or persisted in the DB. This keeps the contract
-        machine-checkable: the verifier reads only prior tool-call results,
-        never args passed to ``attempt_completion``.
+        ``result`` is accepted as an optional final payload for unverified
+        loops. It is returned to the caller but never surfaced in the
+        user-visible completion event. Verified flows remain machine-checkable:
+        the verifier reads prior tool-call results, not this payload.
         """
         await handle_tool_event(
             event=ToolEvent(
@@ -62,7 +61,9 @@ class AttemptCompletionManager(ToolManager):
             user_id=user_id,
         )
 
-        return build_completion_result()
+        raw_result = tool_call.get("result")
+        result = raw_result if isinstance(raw_result, str) else None
+        return build_completion_result(result=result)
 
 
 # =============================================================================

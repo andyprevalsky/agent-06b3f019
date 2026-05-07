@@ -25,7 +25,7 @@ SPAWN_PARAM_REQUIREMENTS: dict[str, str] = {
 SPAWN TYPE: explore
 - Set type="explore"
 - Required: goal (str)
-- Do NOT provide output_schema, verifier, start_url, or github_repo_link
+- Do NOT provide output_schema, start_url, or github_repo_link
 - Explore agents return free-form research summaries
 
 # Self-Contained Goal
@@ -62,11 +62,11 @@ SPAWN TYPE: sub_agent
 - Set type="sub_agent"
 - Required: goal (str), output_schema (object with field names -> types)
 - output_schema is required, define the structured data you expect back
-- Required by policy: start_phase ("plan" or "execute")
-  - "execute" for clear direct tasks expected to need 1-2 tool calls
-  - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
-  - when in doubt, prefer "plan"
-- Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
+- Required by policy: start_phase ("RESEARCH" or "EXECUTE")
+  - "EXECUTE" for clear direct tasks expected to need 1-2 tool calls
+  - "RESEARCH" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "RESEARCH"
+- Optional: attachments (list of filenames), context_gates (object)
 - Example output_schema: {{"summary": "str", "findings": "list[str]"}}
 
 # Self-Contained Goal
@@ -98,11 +98,11 @@ SPAWN TYPE: for_each
   - items_csv (string)
 - The goal is shared across all rows/items; for_each applies it once per row/item downstream
 - Downstream behavior: one spawn_sub_agent child is started per row/item goal
-- Required by policy: start_phase ("plan" or "execute")
-  - "execute" for clear direct tasks expected to need 1-2 tool calls
-  - "plan" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
-  - when in doubt, prefer "plan"
-- Optional: read_only (bool), verifier (object), attachments (list of filenames), context_gates (object)
+- Required by policy: start_phase ("RESEARCH" or "EXECUTE")
+  - "EXECUTE" for clear direct tasks expected to need 1-2 tool calls
+  - "RESEARCH" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "RESEARCH"
+- Optional: attachments (list of filenames), context_gates (object)
 - Keep for_each lightweight: same high-level goal + one child per item/row
 
 # Self-Contained Goal

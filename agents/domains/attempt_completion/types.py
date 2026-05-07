@@ -11,3 +11,4 @@ class CompletionResult(TypedDict):
     """Return value from a successful attempt-completion invocation."""
 
     attempted: bool
+    result: str | None

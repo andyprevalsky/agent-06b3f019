@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APPROVAL_RETRIEVED="false"
+BASE_REF="${PROMPT_APPROVAL_BASE_REF:-}"
+
+for arg in "$@"; do
+  case "$arg" in
+    mandatory-human-approval-retrieved=true|--mandatory-human-approval-retrieved=true)
+      APPROVAL_RETRIEVED="true"
+      ;;
+    mandatory-human-approval-retrieved=false|--mandatory-human-approval-retrieved=false)
+      APPROVAL_RETRIEVED="false"
+      ;;
+    --base-ref=*)
+      BASE_REF="${arg#--base-ref=}"
+      ;;
+    *)
+      echo "Unknown flag: $arg" >&2
+      echo "Usage: bash scripts/check-prompt-human-approval.sh [mandatory-human-approval-retrieved=true] [--base-ref=REF]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -z "$BASE_REF" ]; then
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    BASE_REF="origin/main"
+  else
+    BASE_REF="main"
+  fi
+fi
+
+CHANGED_FILES="$(
+  {
+    git diff --name-only --diff-filter=ACMR "$BASE_REF"...HEAD
+    git diff --name-only --diff-filter=ACMR HEAD
+    git diff --cached --name-only --diff-filter=ACMR
+  } | sort -u
+)"
+
+PROMPT_FILES=""
+while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  case "$file" in
+    CLAUDE.md|AGENTS.md|.claude/commands/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
+    */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*system-prompt*|*system_prompt*|*strategy_override*.txt)
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
+  esac
+done <<< "$CHANGED_FILES"
+
+DIFF_PROMPT_FILES="$(
+  {
+    git diff --unified=0 "$BASE_REF"...HEAD -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**' 2>/dev/null || true
+    git diff --unified=0 HEAD -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**' 2>/dev/null || true
+    git diff --cached --unified=0 -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**' 2>/dev/null || true
+  } | awk '
+    /^\+\+\+ b\// {
+      file=substr($0, 7)
+      scan=(file !~ /(^|\/)(package-lock\.json|\.gitignore)$/ && file ~ /\.(py|ts|tsx|js|jsx|md|mdc|txt|json|yaml|yml)$/)
+      next
+    }
+    /^[+-][^+-]/ && file != "" && scan {
+      line=$0
+      if (line ~ /(SYSTEM_PROMPT|System prompt|system prompt|PROMPT|Prompt|prompt|instructions|rubric|persona|You are an AI|You are a)/) {
+        print file
+      }
+    }
+  ' | sort -u
+)"
+
+ALL_PROMPT_FILES="$(
+  {
+    printf "%s" "$PROMPT_FILES"
+    printf "%s\n" "$DIFF_PROMPT_FILES"
+  } | sed '/^$/d' | sort -u
+)"
+
+if [ -z "$ALL_PROMPT_FILES" ]; then
+  echo "Prompt human-approval guard: no prompt edits detected."
+  exit 0
+fi
+
+if [ "$APPROVAL_RETRIEVED" = "true" ]; then
+  echo "Prompt human-approval guard: approval flag present for prompt edits:"
+  echo "$ALL_PROMPT_FILES" | sed 's/^/  - /'
+  exit 0
+fi
+
+echo "Prompt human-approval guard failed: prompt edits require explicit human approval." >&2
+echo "" >&2
+echo "Detected prompt-related changes:" >&2
+echo "$ALL_PROMPT_FILES" | sed 's/^/  - /' >&2
+echo "" >&2
+echo "After a human approves these prompt modifications, re-run with:" >&2
+echo "  bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true" >&2
+exit 1

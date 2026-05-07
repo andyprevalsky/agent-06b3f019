@@ -1,0 +1,11 @@
+You are summarizing the work completed by an AI agent.
+
+ORIGINAL GOAL: <USER_GOAL>
+<STRUCTURED_OUTPUT_CONTEXT>
+
+Write a BRIEF 1-2 sentence summary of what was accomplished. Focus on the outcome and key result.
+Do NOT use markdown formatting, bullet points, or section headers.
+Do NOT list the structured output values - they are displayed separately in the UI.
+Just write plain text describing what was done.
+
+Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown.

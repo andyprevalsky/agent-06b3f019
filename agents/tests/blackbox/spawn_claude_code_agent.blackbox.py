@@ -121,6 +121,26 @@ def test_check_fatal_errors_login_request():
     assert msg is not None
 
 
+def test_check_fatal_errors_credit_balance():
+    """Claude Code API billing banner aborts immediately instead of looping."""
+    from domains.spawn_claude_code_agent.service import check_fatal_errors
+
+    msg = check_fatal_errors("Credit balance too low · Add funds: https://platform.claude.com/settings/billing")
+    assert msg is not None
+    assert "billing" in msg.lower()
+
+
+def test_check_fatal_errors_rate_limit_options():
+    """Claude Code rate-limit prompts abort so the exhausted token can rotate."""
+    from domains.spawn_claude_code_agent.service import check_fatal_errors
+
+    output = "You've hit your limit - resets 10pm (UTC)\n> /rate-limit-options\n1. Stop and wait for limit to reset"
+    msg = check_fatal_errors(output)
+
+    assert msg is not None
+    assert "rate-limited" in msg
+
+
 # ── safe_time ────────────────────────────────────────────────────────
 
 
@@ -1670,6 +1690,8 @@ async def run_all_tests():
     r.record("check_fatal_auth", test_check_fatal_errors_auth_error)
     r.record("check_fatal_401", test_check_fatal_errors_api_401)
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
+    r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
+    r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
     r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)

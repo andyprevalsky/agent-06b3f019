@@ -1,0 +1,16 @@
+{
+  "name": "browser_press",
+  "description": "Press a keyboard key. Useful for submitting forms (Enter), navigating (Tab), or keyboard shortcuts. Requires browser_navigate to be called first.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string",
+        "description": "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')"
+      }
+    },
+    "required": [
+      "key"
+    ]
+  }
+}

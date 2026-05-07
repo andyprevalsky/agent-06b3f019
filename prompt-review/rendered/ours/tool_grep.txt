@@ -1,0 +1,7 @@
+Use this tool to search across local data sources for information specific to this agent network or this user.
+
+Usage:
+- Do not use this for the public web, use web_search instead.
+
+Returns:
+- matching records with surrounding context (like grep -C).

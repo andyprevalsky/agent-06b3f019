@@ -96,6 +96,26 @@ def test_create_agent_action_model_single_tool():
     assert instance.tool_calls == []
 
 
+def test_create_agent_action_model_injects_completion_result_only_when_requested():
+    """attempt_completion.result appears only for skip-verification schemas."""
+    from utils.tool_schemas import create_agent_action_model
+
+    verified_model = create_agent_action_model(["attempt_completion"])
+    unverified_model = create_agent_action_model(
+        ["attempt_completion"],
+        include_attempt_completion_result=True,
+    )
+
+    verified_schema = verified_model.model_json_schema()
+    unverified_schema = unverified_model.model_json_schema()
+
+    verified_defs = verified_schema.get("$defs", {})
+    unverified_defs = unverified_schema.get("$defs", {})
+
+    assert "result" not in verified_defs["AttemptCompletionTool"]["properties"]
+    assert "result" in unverified_defs["AttemptCompletionWithResultTool"]["properties"]
+
+
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
     from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
@@ -243,7 +263,7 @@ def test_spawn_agent_for_each_items_and_csv_raises():
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
-            start_phase="plan",
+            start_phase="RESEARCH",
             items=["a"],
             items_csv="x,y",
         ),
@@ -268,7 +288,7 @@ def test_spawn_agent_for_each_no_items_raises():
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
-            start_phase="plan",
+            start_phase="RESEARCH",
         ),
         "items",
     )
@@ -382,8 +402,8 @@ def test_spawn_agent_browser_with_string_output_schema():
     assert t.output_schema.fields[0].name == "tokyo_population"
 
 
-def test_spawn_agent_short_goal_raises():
-    """SpawnAgentTool requires goal >=50 chars for non-explore types."""
+def test_spawn_agent_short_goal_allowed():
+    """SpawnAgentTool accepts short goals when other type-specific requirements are met."""
     from utils.tool_schemas import (
         ResponseSchemaConfig,
         ResponseSchemaFieldConfig,
@@ -393,16 +413,14 @@ def test_spawn_agent_short_goal_raises():
     schema = ResponseSchemaConfig(
         fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
     )
-    _assert_raises(
-        lambda: SpawnAgentTool(
-            tool="spawn_agent",
-            type="sub_agent",
-            goal="short",
-            output_schema=schema,
-            start_phase="plan",
-        ),
-        ">=50 chars",
+    t = SpawnAgentTool(
+        tool="spawn_agent",
+        type="sub_agent",
+        goal="short",
+        output_schema=schema,
+        start_phase="RESEARCH",
     )
+    assert t.goal == "short"
 
 
 def test_spawn_agent_browser_valid():
@@ -535,6 +553,10 @@ async def run_all_tests():
     r.record("execute_phase_tools_subset", test_execute_phase_tools_subset)
     r.record("create_agent_action_model", test_create_agent_action_model)
     r.record("create_agent_action_model_single_tool", test_create_agent_action_model_single_tool)
+    r.record(
+        "create_agent_action_model_injects_completion_result_only_when_requested",
+        test_create_agent_action_model_injects_completion_result_only_when_requested,
+    )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     # WaitForTool validation
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
@@ -551,7 +573,7 @@ async def run_all_tests():
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
     r.record("spawn_agent_browser_no_schema", test_spawn_agent_browser_no_schema_raises)
     r.record("spawn_agent_explore_with_schema", test_spawn_agent_explore_with_schema_dropped)
-    r.record("spawn_agent_short_goal", test_spawn_agent_short_goal_raises)
+    r.record("spawn_agent_short_goal", test_spawn_agent_short_goal_allowed)
     r.record("spawn_agent_browser_valid", test_spawn_agent_browser_valid)
     # ResponseSchemaConfig coercion of malformed LLM input
     r.record("response_schema_coerces_json_string", test_response_schema_coerces_json_string)
