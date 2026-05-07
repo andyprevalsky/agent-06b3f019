@@ -31,6 +31,27 @@ class OpenToolCall:
     tool_name: str
     message_id: str
     sequence: int
+    timestamp: str
+
+
+def _record_timestamp(record: dict[str, Any]) -> str:
+    timestamp = record.get("createdAt") or record.get("created_at") or record.get("timestamp") or ""
+    return str(timestamp)
+
+
+def _assistant_tool_call_ids(metadata: dict[str, Any]) -> set[str]:
+    tool_calls = metadata.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return set()
+
+    ids: set[str] = set()
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        tool_call_id = tool_call.get("tool_call_id") or tool_call.get("toolCallId") or tool_call.get("id")
+        if tool_call_id:
+            ids.add(str(tool_call_id))
+    return ids
 
 
 class NoHangingToolCallsInvariant:
@@ -62,6 +83,7 @@ class NoHangingToolCallsInvariant:
                     tool_name=str(metadata.get("toolName") or "unknown"),
                     message_id=str(record.get("id") or record.get("message_id") or ""),
                     sequence=self._sequence,
+                    timestamp=_record_timestamp(record),
                 )
             elif status in {"FINISHED", "ERROR"}:
                 self._open_tools.pop(str(tool_call_id), None)
@@ -70,13 +92,28 @@ class NoHangingToolCallsInvariant:
         if role != "ASSISTANT" or not self._open_tools:
             return
 
-        first_id, first = next(iter(self._open_tools.items()))
+        assistant_tool_ids = _assistant_tool_call_ids(metadata)
+        assistant_timestamp = _record_timestamp(record)
+        unresolved = [
+            (tool_call_id, tool)
+            for tool_call_id, tool in self._open_tools.items()
+            if tool_call_id not in assistant_tool_ids and self._assistant_follows_tool(assistant_timestamp, tool)
+        ]
+        if not unresolved:
+            return
+
+        first_id, first = unresolved[0]
         assistant_id = record.get("id") or record.get("message_id") or "unknown"
         self.failure_reason = (
             "Realtime invariant failed: assistant message "
             f"{assistant_id} followed unresolved tool {first.tool_name} "
             f"({first_id}, IN_PROGRESS message {first.message_id}) with no FINISHED/ERROR state"
         )
+
+    def _assistant_follows_tool(self, assistant_timestamp: str, tool: OpenToolCall) -> bool:
+        if assistant_timestamp and tool.timestamp:
+            return assistant_timestamp > tool.timestamp
+        return self._sequence > tool.sequence
 
     def handle_broadcast(self, event: str, payload: Any) -> None:
         if event == "INSERT":
