@@ -82,7 +82,7 @@ class CallPhoneNumberManager(ToolManager):
         """Execute phone call and post events via handle_tool_event."""
         to = tool_call.get("to", "")
         system_prompt = tool_call.get("system_prompt", "")
-        output_schema = tool_call.get("output_schema", {})
+        output_schema = normalize_output_schema(tool_call.get("output_schema", {}))
 
         formatted_phone = format_phone_number(to)
 
@@ -388,3 +388,21 @@ async def call_phone_number_activity(
     # Timeout
     msg = f"Call timed out after {MAX_POLL_ATTEMPTS * poll_interval} seconds"
     raise Exception(msg)  # noqa: TRY002
+
+
+def normalize_output_schema(raw_schema: Any) -> dict[str, Any]:
+    """Convert the LLM-facing field-list schema into the backend extraction map."""
+    if not isinstance(raw_schema, dict):
+        return {}
+    fields = raw_schema.get("fields")
+    if not isinstance(fields, list):
+        return raw_schema
+    normalized: dict[str, Any] = {}
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name")
+        description = field.get("description")
+        if isinstance(name, str) and name.strip():
+            normalized[name] = description if isinstance(description, str) else ""
+    return normalized

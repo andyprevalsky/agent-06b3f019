@@ -521,9 +521,9 @@ class CallPhoneNumberTool(BaseModel):
             "Instructions for the voice agent's identity, tone, and conversation goals during the call."
         )
     )
-    output_schema: Dict[str, str] = Field(
+    output_schema: ResponseSchemaConfig = Field(
         description=(
-            "Mapping of snake_case field name to a description of what to extract from the conversation."
+            "Fields to extract from the conversation when the call completes."
         )
     )
 
