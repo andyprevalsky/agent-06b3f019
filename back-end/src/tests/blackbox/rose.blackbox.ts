@@ -515,6 +515,19 @@ async function testGptAuth_buildBodyConvertsOrphanToolRowsToContext() {
   assertEqual(last.content?.[0]?.text, '[TOOL]: population: 123', 'orphan tool text preserved');
 }
 
+async function testGptAuth_buildBodyAddsInputForSystemOnlyContext() {
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [{ role: 'system', content: 'system only' }],
+    requestId: 'rid-system-only',
+  });
+  assertEqual(
+    JSON.stringify(body.input),
+    JSON.stringify([{ role: 'user', content: [{ type: 'input_text', text: 'Begin.' }] }]),
+    'system-only context gets a non-empty Codex input'
+  );
+}
+
 async function testStreaming_responsesFunctionCallItem() {
   const chunks: RoseStreamChunk[] = [];
   for await (const chunk of parseResponsesSSE(
@@ -1839,6 +1852,10 @@ async function main(): Promise<void> {
     {
       name: 'gptAuth / body converts orphan tool rows to context',
       fn: testGptAuth_buildBodyConvertsOrphanToolRowsToContext,
+    },
+    {
+      name: 'gptAuth / body adds input for system-only context',
+      fn: testGptAuth_buildBodyAddsInputForSystemOnlyContext,
     },
     {
       name: 'streaming / Responses failed context length is invalid request',

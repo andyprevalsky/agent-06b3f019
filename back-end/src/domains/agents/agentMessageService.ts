@@ -11,7 +11,10 @@ import {
   validateTotalSize,
   getSignedUrl,
 } from '../../providers/storage';
-import { generateResponseSchema } from '../../providers/setResponseSchema';
+import {
+  generateResponseSchema,
+  type ResponseSchemaDirectAuth,
+} from '../../providers/setResponseSchema';
 import { createLogger } from '../../providers/logger';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
@@ -225,8 +228,8 @@ export async function getMessagesBatch(ids: unknown, userId: string) {
 // ---------------------------------------------------------------------------
 
 /** Generate response schema for a goal (used by browser agent). */
-export async function generateSchema(goal: string) {
-  return generateResponseSchema(goal);
+export async function generateSchema(goal: string, directAuth?: ResponseSchemaDirectAuth) {
+  return generateResponseSchema(goal, { directAuth });
 }
 
 // ---------------------------------------------------------------------------

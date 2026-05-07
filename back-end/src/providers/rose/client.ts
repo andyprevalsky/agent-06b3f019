@@ -246,6 +246,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 3. Waterfall — this is the terminal pipeline; unwrap the internal
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
+  if (opts.options.disable_waterfall) {
+    throw gptAuthFailed ?? claudeAuthFailed ?? new Error('Rose waterfall disabled');
+  }
+
   try {
     yield* runWithFallThrough({
       produce: () =>

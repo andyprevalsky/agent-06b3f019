@@ -11,6 +11,7 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { MAX_FILE_SIZE } from '../../providers/storage';
 import { createLogger } from '../../providers/logger';
+import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema';
 import { postMessageSchema, generateSchemaRequestSchema } from './types';
 import * as controlService from './agentControlService';
 import * as messageService from './agentMessageService';
@@ -39,6 +40,23 @@ function handleRouteError(
     error: error instanceof Error ? error.message : String(error),
   });
   res.status(500).json({ error: msg });
+}
+
+function readResponseSchemaDirectAuth(
+  req: HybridAuthRequest
+): ResponseSchemaDirectAuth | undefined {
+  if (req.isInternal !== true) return undefined;
+  const type = req.header('x-compute-token-type');
+  const accessToken = req.header('x-compute-access-token');
+  if ((type !== 'claude' && type !== 'gpt') || accessToken === undefined || accessToken === '') {
+    return undefined;
+  }
+  const accountId = req.header('x-gpt-account-id');
+  return {
+    type,
+    accessToken,
+    ...(accountId !== undefined && accountId !== '' ? { accountId } : {}),
+  };
 }
 
 // POST /:id/messages
@@ -196,7 +214,10 @@ router.post(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = generateSchemaRequestSchema.parse(req.body);
-      const { schema, tokensIn, tokensOut } = await messageService.generateSchema(body.goal);
+      const { schema, tokensIn, tokensOut } = await messageService.generateSchema(
+        body.goal,
+        readResponseSchemaDirectAuth(req)
+      );
       res.json({ schema, tokensIn, tokensOut });
     } catch (error) {
       handleRouteError(res, error, 'Failed to generate response schema');

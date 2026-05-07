@@ -56,6 +56,7 @@ export interface CompletionOptions {
   claude_token?: string;
   gpt_token?: string;
   gpt_account_id?: string;
+  disable_waterfall?: boolean;
 }
 
 /**

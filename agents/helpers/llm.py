@@ -3759,6 +3759,7 @@ async def call_llm_activity(  # noqa: C901
 async def set_response_schema_activity(
     agent_id: str,
     user_messages: List[str],
+    compute_auth: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -3769,6 +3770,7 @@ async def set_response_schema_activity(
     Args:
         agent_id: Agent ID to generate schema for
         user_messages: List of user message texts from conversation context
+        compute_auth: Optional selected compute token from the workflow cache
 
     Returns:
         The generated schema dict with 'fields' array, or None on failure
@@ -3799,9 +3801,18 @@ async def set_response_schema_activity(
         async with httpx.AsyncClient(timeout=90.0) as client:
             # 1. Generate schema using Rose Ultra
             api_start = time.perf_counter()
+            schema_headers = backend_api_headers(api_key)
+            token_type = compute_auth.get("type") if isinstance(compute_auth, dict) else None
+            access_token = compute_auth.get("accessToken") if isinstance(compute_auth, dict) else None
+            if token_type in ("claude", "gpt") and isinstance(access_token, str) and access_token:
+                schema_headers["X-Compute-Token-Type"] = token_type
+                schema_headers["X-Compute-Access-Token"] = access_token
+                account_id = compute_auth.get("accountId")
+                if token_type == "gpt" and isinstance(account_id, str) and account_id:
+                    schema_headers["X-Gpt-Account-Id"] = account_id
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
-                headers=backend_api_headers(api_key),
+                headers=schema_headers,
                 json={"goal": goal},
             )
             schema_response.raise_for_status()

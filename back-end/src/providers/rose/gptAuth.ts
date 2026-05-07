@@ -248,6 +248,9 @@ function buildResponsesInput(messages: CompletionMessage[]): ResponsesInputItem[
   while (out.length > 0 && (out[out.length - 1] as ResponsesInputMessage).role === 'assistant') {
     out.pop();
   }
+  if (out.length === 0) {
+    out.push({ role: 'user', content: [{ type: 'input_text', text: 'Begin.' }] });
+  }
   return out;
 }
 

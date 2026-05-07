@@ -581,7 +581,11 @@ async def mock_save_blueprint_activity(user_id: str, data: dict) -> dict:
 
 
 @activity.defn(name="set_response_schema_activity")
-async def mock_set_response_schema_activity(agent_id: str, schema: Any) -> None:
+async def mock_set_response_schema_activity(
+    agent_id: str,
+    schema: Any,
+    compute_auth: Any = None,
+) -> None:
     return None
 
 

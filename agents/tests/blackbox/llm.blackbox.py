@@ -762,7 +762,7 @@ async def test_set_response_schema_activity_success():
 
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
-    """set_response_schema_activity does not forward compute-token scoped user headers."""
+    """set_response_schema_activity defaults to internal auth only."""
     setup_mock(
         {
             "/api/agents/generate-response-schema": {
@@ -792,6 +792,67 @@ async def test_set_response_schema_activity_uses_internal_auth_only():
     headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
     assert "x-api-key" in headers
     assert "x-user-id" not in headers
+    assert "x-compute-token-type" not in headers
+    assert "x-compute-access-token" not in headers
+
+
+async def test_set_response_schema_activity_forwards_compute_auth_headers():
+    """set_response_schema_activity can forward the workflow's selected compute token."""
+    setup_mock(
+        {
+            "/api/agents/generate-response-schema": {
+                "status": 200,
+                "json": {
+                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
+                    "tokensIn": 10,
+                    "tokensOut": 5,
+                },
+            },
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-abc",
+            ["goal"],
+            {
+                "type": "gpt",
+                "accessToken": "gpt-token",
+                "accountId": "acct-123",
+            },
+        )
+
+    assert result is not None
+    captures = get_captured_requests()
+    schema_requests = [c for c in captures if "generate-response-schema" in c["url"]]
+    assert schema_requests
+    headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
+    assert "x-api-key" in headers
+    assert headers["x-compute-token-type"] == "gpt"
+    assert headers["x-compute-access-token"] == "gpt-token"
+    assert headers["x-gpt-account-id"] == "acct-123"
+
+
+async def test_codex_responses_body_has_input_for_system_only_context():
+    """Codex Responses rejects empty input, so system-only first turns get a start input."""
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
+
+    body = build_codex_responses_body(
+        pool_spec=get_pool("rose-1-lite"),
+        messages=[{"role": "system", "content": "System instructions only"}],
+        request_id="req-1",
+    )
+
+    assert body["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Begin."}]}
+    ]
 
 
 async def test_set_response_schema_activity_empty_goal():
@@ -4075,6 +4136,14 @@ async def run_all_tests():
     await r.record_async(
         "set_response_schema_activity_uses_internal_auth_only",
         test_set_response_schema_activity_uses_internal_auth_only,
+    )
+    await r.record_async(
+        "set_response_schema_activity_forwards_compute_auth_headers",
+        test_set_response_schema_activity_forwards_compute_auth_headers,
+    )
+    await r.record_async(
+        "codex_responses_body_has_input_for_system_only_context",
+        test_codex_responses_body_has_input_for_system_only_context,
     )
     await r.record_async("set_response_schema_activity_empty_goal", test_set_response_schema_activity_empty_goal)
     await r.record_async(

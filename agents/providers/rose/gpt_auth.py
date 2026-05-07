@@ -259,6 +259,11 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
 
     while out and out[-1].get("role") == "assistant":
         out.pop()
+    if not out:
+        out.append({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Begin."}],
+        })
     return out
 
 

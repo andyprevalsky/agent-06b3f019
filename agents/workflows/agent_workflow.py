@@ -669,7 +669,7 @@ class AgentWorkflow:
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
-                    args=[agent_id, [self.goal]],
+                    args=[agent_id, [self.goal], self._active_compute_token_payload()],
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
@@ -1236,6 +1236,24 @@ class AgentWorkflow:
 
     def _active_gpt_pool_id(self) -> Optional[str]:
         return self.gpt_code_token_pool_id if self.compute_token_provider == "gpt" else None
+
+    def _active_compute_token_payload(self) -> Optional[Dict[str, Any]]:
+        if self.compute_token_provider == "claude" and self.claude_max_token:
+            return {
+                "type": "claude",
+                "accessToken": self.claude_max_token,
+                "source": self.claude_max_token_source,
+                "poolTokenId": self.claude_max_token_pool_id,
+            }
+        if self.compute_token_provider == "gpt" and self.gpt_code_token:
+            return {
+                "type": "gpt",
+                "accessToken": self.gpt_code_token,
+                "accountId": self.gpt_code_account_id,
+                "source": self.gpt_code_token_source,
+                "poolTokenId": self.gpt_code_token_pool_id,
+            }
+        return None
 
     async def _refresh_claude_token(self, user_id: str) -> None:
         """Compatibility wrapper for older tests/callers."""
