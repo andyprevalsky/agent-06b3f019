@@ -16,7 +16,6 @@
  */
 
 import { Loader2, ShieldCheck, X } from 'lucide-react';
-import { openPasswordsApp } from '../api';
 import { useApplePasswordsModal } from '../hooks';
 import type { ApplePasswordsModalProps } from '../types';
 import Instructions from './Instructions';
@@ -112,7 +111,7 @@ const ApplePasswordsModal = ({
 
         <div className="px-5 py-4 space-y-4">
           <Instructions
-            onOpenPasswords={() => void openPasswordsApp()}
+            onOpenPasswords={state.onOpenPasswordsClick}
             onExpandScreenshot={() => state.setExpandedImage(true)}
           />
 

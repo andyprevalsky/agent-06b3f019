@@ -13,14 +13,7 @@ import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
 import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import AgentPayModal from '../../../components/AgentPayModal';
 import type { BrowserInfo, BrowserType, Integration } from '../types';
-import {
-  fetchIntegrations,
-  fetchUserSettings,
-  startGmailOAuth,
-  uploadApplePasswords,
-  sendPasswordIntegrationRequest,
-  spawnLinkedInSyncAgent,
-} from '../api';
+import { useOnboardingDataApi } from '../hooks';
 
 // Browser icons
 import chromeIcon from '../../../assets/chrome-icon.png';
@@ -128,6 +121,7 @@ const BrowserIcon = ({
 };
 
 const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
+  const onboardingDataApi = useOnboardingDataApi();
   const [connectedEmails, setConnectedEmails] = useState<string[]>([]);
   const [gmailLoading, setGmailLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -237,7 +231,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         }
 
         // Fetch existing integrations via api layer
-        const integrations: Integration[] = await fetchIntegrations();
+        const integrations: Integration[] = await onboardingDataApi.fetchIntegrations();
 
         // Check for browser integrations (chrome, edge, atlas, etc.)
         const validBrowserTypes = [
@@ -309,7 +303,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         setTelegramConnected(!!telegramIntegration);
 
         // Check if agent pay is already configured
-        const settings = await fetchUserSettings();
+        const settings = await onboardingDataApi.fetchUserSettings();
         if (settings !== null && settings.encryptedPaymentInformation) {
           setAgentPayConfigured(true);
         }
@@ -321,7 +315,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     };
 
     fetchData();
-  }, []);
+  }, [onboardingDataApi]);
 
   // Continue is only available when at least one browser is connected and at least one email
   const canContinue = connectedBrowsers.size > 0 && connectedEmails.length > 0;
@@ -405,7 +399,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleApplePasswordsSync = async (file: File) => {
     setPasswordSyncLoading('apple');
     try {
-      const result = await uploadApplePasswords(file);
+      const result = await onboardingDataApi.uploadApplePasswords(file);
       setApplePasswordsSynced(true);
       setApplePasswordsModalOpen(false);
       console.log(`[OnboardingData] Imported ${result.passwordCount} Apple passwords`);
@@ -444,7 +438,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     setPasswordRequestSending(true);
 
     try {
-      await sendPasswordIntegrationRequest(passwordRequestInput.trim());
+      await onboardingDataApi.sendPasswordIntegrationRequest(passwordRequestInput.trim());
       setPasswordRequestSent(true);
       setPasswordRequestInput('');
       console.log('[OnboardingData] Password integration request sent');
@@ -571,7 +565,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleLinkedInSync = async () => {
     setLinkedinSyncLoading(true);
     try {
-      await spawnLinkedInSyncAgent();
+      await onboardingDataApi.spawnLinkedInSyncAgent();
       console.log('[LinkedIn] Sync agent started successfully');
     } catch (err) {
       console.error('[LinkedIn] Failed to start sync agent:', err);
@@ -584,7 +578,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const handleGmailConnect = async () => {
     setGmailLoading(true);
     try {
-      const authUrl = await startGmailOAuth();
+      const authUrl = await onboardingDataApi.startGmailOAuth();
 
       const width = 500;
       const height = 600;
@@ -607,7 +601,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       // Poll backend for integration status (works regardless of popup or external browser)
       const pollForConnection = setInterval(async () => {
         try {
-          const integrations: Integration[] = await fetchIntegrations();
+          const integrations: Integration[] = await onboardingDataApi.fetchIntegrations();
           const gmailIntegration = integrations.find((i) => i.name === 'gmail');
           const isGmailConnected =
             gmailIntegration?.status === 'CONNECTED' || gmailIntegration?.status === 'SYNCING';

@@ -62,7 +62,12 @@ function validateCredentials(credentialsJson: string): SyncResult | null {
     return { success: false, message: 'Codex is not logged in with a ChatGPT account' };
   }
 
-  if (!parsed.tokens?.access_token || !parsed.tokens.refresh_token) {
+  if (
+    parsed.tokens?.access_token === undefined ||
+    parsed.tokens.refresh_token === undefined ||
+    parsed.tokens.access_token.length === 0 ||
+    parsed.tokens.refresh_token.length === 0
+  ) {
     return {
       success: false,
       message: 'Codex credentials missing access or refresh token. Please run codex login.',

@@ -270,6 +270,8 @@ if should_run "front-end"; then
 fi
 
 if should_run "mac-app"; then
+  bg_suite "Mac App Structural" bash -c "cd mac-app && npm run test:structural"
+
   if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
     bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
   else

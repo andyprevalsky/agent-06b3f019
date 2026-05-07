@@ -8,7 +8,7 @@
 
 import type { IMessageData } from '../../../shared/types/ipc';
 import type { ContactRecord } from '../../services/contactsReaderNative';
-import type { NormalizedMessage } from '../messaging-core/types';
+import type { NormalizedMessage } from '../../services/messaging/types';
 
 export type { IMessageData, ContactRecord, NormalizedMessage };
 

@@ -23,6 +23,7 @@
     "lint:fix": "eslint . --fix",
     "map-domains": "tsx scripts/map-domains.ts",
     "test": "vitest run",
+    "test:structural": "tsx tests/structural/layer-deps.test.ts",
     "test:watch": "vitest",
     "test:blackbox": "bash scripts/run-blackbox-tests.sh"
   },

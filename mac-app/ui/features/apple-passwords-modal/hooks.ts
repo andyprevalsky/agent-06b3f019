@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { openPasswordsApp } from './api';
 import { ACCEPTED_EXTENSION, CSV_REQUIRED_MESSAGE, GENERIC_IMPORT_FAILURE } from './config';
 import type { UseApplePasswordsModalResult } from './types';
 
@@ -78,6 +79,10 @@ export const useApplePasswordsModal = (
     onClose();
   };
 
+  const onOpenPasswordsClick = (): void => {
+    void openPasswordsApp();
+  };
+
   return {
     file,
     loading,
@@ -92,5 +97,6 @@ export const useApplePasswordsModal = (
     onDrop,
     onSyncClick,
     onCloseClick,
+    onOpenPasswordsClick,
   };
 };

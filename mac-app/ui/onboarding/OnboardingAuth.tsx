@@ -5,4 +5,4 @@
  * `../../ui/onboarding/OnboardingAuth` directly. Once the test moves to the
  * new feature path this file can be deleted.
  */
-export { default } from '../features/onboarding/components/OnboardingAuth';
+export { OnboardingAuth as default } from '../features/onboarding';

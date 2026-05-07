@@ -25,6 +25,7 @@ const STRICT_DOMAIN_FILES = [
   'main/services/messaging/MessageTransformer.ts',
   'main/services/messaging/index.ts',
   'main/services/messaging/types.ts',
+  'main/domains/messaging-core/**/*.ts',
   'main/domains/messaging-core/types.ts',
   'main/domains/messaging-core/config.ts',
   'main/domains/messaging-core/repo.ts',
@@ -41,6 +42,8 @@ const STRICT_DOMAIN_FILES = [
   'main/domains/auth/**/*.ts',
   'main/services/claudeCredentialSync.ts',
   'main/domains/claude-credential-sync/**/*.ts',
+  'main/services/gptCredentialSync.ts',
+  'main/domains/gpt-credential-sync/**/*.ts',
   'main/services/messaging/platforms/telegram/**/*.ts',
   'main/domains/messaging-telegram/**/*.ts',
   'main/services/chromeProfileResolver.ts',
@@ -94,6 +97,8 @@ const STRICT_DOMAIN_FILES = [
   'ui/features/launcher/**/*.{ts,tsx}',
   'ui/features/atlas-password-modal/**/*.{ts,tsx}',
   'ui/features/telegram-auth-modal/**/*.{ts,tsx}',
+  'main/index.ts',
+  'main/app/**/*.ts',
 ];
 
 export default tseslint.config(
