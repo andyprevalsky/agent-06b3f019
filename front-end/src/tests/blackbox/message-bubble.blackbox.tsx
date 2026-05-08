@@ -432,6 +432,7 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} />);
     await waitFor(() => expect(screen.getAllByText(/Explore foo/).length).toBeGreaterThan(0));
+    expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
   });
 
   it('renders Claude Code tool message as ClaudeCodeChip', async () => {
