@@ -1,6 +1,7 @@
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
+import { resolveAnimationUrl } from '@/components/thinkingAnimationUrl';
 
 const frameData = {
   frames: [{ t: 0, xml: '<svg><g id="thinking-frame"></g></svg>' }],
@@ -26,6 +27,17 @@ describe('ThinkingAnimation asset loading', () => {
       expect(globalThis.fetch).toHaveBeenCalledWith('/thinking_animations.txt');
       expect(document.querySelector('#thinking-frame')).toBeInTheDocument();
     });
+  });
+
+  it('resolves the public animation asset relative to packaged file:// pages', () => {
+    expect(
+      resolveAnimationUrl(
+        '/thinking_animations.txt',
+        'file:///Applications/Rose.app/Contents/Resources/app.asar/dist/ui/index.html?agent-id=1',
+      ),
+    ).toBe(
+      'file:///Applications/Rose.app/Contents/Resources/app.asar/dist/ui/thinking_animations.txt',
+    );
   });
 
   it('shares one fetch across simultaneous animation mounts', async () => {

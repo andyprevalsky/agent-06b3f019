@@ -43,6 +43,7 @@ import {
   type CSSProperties,
 } from 'react';
 import { useXmlFrameReplay, type XmlFrameData } from '@/hooks/useXmlFrameReplay';
+import { DEFAULT_THINKING_ANIMATION_URL, resolveAnimationUrl } from './thinkingAnimationUrl';
 
 export interface ThinkingAnimationProps {
   dataUrl?: string;
@@ -69,17 +70,13 @@ const classNames = (...values: Array<string | undefined>) =>
   values.filter(Boolean).join(' ').trim();
 
 const RGB_REGEX = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/g;
-const DEFAULT_THINKING_ANIMATION_URL = '/thinking_animations.txt';
 
 const animationDataCache = new Map<string, Promise<XmlFrameData>>();
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
-const normalizeAnimationUrl = (dataUrl: string) =>
-  dataUrl === './thinking_animations.txt' ? DEFAULT_THINKING_ANIMATION_URL : dataUrl;
-
 const fetchAnimationData = (dataUrl: string) => {
-  const resolvedDataUrl = normalizeAnimationUrl(dataUrl);
+  const resolvedDataUrl = resolveAnimationUrl(dataUrl);
   const cachedData = animationDataCache.get(resolvedDataUrl);
   if (cachedData) {
     return cachedData;
