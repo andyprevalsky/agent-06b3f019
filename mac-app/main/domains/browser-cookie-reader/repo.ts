@@ -63,6 +63,11 @@ export function resolveCookiePath(pattern: string): string | null {
   return sorted.length > 0 ? sorted[0].path : null;
 }
 
+/** Read Safari's `Cookies.binarycookies` file for parsing in the service layer. */
+export function readSafariCookieFile(sourcePath: string): Buffer {
+  return fs.readFileSync(sourcePath);
+}
+
 /**
  * Fetch the Safe Storage password for a given keychain account via the
  * `security(1)` CLI. Rejection (missing entry, user-denied, unknown error)

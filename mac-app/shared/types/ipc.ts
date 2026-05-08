@@ -13,7 +13,8 @@ export type BrowserType =
   | 'opera'
   | 'vivaldi'
   | 'chromium'
-  | 'atlas';
+  | 'atlas'
+  | 'safari';
 
 export interface BrowserInfo {
   type: BrowserType;

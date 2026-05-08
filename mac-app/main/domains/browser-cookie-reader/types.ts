@@ -1,8 +1,9 @@
 import type { CookieData } from '../../../shared/types/ipc';
 
 /**
- * Supported Chromium-family browsers the multi-browser reader knows how to
- * decrypt cookies for. Distinct from `shared/types/ipc`'s `BrowserType` in
+ * Supported browser credential sources the multi-browser reader knows how to
+ * import. Chromium-family browsers use SQLite + Safe Storage; Safari uses
+ * Cookies.binarycookies. Distinct from `shared/types/ipc`'s `BrowserType` in
  * name only — the union must stay in lockstep with that shared alias.
  */
 export type BrowserType =
@@ -13,12 +14,13 @@ export type BrowserType =
   | 'opera'
   | 'vivaldi'
   | 'chromium'
-  | 'atlas';
+  | 'atlas'
+  | 'safari';
 
 /**
- * Static, per-browser wiring: where cookies live on disk, the macOS Keychain
- * entry that holds the Safe Storage password, and whether the user must
- * supply the password manually (Data Protection keychain, as Atlas does).
+ * Static, per-browser wiring: where cookies live on disk, how the store is
+ * encoded, the macOS Keychain entry for Chromium Safe Storage when relevant,
+ * and whether the user must supply the password manually.
  */
 export interface BrowserConfig {
   type: BrowserType;
@@ -27,11 +29,12 @@ export interface BrowserConfig {
   keychainEntry: string;
   keychainAccount: string;
   needsManualPassword: boolean;
+  cookieStore: 'sqlite' | 'safariBinary';
 }
 
 /**
  * `BrowserConfig` augmented with the result of probing the filesystem:
- * whether the browser is installed and, if so, the resolved cookies-DB path.
+ * whether the browser is installed and, if so, the resolved cookie-store path.
  */
 export interface BrowserInfo extends BrowserConfig {
   isInstalled: boolean;

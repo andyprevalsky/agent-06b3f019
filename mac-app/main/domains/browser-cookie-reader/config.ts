@@ -70,6 +70,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Chrome Safe Storage',
     keychainAccount: 'Chrome',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'edge',
@@ -78,6 +79,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Microsoft Edge Safe Storage',
     keychainAccount: 'Microsoft Edge',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'brave',
@@ -86,6 +88,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Brave Safe Storage',
     keychainAccount: 'Brave',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'arc',
@@ -94,6 +97,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Arc Safe Storage',
     keychainAccount: 'Arc',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'opera',
@@ -102,6 +106,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Opera Safe Storage',
     keychainAccount: 'Opera',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'vivaldi',
@@ -110,6 +115,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Vivaldi Safe Storage',
     keychainAccount: 'Vivaldi',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'chromium',
@@ -118,6 +124,7 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'Chromium Safe Storage',
     keychainAccount: 'Chromium',
     needsManualPassword: false,
+    cookieStore: 'sqlite',
   },
   {
     type: 'atlas',
@@ -127,6 +134,17 @@ const BROWSER_SEEDS: readonly BrowserConfigSeed[] = [
     keychainEntry: 'ChatGPT Safe Storage',
     keychainAccount: 'ChatGPT',
     needsManualPassword: true,
+    cookieStore: 'sqlite',
+  },
+  {
+    type: 'safari',
+    name: 'Safari',
+    relativeCookiePath:
+      'Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies',
+    keychainEntry: '',
+    keychainAccount: '',
+    needsManualPassword: false,
+    cookieStore: 'safariBinary',
   },
 ];
 

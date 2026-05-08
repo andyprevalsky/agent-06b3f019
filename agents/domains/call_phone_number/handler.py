@@ -258,7 +258,12 @@ async def call_phone_number_activity(
         response = await client.post(
             f"{config.backend.api_url}/api/vapi/call",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={"to": to, "system_prompt": system_prompt, "output_schema": output_schema},
+            json={
+                "to": to,
+                "system_prompt": system_prompt,
+                "output_schema": output_schema,
+                "idempotency_key": f"{agent_id}:{tool_call_id}",
+            },
         )
 
         if response.status_code not in [200, 201]:

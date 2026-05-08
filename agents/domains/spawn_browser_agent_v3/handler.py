@@ -1751,12 +1751,23 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
+                    pause_metadata = {
+                        "toolName": "spawn_browser_agent",
+                        "action_type": "session_paused",
+                    }
+                    if result:
+                        if result.get("task_id"):
+                            pause_metadata["task_id"] = result["task_id"]
+                        if result.get("browser_url"):
+                            pause_metadata["browser_url"] = result["browser_url"]
+                        if result.get("session_id"):
+                            pause_metadata["session_id"] = result["session_id"]
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
                         title="Browser Session Paused",
                         message="User paused the browser agent",
                         status=MessageStatus.ERROR,
-                        metadata={"toolName": "spawn_browser_agent", "action_type": "session_paused"},
+                        metadata=pause_metadata,
                     )
                     return
 

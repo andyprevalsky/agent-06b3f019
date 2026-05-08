@@ -1,13 +1,17 @@
 services:
-  # Backend API Service
   - type: web
     name: navi-agent-backend
-    env: node
-    region: oregon
-    plan: starter
-    buildCommand: pip3 install --user harbor && npm install && npm run prisma:generate && npm run build
+    runtime: node
+    repo: https://github.com/Rose-Ai-Labs/rose
+    branch: main
+    rootDir: back-end
+    region: virginia
+    plan: pro max
+    numInstances: 1
+    buildCommand: npm install && npm run prisma:generate && npm run build
     startCommand: npm run prisma:migrate && npm start
     healthCheckPath: /health
+    autoDeployTrigger: commit
     envVars:
       - key: NODE_ENV
         value: production
@@ -15,6 +19,129 @@ services:
         value: --max-old-space-size=6144
       - key: PORT
         value: 10000
-      - key: PATH
-        value: /opt/render/.local/bin:$PATH  # So 'harbor' command is found
-
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:8080,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8081,https://www.roselabs.ai,https://roselabs.ai
+      - key: BACKEND_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: BACKEND_API_KEY
+        sync: false
+      - key: BROWSERBASE_API_KEY
+        sync: false
+      - key: BROWSERBASE_PROJECT_ID
+        sync: false
+      - key: BROWSER_PROVIDER
+        value: browserbase
+      - key: CDP_API_KEY_ID
+        sync: false
+      - key: CDP_API_KEY_SECRET
+        sync: false
+      - key: CDP_WALLET_SECRET
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: CLAUDE_CREDENTIAL_DECRYPTION_KEY
+        sync: false
+      - key: CURSOR_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DAYTONA_API_KEY
+        sync: false
+      - key: DIRECT_DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_CLAUDE_CODE_TEMPLATE_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GMAIL_DESKTOP_CLIENT_ID
+        sync: false
+      - key: GMAIL_DESKTOP_SECRET_ID
+        sync: false
+      - key: GMAIL_WEB_CLIENT_ID
+        sync: false
+      - key: GMAIL_WEB_CLIENT_SECRET
+        sync: false
+      - key: HYPERBROWSER_API_KEY
+        sync: false
+      - key: LITHIC_API_KEY
+        sync: false
+      - key: MESSAGE_BIRD_EMAIL_ACCESS_KEY
+        sync: false
+      - key: MESSAGE_BIRD_SMS_ACCESS_KEY
+        sync: false
+      - key: MODAL_TOKEN_ID
+        sync: false
+      - key: MODAL_TOKEN_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: PARRALLEL_API_KEY
+        sync: false
+      - key: PERPLEXITY_API_KEY
+        sync: false
+      - key: PROMPT_SECRET_STRIPE_PUBLISHABLE_KEY_PRODUCTION
+        sync: false
+      - key: PROMPT_SECRET_STRIPE_PUBLISHABLE_KEY_TEST
+        sync: false
+      - key: PROMPT_SECRET_STRIPE_SECRET_KEY_PRODUCTION
+        sync: false
+      - key: PROMPT_SECRET_STRIPE_SECRET_KEY_TEST
+        sync: false
+      - key: ROSE_API_KEY
+        sync: false
+      - key: SMS_PROVIDER
+        value: twilio
+      - key: STEEL_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SURGE_ACCOUNT_ID
+        sync: false
+      - key: SURGE_API_KEY
+        sync: false
+      - key: SURGE_SIGNING_SECRET
+        sync: false
+      - key: TEMPORAL_ADDRESS
+        value: us-east-1.aws.api.temporal.io:7233
+      - key: TEMPORAL_API_KEY
+        sync: false
+      - key: TEMPORAL_NAMESPACE
+        value: rose-labs-us-east-1.tch2n
+      - key: TEMPORAL_TASK_QUEUE
+        value: navi-agent-tasks
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_VERIFY_SERVICE_SID
+        sync: false
+      - key: VAPI_OUTBOUND_PHONE_NUMBER_ID
+        sync: false
+      - key: VAPI_PRIVATE_KEY
+        sync: false
+      - key: VAPI_PUBLIC_KEY
+        sync: false
+      - key: VERCEL_V0_API_KEY
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: X402_RECEIVING_WALLET
+        sync: false

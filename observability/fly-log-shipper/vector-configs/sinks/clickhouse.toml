@@ -1,0 +1,15 @@
+[sinks.clickhouse]
+  type = "clickhouse"
+  inputs = ["log_json"]
+  endpoint = "${CLICKHOUSE_ENDPOINT?}"
+  database = "${CLICKHOUSE_DATABASE-observability}"
+  table = "${CLICKHOUSE_TABLE-fly_logs}"
+  format = "json_each_row"
+  compression = "gzip"
+  date_time_best_effort = true
+  skip_unknown_fields = true
+  healthcheck.enabled = false
+
+  auth.strategy = "basic"
+  auth.user = "${CLICKHOUSE_USER?}"
+  auth.password = "${CLICKHOUSE_PASSWORD?}"

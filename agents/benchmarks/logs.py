@@ -3,21 +3,25 @@ Fetch production logs for benchmark agents.
 
 Log sources:
   1. Render   — backend HTTP logs (REST API, needs RENDER_API_KEY in back-end/.env)
-  2. Fly.io   — agent worker logs (real-time stream via flyctl, needs FLY_API_TOKEN in agents/.env)
-  3. Supabase — edge function gateway logs (Management API, needs SUPABASE_ACCESS_TOKEN in agents/.env)
-  4. Realtime — Supabase websocket/broadcast frames captured live during benchmarks
-  5. Messages — full agent message transcript (from agent GET response, always available)
+  2. ClickHouse — retained Fly.io worker logs (needs CLICKHOUSE_* in agents/.env)
+  3. Fly.io   — live agent worker logs (real-time stream via flyctl, needs FLY_API_TOKEN in agents/.env)
+  4. Supabase — edge function gateway logs (Management API, needs SUPABASE_ACCESS_TOKEN in agents/.env)
+  5. Realtime — Supabase websocket/broadcast frames captured live during benchmarks
+  6. Messages — full agent message transcript (from agent GET response, always available)
 
 Token locations:
   - RENDER_API_KEY:        back-end/.env
+  - CLICKHOUSE_ENDPOINT:   agents/.env
+  - CLICKHOUSE_USER:       agents/.env
+  - CLICKHOUSE_PASSWORD:   agents/.env
   - FLY_API_TOKEN:         agents/.env  (generate: flyctl tokens create deploy -a navi-whisper-lux)
   - SUPABASE_ACCESS_TOKEN: agents/.env  (generate: https://supabase.com/dashboard/account/tokens)
 
-Fly.io note:
+Fly.io / ClickHouse note:
   flyctl logs --no-tail only returns ~30s of buffered logs (mostly health checks).
-  Instead, FlyLogCollector streams flyctl logs --json as a background process for
-  the entire benchmark run, capturing all worker logs in real-time, then filters
-  by agent_id after each task completes.
+  Retained worker logs are stored in ClickHouse observability.fly_logs for 7 days.
+  FlyLogCollector still streams live logs during benchmark runs, then we merge
+  stream, snapshot, and ClickHouse rows by agent_id.
 
 Supabase note:
   The Supabase Management API only exposes gateway-level HTTP logs (method/status/URL)
@@ -90,6 +94,13 @@ RENDER_OWNER_ID = load_env_var("RENDER_OWNER_ID", _BACKEND_ENV) or "tea-csppgi56
 FLY_API_TOKEN = load_env_var("FLY_API_TOKEN", _AGENTS_ENV)
 FLY_APP_NAME = "navi-whisper-lux"
 
+# ClickHouse (retained Fly.io worker logs)
+CLICKHOUSE_ENDPOINT = load_env_var("CLICKHOUSE_ENDPOINT", _AGENTS_ENV, _BACKEND_ENV)
+CLICKHOUSE_USER = load_env_var("CLICKHOUSE_USER", _AGENTS_ENV, _BACKEND_ENV)
+CLICKHOUSE_PASSWORD = load_env_var("CLICKHOUSE_PASSWORD", _AGENTS_ENV, _BACKEND_ENV)
+CLICKHOUSE_DATABASE = load_env_var("CLICKHOUSE_DATABASE", _AGENTS_ENV, _BACKEND_ENV) or "observability"
+CLICKHOUSE_TABLE = load_env_var("CLICKHOUSE_TABLE", _AGENTS_ENV, _BACKEND_ENV) or "fly_logs"
+
 # Supabase (edge functions — completions, cost, etc.)
 SUPABASE_ACCESS_TOKEN = load_env_var("SUPABASE_ACCESS_TOKEN", _AGENTS_ENV)
 SUPABASE_PROJECT_REF = load_env_var("SUPABASE_PROJECT_REF", _AGENTS_ENV) or "kzlurqihzaolhzsbkctf"
@@ -155,6 +166,70 @@ async def fetch_render_logs(
 # ---------------------------------------------------------------------------
 # Fly.io worker logs — real-time streaming collector
 # ---------------------------------------------------------------------------
+
+
+async def fetch_clickhouse_worker_logs(
+    agent_id: str,
+    start_time: datetime,
+    end_time: Optional[datetime] = None,
+    limit: int = 2000,
+) -> List[str]:
+    """Fetch retained Fly.io worker logs from ClickHouse for an agent_id."""
+    if not (CLICKHOUSE_ENDPOINT and CLICKHOUSE_USER and CLICKHOUSE_PASSWORD):
+        return []
+
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+
+    table = f"{CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}"
+    query = f"""
+SELECT raw
+FROM {table}
+WHERE ingested_at >= parseDateTime64BestEffort({{start:String}}, 3)
+  AND ingested_at <= parseDateTime64BestEffort({{end:String}}, 3)
+  AND (
+    agent_id = {{agent_id:String}}
+    OR raw LIKE concat('%', {{agent_id:String}}, '%')
+    OR raw LIKE concat('%', {{short_id:String}}, '%')
+  )
+ORDER BY ingested_at ASC
+LIMIT {{limit:UInt32}}
+FORMAT JSONEachRow
+"""
+
+    params = {
+        "param_start": start_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "param_end": end_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "param_agent_id": agent_id,
+        "param_short_id": agent_id[:12],
+        "param_limit": str(limit),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                CLICKHOUSE_ENDPOINT,
+                params=params,
+                content=query,
+                auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+            )
+        if resp.status_code != 200:
+            return [f"[clickhouse] API {resp.status_code}: {resp.text[:200]}"]
+
+        logs: List[str] = []
+        for line in resp.text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            raw = row.get("raw")
+            if isinstance(raw, str) and raw:
+                logs.append(raw)
+        return logs
+    except Exception as e:
+        return [f"[clickhouse] Error: {e}"]
 
 
 class FlyLogCollector:
@@ -650,7 +725,7 @@ async def collect_logs(
         {
             "messages":       [...],  # Full message transcript
             "backend_logs":   [...],  # Render backend HTTP logs
-            "worker_logs":    [...],  # Fly.io agent worker logs (from streaming collector)
+            "worker_logs":    [...],  # Fly.io agent worker logs (ClickHouse + live stream)
             "research_logs":  [...],  # Supabase completions gateway logs (by time window)
             "realtime_logs":  [...],  # Supabase Realtime frames captured live
         }
@@ -658,14 +733,17 @@ async def collect_logs(
     messages = extract_message_transcript(agent_data)
     realtime_logs = get_supabase_realtime_logs_for_agent(agent_id)
 
-    # Fly.io logs: merge streaming collector + one-shot snapshot (deduped)
+    # Fly.io logs: merge retained ClickHouse rows + streaming collector + one-shot snapshot (deduped)
     stream_logs = get_flyio_logs_for_agent(agent_id)
-    snapshot_logs = await fetch_flyio_logs_snapshot(agent_id)
-    # Deduplicate: use set of raw strings, preserving order from stream first
+    snapshot_logs, clickhouse_logs = await asyncio.gather(
+        fetch_flyio_logs_snapshot(agent_id),
+        fetch_clickhouse_worker_logs(agent_id, start_time),
+    )
+    # Deduplicate: use set of raw strings, preserving order from retained logs first
     seen = set()
     worker_logs = []
     # Skip the "[fly.io] 0 logs..." placeholder messages
-    for log in stream_logs + snapshot_logs:
+    for log in clickhouse_logs + stream_logs + snapshot_logs:
         if log.startswith("[fly.io]"):
             continue
         if log not in seen:
@@ -674,7 +752,8 @@ async def collect_logs(
     if not worker_logs:
         stream_total = _fly_collector.total_lines if _fly_collector else 0
         worker_logs = [
-            f"[fly.io] 0 logs for agent {agent_id[:12]} ({stream_total} streamed + {len(snapshot_logs)} snapshot)"
+            f"[fly.io] 0 logs for agent {agent_id[:12]} "
+            f"({len(clickhouse_logs)} clickhouse + {stream_total} streamed + {len(snapshot_logs)} snapshot)"
         ]
 
     # Render and Supabase logs fetched via HTTP

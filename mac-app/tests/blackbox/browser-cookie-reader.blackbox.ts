@@ -73,17 +73,20 @@ const fsCopyFileSync = vi.hoisted(() =>
   vi.fn<(src: string, dest: string) => void>(() => undefined)
 );
 const fsUnlinkSync = vi.hoisted(() => vi.fn<(p: string) => void>(() => undefined));
+const fsReadFileSync = vi.hoisted(() => vi.fn<(p: string) => Buffer>(() => Buffer.alloc(0)));
 vi.mock('fs', () => ({
   default: {
     existsSync: fsExistsSync,
     statSync: fsStatSync,
     copyFileSync: fsCopyFileSync,
     unlinkSync: fsUnlinkSync,
+    readFileSync: fsReadFileSync,
   },
   existsSync: fsExistsSync,
   statSync: fsStatSync,
   copyFileSync: fsCopyFileSync,
   unlinkSync: fsUnlinkSync,
+  readFileSync: fsReadFileSync,
 }));
 
 const execMock = vi.hoisted(() => vi.fn());
@@ -221,6 +224,69 @@ function installAtlasFs(matches: string[] = ['/tmp/mac-app-test/atlas-user/Cooki
   );
 }
 
+function buildSafariBinaryCookies(
+  cookies: Array<{
+    host: string;
+    name: string;
+    path: string;
+    value: string;
+    flags?: number;
+    expiresAt?: number;
+    createdAt?: number;
+  }>
+): Buffer {
+  const cookieBuffers = cookies.map((cookie) => {
+    const headerSize = 56;
+    const strings = [
+      Buffer.from(`${cookie.host}\0`, 'utf8'),
+      Buffer.from(`${cookie.name}\0`, 'utf8'),
+      Buffer.from(`${cookie.path}\0`, 'utf8'),
+      Buffer.from(`${cookie.value}\0`, 'utf8'),
+    ];
+    const hostOffset = headerSize;
+    const nameOffset = hostOffset + strings[0].length;
+    const pathOffset = nameOffset + strings[1].length;
+    const valueOffset = pathOffset + strings[2].length;
+    const size = valueOffset + strings[3].length;
+    const buf = Buffer.alloc(size);
+    buf.writeUInt32LE(size, 0);
+    buf.writeUInt32LE(cookie.flags ?? 0, 8);
+    buf.writeUInt32LE(hostOffset, 16);
+    buf.writeUInt32LE(nameOffset, 20);
+    buf.writeUInt32LE(pathOffset, 24);
+    buf.writeUInt32LE(valueOffset, 28);
+    buf.writeDoubleLE(cookie.expiresAt ?? 8000, 40);
+    buf.writeDoubleLE(cookie.createdAt ?? 7000, 48);
+    Buffer.concat(strings).copy(buf, headerSize);
+    return buf;
+  });
+
+  const pageHeaderSize = 8 + cookieBuffers.length * 4;
+  let nextCookieOffset = pageHeaderSize;
+  const cookieOffsets = cookieBuffers.map((buf) => {
+    const offset = nextCookieOffset;
+    nextCookieOffset += buf.length;
+    return offset;
+  });
+  const page = Buffer.alloc(nextCookieOffset);
+  page.writeUInt32LE(0x00000100, 0);
+  page.writeUInt32LE(cookieBuffers.length, 4);
+  cookieOffsets.forEach((offset, index) => page.writeUInt32LE(offset, 8 + index * 4));
+  cookieBuffers.forEach((buf, index) => buf.copy(page, cookieOffsets[index]));
+
+  const file = Buffer.alloc(12);
+  file.write('cook', 0, 'ascii');
+  file.writeUInt32BE(1, 4);
+  file.writeUInt32BE(page.length, 8);
+  return Buffer.concat([file, page]);
+}
+
+function installSafariFs(buffer = buildSafariBinaryCookies([])): void {
+  globSync.mockReturnValue([]);
+  fsExistsSync.mockImplementation((pattern: string) => pattern.includes('Cookies.binarycookies'));
+  fsReadFileSync.mockReturnValue(buffer);
+}
+
 // ── Suite ───────────────────────────────────────────────────────────────────
 
 describe('browser-cookie-reader blackbox', () => {
@@ -233,6 +299,7 @@ describe('browser-cookie-reader blackbox', () => {
     fsStatSync.mockReset();
     fsCopyFileSync.mockReset();
     fsUnlinkSync.mockReset();
+    fsReadFileSync.mockReset();
     execMock.mockReset();
     prepareMock.mockReset();
     dbCtor.mockClear();
@@ -257,6 +324,7 @@ describe('browser-cookie-reader blackbox', () => {
         name: 'Chrome',
         keychainAccount: 'Chrome',
         needsManualPassword: false,
+        cookieStore: 'sqlite',
       });
     });
 
@@ -267,6 +335,19 @@ describe('browser-cookie-reader blackbox', () => {
       expect(config).not.toBeNull();
       expect(config?.needsManualPassword).toBe(true);
       expect(config?.keychainEntry).toBe('ChatGPT Safe Storage');
+    });
+
+    it('returns Safari as a binary cookie store browser', async () => {
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+      const config = BrowserCookieReader.getBrowserConfig('safari');
+
+      expect(config).toMatchObject({
+        type: 'safari',
+        name: 'Safari',
+        needsManualPassword: false,
+        cookieStore: 'safariBinary',
+      });
+      expect(config?.cookiePathPattern).toContain('Cookies.binarycookies');
     });
 
     it('returns null for an unknown browser type', async () => {
@@ -337,6 +418,17 @@ describe('browser-cookie-reader blackbox', () => {
       expect(atlas).toBeDefined();
       expect(atlas?.resolvedCookiePath).toBe(newer);
     });
+
+    it('detects Safari when Cookies.binarycookies exists on disk', async () => {
+      installSafariFs();
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+      const installed = BrowserCookieReader.getInstalledBrowsers();
+
+      const safari = installed.find((b) => b.type === 'safari');
+      expect(safari).toBeDefined();
+      expect(safari?.name).toBe('Safari');
+      expect(safari?.resolvedCookiePath).toContain('Cookies.binarycookies');
+    });
   });
 
   describe('readCookies — unknown / empty states', () => {
@@ -378,6 +470,44 @@ describe('browser-cookie-reader blackbox', () => {
       expect(dbClose).toHaveBeenCalledTimes(1);
       expect(fsUnlinkSync).toHaveBeenCalledTimes(1);
       expect(fetchCaptures).toHaveLength(0);
+    });
+  });
+
+  describe('readCookies — Safari binary cookie store', () => {
+    it('parses Safari Cookies.binarycookies without keychain or sqlite access', async () => {
+      const safariCookieFile = buildSafariBinaryCookies([
+        {
+          host: '.example.com',
+          name: 'safari_session',
+          path: '/',
+          value: 'safari-value',
+          flags: 0x05,
+          expiresAt: 8000,
+          createdAt: 7000,
+        },
+      ]);
+      installSafariFs(safariCookieFile);
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+
+      const result = await BrowserCookieReader.readCookies('safari');
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        host_key: '.example.com',
+        name: 'safari_session',
+        value: 'safari-value',
+        path: '/',
+        is_secure: true,
+        is_httponly: true,
+        has_expires: true,
+        is_persistent: true,
+        source_scheme: 2,
+        source_port: 443,
+      });
+      expect(result[0].expires_utc).toBe(12622788800000000);
+      expect(execMock).not.toHaveBeenCalled();
+      expect(fsCopyFileSync).not.toHaveBeenCalled();
+      expect(dbCtor).not.toHaveBeenCalled();
     });
   });
 
