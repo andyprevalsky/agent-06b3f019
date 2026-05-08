@@ -182,6 +182,7 @@ describe('WaitForChip — condition mode', () => {
     // Live indicator present
     expect(screen.getByText('live')).toBeInTheDocument();
     expect(screen.getByText(/Exploring - Checking mailbox/)).toBeInTheDocument();
+    expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
 
     // Click the inline chip to expand it
     await u.click(screen.getByText(/Exploring - Checking mailbox/));
