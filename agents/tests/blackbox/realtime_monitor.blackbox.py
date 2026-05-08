@@ -53,11 +53,35 @@ def test_no_hanging_tool_calls_allows_finished_before_assistant():
     assert invariant.failure_reason is None
 
 
+def test_no_hanging_tool_calls_allows_late_in_progress_after_finished():
+    """Supabase realtime can deliver INSERT frames slightly out of order."""
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(_tool_record("agent-1", "FINISHED"))
+    invariant.handle_insert(_tool_record("agent-1", "IN_PROGRESS"))
+    invariant.handle_insert(_assistant_record("agent-1"))
+
+    assert invariant.failure_reason is None
+
+
 def test_no_hanging_tool_calls_ignores_other_agents():
     from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
 
     invariant = NoHangingToolCallsInvariant("agent-1")
     invariant.handle_insert(_tool_record("agent-2", "IN_PROGRESS"))
+    invariant.handle_insert(_assistant_record("agent-1"))
+
+    assert invariant.failure_reason is None
+
+
+def test_no_hanging_tool_calls_ignores_subagent_internal_tools():
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    record = _tool_record("agent-1", "IN_PROGRESS", "tc-sub")
+    record["metadata"]["subAgentId"] = "child-1"
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(record)
     invariant.handle_insert(_assistant_record("agent-1"))
 
     assert invariant.failure_reason is None
@@ -76,6 +100,25 @@ def test_no_hanging_tool_calls_ignores_declaring_assistant():
         )
     )
 
+    assert invariant.failure_reason is None
+
+
+def test_no_hanging_tool_calls_snapshot_reconcile_clears_missed_finished_frame():
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(_tool_record("agent-1", "IN_PROGRESS"))
+    invariant.handle_insert(_assistant_record("agent-1", "2026-01-01T00:00:03Z"))
+    assert invariant.failure_reason is not None
+
+    messages = [
+        _tool_record("agent-1", "IN_PROGRESS"),
+        _tool_record("agent-1", "FINISHED"),
+        _assistant_record("agent-1", "2026-01-01T00:00:03Z"),
+    ]
+    messages[1]["timestamp"] = "2026-01-01T00:00:02Z"
+
+    assert invariant.reconcile_snapshot(messages) is None
     assert invariant.failure_reason is None
 
 
@@ -122,10 +165,22 @@ async def run_all_tests():
         "no_hanging_tool_calls_allows_finished_before_assistant",
         test_no_hanging_tool_calls_allows_finished_before_assistant,
     )
+    r.record(
+        "no_hanging_tool_calls_allows_late_in_progress_after_finished",
+        test_no_hanging_tool_calls_allows_late_in_progress_after_finished,
+    )
     r.record("no_hanging_tool_calls_ignores_other_agents", test_no_hanging_tool_calls_ignores_other_agents)
+    r.record(
+        "no_hanging_tool_calls_ignores_subagent_internal_tools",
+        test_no_hanging_tool_calls_ignores_subagent_internal_tools,
+    )
     r.record(
         "no_hanging_tool_calls_ignores_declaring_assistant",
         test_no_hanging_tool_calls_ignores_declaring_assistant,
+    )
+    r.record(
+        "no_hanging_tool_calls_snapshot_reconcile_clears_missed_finished_frame",
+        test_no_hanging_tool_calls_snapshot_reconcile_clears_missed_finished_frame,
     )
     r.record(
         "no_hanging_tool_calls_ignores_older_assistant_delivered_late",

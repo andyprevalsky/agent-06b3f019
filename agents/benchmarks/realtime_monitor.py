@@ -60,6 +60,7 @@ class NoHangingToolCallsInvariant:
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
         self._open_tools: dict[str, OpenToolCall] = {}
+        self._closed_tool_ids: set[str] = set()
         self._sequence = 0
         self.failure_reason: Optional[str] = None
 
@@ -72,21 +73,27 @@ class NoHangingToolCallsInvariant:
         self._sequence += 1
         role = record.get("role")
         metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        if metadata.get("subAgentId"):
+            return
 
         if role == "TOOL":
             tool_call_id = metadata.get("toolCallId")
             status = metadata.get("toolStatus")
             if not tool_call_id:
                 return
+            tool_call_id = str(tool_call_id)
             if status == "IN_PROGRESS":
-                self._open_tools[str(tool_call_id)] = OpenToolCall(
+                if tool_call_id in self._closed_tool_ids:
+                    return
+                self._open_tools[tool_call_id] = OpenToolCall(
                     tool_name=str(metadata.get("toolName") or "unknown"),
                     message_id=str(record.get("id") or record.get("message_id") or ""),
                     sequence=self._sequence,
                     timestamp=_record_timestamp(record),
                 )
             elif status in {"FINISHED", "ERROR"}:
-                self._open_tools.pop(str(tool_call_id), None)
+                self._closed_tool_ids.add(tool_call_id)
+                self._open_tools.pop(tool_call_id, None)
             return
 
         if role != "ASSISTANT" or not self._open_tools:
@@ -119,6 +126,23 @@ class NoHangingToolCallsInvariant:
         if event == "INSERT":
             self.handle_insert(_record_from_broadcast(payload))
 
+    def reconcile_snapshot(self, messages: list[dict[str, Any]]) -> Optional[str]:
+        """Re-check the invariant against the canonical DB message snapshot."""
+        snapshot = NoHangingToolCallsInvariant(self.agent_id)
+        for message in sorted(messages, key=_record_timestamp):
+            record = dict(message)
+            if "agentId" not in record:
+                record["agentId"] = self.agent_id
+            if "timestamp" not in record and "created_at" in record:
+                record["timestamp"] = record["created_at"]
+            snapshot.handle_insert(record)
+
+        self._open_tools = snapshot._open_tools
+        self._closed_tool_ids = snapshot._closed_tool_ids
+        self._sequence = snapshot._sequence
+        self.failure_reason = snapshot.failure_reason
+        return self.failure_reason
+
 
 class SupabaseRealtimeSmokeMonitor:
     """Listens to the same agent channel as the frontend during smoke tests."""
@@ -137,6 +161,9 @@ class SupabaseRealtimeSmokeMonitor:
         if self._startup_error:
             return f"Realtime monitor failed to subscribe: {self._startup_error}"
         return self.invariant.failure_reason
+
+    def reconcile_snapshot(self, messages: list[dict[str, Any]]) -> Optional[str]:
+        return self.invariant.reconcile_snapshot(messages)
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name=f"realtime-smoke-{self.agent_id[:8]}")

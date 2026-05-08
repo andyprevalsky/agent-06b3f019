@@ -493,7 +493,9 @@ async def poll_agent(
         root_msg_count = len(messages)
 
         if realtime_monitor and realtime_monitor.failure_reason:
-            return data, approvals_triggered, approvals_resolved, realtime_monitor.failure_reason
+            realtime_failure = realtime_monitor.reconcile_snapshot(messages)
+            if realtime_failure:
+                return data, approvals_triggered, approvals_resolved, realtime_failure
 
         # Validate context well-formedness. Any error-severity violation is an
         # instant fail — don't keep polling, the agent will not recover.

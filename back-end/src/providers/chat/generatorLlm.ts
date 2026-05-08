@@ -304,6 +304,7 @@ export async function callGeneratorLlm(params: {
   claudeToken: string | null;
   gptToken?: string | null;
   gptAccountId?: string;
+  disableWaterfall?: boolean;
 }): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
@@ -399,6 +400,7 @@ export async function callGeneratorLlm(params: {
     claude_token: params.claudeToken ?? undefined,
     gpt_token: params.gptToken ?? undefined,
     gpt_account_id: params.gptAccountId,
+    disable_waterfall: params.disableWaterfall,
   });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)

@@ -284,39 +284,21 @@ async function testBoundary_noOutboundCalls() {
     return;
   }
 
-  // Snapshot cursor, make request, read only new captures.
-  const cursorData = probe.data as { nextId: number };
-  const cursor = cursorData.nextId - 1;
+  const captureToken = `tools-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  await request(`${BASE_URL}/api/tools`);
+  await request(`${BASE_URL}/api/tools`, {
+    headers: { 'X-Capture-Token': captureToken },
+  });
 
-  const afterRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const afterRes = await request(
+    `${BASE_URL}/api/test/captures?token=${encodeURIComponent(captureToken)}`
+  );
   assertStatus(afterRes.status, 200, afterRes.data);
   const captures = (afterRes.data as { captures: { url: string }[] }).captures;
 
-  // Filter infrastructure calls from concurrent test domains.
-  const INFRA = [
-    'supabase.co',
-    'twilio.com',
-    'googleapis.com',
-    'perplexity.ai',
-    'exa.ai',
-    'anthropic.com',
-    'openai.com',
-    'github.com',
-    'openrouter.ai',
-    'ip-api.com',
-    'surge.app',
-    'stripe.com',
-    'e2b.app',
-    'verify.twilio.com',
-    'vapi.ai',
-  ];
-  const toolsCaptures = captures.filter((c) => !INFRA.some((p) => c.url.includes(p)));
-
   assert(
-    toolsCaptures.length === 0,
-    `Expected 0 outbound calls from tools domain, got ${toolsCaptures.length}: ${JSON.stringify(toolsCaptures).substring(0, 500)}`
+    captures.length === 0,
+    `Expected 0 outbound calls from tools domain, got ${captures.length}: ${JSON.stringify(captures).substring(0, 500)}`
   );
 }
 
