@@ -196,6 +196,21 @@ describe('OnboardingData', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it('shows an empty browser state when no supported browsers are installed', async () => {
+    const api = installOnboardingApiMocks();
+    api.getInstalledBrowsers.mockResolvedValueOnce([]);
+    server.use(http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })));
+    const user = userEvent.setup();
+
+    renderWithProviders(<OnboardingData onComplete={() => {}} />);
+    await screen.findByText('Connect your Data');
+
+    await user.click(sectionToggle('Browser Sync'));
+
+    expect(screen.getByText(/No supported browsers detected/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled();
+  });
+
   it('expands every data connector section and drives representative actions', async () => {
     const api = installOnboardingApiMocks();
     const user = userEvent.setup();

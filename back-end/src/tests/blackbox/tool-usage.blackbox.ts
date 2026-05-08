@@ -486,16 +486,19 @@ async function testBoundary_noOutboundCalls() {
     console.warn('    SKIP: capture harness not active (BLACKBOX_TEST_CAPTURE_OUTBOUND not set)');
     return;
   }
-  await postUsage({
-    agent_id: ctx.agentId,
-    user_id: ctx.user1Id,
-    tool_name: 'boundary_test',
-    total_cost_cents: 0,
-    usage_items: [],
-  }, {
-    ...apiKeyHeaders(ctx.user1Id!),
-    'X-Capture-Token': captureToken,
-  });
+  await postUsage(
+    {
+      agent_id: ctx.agentId,
+      user_id: ctx.user1Id,
+      tool_name: 'boundary_test',
+      total_cost_cents: 0,
+      usage_items: [],
+    },
+    {
+      ...apiKeyHeaders(ctx.user1Id!),
+      'X-Capture-Token': captureToken,
+    }
+  );
   await getUsage(ctx.agentId!, {
     ...apiKeyHeaders(ctx.user1Id!),
     'X-Capture-Token': captureToken,
