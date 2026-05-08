@@ -172,12 +172,13 @@ class GptAuthContext(ComputeAuthContext):
 
 # What kind of chunk this is. Callers iterating the stream switch on `kind`.
 ChunkKind = Literal[
-    "metadata",     # first chunk: actual_model, pool_name, request_id
-    "content",      # text delta
-    "tool_call",    # complete tool-call (name + arguments JSON)
-    "reasoning",    # reasoning_content delta (extended thinking models)
-    "usage",        # final chunk: token counts + cache stats
-    "done",         # stream finished cleanly
+    "metadata",  # first chunk: actual_model, pool_name, request_id
+    "content",  # text delta
+    "tool_call",  # complete tool-call (name + arguments JSON)
+    "reasoning",  # reasoning_content delta (extended thinking models)
+    "codex_reasoning_item",  # GPT Responses reasoning item with encrypted_content
+    "usage",  # final chunk: token counts + cache stats
+    "done",  # stream finished cleanly
 ]
 
 
@@ -208,6 +209,7 @@ class RoseResponse:
     content: str = ""
     reasoning: str = ""
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    codex_reasoning_items: List[Dict[str, Any]] = field(default_factory=list)
     actual_model: str = ""
     pool_name: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)

@@ -55,7 +55,7 @@ function TakeControlChip({ onResume, isResuming }: { onResume: () => void; isRes
       <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
         <div className="flex items-center gap-2">
           <ThinkingAnimation
-            dataUrl="./thinking_animations.txt"
+            dataUrl="/thinking_animations.txt"
             autoplay
             loop
             className="w-4 h-4 flex-shrink-0"

@@ -1,5 +1,10 @@
 import { prisma } from './database';
-import { decryptCredentialEnvelope } from './claudeCredentials';
+import {
+  decryptCredentialEnvelope,
+  markPoolTokenRateLimited,
+  markUserTokenRateLimited,
+} from './claudeCredentials';
+import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
 
 const log = createLogger('ComputeCredentials');
@@ -177,4 +182,34 @@ export async function fetchComputeTokenForUser(
     if (userToken) return userToken;
   }
   return fetchComputePoolToken(options?.excludePoolTokenIds);
+}
+
+export async function markComputeTokenUnavailable(
+  token: ComputeCodeCredentialResult,
+  reason: 'auth_error' | 'rate_limit'
+): Promise<void> {
+  const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
+
+  if (token.source === 'pool') {
+    if (!token.poolTokenId) {
+      log.warn('Cannot mark pool compute token unavailable without poolTokenId', {
+        type: token.type,
+        reason,
+        userId: token.userId,
+      });
+      return;
+    }
+    if (token.type === 'claude') {
+      await markPoolTokenRateLimited(token.poolTokenId, { failureReason });
+      return;
+    }
+    await markGptPoolTokenRateLimited(token.poolTokenId, { failureReason });
+    return;
+  }
+
+  if (token.type === 'claude') {
+    await markUserTokenRateLimited(token.userId, { failureReason });
+    return;
+  }
+  await markGptUserTokenRateLimited(token.userId, { failureReason });
 }

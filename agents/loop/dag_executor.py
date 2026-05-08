@@ -32,6 +32,10 @@ from tools.base import EventType, MessageStatus, ToolEvent
 
 logger = structlog.get_logger()
 
+DAG_REASONING_UI_TOOL_NAME = "thought"
+DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
+DAG_REASONING_FINISHED_TITLE = "Thought"
+
 # Planning-time aliases → Execution-time tool names
 # Planner uses separate names (spawn_browser_agent, etc.) that map to unified spawn_agent
 TOOL_ALIASES = {
@@ -497,12 +501,12 @@ async def _execute_single_task(
             await handle_tool_event_fn(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Reasoning",
+                    title=DAG_REASONING_IN_PROGRESS_TITLE,
                     message=task.goal,
                     status=MessageStatus.IN_PROGRESS,
                 ),
                 tool_call_id,
-                "reasoning",
+                DAG_REASONING_UI_TOOL_NAME,
             )
 
             # Trim context to the same window the reasoning activity will use
@@ -583,6 +587,8 @@ async def _execute_single_task(
                             claude_token_rotated=reasoning_usage.get("claude_token_rotated", False),
                             claude_token_error=reasoning_usage.get("claude_token_error"),
                             gpt_token_error=reasoning_usage.get("gpt_token_error"),
+                            gpt_token_rotated=reasoning_usage.get("gpt_token_rotated", False),
+                            compute_token_used=reasoning_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
@@ -590,12 +596,12 @@ async def _execute_single_task(
             await handle_tool_event_fn(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Reasoning",
+                    title=DAG_REASONING_FINISHED_TITLE,
                     message=reasoning_content,
                     status=MessageStatus.FINISHED,
                 ),
                 tool_call_id,
-                "reasoning",
+                DAG_REASONING_UI_TOOL_NAME,
             )
 
             # Post reasoning to DB as ASSISTANT message
@@ -697,6 +703,8 @@ async def _execute_single_task(
                             claude_token_rotated=param_usage.get("claude_token_rotated", False),
                             claude_token_error=param_usage.get("claude_token_error"),
                             gpt_token_error=param_usage.get("gpt_token_error"),
+                            gpt_token_rotated=param_usage.get("gpt_token_rotated", False),
+                            compute_token_used=param_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")

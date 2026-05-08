@@ -1,15 +1,18 @@
 /**
- * Generic tool card.
+ * STATE MACHINE: ToolMessage
  *
- * Composition:
- *   ToolMessageHeader    -> icon + title + chevron
- *   progress bar         -> optional, shown when progressComplete + IN_PROGRESS
- *   countdown / simulated -> attention-request auto-answer UX
- *   SendIMessageAction   -> when actionMetadata targets sendSmsThroughIMessage
- *   expanded body        -> MarkdownText when hasMessage && shouldBeExpanded
+ * [COLLAPSED]
+ *   - header is always visible
+ *   - progress/countdown/simulated/action rows render from tool status metadata
+ *   - if expandable header is clicked -> [EXPANDED]
  *
- * Expand/collapse + progress handled by useToolMessageState.
- * Countdown handled by useCountdown.
+ * [EXPANDED]
+ *   - body renders MarkdownText when hasMessage && shouldBeExpanded
+ *   - content is vertically scrollable, horizontally constrained, and wraps
+ *     long unbroken tool output such as URLs and serialized action summaries
+ *   - header click -> [COLLAPSED]
+ *
+ * Derived state lives in useToolMessageState. Countdown lives in useCountdown.
  */
 import { memo } from 'react';
 import { MarkdownText } from '../MarkdownText';
@@ -41,7 +44,7 @@ export const ToolMessage = memo(function ToolMessage({
     (data.actionMetadata as { onSuccess?: string }).onSuccess === 'sendSmsThroughIMessage';
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex min-w-0 max-w-full flex-col gap-1">
       <ToolMessageHeader
         data={data}
         titleText={state.titleText}
@@ -77,12 +80,12 @@ export const ToolMessage = memo(function ToolMessage({
       )}
 
       {state.hasMessage && state.shouldBeExpanded && (
-        <div className="overflow-hidden transition-all duration-200">
-          <div className="pr-2 pl-4 border-l-2 border-border max-h-[300px] overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
+        <div className="min-w-0 max-w-full overflow-hidden transition-all duration-200">
+          <div className="min-w-0 max-w-full pr-2 pl-4 border-l-2 border-border max-h-[300px] overflow-y-auto overflow-x-hidden scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
             <MarkdownText
               text={data.message}
               shouldAnimate={false}
-              className="text-sm text-muted-foreground"
+              className="tool-message-markdown min-w-0 max-w-full text-sm text-muted-foreground"
             />
           </div>
         </div>

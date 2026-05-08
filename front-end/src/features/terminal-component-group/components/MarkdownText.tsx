@@ -19,6 +19,7 @@ import remarkBreaks from 'remark-breaks';
 import { cn } from '@/lib/utils';
 
 import { FadeInMarkdown, normalizeMarkdownText } from './markdown-text';
+import { MarkdownStyles } from './markdown-text/MarkdownStyles';
 
 interface MarkdownTextProps {
   text: string;
@@ -40,6 +41,7 @@ export const MarkdownText = memo(function MarkdownText({
   if (breaks && !shouldAnimate) {
     return (
       <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
+        <MarkdownStyles />
         <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{normalizedText}</ReactMarkdown>
       </div>
     );

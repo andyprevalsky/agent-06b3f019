@@ -5,7 +5,8 @@ Log sources:
   1. Render   — backend HTTP logs (REST API, needs RENDER_API_KEY in back-end/.env)
   2. Fly.io   — agent worker logs (real-time stream via flyctl, needs FLY_API_TOKEN in agents/.env)
   3. Supabase — edge function gateway logs (Management API, needs SUPABASE_ACCESS_TOKEN in agents/.env)
-  4. Messages — full agent message transcript (from agent GET response, always available)
+  4. Realtime — Supabase websocket/broadcast frames captured live during benchmarks
+  5. Messages — full agent message transcript (from agent GET response, always available)
 
 Token locations:
   - RENDER_API_KEY:        back-end/.env
@@ -33,7 +34,7 @@ import os
 import shutil
 import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -50,6 +51,7 @@ def _find_flyctl() -> str:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return "flyctl"
+
 
 # ---------------------------------------------------------------------------
 # Config — load from env, fall back to .env files
@@ -74,7 +76,7 @@ def load_env_var(name: str, *env_files: str) -> str:
                     val = line.split("=", 1)[1].strip().strip('"').strip("'")
                     # Strip inline comments (e.g. KEY=value # comment)
                     if " #" in val:
-                        val = val[:val.index(" #")].rstrip()
+                        val = val[: val.index(" #")].rstrip()
                     return val
     return ""
 
@@ -91,11 +93,17 @@ FLY_APP_NAME = "navi-whisper-lux"
 # Supabase (edge functions — completions, cost, etc.)
 SUPABASE_ACCESS_TOKEN = load_env_var("SUPABASE_ACCESS_TOKEN", _AGENTS_ENV)
 SUPABASE_PROJECT_REF = load_env_var("SUPABASE_PROJECT_REF", _AGENTS_ENV) or "kzlurqihzaolhzsbkctf"
+SUPABASE_URL = load_env_var("SUPABASE_URL", _AGENTS_ENV, _BACKEND_ENV)
+SUPABASE_ANON_KEY = load_env_var("SUPABASE_ANON_KEY", _AGENTS_ENV, _BACKEND_ENV) or load_env_var(
+    "VITE_SUPABASE_ANON_KEY",
+    os.path.join(os.path.dirname(__file__), "..", "..", "front-end", ".env"),
+)
 
 
 # ---------------------------------------------------------------------------
 # Render backend logs
 # ---------------------------------------------------------------------------
+
 
 async def fetch_render_logs(
     agent_id: str,
@@ -121,9 +129,7 @@ async def fetch_render_logs(
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                "https://api.render.com/v1/logs", headers=headers, params=params
-            )
+            resp = await client.get("https://api.render.com/v1/logs", headers=headers, params=params)
             if resp.status_code != 200:
                 return [f"[render] API {resp.status_code}: {resp.text[:200]}"]
 
@@ -149,6 +155,7 @@ async def fetch_render_logs(
 # ---------------------------------------------------------------------------
 # Fly.io worker logs — real-time streaming collector
 # ---------------------------------------------------------------------------
+
 
 class FlyLogCollector:
     """
@@ -189,7 +196,10 @@ class FlyLogCollector:
             env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
             # Use default format (not --json) — gives one line per log entry
             self._process = await asyncio.create_subprocess_exec(
-                _find_flyctl(), "logs", "-a", FLY_APP_NAME,
+                _find_flyctl(),
+                "logs",
+                "-a",
+                FLY_APP_NAME,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -312,7 +322,11 @@ async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
     try:
         env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
         proc = await asyncio.create_subprocess_exec(
-            _find_flyctl(), "logs", "-a", FLY_APP_NAME, "--no-tail",
+            _find_flyctl(),
+            "logs",
+            "-a",
+            FLY_APP_NAME,
+            "--no-tail",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -356,8 +370,167 @@ async def stop_fly_log_collector():
 
 
 # ---------------------------------------------------------------------------
+# Supabase Realtime broadcast frames — real-time streaming collector
+# ---------------------------------------------------------------------------
+
+
+def _record_from_realtime_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    body = payload.get("payload", payload)
+    if not isinstance(body, dict):
+        return {}
+    record = body.get("record", body)
+    return record if isinstance(record, dict) else {}
+
+
+class SupabaseRealtimeLogCollector:
+    """Capture agent:{id} broadcast frames during benchmark runs."""
+
+    EVENTS = ("INSERT", "UPDATE", "DELETE", "ASSISTANT_STREAM", "TOOL_STREAM", "PLAN_STREAM", "ATTENTION_STREAM")
+
+    def __init__(self, *, private: bool):
+        self.private = private
+        self._client: Any = None
+        self._channels: Dict[str, Any] = {}
+        self._frames: List[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._startup_error: Optional[str] = None
+
+    async def start(self) -> str:
+        if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+            self._startup_error = "SUPABASE_URL and SUPABASE_ANON_KEY are required"
+            return f"[supabase-realtime] {self._startup_error}"
+
+        try:
+            from realtime import AsyncRealtimeClient
+
+            try:
+                from tests.e2e.test_helpers import authenticate
+
+                auth = await authenticate()
+                access_token = auth.get("access_token") or SUPABASE_ANON_KEY
+            except Exception:
+                access_token = SUPABASE_ANON_KEY
+
+            realtime_url = f"{SUPABASE_URL.rstrip('/')}/realtime/v1"
+            self._client = AsyncRealtimeClient(realtime_url, token=SUPABASE_ANON_KEY, timeout=10)
+            await self._client.set_auth(access_token)
+            return "supabase realtime frame collector started"
+        except Exception as exc:
+            self._startup_error = str(exc)
+            return f"[supabase-realtime] Failed to start frame collector: {exc}"
+
+    async def subscribe_agent(self, agent_id: str) -> str:
+        if not agent_id:
+            return "[supabase-realtime] empty agent_id"
+        if self._startup_error:
+            return f"[supabase-realtime] {self._startup_error}"
+        if self._client is None:
+            return "[supabase-realtime] collector not started"
+        if agent_id in self._channels:
+            return f"already subscribed to agent:{agent_id[:12]}"
+
+        from realtime import RealtimeSubscribeStates
+
+        subscribed = asyncio.Event()
+        error_holder: dict[str, str] = {}
+        channel = self._client.channel(
+            f"agent:{agent_id}",
+            {"config": {"private": self.private}},
+        )
+
+        for event_name in self.EVENTS:
+            channel.on_broadcast(
+                event_name,
+                lambda payload, name=event_name, aid=agent_id: self.record_broadcast(aid, name, payload),
+            )
+
+        def on_subscribe(status: RealtimeSubscribeStates, error: Optional[Exception]) -> None:
+            if status == RealtimeSubscribeStates.SUBSCRIBED:
+                subscribed.set()
+                return
+            error_holder["error"] = str(error or f"subscription status {status.value}")
+            subscribed.set()
+
+        await channel.subscribe(on_subscribe)
+        await asyncio.wait_for(subscribed.wait(), timeout=15)
+        if error_holder:
+            return f"[supabase-realtime] subscribe agent:{agent_id[:12]} failed: {error_holder['error']}"
+        self._channels[agent_id] = channel
+        return f"subscribed to agent:{agent_id[:12]}"
+
+    def record_broadcast(self, agent_id: str, event: str, payload: Any) -> None:
+        record = _record_from_realtime_payload(payload)
+        frame_agent_id = str(record.get("agentId") or agent_id)
+        frame = {
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "agent_id": frame_agent_id,
+            "topic": f"agent:{agent_id}",
+            "event": event,
+            "record": record,
+        }
+        with self._lock:
+            self._frames.append(frame)
+
+    def get_logs_for_agent(self, agent_id: str) -> List[str]:
+        with self._lock:
+            frames = [
+                frame
+                for frame in self._frames
+                if frame.get("agent_id") == agent_id or str(frame.get("agent_id", "")).startswith(agent_id[:12])
+            ]
+            total = len(self._frames)
+
+        if not frames:
+            return [f"[supabase-realtime] 0 frames for agent {agent_id[:12]} ({total} total captured)"]
+        return [json.dumps(frame, default=str, separators=(",", ":")) for frame in frames]
+
+    async def stop(self) -> int:
+        for channel in list(self._channels.values()):
+            try:
+                await channel.unsubscribe()
+            except Exception:
+                pass
+        self._channels.clear()
+        with self._lock:
+            return len(self._frames)
+
+
+_supabase_realtime_collector: Optional[SupabaseRealtimeLogCollector] = None
+
+
+async def start_supabase_realtime_collector(*, private: bool) -> str:
+    global _supabase_realtime_collector
+    _supabase_realtime_collector = SupabaseRealtimeLogCollector(private=private)
+    return await _supabase_realtime_collector.start()
+
+
+async def subscribe_supabase_realtime_agent(agent_id: str) -> str:
+    if _supabase_realtime_collector is None:
+        return "[supabase-realtime] collector not started"
+    return await _supabase_realtime_collector.subscribe_agent(agent_id)
+
+
+def get_supabase_realtime_logs_for_agent(agent_id: str) -> List[str]:
+    if _supabase_realtime_collector is None:
+        return ["[supabase-realtime] collector not started"]
+    return _supabase_realtime_collector.get_logs_for_agent(agent_id)
+
+
+async def stop_supabase_realtime_collector() -> int:
+    global _supabase_realtime_collector
+    if _supabase_realtime_collector is None:
+        return 0
+    total = await _supabase_realtime_collector.stop()
+    _supabase_realtime_collector = None
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Supabase edge function logs (Management API — gateway-level)
 # ---------------------------------------------------------------------------
+
 
 async def fetch_supabase_logs(
     agent_id: str,
@@ -373,7 +546,9 @@ async def fetch_supabase_logs(
     are correlated by timestamp, not by agent_id.
     """
     if not SUPABASE_ACCESS_TOKEN:
-        return ["[supabase] SUPABASE_ACCESS_TOKEN not set in agents/.env — generate: https://supabase.com/dashboard/account/tokens"]
+        return [
+            "[supabase] SUPABASE_ACCESS_TOKEN not set in agents/.env — generate: https://supabase.com/dashboard/account/tokens"
+        ]
 
     if end_time is None:
         end_time = datetime.now(timezone.utc)
@@ -428,6 +603,7 @@ async def fetch_supabase_logs(
 # Message transcript (from agent GET response)
 # ---------------------------------------------------------------------------
 
+
 def extract_message_transcript(agent_data: dict) -> List[dict]:
     messages = agent_data.get("messages", [])
     transcript = []
@@ -456,6 +632,7 @@ def extract_message_transcript(agent_data: dict) -> List[dict]:
 # Collect all logs for a single agent
 # ---------------------------------------------------------------------------
 
+
 async def collect_logs(
     agent_id: str,
     agent_data: dict,
@@ -470,9 +647,11 @@ async def collect_logs(
             "backend_logs":   [...],  # Render backend HTTP logs
             "worker_logs":    [...],  # Fly.io agent worker logs (from streaming collector)
             "research_logs":  [...],  # Supabase completions gateway logs (by time window)
+            "realtime_logs":  [...],  # Supabase Realtime frames captured live
         }
     """
     messages = extract_message_transcript(agent_data)
+    realtime_logs = get_supabase_realtime_logs_for_agent(agent_id)
 
     # Fly.io logs: merge streaming collector + one-shot snapshot (deduped)
     stream_logs = get_flyio_logs_for_agent(agent_id)
@@ -489,7 +668,9 @@ async def collect_logs(
             worker_logs.append(log)
     if not worker_logs:
         stream_total = _fly_collector.total_lines if _fly_collector else 0
-        worker_logs = [f"[fly.io] 0 logs for agent {agent_id[:12]} ({stream_total} streamed + {len(snapshot_logs)} snapshot)"]
+        worker_logs = [
+            f"[fly.io] 0 logs for agent {agent_id[:12]} ({stream_total} streamed + {len(snapshot_logs)} snapshot)"
+        ]
 
     # Render and Supabase logs fetched via HTTP
     backend_logs, research_logs = await asyncio.gather(
@@ -502,12 +683,14 @@ async def collect_logs(
         "backend_logs": backend_logs,
         "worker_logs": worker_logs,
         "research_logs": research_logs,
+        "realtime_logs": realtime_logs,
     }
 
 
 # ---------------------------------------------------------------------------
 # Collect logs for an entire agent tree (root + all descendants)
 # ---------------------------------------------------------------------------
+
 
 async def collect_tree_logs(
     root_agent_id: str,
@@ -537,6 +720,7 @@ async def collect_tree_logs(
             ...
         }
     """
+
     async def _collect_one(agent_info: dict) -> tuple:
         aid = agent_info.get("agent_id", "")
         if not aid:
@@ -589,6 +773,7 @@ async def collect_tree_logs(
 def _detect_anomalies(msgs: List[dict]) -> List[str]:
     """Detect message patterns that indicate bugs (infinite loops, repeated content, stalls, etc.)."""
     from collections import Counter
+
     anomalies = []
 
     # 1. Detect repeated identical messages (infinite loop) — scan ALL messages, not just last 20
@@ -597,9 +782,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         counts = Counter(all_texts)
         for text, count in counts.most_common(3):
             if count >= 4:
-                anomalies.append(
-                    f"INFINITE LOOP: message repeated {count}x (total): {text[:80]}"
-                )
+                anomalies.append(f"INFINITE LOOP: message repeated {count}x (total): {text[:80]}")
 
     # 2. Detect tools stuck IN_PROGRESS without FINISHED
     # Spawn tools are inherently long-running (sub-agents have their own anomaly detection).
@@ -607,9 +790,14 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
     # ride under toolName="attempt_completion"); skip those instead of relying
     # on the old check_progress toolName.
     _LONG_RUNNING_TOOLS = {
-        "spawn_agent", "spawn_sub_agent", "spawn_sub_agent_for_each",
-        "spawn_claude_code_agent", "spawn_browser_agent",
-        "set_plan", "message_person", "request_user_approval",
+        "spawn_agent",
+        "spawn_sub_agent",
+        "spawn_sub_agent_for_each",
+        "spawn_claude_code_agent",
+        "spawn_browser_agent",
+        "set_plan",
+        "message_person",
+        "request_user_approval",
     }
     in_progress = {}  # tool_call_id → metadata
     for m in msgs:
@@ -639,6 +827,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         if ts:
             try:
                 from datetime import datetime, timezone
+
                 # Handle both "2026-03-20T20:28:51.907Z" and other ISO formats
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 timestamps.append(dt)
@@ -648,9 +837,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         for i in range(1, len(timestamps)):
             gap = (timestamps[i] - timestamps[i - 1]).total_seconds()
             if gap > 180:  # 3+ minute gap
-                anomalies.append(
-                    f"TIME GAP: {gap:.0f}s ({gap/60:.1f}min) between messages {i-1} and {i}"
-                )
+                anomalies.append(f"TIME GAP: {gap:.0f}s ({gap / 60:.1f}min) between messages {i - 1} and {i}")
 
     # 4. Detect abnormal tool distribution (one tool called way too many times)
     tool_names = []
@@ -692,10 +879,20 @@ def format_tree_diagnostics(
         found = []
         for log_line in log_list:
             lower = log_line.lower() if isinstance(log_line, str) else ""
-            if any(kw in lower for kw in (
-                '"level":"error"', '"event":"error"', 'traceback',
-                'exception', 'error:', 'failed', '500 ', '502 ', '503 ',
-            )):
+            if any(
+                kw in lower
+                for kw in (
+                    '"level":"error"',
+                    '"event":"error"',
+                    "traceback",
+                    "exception",
+                    "error:",
+                    "failed",
+                    "500 ",
+                    "502 ",
+                    "503 ",
+                )
+            ):
                 found.append(f"[{source_name}] {log_line[:200]}")
         return found
 
@@ -712,8 +909,13 @@ def format_tree_diagnostics(
         prefix = "└─" if depth > 0 else "●"
 
         # Status icon
-        icon = {"COMPLETED": "✅", "FAILED": "❌", "PAUSED": "⏸",
-                "COST_LIMIT_REACHED": "💸", "OUT_OF_CREDITS": "💸"}.get(status, "🔄")
+        icon = {
+            "COMPLETED": "✅",
+            "FAILED": "❌",
+            "PAUSED": "⏸",
+            "COST_LIMIT_REACHED": "💸",
+            "OUT_OF_CREDITS": "💸",
+        }.get(status, "🔄")
 
         # Agent state line (tokens, cost)
         state = info.get("agent_state", {})
@@ -741,11 +943,13 @@ def format_tree_diagnostics(
         worker = logs.get("worker_logs", [])
         backend = logs.get("backend_logs", [])
         research = logs.get("research_logs", [])
+        realtime = logs.get("realtime_logs", [])
 
         all_log_errors = (
             _scan_log_errors(worker, "worker")
             + _scan_log_errors(backend, "backend")
             + _scan_log_errors(research, "research")
+            + _scan_log_errors(realtime, "realtime")
         )
         if all_log_errors:
             lines.append(f"{indent}   ⚠ {len(all_log_errors)} error(s) in prod logs:")
@@ -756,9 +960,13 @@ def format_tree_diagnostics(
         msgs = logs.get("messages", [])
         if msgs:
             from collections import Counter
+
             tool_msgs = [m for m in msgs if m.get("role") == "TOOL"]
-            error_tools = [m for m in tool_msgs
-                           if isinstance(m.get("metadata"), dict) and m["metadata"].get("toolStatus") == "ERROR"]
+            error_tools = [
+                m
+                for m in tool_msgs
+                if isinstance(m.get("metadata"), dict) and m["metadata"].get("toolStatus") == "ERROR"
+            ]
             assistant_msgs = [m for m in msgs if m.get("role") == "ASSISTANT"]
             file_msgs = [m for m in msgs if m.get("file_pointer")]
 
@@ -772,8 +980,9 @@ def format_tree_diagnostics(
             lines.append(f"{indent}   📨 {', '.join(parts)}")
 
             # Tool distribution breakdown (spot abnormal patterns)
-            tool_names = [m.get("metadata", {}).get("toolName", "?")
-                          for m in tool_msgs if isinstance(m.get("metadata"), dict)]
+            tool_names = [
+                m.get("metadata", {}).get("toolName", "?") for m in tool_msgs if isinstance(m.get("metadata"), dict)
+            ]
             if tool_names:
                 tool_dist = Counter(tool_names).most_common()
                 dist_str = ", ".join(f"{name}={cnt}" for name, cnt in tool_dist)
@@ -819,8 +1028,11 @@ def format_tree_diagnostics(
 
     lines.append("")
     lines.append(f"  Total agents in tree: {len(tree_logs)}")
-    failed = [aid for aid, info in tree_logs.items()
-              if info.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
+    failed = [
+        aid
+        for aid, info in tree_logs.items()
+        if info.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")
+    ]
     if failed:
         lines.append(f"  Failed agents: {', '.join(a[:12] for a in failed)}")
 

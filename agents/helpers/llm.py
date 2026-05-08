@@ -31,6 +31,7 @@ from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     ClaudeAuthContext,
+    ComputeAuthContext,
     GptAuthContext,
     RoseClient,
     RoseError,
@@ -56,6 +57,7 @@ CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 
 def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
     return metadata.get("toolName") == CLOUD_AGENT_TOOL_NAME
+
 
 # Same-machine optimization: passes large LLM context without Temporal serialization.
 # On cross-machine miss, call_llm_activity falls back to fetching from backend API.
@@ -85,7 +87,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 0,
+    max_rotations: int = 3,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
     if not claude_token:
@@ -110,17 +112,11 @@ def _build_claude_auth_context(
             failure_reason=failure_reason,
         )
 
-    async def _fetch_fresh(fetch_user_id: str) -> Optional[ClaudeAuthContext]:
-        result = await fetch_claude_max_token_activity(fetch_user_id)
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
+        result = await fetch_compute_token_activity(fetch_user_id)
         if not result or not result.get("accessToken"):
             return None
-        return _build_claude_auth_context(
-            result.get("accessToken"),
-            source=result.get("source"),
-            user_id=fetch_user_id,
-            pool_token_id=result.get("poolTokenId"),
-            max_rotations=max_rotations,
-        )
+        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -140,7 +136,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 0,
+    max_rotations: int = 3,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
     if not gpt_token:
@@ -165,18 +161,11 @@ def _build_gpt_auth_context(
             failure_reason=failure_reason,
         )
 
-    async def _fetch_fresh(fetch_user_id: str) -> Optional[GptAuthContext]:
+    async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
         result = await fetch_compute_token_activity(fetch_user_id)
-        if not result or result.get("type") != "gpt" or not result.get("accessToken"):
+        if not result or not result.get("accessToken"):
             return None
-        return _build_gpt_auth_context(
-            result.get("accessToken"),
-            account_id=result.get("accountId"),
-            source=result.get("source"),
-            user_id=fetch_user_id,
-            pool_token_id=result.get("poolTokenId"),
-            max_rotations=max_rotations,
-        )
+        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
 
     return GptAuthContext(
         token=gpt_token,
@@ -184,8 +173,37 @@ def _build_gpt_auth_context(
         user_id=user_id,
         account_id=account_id,
         pool_token_id=pool_token_id if source == "pool" else None,
-        mark_rate_limited=_mark_rate_limited if max_rotations > 0 else None,
-        fetch_fresh=_fetch_fresh if max_rotations > 0 else None,
+        mark_rate_limited=_mark_rate_limited,
+        fetch_fresh=_fetch_fresh,
+        max_rotations=max_rotations,
+    )
+
+
+def _build_compute_auth_context(
+    result: Dict[str, Any],
+    user_id: str,
+    *,
+    max_rotations: int = 3,
+) -> Optional[ComputeAuthContext]:
+    """Build a direct auth context from the unified compute-token endpoint."""
+    token = result.get("accessToken")
+    provider_type = result.get("type")
+    if not token or provider_type not in ("claude", "gpt"):
+        return None
+    if provider_type == "claude":
+        return _build_claude_auth_context(
+            token,
+            source=result.get("source"),
+            user_id=user_id,
+            pool_token_id=result.get("poolTokenId"),
+            max_rotations=max_rotations,
+        )
+    return _build_gpt_auth_context(
+        token,
+        account_id=result.get("accountId"),
+        source=result.get("source"),
+        user_id=user_id,
+        pool_token_id=result.get("poolTokenId"),
         max_rotations=max_rotations,
     )
 
@@ -394,20 +412,22 @@ def build_verifier_context_messages(  # noqa: C901
                 # text-only batches.
                 _flush_batch()
                 media_type = metadata.get("screenshot_media_type", "image/png")
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": tool_text},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": screenshot_b64,
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": tool_text},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": screenshot_b64,
+                                },
                             },
-                        },
-                    ],
-                })
+                        ],
+                    }
+                )
                 continue
 
             current_batch.append(tool_text)
@@ -879,6 +899,12 @@ async def build_llm_messages(  # noqa: C901
                         full_text += f"\n\n[Attached file: {fname}]"
 
             assistant_msg: Dict[str, Any] = {"role": llm_role, "content": full_text}
+            codex_reasoning_items = metadata.get("codex_reasoning_items")
+            if isinstance(codex_reasoning_items, list):
+                assistant_msg["codex_reasoning_items"] = codex_reasoning_items
+            codex_message_items = metadata.get("codex_message_items")
+            if isinstance(codex_message_items, list):
+                assistant_msg["codex_message_items"] = codex_message_items
             if raw_tool_calls:
                 if not isinstance(raw_tool_calls, list):
                     raise ValueError(
@@ -946,10 +972,7 @@ async def build_llm_messages(  # noqa: C901
                     if metadata.get("title"):
                         tool_content = f"{metadata['title']}: {tool_content}"
                     if metadata.get("structured_response"):
-                        tool_content += (
-                            "\n\nStructured Response: "
-                            + json.dumps(metadata["structured_response"])
-                        )
+                        tool_content += "\n\nStructured Response: " + json.dumps(metadata["structured_response"])
                     if metadata_texts:
                         tool_content = tool_content + "\n\n" + "\n\n".join(metadata_texts)
                     if content:
@@ -1301,6 +1324,7 @@ async def call_llm_structured_streaming(  # noqa: C901
 
         # Stream state
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
+        codex_reasoning_items: List[Dict[str, Any]] = []  # Encrypted GPT reasoning state for replay only
         accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
@@ -1359,6 +1383,12 @@ async def call_llm_structured_streaming(  # noqa: C901
             pool_token_id=gpt_token_pool_id,
         )
 
+        def _native_visible_text() -> str:
+            reasoning = accumulated_reasoning.strip()
+            if reasoning and text_buffer:
+                return reasoning + "\n\n" + text_buffer
+            return reasoning or text_buffer
+
         try:
             async for chunk in rose_client.complete(
                 pool=pool,
@@ -1389,12 +1419,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                     if chunk.data.get("actual_model"):
                         actual_model = chunk.data["actual_model"]
                         using_claude_auth = actual_model.endswith("-claude")
-                        using_native_direct_tools = (
-                            using_claude_auth or actual_model.endswith("-gpt")
-                        )
-                        logger.info(
-                            f"🎯 Rose model selected: {actual_model} (claudeAuth={using_claude_auth})"
-                        )
+                        using_native_direct_tools = using_claude_auth or actual_model.endswith("-gpt")
+                        logger.info(f"🎯 Rose model selected: {actual_model} (claudeAuth={using_claude_auth})")
                         if on_model_detected:
                             on_model_detected(actual_model)
                     if chunk.data.get("pool_name"):
@@ -1447,9 +1473,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     # the full message immediately rather than streaming partials.
                     if on_attention_stream and tool_name == "send_message_to_user":
                         attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
-                        detected_tools_ordered.append(
-                            ("send_message_to_user", attention_tool_call_id, _safe_time())
-                        )
+                        detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                         message_text = parsed_args.get("message", "") or ""
                         is_question = parsed_args.get("is_question", True)
                         if not isinstance(is_question, bool):
@@ -1457,6 +1481,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                         if message_text:
                             await on_attention_stream(attention_tool_call_id, message_text, is_question)
                             last_attention_message = message_text
+                    continue
+
+                if kind == "codex_reasoning_item":
+                    codex_reasoning_items.append(dict(chunk.data))
                     continue
 
                 reasoning_delta = chunk.data.get("text", "") if kind == "reasoning" else ""
@@ -1485,9 +1513,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                             first_tool_calls_chunk = chunk_count
                             logger.info(f"🔧 C{chunk_count} TOOL_CALLS started")
 
-                token_count = (
-                    len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer)
-                ) // 4
+                token_count = (len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer)) // 4
 
                 # Periodic state log (every 50 chunks).
                 if chunk_count % 50 == 0:
@@ -1505,21 +1531,14 @@ async def call_llm_structured_streaming(  # noqa: C901
                     )
 
                 # Tool detection on waterfall path — regex-scan accumulated_json.
-                if (
-                    not using_native_direct_tools
-                    and on_tool_detected
-                    and '"tool_calls"' in accumulated_json
-                ):
+                if not using_native_direct_tools and on_tool_detected and '"tool_calls"' in accumulated_json:
                     tool_matches = re.findall(r'"tool"\s*:\s*"([^"]+)"', accumulated_json)
                     for tool_name in tool_matches:
                         if tool_name in SKIP_EARLY_PROGRESS:
                             continue
                         current_position = detected_tool_positions.get(tool_name, 0)
                         existing_count = sum(1 for t, _, _ in detected_tools_ordered if t == tool_name)
-                        if (
-                            existing_count < tool_matches.count(tool_name)
-                            and existing_count == current_position
-                        ):
+                        if existing_count < tool_matches.count(tool_name) and existing_count == current_position:
                             if len(detected_tools_ordered) > 0:
                                 completed_tools = _extract_completed_tool_calls(accumulated_json)
                                 prev_tool_idx = len(detected_tools_ordered) - 1
@@ -1552,9 +1571,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 ):
                     if not attention_tool_call_id:
                         attention_tool_call_id = str(uuid.uuid4())
-                        detected_tools_ordered.append(
-                            ("send_message_to_user", attention_tool_call_id, _safe_time())
-                        )
+                        detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                         logger.info(f"📢 Attention message detected, tool_call_id={attention_tool_call_id}")
 
                     msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"?', accumulated_json)
@@ -1569,23 +1586,21 @@ async def call_llm_structured_streaming(  # noqa: C901
                             is_question = iq_match.group(1) == "true"
                         if attention_message and attention_message != last_attention_message:
                             last_attention_message = attention_message
-                            await on_attention_stream(
-                                attention_tool_call_id, attention_message, is_question
-                            )
+                            await on_attention_stream(attention_tool_call_id, attention_message, is_question)
 
                 # Streaming text deltas to caller.
                 if using_native_direct_tools:
-                    # Native direct-token path: text_buffer is the response text directly.
-                    if text_buffer and text_buffer != last_emitted_text:
-                        last_emitted_text = text_buffer
-                        pending_delta = len(text_buffer) - len(last_emitted_for_chunk)
+                    # Native direct-token path: stream visible reasoning summaries
+                    # and response text through the same monotonically growing buffer.
+                    visible_text = _native_visible_text()
+                    if visible_text and visible_text != last_emitted_text:
+                        last_emitted_text = visible_text
+                        pending_delta = len(visible_text) - len(last_emitted_for_chunk)
                         if pending_delta >= 18:
-                            await on_chunk(text_buffer, token_count)
-                            last_emitted_for_chunk = text_buffer
+                            await on_chunk(visible_text, token_count)
+                            last_emitted_for_chunk = visible_text
                 else:
-                    response_text = _extract_response_from_partial_json(
-                        accumulated_reasoning, accumulated_json
-                    )
+                    response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
                     if response_text and response_text != last_emitted_text:
                         last_emitted_text = response_text
                         pending_delta = len(response_text) - len(last_emitted_for_chunk)
@@ -1610,16 +1625,12 @@ async def call_llm_structured_streaming(  # noqa: C901
                     )
 
                 if on_raw_progress:
-                    await on_raw_progress(
-                        len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer)
-                    )
+                    await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer))
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
         except RoseError as exc:
-            logger.error(
-                f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}"
-            )
+            logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
             raise ValueError(f"Rose streaming failed: {exc}") from exc
 
         # On the native direct-token path, rebuild the response-model JSON once the
@@ -1667,6 +1678,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "claude_token_error": claude_token_error,
                     "gpt_token_error": gpt_token_error,
                     "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
+                    "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
+                    "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
+                    "compute_token_used": stream_usage.get("compute_token_used"),
                     "cancelled": True,
                 }
             else:
@@ -1680,6 +1694,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "claude_token_error": claude_token_error,
                     "gpt_token_error": gpt_token_error,
                     "claude_token_rotated": False,
+                    "gpt_token_rotated": False,
+                    "compute_token_rotated": False,
+                    "compute_token_used": None,
                     "cancelled": True,
                 }
             return empty_response, usage, detected_tools_ordered
@@ -1694,7 +1711,9 @@ async def call_llm_structured_streaming(  # noqa: C901
         # Guard: skip escalation if not enough time remains for another streaming call (need 120s headroom)
         elapsed = _safe_time() - request_start_time if request_start_time else 0
         if final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed < 180:
-            logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)")
+            logger.warning(
+                f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)"
+            )
 
             # Known limitation: the retry restarts text_so_far from "" but callers that
             # track delta state (e.g. last_text[0] in run_agent.py) still hold the first
@@ -1751,11 +1770,9 @@ async def call_llm_structured_streaming(  # noqa: C901
         # call_llm_activity) see the final chunk jump to "reasoning + text" and
         # compute the wrong slice offset.
         if using_native_direct_tools:
-            response_text = text_buffer or None
+            response_text = _native_visible_text() or None
         else:
-            response_text = _extract_response_from_partial_json(
-                accumulated_reasoning, accumulated_json
-            )
+            response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
         if response_text and response_text != last_emitted_for_chunk:
             await on_chunk(response_text, token_count)
 
@@ -1905,7 +1922,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                             f"Recovered nested tool_calls from wrapped response text: {len(normalized_nested_tools)} call(s)"
                         )
 
-            # Prepend explanation/reasoning to response so it shows in the same section
+            # Prepend explanation/reasoning to response so it shows in the same section.
+            # Direct GPT/Codex mirrors claudeAuth here: visible reasoning summaries
+            # are part of the assistant response, while encrypted replay state stays
+            # separate in codex_reasoning_items metadata.
             combined_reasoning_parts = []
             if accumulated_reasoning and accumulated_reasoning.strip():
                 combined_reasoning_parts.append(accumulated_reasoning.strip())
@@ -1946,6 +1966,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "claude_token_error": claude_token_error,
                 "gpt_token_error": gpt_token_error,
                 "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
+                "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
+                "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
+                "compute_token_used": stream_usage.get("compute_token_used"),
                 "cancelled": False,
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
@@ -1962,6 +1985,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "claude_token_error": claude_token_error,
                 "gpt_token_error": gpt_token_error,
                 "claude_token_rotated": False,
+                "gpt_token_rotated": False,
+                "compute_token_rotated": False,
+                "compute_token_used": None,
                 "cancelled": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -1994,6 +2020,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 detected_tools_ordered = new_detected
 
             response.tool_calls = deduplicated_tools
+
+        object.__setattr__(response, "codex_reasoning_items", codex_reasoning_items)
 
         return response, usage, detected_tools_ordered
 
@@ -2381,10 +2409,13 @@ async def call_llm(
 
             content = rose_response.content
             if response_model is not None:
-                content = _content_from_structured_rose_response(
-                    rose_response.tool_calls,
-                    response_model,
-                ) or content
+                content = (
+                    _content_from_structured_rose_response(
+                        rose_response.tool_calls,
+                        response_model,
+                    )
+                    or content
+                )
             usage = rose_response.usage or {}
 
             result = {
@@ -2403,6 +2434,10 @@ async def call_llm(
                     "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
                     "claude_token_error": rose_response.claude_token_error,
                     "gpt_token_error": rose_response.gpt_token_error,
+                    "claude_token_rotated": usage.get("claude_token_rotated", False),
+                    "gpt_token_rotated": usage.get("gpt_token_rotated", False),
+                    "compute_token_rotated": usage.get("compute_token_rotated", False),
+                    "compute_token_used": usage.get("compute_token_used"),
                 },
             }
 
@@ -2621,10 +2656,12 @@ async def _call_llm_verifier(  # noqa: C901
                     parsed_args = {}
                 if not isinstance(parsed_args, dict):
                     parsed_args = {}
-                tool_use_blocks.append({
-                    "name": chunk.data.get("name", ""),
-                    "input": parsed_args,
-                })
+                tool_use_blocks.append(
+                    {
+                        "name": chunk.data.get("name", ""),
+                        "input": parsed_args,
+                    }
+                )
             elif kind == "usage":
                 stream_usage = dict(chunk.data)
             elif kind == "done":
@@ -2644,10 +2681,7 @@ async def _call_llm_verifier(  # noqa: C901
     if tool_use_blocks:
         first_input = tool_use_blocks[0].get("input")
         if not isinstance(first_input, dict):
-            raise ValueError(
-                "Verifier native tool payload must be an object "
-                f"(got {type(first_input).__name__})"
-            )
+            raise ValueError(f"Verifier native tool payload must be an object (got {type(first_input).__name__})")
         accumulated_json = json.dumps(first_input)
 
     # llm.cache event is emitted from RoseClient.complete (single source).
@@ -2686,6 +2720,9 @@ async def _call_llm_verifier(  # noqa: C901
         "claude_token_error": claude_token_error,
         "gpt_token_error": gpt_token_error,
         "claude_token_rotated": stream_usage.get("claude_token_rotated", False) if stream_usage else False,
+        "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False) if stream_usage else False,
+        "compute_token_rotated": stream_usage.get("compute_token_rotated", False) if stream_usage else False,
+        "compute_token_used": stream_usage.get("compute_token_used") if stream_usage else None,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }
@@ -3529,9 +3566,7 @@ async def call_llm_activity(  # noqa: C901
                 )
                 _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
             else:
-                raise ValueError(
-                    f"No pending LLM context for agent {_context_key} and no system_prompt provided"
-                )
+                raise ValueError(f"No pending LLM context for agent {_context_key} and no system_prompt provided")
         else:
             # Legacy: pre-built messages list passed directly
             messages = messages_or_agent_id
@@ -3690,9 +3725,7 @@ async def call_llm_activity(  # noqa: C901
             matching = [tc for tc in tool_calls_dict if tc.get("tool") == required_tool]
             if not matching:
                 got = [tc.get("tool") for tc in tool_calls_dict]
-                raise ValueError(
-                    f"LLM did not call required tool '{required_tool}'. Got: {got}"
-                )
+                raise ValueError(f"LLM did not call required tool '{required_tool}'. Got: {got}")
 
         logger.info(
             "LLM activity completed",
@@ -3708,6 +3741,7 @@ async def call_llm_activity(  # noqa: C901
         return {
             "response": result.response if result.response else "",
             "tool_calls": tool_calls_dict,
+            "codex_reasoning_items": getattr(result, "codex_reasoning_items", []),
             "usage": usage,
             "detected_tools_ordered": detected_tools_ordered,  # [(tool_name, tool_call_id, timestamp), ...]
         }
@@ -3725,6 +3759,7 @@ async def call_llm_activity(  # noqa: C901
 async def set_response_schema_activity(
     agent_id: str,
     user_messages: List[str],
+    compute_auth: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -3735,6 +3770,7 @@ async def set_response_schema_activity(
     Args:
         agent_id: Agent ID to generate schema for
         user_messages: List of user message texts from conversation context
+        compute_auth: Optional selected compute token from the workflow cache
 
     Returns:
         The generated schema dict with 'fields' array, or None on failure
@@ -3765,9 +3801,18 @@ async def set_response_schema_activity(
         async with httpx.AsyncClient(timeout=90.0) as client:
             # 1. Generate schema using Rose Ultra
             api_start = time.perf_counter()
+            schema_headers = backend_api_headers(api_key)
+            token_type = compute_auth.get("type") if isinstance(compute_auth, dict) else None
+            access_token = compute_auth.get("accessToken") if isinstance(compute_auth, dict) else None
+            if token_type in ("claude", "gpt") and isinstance(access_token, str) and access_token:
+                schema_headers["X-Compute-Token-Type"] = token_type
+                schema_headers["X-Compute-Access-Token"] = access_token
+                account_id = compute_auth.get("accountId")
+                if token_type == "gpt" and isinstance(account_id, str) and account_id:
+                    schema_headers["X-Gpt-Account-Id"] = account_id
             schema_response = await client.post(
                 f"{backend_url}/api/agents/generate-response-schema",
-                headers=backend_api_headers(api_key),
+                headers=schema_headers,
                 json={"goal": goal},
             )
             schema_response.raise_for_status()
@@ -3862,9 +3907,7 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
                 if token:
                     source = data.get("source", "user")
                     pool_token_id = data.get("poolTokenId")
-                    logger.info(
-                        f"✅ Claude Max token fetched for user {user_id} (source={source})"
-                    )
+                    logger.info(f"✅ Claude Max token fetched for user {user_id} (source={source})")
                     return {
                         "accessToken": token,
                         "source": source,
@@ -4011,13 +4054,9 @@ async def mark_claude_token_rate_limited_activity(
                 timeout=10.0,
             )
             if response.status_code == 200:
-                logger.info(
-                    f"✅ Marked {source} Claude token rate-limited until {effective_rate_limited_until}"
-                )
+                logger.info(f"✅ Marked {source} Claude token rate-limited until {effective_rate_limited_until}")
                 return True
-            logger.warning(
-                f"Failed to mark token rate-limited: {response.status_code} {response.text[:200]}"
-            )
+            logger.warning(f"Failed to mark token rate-limited: {response.status_code} {response.text[:200]}")
     except Exception as e:
         logger.warning(f"Error marking token rate-limited: {e}")
 
@@ -4073,9 +4112,7 @@ async def mark_compute_token_rate_limited_activity(
                     failure_reason=failure_reason,
                 )
                 return True
-            logger.warning(
-                f"Failed to mark compute token rate-limited: {response.status_code} {response.text[:200]}"
-            )
+            logger.warning(f"Failed to mark compute token rate-limited: {response.status_code} {response.text[:200]}")
     except Exception as e:
         logger.warning(f"Error marking compute token rate-limited: {e}")
 
@@ -4121,13 +4158,9 @@ async def mark_gpt_token_rate_limited_activity(
                 timeout=10.0,
             )
             if response.status_code == 200:
-                logger.info(
-                    f"✅ Marked {source} GPT token rate-limited until {effective_rate_limited_until}"
-                )
+                logger.info(f"✅ Marked {source} GPT token rate-limited until {effective_rate_limited_until}")
                 return True
-            logger.warning(
-                f"Failed to mark GPT token rate-limited: {response.status_code} {response.text[:200]}"
-            )
+            logger.warning(f"Failed to mark GPT token rate-limited: {response.status_code} {response.text[:200]}")
     except Exception as e:
         logger.warning(f"Error marking GPT token rate-limited: {e}")
 

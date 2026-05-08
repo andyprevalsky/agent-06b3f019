@@ -94,12 +94,38 @@ async def test_result_arg_is_returned_but_not_posted():
     assert "echo done" not in posted_message
 
 
+async def test_plan_phase_posts_execute_transition_message():
+    """PLAN-phase attempt_completion shows transition copy, not verifier copy."""
+    from domains.attempt_completion.config import PLAN_EVENT_MESSAGE, PLAN_EVENT_TITLE
+    from tools.attempt_completion import AttemptCompletionManager
+
+    manager = AttemptCompletionManager()
+    mock_execute = AsyncMock()
+    mock_handle = AsyncMock()
+
+    with patch("domains.attempt_completion.handler.handle_tool_event", new=mock_handle):
+        result = await manager.execute_tool(
+            execute_activity=mock_execute,
+            tool_call={"_phase": "PLAN"},
+            tool_call_id="tc-plan-complete",
+            agent_id="agent-plan",
+            user_id="user-plan",
+        )
+
+    assert result["attempted"] is True
+    assert mock_handle.await_count == 1
+    event = mock_handle.await_args.kwargs["event"]
+    assert event.title == PLAN_EVENT_TITLE
+    assert event.message == PLAN_EVENT_MESSAGE
+
+
 async def run_all_tests():
     print("attempt-completion blackbox tests:")
     r = BlackboxResult()
     await r.record_async("returns_attempted_true", test_returns_attempted_true)
     await r.record_async("no_outbound_http_calls", test_no_outbound_http_calls)
     await r.record_async("result_arg_is_returned_but_not_posted", test_result_arg_is_returned_but_not_posted)
+    await r.record_async("plan_phase_posts_execute_transition_message", test_plan_phase_posts_execute_transition_message)
     teardown_mock()
     return r.all_passed
 

@@ -314,9 +314,41 @@ def test_codex_structured_response_prefers_unwrapped_final_sequence():
 
     structured = _synthesize_codex_structured_response(sample, schema)
     assert structured is not None
-    assert structured["collatz_sequence"][49:53] == [377, 1132, 566, 283]
+    assert structured["collatz_sequence"][48:52] == [377, 1132, 566, 283]
     assert structured["total_steps"] == 111
     assert structured["python_script_path"] == {"path": "/home/user/collatz_27.py"}
+
+
+def test_codex_structured_response_parses_printed_sequence_and_steps_label():
+    """Regression for smoke output where Codex used a concise final answer."""
+    from domains.spawn_claude_code_agent.service import _synthesize_codex_structured_response
+
+    sample = (
+        "[Codex file_change completed] add /home/user/collatz_27.py\n"
+        "[Codex command completed] /bin/bash -lc 'python3 /home/user/collatz_27.py'\n"
+        "[Codex command output]\n27\n82\n41\n124\n62\n31\n94\n47\n142\n71\n214\n107\n322\n161\n484\n242\n121\n364\n182\n91\n274\n137\n412\n206\n103\n310\n155\n466\n233\n700\n350\n175\n526\n263\n790\n395\n1186\n593\n1780\n890\n445\n1336\n668\n334\n167\n502\n251\n754\n377\n113\n2\n566\n283\n850\n425\n1276\n638\n319\n958\n479\n1438\n719\n2158\n1079\n3238\n1619\n4858\n2429\n7288\n3644\n1822\n911\n2734\n1367\n4102\n2051\n6154\n3077\n9232\n4616\n2308\n1154\n577\n1732\n866\n433\n1300\n650\n325\n976\n488\n244\n122\n61\n184\n92\n46\n23\n70\n35\n106\n53\n160\n80\n40\n20\n10\n5\n16\n8\n4\n2\n1\nsteps: 111\n[Codex exit_code] 0\n"
+        "[Codex] [file pointer](/home/user/collatz_27.py:1)\n"
+        "absolute path: `/home/user/collatz_27.py`\n"
+        "printed Collatz integers:\n"
+        "`27, 82, 41, 124, 62, 31, 94, 47, 142, 71, 214, 107, 322, 161, 484, 242, 121, 364, 182, 91, 274, 137, 412, 206, 103, 310, 155, 466, 233, 700, 350, 175, 526, 263, 790, 395, 1186, 593, 1780, 890, 445, 1336, 668, 334, 167, 502, 251, 754, 377, 1132, 566, 283, 850, 425, 1276, 638, 319, 958, 479, 1438, 719, 2158, 1079, 3238, 1619, 4858, 2429, 7288, 3644, 1822, 911, 2734, 1367, 4102, 2051, 6154, 3077, 9232, 4616, 2308, 1154, 577, 1732, 866, 433, 1300, 650, 325, 976, 488, 244, 122, 61, 184, 92, 46, 23, 70, 35, 106, 53, 160, 80, 40, 20, 10, 5, 16, 8, 4, 2, 1`\n"
+        "total step count: `111`\n"
+    )
+    schema = {
+        "fields": [
+            {"name": "program_file", "type": "file_pointer", "description": "Created Python script file."},
+            {"name": "program_absolute_path", "type": "str", "description": "Absolute session path to the Python script."},
+            {"name": "collatz_sequence", "type": "list[int]", "description": "Ordered Collatz sequence"},
+            {"name": "step_count", "type": "int", "description": "total step count"},
+        ]
+    }
+
+    structured = _synthesize_codex_structured_response(sample, schema)
+    assert structured is not None
+    assert structured["program_file"] == {"path": "/home/user/collatz_27.py"}
+    assert structured["program_absolute_path"] == "/home/user/collatz_27.py"
+    assert structured["collatz_sequence"][48:52] == [377, 1132, 566, 283]
+    assert structured["collatz_sequence"][-1] == 1
+    assert structured["step_count"] == 111
 
 
 # ── build_context_summary ────────────────────────────────────────────
@@ -1088,6 +1120,53 @@ async def test_run_verifier_exception_fallback():
     assert itok == 0 and otok == 0
 
 
+async def test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded():
+    """Codex can satisfy narrow file/sequence schemas directly from terminal evidence."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=200, rows=50)
+    terminal.feed(
+        "[Codex file_change completed] add /home/user/collatz_3.py\n"
+        "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\nsteps: 7\n[Codex exit_code] 0\n"
+    )
+
+    async def fake_activity(*_args, **_kwargs):
+        raise AssertionError("verifier LLM should not be called")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, struct, itok, otok = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="Compute Collatz from 3",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=[],
+            output_schema={
+                "fields": [
+                    {"name": "program_file", "type": "file_pointer", "description": "Created Python script file."},
+                    {"name": "collatz_sequence", "type": "list[int]", "description": "Collatz sequence"},
+                    {"name": "step_count", "type": "int", "description": "total step count"},
+                ]
+            },
+            claude_token=None,
+            code_provider="codex",
+            exit_code=0,
+        )
+    assert score == 1.0
+    assert "skipping verifier LLM call" in reasoning
+    assert struct == {
+        "program_file": {"path": "/home/user/collatz_3.py"},
+        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
+        "step_count": 7,
+    }
+    assert itok == 0 and otok == 0
+
+
 async def test_run_verifier_truncation_override_promotes_to_pass():
     """When parent LLM signals completion AND terminal output is truncated, partial score → 1.0.
 
@@ -1852,6 +1931,14 @@ async def run_all_tests():
     r.record("codex_evidence_summary", test_codex_evidence_summary_extracts_paths_and_commands)
     r.record("codex_structured_fallback", test_codex_structured_response_synthesizes_all_fields)
     r.record("codex_structured_json_steps", test_codex_structured_response_uses_json_step_field)
+    r.record(
+        "codex_structured_prefers_final_sequence",
+        test_codex_structured_response_prefers_unwrapped_final_sequence,
+    )
+    r.record(
+        "codex_structured_printed_sequence",
+        test_codex_structured_response_parses_printed_sequence_and_steps_label,
+    )
     r.record("context_summary_success", test_build_context_summary_success)
     r.record("context_summary_failure", test_build_context_summary_failure_with_error)
     r.record("context_summary_truncates", test_build_context_summary_truncates_actions)
@@ -1903,6 +1990,10 @@ async def run_all_tests():
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
+    await r.record_async(
+        "run_verifier_codex_preflight",
+        test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded,
+    )
     await r.record_async(
         "run_verifier_truncation_override", test_run_verifier_truncation_override_promotes_to_pass
     )

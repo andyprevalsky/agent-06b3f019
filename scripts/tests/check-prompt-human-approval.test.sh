@@ -60,7 +60,7 @@ expect_flag_pass() {
 }
 
 false_positive_repo="$(new_repo false-positive-code)"
-mkdir -p "$false_positive_repo/agents/tests/blackbox" "$false_positive_repo/agents/workflows"
+mkdir -p "$false_positive_repo/agents/helpers" "$false_positive_repo/agents/tests/blackbox" "$false_positive_repo/agents/workflows"
 cat >"$false_positive_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
 fake_activity_returns = {
     "get_user_custom_system_prompt": "Prefer concise answers.",
@@ -76,8 +76,20 @@ from utils.prompts import build_system_prompt
 async def build_system_prompt_wrapper():
     return build_system_prompt()
 PY
-git -C "$false_positive_repo" add agents/tests/blackbox/workflow.blackbox.py agents/workflows/agent_workflow.py
-expect_pass "$false_positive_repo" "prompt helper imports and token accounting are not prompt edits"
+cat >"$false_positive_repo/agents/helpers/llm.py" <<'PY'
+async def call_llm_activity(system_prompt):
+    if system_prompt is None:
+        raise ValueError(f"No pending LLM context for agent abc and no system_prompt provided")
+
+    return {
+        "codex_reasoning_items": [],
+    }
+PY
+git -C "$false_positive_repo" add \
+  agents/helpers/llm.py \
+  agents/tests/blackbox/workflow.blackbox.py \
+  agents/workflows/agent_workflow.py
+expect_pass "$false_positive_repo" "prompt helper imports, token accounting, and LLM plumbing are not prompt edits"
 
 test_prompt_repo="$(new_repo test-prompt-files)"
 mkdir -p "$test_prompt_repo/agents/tests/blackbox" "$test_prompt_repo/front-end/src/tests"

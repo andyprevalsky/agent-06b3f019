@@ -47,7 +47,7 @@ API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 
-VALID_SOURCES = {"worker", "backend", "research", "messages"}
+VALID_SOURCES = {"worker", "backend", "research", "realtime", "messages"}
 
 
 async def _api_headers() -> dict:
@@ -62,6 +62,7 @@ async def _api_headers() -> dict:
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
     import httpx
+
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{base_url}/api/agents/{agent_id}", headers=headers)
@@ -72,11 +73,10 @@ async def get_agent(base_url: str, agent_id: str) -> dict:
 
 async def get_agent_tree(base_url: str, bus_id: str) -> list:
     import httpx
+
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{base_url}/api/agents/tree", headers=headers, params={"busId": bus_id}
-        )
+        resp = await client.get(f"{base_url}/api/agents/tree", headers=headers, params={"busId": bus_id})
         if resp.status_code != 200:
             raise Exception(f"GET tree failed: {resp.status_code} {resp.text[:200]}")
         return resp.json().get("agents", [])
@@ -84,9 +84,9 @@ async def get_agent_tree(base_url: str, bus_id: str) -> list:
 
 def _print_logs(label: str, logs: list, agent_id: str = ""):
     prefix = f"[{agent_id[:12]}] " if agent_id else ""
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"  {prefix}{label} ({len(logs)} entries)")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
     for entry in logs:
         if isinstance(entry, dict):
             # Message transcript entry
@@ -114,14 +114,17 @@ def _print_logs(label: str, logs: list, agent_id: str = ""):
                 if action:
                     extra += f" action={action}"
                 # Show isWaitingForUser
-                if meta.get("isWaitingForUser") or (isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")):
+                if meta.get("isWaitingForUser") or (
+                    isinstance(meta.get("sendMessageToUser"), dict)
+                    and meta["sendMessageToUser"].get("isWaitingForUser")
+                ):
                     extra += " 🔔WAITING_FOR_USER"
             if fp:
                 fname = fp.get("original_filename", "file")
                 extra += f" 📎{fname}"
             # Truncate very long messages but not aggressively
             if text and len(text) > 500:
-                text = text[:500] + f"... (+{len(text)-500} chars)"
+                text = text[:500] + f"... (+{len(text) - 500} chars)"
             time_str = f" ({ts[11:19]})" if ts and len(ts) > 19 else ""
             print(f"  {role}{tool_info}{extra}{time_str}: {text}")
         else:
@@ -145,7 +148,9 @@ async def run(args):
         if args.diagnostics:
             # Diagnostics mode: use format_tree_diagnostics
             tree_logs = await collect_tree_logs(
-                agent_id, tree_agents, start_time,
+                agent_id,
+                tree_agents,
+                start_time,
                 get_agent_fn=lambda aid: get_agent(base_url, aid),
             )
             print(format_tree_diagnostics(tree_logs, agent_id))
@@ -159,10 +164,10 @@ async def run(args):
             parent = agent_info.get("parent_agent_id")
             role = "ROOT" if not parent else f"child of {parent[:12]}"
 
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"  Agent: {aid[:12]}  [{status}]  ({role})")
             print(f"  Goal: {goal}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
             agent_data = await get_agent(base_url, aid)
             logs = await collect_logs(aid, agent_data, start_time)
@@ -175,6 +180,8 @@ async def run(args):
                 _print_logs("BACKEND (Render)", logs["backend_logs"], aid)
             if "research" in sources:
                 _print_logs("RESEARCH (Supabase)", logs["research_logs"], aid)
+            if "realtime" in sources:
+                _print_logs("REALTIME (Supabase)", logs["realtime_logs"], aid)
 
     else:
         # Single agent mode
@@ -193,25 +200,30 @@ async def run(args):
             _print_logs("BACKEND (Render)", logs["backend_logs"])
         if "research" in sources:
             _print_logs("RESEARCH (Supabase)", logs["research_logs"])
+        if "realtime" in sources:
+            _print_logs("REALTIME (Supabase)", logs["realtime_logs"])
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Fetch all prod logs for an agent or agent tree"
-    )
+    parser = argparse.ArgumentParser(description="Fetch all prod logs for an agent or agent tree")
     parser.add_argument("agent_id", help="Agent ID (also used as busId for --tree)")
     parser.add_argument("--tree", action="store_true", help="Fetch logs for entire agent tree")
     parser.add_argument(
-        "--source", action="append", choices=sorted(VALID_SOURCES),
+        "--source",
+        action="append",
+        choices=sorted(VALID_SOURCES),
         help="Filter by log source (repeatable). Default: all sources",
     )
     parser.add_argument("--diagnostics", action="store_true", help="Show formatted tree diagnostics")
     parser.add_argument(
-        "--url", default="https://navi-j9a9.onrender.com",
+        "--url",
+        default="https://navi-j9a9.onrender.com",
         help="Base API URL (default: prod)",
     )
     parser.add_argument(
-        "--hours", type=int, default=24,
+        "--hours",
+        type=int,
+        default=24,
         help="Look back N hours for time-windowed logs (default: 24)",
     )
     target_group = parser.add_mutually_exclusive_group()

@@ -327,8 +327,8 @@ export async function* parseResponsesSSE(
       continue;
     }
 
-    const reasoningDelta = stringValue(event.summary_text) ?? stringValue(event.reasoning);
-    if (reasoningDelta && type.includes('reasoning')) {
+    const reasoningDelta = reasoningDeltaText(event, type);
+    if (reasoningDelta) {
       emittedContentOrTool = true;
       yield { kind: 'reasoning', data: { text: reasoningDelta } };
       continue;
@@ -401,6 +401,16 @@ export async function* parseResponsesSSE(
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function reasoningDeltaText(event: Record<string, unknown>, type: string): string | undefined {
+  if (!type.includes('reasoning')) return undefined;
+  if (type.endsWith('.delta')) {
+    return (
+      stringValue(event.delta) ?? stringValue(event.summary_text) ?? stringValue(event.reasoning)
+    );
+  }
+  return stringValue(event.summary_text) ?? stringValue(event.reasoning);
 }
 
 function numberValue(value: unknown): number | undefined {

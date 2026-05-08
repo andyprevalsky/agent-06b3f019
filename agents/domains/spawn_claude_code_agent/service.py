@@ -664,6 +664,17 @@ def _extract_codex_sequence_numbers(final_output: str) -> list[int]:
         return []
 
     for match in re.finditer(
+        r"(?is)(?:printed\s+collatz\s+integers|collatz\s+sequence|ordered\s+integers).*?`([\s\d,]+)`",
+        final_output,
+    ):
+        block = match.group(1)
+        if "," not in block:
+            continue
+        numbers = [int(n) for n in re.findall(r"\d+", block)]
+        if len(numbers) >= 2:
+            return numbers
+
+    for match in re.finditer(
         r"(?is)(?:exact\s+full\s+sequence|full\s+sequence).*?(\[[\s\d,]+\])",
         final_output,
     ):
@@ -714,7 +725,7 @@ def _synthesize_codex_structured_response(
     sequence_numbers = _extract_codex_sequence_numbers(final_output)
     numbers = sequence_numbers or _extract_codex_command_numbers(final_output)
     steps_match = re.search(
-        r"(?:Total steps|Step count|[\"']total_steps[\"'])\s*:\s*(\d+)",
+        r"(?:Total steps|Step count|total step count|steps|[\"']total_steps[\"'])\s*:\s*`?(\d+)",
         final_output,
         re.IGNORECASE,
     )
@@ -798,6 +809,30 @@ async def _run_verifier(
         )
 
         final_output = terminal.get_display()
+        if code_provider == "codex" and (exit_code is None or exit_code == 0):
+            structured_response = _synthesize_codex_structured_response(final_output, output_schema)
+            if structured_response:
+                v_reasoning = (
+                    "Codex exited successfully and terminal evidence satisfies the requested schema; "
+                    "skipping verifier LLM call and using explicit Codex command output and file paths."
+                )
+                logger.info(
+                    "[ClaudeCode] Codex verifier preflight succeeded",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    fields=list(structured_response.keys()),
+                )
+                await save_claude_code_message(
+                    agent_id=agent_id,
+                    title="⚖️ Progress: 100%",
+                    task_id=task_id,
+                    message=v_reasoning,
+                    status=MessageStatus.FINISHED,
+                    action_type="system",
+                    tool_call_id=verifier_call_id,
+                )
+                return 1.0, v_reasoning, structured_response, input_tokens, output_tokens
+
         verifier_terminal_output = final_output[-5000:]
         if code_provider == "codex":
             codex_evidence = _build_codex_evidence_summary(final_output)

@@ -34,7 +34,7 @@ export function ThinkingIndicator({
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <ThinkingAnimation
-            dataUrl="./thinking_animations.txt"
+            dataUrl="/thinking_animations.txt"
             autoplay
             loop
             className="w-4 h-4 flex-shrink-0"

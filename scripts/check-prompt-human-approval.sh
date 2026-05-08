@@ -68,21 +68,27 @@ DIFF_PROMPT_FILES="$(
     function is_prompt_content(line) {
       sub(/^[+-]/, "", line)
 
+      code=line
+      sub(/^[[:space:]]*#.*$/, "", code)
+      sub(/^[[:space:]]*\/\/.*$/, "", code)
+      sub(/[[:space:]]+#.*$/, "", code)
+      sub(/[[:space:]]+\/\/.*$/, "", code)
+
       # Imports and token accounting fields reference prompt-related symbols
       # without changing LLM instructions.
-      if (line ~ /^[[:space:]]*(import|from)[[:space:]]/) return 0
-      if (line ~ /^[[:space:]]*(prompt_tokens|completion_tokens|total_tokens)[[:space:]]*[:=]/) return 0
+      if (code ~ /^[[:space:]]*(import|from)[[:space:]]/) return 0
+      if (code ~ /^[[:space:]]*(prompt_tokens|completion_tokens|total_tokens)[[:space:]]*[:=]/) return 0
 
-      # Explicit prompt constants/properties. Use identifier boundaries so
-      # helper names like build_system_prompt/get_user_custom_system_prompt do
-      # not trip the guard by themselves.
-      if (line ~ /(^|[^A-Za-z0-9_])(SYSTEM_PROMPT|systemPrompt|system_prompt|TOOL_PROMPTS|toolPrompts)([^A-Za-z0-9_]|$)/) return 1
+      # Explicit prompt constants/properties. Require assignment to prompt-like
+      # content so ordinary plumbing/error text that mentions system_prompt does
+      # not trip the guard by itself.
+      if (code ~ /(^|[^A-Za-z0-9_])(SYSTEM_PROMPT|systemPrompt|system_prompt|TOOL_PROMPTS|toolPrompts)([^A-Za-z0-9_]|$)/ && code ~ /[:=][[:space:]]*["'"'"'`(]/) return 1
 
       # Prompt-bearing fields usually assign string content to these names.
-      if (line ~ /(^|[^A-Za-z0-9_])(prompt|instructions|rubric|persona)([^A-Za-z0-9_]|$)/ && line ~ /[:=][[:space:]]*[`"'"'"']/) return 1
+      if (code ~ /(^|[^A-Za-z0-9_])(prompt|instructions|rubric|persona)([^A-Za-z0-9_]|$)/ && code ~ /[:=][[:space:]]*[`"'"'"']/) return 1
 
       # Direct prompt text edits embedded in code.
-      if (line ~ /(You are an AI|You are ChatGPT|You are Codex|You are a |System prompt|system prompt)/) return 1
+      if (code ~ /(You are an AI|You are ChatGPT|You are Codex|You are a |System prompt|system prompt)/) return 1
 
       return 0
     }

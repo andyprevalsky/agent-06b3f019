@@ -352,6 +352,13 @@ Output JSON only. Do not include prose outside the JSON envelope.`;
 interface StreamAttemptOptions {
   goal: string;
   maxTokens: number;
+  directAuth?: ResponseSchemaDirectAuth;
+}
+
+export interface ResponseSchemaDirectAuth {
+  type: 'claude' | 'gpt';
+  accessToken: string;
+  accountId?: string;
 }
 
 interface StreamAttemptResult {
@@ -413,6 +420,14 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
     ],
     temperature: 0.3,
     max_tokens: opts.maxTokens,
+    ...(opts.directAuth?.type === 'claude' ? { claude_token: opts.directAuth.accessToken } : {}),
+    ...(opts.directAuth?.type === 'gpt'
+      ? {
+          gpt_token: opts.directAuth.accessToken,
+          gpt_account_id: opts.directAuth.accountId,
+        }
+      : {}),
+    disable_waterfall: opts.directAuth !== undefined,
     response_format: {
       type: 'json_schema',
       json_schema: {
@@ -481,7 +496,10 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
  *      for non-retryable RoseAuthError / RoseInvalidRequest /
  *      MaxTokensTruncationError (the latter is already escalated).
  */
-export async function generateResponseSchema(goal: string): Promise<GenerateResult> {
+export async function generateResponseSchema(
+  goal: string,
+  opts: { directAuth?: ResponseSchemaDirectAuth } = {}
+): Promise<GenerateResult> {
   const startTime = Date.now();
   const maxGenerationAttempts = 3;
   const initialMaxTokens = 2000;
@@ -496,6 +514,7 @@ export async function generateResponseSchema(goal: string): Promise<GenerateResu
         result = await attemptSchemaGeneration({
           goal,
           maxTokens: initialMaxTokens,
+          directAuth: opts.directAuth,
         });
       } catch (innerErr) {
         if (innerErr instanceof MaxTokensTruncationError) {
@@ -513,6 +532,7 @@ export async function generateResponseSchema(goal: string): Promise<GenerateResu
           result = await attemptSchemaGeneration({
             goal,
             maxTokens: escalatedMaxTokens,
+            directAuth: opts.directAuth,
           });
         } else {
           throw innerErr;

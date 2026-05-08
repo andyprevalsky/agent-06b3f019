@@ -14,17 +14,16 @@ import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
 import { startAgentWorkflow } from '../temporal';
 import { createMessage } from '../messages';
-import { setResponseSchema } from '../setResponseSchema';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { executeWebSearch } from './chatTools';
+import { callWithChatComputeRotation, fetchChatComputeAuth } from './computeRotation';
 import {
   broadcastToolEvent,
   broadcastAgentModeStarted,
   generateStreamId,
 } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
-import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('ChatHandler');
@@ -58,35 +57,7 @@ export async function handleChatMessage(config: {
     model: config.model,
   });
 
-  // Fetch one provider-typed compute token for direct passthrough. Selection is
-  // provider-neutral across Claude/GPT; Rose uses the returned type to choose
-  // the matching direct API path and falls through to OpenRouter if it fails.
-  let claudeToken: string | null = null;
-  let gptToken: string | null = null;
-  let gptAccountId: string | undefined;
-  try {
-    const computeToken = await fetchComputeTokenForUser(config.userId);
-    if (computeToken?.type === 'claude') {
-      claudeToken = computeToken.accessToken;
-    }
-    if (computeToken?.type === 'gpt') {
-      gptToken = computeToken.accessToken;
-      gptAccountId = computeToken.accountId;
-    }
-    if (computeToken) {
-      log.info('[ChatHandler] Using compute token', {
-        userId: config.userId,
-        type: computeToken.type,
-        source: computeToken.source,
-        poolTokenId: computeToken.poolTokenId,
-      });
-    }
-  } catch (error) {
-    log.warn('[ChatHandler] Failed to fetch compute token, falling back to waterfall', {
-      userId: config.userId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  let computeAuth = await fetchChatComputeAuth(config.userId);
 
   // Fetch messages from DB
   const dbMessages = await prisma.message.findMany({
@@ -105,14 +76,24 @@ export async function handleChatMessage(config: {
   // LLM CALL 1: Router - Decide action
   // Streams reasoning as thinking, detects web_search early
   // ============================================
-  const routerResponse = await callRouterLlm({
+  const routerAttempt = await callWithChatComputeRotation({
+    userId: config.userId,
     agentId: config.agentId,
-    messages,
-    model: config.model,
-    claudeToken,
-    gptToken,
-    gptAccountId,
+    phase: 'router',
+    initialAuth: computeAuth,
+    invoke: (auth, options) =>
+      callRouterLlm({
+        agentId: config.agentId,
+        messages,
+        model: config.model,
+        claudeToken: auth.claudeToken,
+        gptToken: auth.gptToken,
+        gptAccountId: auth.gptAccountId,
+        disableWaterfall: options.disableWaterfall,
+      }),
   });
+  computeAuth = routerAttempt.auth;
+  const routerResponse = routerAttempt.result;
 
   const { decision, webSearchToolCallId } = routerResponse;
 
@@ -256,14 +237,23 @@ export async function handleChatMessage(config: {
     filePointer: m.filePointer as Record<string, unknown> | undefined,
   }));
 
-  const generatorResponse = await callGeneratorLlm({
+  const generatorAttempt = await callWithChatComputeRotation({
+    userId: config.userId,
     agentId: config.agentId,
-    messages: updatedMessages,
-    model: config.model,
-    claudeToken,
-    gptToken,
-    gptAccountId,
+    phase: 'generator',
+    initialAuth: computeAuth,
+    invoke: (auth, options) =>
+      callGeneratorLlm({
+        agentId: config.agentId,
+        messages: updatedMessages,
+        model: config.model,
+        claudeToken: auth.claudeToken,
+        gptToken: auth.gptToken,
+        gptAccountId: auth.gptAccountId,
+        disableWaterfall: options.disableWaterfall,
+      }),
   });
+  const generatorResponse = generatorAttempt.result;
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
 
@@ -334,19 +324,6 @@ async function startTemporalWorkflowForChat(
 
   if (!agent.verifier) {
     throw new Error(`Agent ${agentId} has no verifier`);
-  }
-
-  // Generate response schema based on start phase:
-  // - Execute mode: fire-and-forget here (no set_plan phase to generate it)
-  // - Plan mode: schema is generated during set_plan tool execution (in parallel with planner)
-  if (startPhase === 'execute') {
-    log.info('🎯 Starting async response schema generation for execute mode', { agentId });
-    setResponseSchema(agentId).catch((err) => {
-      log.error('❌ Failed to set response schema (background)', {
-        agentId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
   }
 
   // Start Temporal workflow (existing function)

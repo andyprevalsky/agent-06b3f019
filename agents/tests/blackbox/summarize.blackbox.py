@@ -114,8 +114,8 @@ async def test_compress_context_happy():
     import helpers.llm as llm_mod
 
     async def fake_llm(messages, **kwargs):
-        assert "claude_token" not in kwargs
-        assert "gpt_token" not in kwargs
+        assert kwargs["claude_token"] is None
+        assert kwargs["gpt_token"] is None
         return {"content": "## Learnings\n- worked well", "usage": {"total_tokens": 100}}
 
     with patch("temporalio.activity.heartbeat"):
@@ -127,6 +127,40 @@ async def test_compress_context_happy():
             )
     assert "Learnings" in out["learnings"]
     assert out["usage"]["total_tokens"] == 100
+
+
+async def test_compress_context_forwards_compute_auth():
+    """compress_context forwards direct compute auth to call_llm."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    observed_kwargs = []
+
+    async def fake_llm(messages, **kwargs):
+        observed_kwargs.append(kwargs)
+        return {"content": "## Learnings\n- used direct auth", "usage": {"total_tokens": 10}}
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            await summarize.compress_context(
+                context=[{"role": "USER", "text": "do stuff"}],
+                iteration_count=5,
+                model="test-model",
+                gpt_token="gpt-token",
+                gpt_account_id="acct-1",
+                gpt_token_source="user",
+                gpt_token_pool_id="pool-1",
+                gpt_token_user_id="user-1",
+                agent_id="agent-1",
+            )
+
+    assert observed_kwargs[0]["gpt_token"] == "gpt-token"
+    assert observed_kwargs[0]["gpt_account_id"] == "acct-1"
+    assert observed_kwargs[0]["gpt_token_source"] == "user"
+    assert observed_kwargs[0]["gpt_token_pool_id"] == "pool-1"
+    assert observed_kwargs[0]["gpt_token_user_id"] == "user-1"
+    assert observed_kwargs[0]["agent_id"] == "agent-1"
+    assert observed_kwargs[0]["user_id"] == "user-1"
 
 
 async def test_compress_context_on_error_returns_fallback():
@@ -155,8 +189,8 @@ async def test_generate_completion_summary_happy():
 
     async def fake_llm(messages, **kwargs):
         observed_local_context.append(kwargs.get("local_context"))
-        assert "claude_token" not in kwargs
-        assert "gpt_token" not in kwargs
+        assert kwargs["claude_token"] is None
+        assert kwargs["gpt_token"] is None
         return {
             "content": "Completed all research tasks successfully.",
             "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
@@ -184,6 +218,47 @@ async def test_generate_completion_summary_happy():
     assert out["tool_counts"]["web_search"] == 4  # 1 own + 3 sub
     assert out["tool_counts"]["wait_for"] == 1
     assert observed_local_context == [context]
+
+
+async def test_generate_completion_summary_forwards_compute_auth():
+    """generate_completion_summary forwards direct compute auth to call_llm."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    observed_kwargs = []
+
+    async def fake_llm(messages, **kwargs):
+        observed_kwargs.append(kwargs)
+        return {
+            "content": "Completed with cached direct auth.",
+            "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20},
+        }
+
+    def fake_convert(context, include_system=False, include_assistant=True):
+        return []
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(llm_mod, "convert_context_to_messages", fake_convert):
+                await summarize.generate_completion_summary(
+                    context=[],
+                    goal="G",
+                    model="m",
+                    gpt_token="gpt-token",
+                    gpt_account_id="acct-1",
+                    gpt_token_source="user",
+                    gpt_token_pool_id="pool-1",
+                    gpt_token_user_id="user-1",
+                    agent_id="agent-1",
+                )
+
+    assert observed_kwargs[0]["gpt_token"] == "gpt-token"
+    assert observed_kwargs[0]["gpt_account_id"] == "acct-1"
+    assert observed_kwargs[0]["gpt_token_source"] == "user"
+    assert observed_kwargs[0]["gpt_token_pool_id"] == "pool-1"
+    assert observed_kwargs[0]["gpt_token_user_id"] == "user-1"
+    assert observed_kwargs[0]["agent_id"] == "agent-1"
+    assert observed_kwargs[0]["user_id"] == "user-1"
 
 
 async def test_generate_completion_summary_on_error():
@@ -243,8 +318,13 @@ async def run_all_tests():
     await r.record_async("format_tool_stats_footer_empty", test_format_tool_stats_footer_empty)
     await r.record_async("format_tool_stats_footer_sort_order", test_format_tool_stats_footer_sort_order)
     await r.record_async("compress_context_happy", test_compress_context_happy)
+    await r.record_async("compress_context_forwards_compute_auth", test_compress_context_forwards_compute_auth)
     await r.record_async("compress_context_error_fallback", test_compress_context_on_error_returns_fallback)
     await r.record_async("generate_completion_summary_happy", test_generate_completion_summary_happy)
+    await r.record_async(
+        "generate_completion_summary_forwards_compute_auth",
+        test_generate_completion_summary_forwards_compute_auth,
+    )
     await r.record_async("generate_completion_summary_error", test_generate_completion_summary_on_error)
     await r.record_async("generate_completion_summary_no_structured", test_generate_completion_summary_no_structured_response)
     teardown_mock()

@@ -149,17 +149,11 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                 });
               } catch (e) {}
 
-              // Override viewport dimensions
+              // Temporarily do not override inner viewport dimensions. The agent
+              // browser must report its real content viewport so site layout,
+              // screenshots, and click coordinates agree.
               if (fp.viewport) {
                 try {
-                  Object.defineProperty(window, 'innerWidth', {
-                    get: () => fp.viewport.innerWidth,
-                    configurable: true,
-                  });
-                  Object.defineProperty(window, 'innerHeight', {
-                    get: () => fp.viewport.innerHeight,
-                    configurable: true,
-                  });
                   Object.defineProperty(window, 'outerWidth', {
                     get: () => fp.viewport.outerWidth,
                     configurable: true,

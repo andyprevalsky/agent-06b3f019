@@ -12,4 +12,7 @@ Steps:
    - The goal is to keep ALL code from main AND integrate the branch's changes on top. If the branch modified a section that main also modified, combine both changes.
    - If a conflict is ambiguous and you cannot confidently combine both sides, stop and ask the user before resolving it.
    - After resolving, stage and commit the merge
-5. Confirm the result to the user (current branch name, number of new commits pulled in, any conflicts resolved, whether local main was updated)
+5. Resync the local database from production by running `bash scripts/setup-db.sh`
+   - This refreshes the workspace Postgres schema and synced production data, including credentials that local smoke/deploy tests read from the DB.
+   - If `CONDUCTOR_PORT` or `CONDUCTOR_WORKSPACE_NAME` is missing, stop and tell the user `/sync` must be run from a Conductor workspace.
+6. Confirm the result to the user (current branch name, number of new commits pulled in, any conflicts resolved, whether local main was updated, whether the DB resync completed)

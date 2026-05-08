@@ -33,7 +33,7 @@ export function ToolMessageIcon({
   if (isThought) {
     return status === 'IN_PROGRESS' ? (
       <ThinkingAnimation
-        dataUrl="./thinking_animations.txt"
+        dataUrl="/thinking_animations.txt"
         autoplay
         loop
         className="w-4 h-4 flex-shrink-0"

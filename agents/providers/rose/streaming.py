@@ -69,6 +69,16 @@ def _responses_error_to_exception(error_payload: Any, request_id: str):
     return RoseServerError(details)
 
 
+def _reasoning_delta_text(event: Dict[str, Any], event_type: str) -> Optional[str]:
+    if "reasoning" not in event_type:
+        return None
+    if event_type.endswith(".delta"):
+        value = event.get("delta") or event.get("summary_text") or event.get("reasoning")
+    else:
+        value = event.get("summary_text") or event.get("reasoning")
+    return value if isinstance(value, str) and value else None
+
+
 class _LineStream(Protocol):
     """Minimal interface we need from `httpx.Response` for SSE parsing.
 
@@ -272,9 +282,7 @@ async def parse_anthropic_sse(
         await _close_quietly(response)
 
     if not emitted_content_or_tool:
-        raise RoseStallError(
-            f"Anthropic stream closed without content or tool_call (request_id={request_id})"
-        )
+        raise RoseStallError(f"Anthropic stream closed without content or tool_call (request_id={request_id})")
 
     yield StreamChunk(
         kind="usage",
@@ -404,9 +412,7 @@ async def parse_openai_sse(
 
             for tc_delta in delta.get("tool_calls") or []:
                 index = tc_delta.get("index", 0)
-                slot = tool_calls.setdefault(
-                    index, {"id": "", "name": "", "arguments": ""}
-                )
+                slot = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
                 if tc_delta.get("id"):
                     slot["id"] = tc_delta["id"]
                 fn = tc_delta.get("function") or {}
@@ -442,16 +448,8 @@ async def parse_openai_sse(
     # Anthropic-native fields (direct claudeAuth path) live at the top level.
     # OpenRouter wraps them under prompt_tokens_details with different names.
     ptd = usage.get("prompt_tokens_details") or {}
-    cache_write = (
-        usage.get("cache_creation_input_tokens")
-        or ptd.get("cache_write_tokens")
-        or 0
-    )
-    cache_read = (
-        usage.get("cache_read_input_tokens")
-        or ptd.get("cached_tokens")
-        or 0
-    )
+    cache_write = usage.get("cache_creation_input_tokens") or ptd.get("cache_write_tokens") or 0
+    cache_read = usage.get("cache_read_input_tokens") or ptd.get("cached_tokens") or 0
 
     yield StreamChunk(
         kind="usage",
@@ -544,15 +542,29 @@ async def parse_responses_sse(
                 yield StreamChunk(kind="content", data={"text": delta})
                 continue
 
-            reasoning_delta = event.get("summary_text") or event.get("reasoning")
-            if isinstance(reasoning_delta, str) and reasoning_delta and "reasoning" in event_type:
+            reasoning_delta = _reasoning_delta_text(event, event_type)
+            if reasoning_delta:
                 emitted_content_or_tool = True
                 yield StreamChunk(kind="reasoning", data={"text": reasoning_delta})
                 continue
 
             if event_type == "response.output_item.done":
                 item = event.get("item") or {}
-                if isinstance(item, dict) and item.get("type") == "function_call":
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "reasoning":
+                    encrypted_content = item.get("encrypted_content")
+                    if isinstance(encrypted_content, str) and encrypted_content:
+                        yield StreamChunk(
+                            kind="codex_reasoning_item",
+                            data={
+                                "id": item.get("id"),
+                                "encrypted_content": encrypted_content,
+                                "summary": item.get("summary") if isinstance(item.get("summary"), list) else [],
+                            },
+                        )
+                        continue
+                if item.get("type") == "function_call":
                     emitted_content_or_tool = True
                     yield StreamChunk(
                         kind="tool_call",
@@ -593,8 +605,7 @@ async def parse_responses_sse(
 
     if not emitted_content_or_tool:
         raise RoseStallError(
-            f"Responses stream closed without content or tool_call "
-            f"(request_id={request_id}, saw_done={saw_done})"
+            f"Responses stream closed without content or tool_call (request_id={request_id}, saw_done={saw_done})"
         )
 
     yield StreamChunk(
@@ -641,9 +652,7 @@ async def _iter_with_idle_timeout(
                 request_id=request_id,
                 idle_timeout_s=idle_timeout_s,
             )
-            raise RoseStallError(
-                f"SSE stream idle for >{idle_timeout_s}s (request_id={request_id})"
-            ) from exc
+            raise RoseStallError(f"SSE stream idle for >{idle_timeout_s}s (request_id={request_id})") from exc
         yield line
 
 

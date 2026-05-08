@@ -315,11 +315,27 @@ async def run_agent(  # noqa: C901
 
         if context_tokens >= threshold:
             logger.info(f"Context overflow: {context_tokens} >= {threshold}")
+            compression_claude_token = get_claude_token() if get_claude_token else claude_token
+            compression_claude_token_source = get_claude_token_source() if get_claude_token_source else None
+            compression_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
+            compression_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
+            compression_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
+            compression_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
+            compression_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
             compressed = await _compress_context(
                 execute_activity=execute_activity,
                 context=context,
                 model=model,
                 on_tokens=on_tokens,
+                agent_id=agent_id,
+                user_id=user_id,
+                claude_token=compression_claude_token,
+                claude_token_source=compression_claude_token_source,
+                claude_token_pool_id=compression_claude_token_pool_id,
+                gpt_token=compression_gpt_token,
+                gpt_account_id=compression_gpt_account_id,
+                gpt_token_source=compression_gpt_token_source,
+                gpt_token_pool_id=compression_gpt_token_pool_id,
             )
 
             if on_context_overflow:
@@ -477,6 +493,7 @@ async def run_agent(  # noqa: C901
                     {
                         "response": pydantic_result.response or "",
                         "tool_calls": tool_calls_as_dicts,  # List[dict]
+                        "codex_reasoning_items": getattr(pydantic_result, "codex_reasoning_items", []),
                     },
                 )()
 
@@ -541,9 +558,10 @@ async def run_agent(  # noqa: C901
 
                 # Reconstruct result object from activity response
                 class ActivityResult:
-                    def __init__(self, response: str, tool_calls: list):
+                    def __init__(self, response: str, tool_calls: list, codex_reasoning_items: list):
                         self.response = response
                         self.tool_calls = tool_calls
+                        self.codex_reasoning_items = codex_reasoning_items
 
                 # Keep tool_calls as dicts - they'll be processed directly
                 tool_calls_list = llm_result.get("tool_calls", [])
@@ -551,6 +569,7 @@ async def run_agent(  # noqa: C901
                 result = ActivityResult(
                     response=llm_result.get("response", ""),
                     tool_calls=tool_calls_list,  # Keep as dicts, not objects
+                    codex_reasoning_items=llm_result.get("codex_reasoning_items", []),
                 )
                 usage = llm_result.get("usage", {})
 
@@ -595,6 +614,8 @@ async def run_agent(  # noqa: C901
                         claude_token_error=usage.get("claude_token_error"),
                         gpt_token_error=usage.get("gpt_token_error"),
                         claude_token_rotated=usage.get("claude_token_rotated", False),
+                        gpt_token_rotated=usage.get("gpt_token_rotated", False),
+                        compute_token_used=usage.get("compute_token_used"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed: {e}")
@@ -763,7 +784,14 @@ async def run_agent(  # noqa: C901
             processed_tools.append((tool_name, tool_args, tool_call_id))
 
         # 10. Persist assistant message (including tool-only declaration turns)
-        assistant_metadata = {"tool_calls": assistant_tool_calls} if assistant_tool_calls else None
+        assistant_metadata = {}
+        if assistant_tool_calls:
+            assistant_metadata["tool_calls"] = assistant_tool_calls
+        codex_reasoning_items = getattr(result, "codex_reasoning_items", [])
+        if codex_reasoning_items:
+            assistant_metadata["codex_reasoning_items"] = codex_reasoning_items
+        if not assistant_metadata:
+            assistant_metadata = None
         if response_text or assistant_tool_calls:
             if post_message:
                 await post_message(response_text, "ASSISTANT", assistant_metadata)
@@ -772,12 +800,14 @@ async def run_agent(  # noqa: C901
             # subsequent TOOL results have their declaring assistant row and
             # the LLM sees its own prior responses.
             if not poll_messages:
-                context.append({
-                    "role": "ASSISTANT",
-                    "text": response_text or "",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "metadata": assistant_metadata or {},
-                })
+                context.append(
+                    {
+                        "role": "ASSISTANT",
+                        "text": response_text or "",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "metadata": assistant_metadata or {},
+                    }
+                )
 
         # 11. Execute tool calls (tool_calls is always List[dict] at this point)
         # Execute regular tools in parallel
@@ -830,17 +860,19 @@ async def run_agent(  # noqa: C901
                     # When no poll_messages, locally append error so agent sees it
                     # (omit subAgentId so convert_context_to_messages doesn't filter it)
                     if not poll_messages:
-                        context.append({
-                            "role": "TOOL",
-                            "text": f"Error: {error}",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "metadata": {
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "toolStatus": "ERROR",
-                                "error": True,
-                            },
-                        })
+                        context.append(
+                            {
+                                "role": "TOOL",
+                                "text": f"Error: {error}",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "metadata": {
+                                    "toolCallId": tool_call_id,
+                                    "toolName": tool_name,
+                                    "toolStatus": "ERROR",
+                                    "error": True,
+                                },
+                            }
+                        )
                     continue
 
                 # Check for special status returns (used by browser agent)
@@ -934,17 +966,19 @@ async def run_agent(  # noqa: C901
                     f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
                     f"{[t for t, _, _ in processed_tools]}"
                 )
-                context.append({
-                    "role": "SYSTEM",
-                    "text": (
-                        f"WARNING: You have called the same tool(s) with identical arguments "
-                        f"{same_call_streak + 2} times in a row without making progress. "
-                        "The previous approach is not working. You MUST try a fundamentally different strategy: "
-                        "use different arguments, a different tool, or decompose the problem differently. "
-                        "Do not repeat the same call again."
-                    ),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+                context.append(
+                    {
+                        "role": "SYSTEM",
+                        "text": (
+                            f"WARNING: You have called the same tool(s) with identical arguments "
+                            f"{same_call_streak + 2} times in a row without making progress. "
+                            "The previous approach is not working. You MUST try a fundamentally different strategy: "
+                            "use different arguments, a different tool, or decompose the problem differently. "
+                            "Do not repeat the same call again."
+                        ),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             else:
                 same_call_streak = 0
 
@@ -1116,6 +1150,8 @@ async def run_agent(  # noqa: C901
                             claude_token_error=v_usage.get("claude_token_error"),
                             gpt_token_error=v_usage.get("gpt_token_error"),
                             claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                            gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                            compute_token_used=v_usage.get("compute_token_used"),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -1286,6 +1322,8 @@ async def run_agent(  # noqa: C901
                         claude_token_error=v_usage.get("claude_token_error"),
                         gpt_token_error=v_usage.get("gpt_token_error"),
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                        gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                        compute_token_used=v_usage.get("compute_token_used"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -1336,11 +1374,34 @@ async def _compress_context(
     context: List[Dict],
     model: str,
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
+    agent_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
 ) -> List[Dict]:
     """Compress context using LLM."""
     result = await execute_activity(
         compress_context,
-        args=[context, len(context), model],
+        args=[
+            context,
+            len(context),
+            model,
+            claude_token,
+            claude_token_source,
+            claude_token_pool_id,
+            user_id,
+            gpt_token,
+            gpt_account_id,
+            gpt_token_source,
+            gpt_token_pool_id,
+            user_id,
+            agent_id,
+        ],
         start_to_close_timeout=timedelta(seconds=60),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
@@ -1366,6 +1427,7 @@ async def _compress_context(
                     claude_token_rotated=usage.get("claude_token_rotated", False),
                     gpt_token_error=usage.get("gpt_token_error"),
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
+                    compute_token_used=usage.get("compute_token_used"),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")

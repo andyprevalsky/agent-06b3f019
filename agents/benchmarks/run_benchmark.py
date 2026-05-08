@@ -56,7 +56,10 @@ from benchmarks.logs import (
     collect_logs,
     load_env_var,
     start_fly_log_collector,
+    start_supabase_realtime_collector,
     stop_fly_log_collector,
+    stop_supabase_realtime_collector,
+    subscribe_supabase_realtime_agent,
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
@@ -74,9 +77,7 @@ from tests.e2e.test_helpers import (
 )
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
-DEFAULT_BASE_URL = os.environ.get(
-    "BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com"
-)
+DEFAULT_BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com")
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
@@ -88,17 +89,18 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # step of research-heavy smoke tasks.
 AGENT_STALL_SECONDS = 180
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
-TEST_ASSETS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets"
-)
+TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets")
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
+
 class AgentNotFoundError(Exception):
     """Raised when an agent returns 404 (deleted or expired)."""
+
     pass
+
 
 # Terminal agent statuses
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
@@ -115,6 +117,7 @@ def _ci_should_fail(summary: dict) -> bool:
 
 _cached_headers: Optional[dict] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
+
 
 async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
@@ -202,9 +205,7 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
     """GET /api/tool-usage/tree/:id — aggregated cache metrics for entire agent tree."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{base_url}/api/tool-usage/tree/{agent_id}", headers=headers
-        )
+        resp = await client.get(f"{base_url}/api/tool-usage/tree/{agent_id}", headers=headers)
         if resp.status_code == 200:
             return resp.json()
         return {}
@@ -214,17 +215,13 @@ async def get_attention_requests(base_url: str) -> list:
     """GET /api/attention-requests — returns pending requests for current user."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{base_url}/api/attention-requests", headers=headers
-        )
+        resp = await client.get(f"{base_url}/api/attention-requests", headers=headers)
         if resp.status_code == 200:
             return resp.json()
         return []
 
 
-async def respond_to_attention_request(
-    base_url: str, request_id: str, response: str
-) -> None:
+async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
     """POST /api/attention-requests/:id/respond"""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
@@ -239,9 +236,7 @@ async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
     """GET /api/agents/tree?busId=X — all agents sharing a bus (root + descendants)."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{base_url}/api/agents/tree", headers=headers, params={"busId": bus_id}
-        )
+        resp = await client.get(f"{base_url}/api/agents/tree", headers=headers, params={"busId": bus_id})
         if resp.status_code != 200:
             return []
         data = resp.json()
@@ -292,9 +287,7 @@ async def pause_agent(base_url: str, agent_id: str) -> bool:
         return resp.status_code in (200, 204)
 
 
-async def post_attachment_message(
-    base_url: str, agent_id: str, file_pointers: List[dict]
-) -> bool:
+async def post_attachment_message(base_url: str, agent_id: str, file_pointers: List[dict]) -> bool:
     """POST /api/agents/:id/messages with file attachments so the agent can see them."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
@@ -306,9 +299,7 @@ async def post_attachment_message(
         return resp.status_code in (200, 201)
 
 
-async def upload_attachment(
-    base_url: str, agent_id: str, filepath: str
-) -> Optional[dict]:
+async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Optional[dict]:
     """Upload a file attachment for an agent. Returns FilePointer or None."""
     headers = await _api_headers()
     # Remove Content-Type — httpx sets multipart boundary automatically
@@ -334,6 +325,7 @@ async def upload_attachment(
 # Polling loop
 # ============================================================
 
+
 async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
     """
     Fetch tree-level aggregate stats for stall detection and progress reporting.
@@ -346,8 +338,15 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
     try:
         agents = await get_agent_tree(base_url, agent_id)
         if not agents:
-            return {"agent_count": 0, "total_messages": 0, "total_cost_cents": 0,
-                    "active_count": 0, "failed_count": 0, "error_agents": [], "all_agents": []}
+            return {
+                "agent_count": 0,
+                "total_messages": 0,
+                "total_cost_cents": 0,
+                "active_count": 0,
+                "failed_count": 0,
+                "error_agents": [],
+                "all_agents": [],
+            }
 
         total_msgs = sum(a.get("message_count", 0) for a in agents)
         total_cost = sum(a.get("tree_cost_cents", 0) for a in agents)
@@ -360,13 +359,19 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "total_cost_cents": total_cost,
             "active_count": len(active),
             "failed_count": len(failed),
-            "error_agents": [{"agent_id": a.get("agent_id", "")[:12], "status": a.get("status")}
-                             for a in failed],
+            "error_agents": [{"agent_id": a.get("agent_id", "")[:12], "status": a.get("status")} for a in failed],
             "all_agents": agents,
         }
     except Exception:
-        return {"agent_count": 0, "total_messages": 0, "total_cost_cents": 0,
-                "active_count": 0, "failed_count": 0, "error_agents": [], "all_agents": []}
+        return {
+            "agent_count": 0,
+            "total_messages": 0,
+            "total_cost_cents": 0,
+            "active_count": 0,
+            "failed_count": 0,
+            "error_agents": [],
+            "all_agents": [],
+        }
 
 
 def suite_name_for_error(args) -> str:
@@ -384,6 +389,7 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     Returns list of error descriptions.
     """
     from benchmarks.logs import _fly_collector
+
     if not _fly_collector:
         return []
 
@@ -392,11 +398,19 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
         logs = _fly_collector.get_logs_for_agent(aid)
         for log_line in logs:
             ll = log_line.lower()
-            if any(kw in ll for kw in (
-                "session limit reached", "429", "too many requests",
-                "connection refused", "all reconnection attempts failed",
-                "oom", "out of memory", "killed",
-            )):
+            if any(
+                kw in ll
+                for kw in (
+                    "session limit reached",
+                    "429",
+                    "too many requests",
+                    "connection refused",
+                    "all reconnection attempts failed",
+                    "oom",
+                    "out of memory",
+                    "killed",
+                )
+            ):
                 errors.append(log_line[:200])
     return errors
 
@@ -464,7 +478,8 @@ async def poll_agent(
             print(f"    ⚠ Agent {agent_id[:12]} returned 404 — deleted or expired")
             return (
                 {"agent": {"status": "DELETED"}, "messages": []},
-                approvals_triggered, approvals_resolved,
+                approvals_triggered,
+                approvals_resolved,
                 "Agent returned 404",
             )
         except Exception as e:
@@ -478,7 +493,9 @@ async def poll_agent(
         root_msg_count = len(messages)
 
         if realtime_monitor and realtime_monitor.failure_reason:
-            return data, approvals_triggered, approvals_resolved, realtime_monitor.failure_reason
+            realtime_failure = realtime_monitor.reconcile_snapshot(messages)
+            if realtime_failure:
+                return data, approvals_triggered, approvals_resolved, realtime_failure
 
         # Validate context well-formedness. Any error-severity violation is an
         # instant fail — don't keep polling, the agent will not recover.
@@ -545,8 +562,10 @@ async def poll_agent(
 
             stall_seconds = now - last_activity_time
             if stall_seconds > STALL_THRESHOLD:
-                print(f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
-                      f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)")
+                print(
+                    f"    ⚠ TREE STALL: {stall_seconds:.0f}s since last message across "
+                    f"{tree_stats['agent_count']} agents ({tree_total_msgs} total msgs)"
+                )
 
             # ── Tree stall detection (early fail) ────────────────────
             # Track each agent's message_count over time. Internal nodes
@@ -597,9 +616,7 @@ async def poll_agent(
                     continue
                 child_ids = children_of.get(aid, [])
                 has_active_child = any(
-                    per_agent_state.get(cid, {}).get("status", "ACTIVE")
-                    not in TERMINAL_STATUSES
-                    for cid in child_ids
+                    per_agent_state.get(cid, {}).get("status", "ACTIVE") not in TERMINAL_STATUSES for cid in child_ids
                 )
                 if not has_active_child:
                     leaves.append(aid)
@@ -609,10 +626,7 @@ async def poll_agent(
             # leaf still emitted within the threshold, the tree is making
             # progress somewhere — not stalled.
             if leaves:
-                max_leaf_change = max(
-                    per_agent_state.get(aid, {}).get("last_change_time", 0.0)
-                    for aid in leaves
-                )
+                max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
                 if tree_idle > AGENT_STALL_SECONDS:
                     # All leaves silent — pick the staffer leaf (most recent
@@ -663,10 +677,8 @@ async def poll_agent(
             if not isinstance(meta, dict):
                 continue
             msg_id = m.get("message_id") or m.get("id", "")
-            is_waiting = (
-                meta.get("isWaitingForUser")
-                or (isinstance(meta.get("sendMessageToUser"), dict)
-                    and meta["sendMessageToUser"].get("isWaitingForUser"))
+            is_waiting = meta.get("isWaitingForUser") or (
+                isinstance(meta.get("sendMessageToUser"), dict) and meta["sendMessageToUser"].get("isWaitingForUser")
             )
             if is_waiting and msg_id and msg_id not in replied_waiting_msgs:
                 replied_waiting_msgs.add(msg_id)
@@ -675,10 +687,11 @@ async def poll_agent(
                 print("    → Auto-replying to unblock workflow")
                 try:
                     await post_message(
-                        base_url, agent_id,
+                        base_url,
+                        agent_id,
                         "Please do not ask me anymore questions. I trust your judgment, intuition, "
                         "and ability to make reasonable assumptions. Please proceed with the task. "
-                        "All files have been uploaded as attachments and should be available in your context."
+                        "All files have been uploaded as attachments and should be available in your context.",
                     )
                 except Exception as e:
                     print(f"    ⚠ Auto-reply failed: {e}")
@@ -686,9 +699,7 @@ async def poll_agent(
         # Handle approval requests (check entire agent tree, not just root)
         tree_agent_ids = {agent_id}  # always include root
         if last_tree_stats.get("all_agents"):
-            tree_agent_ids.update(
-                a.get("agent_id", "") for a in last_tree_stats["all_agents"] if a.get("agent_id")
-            )
+            tree_agent_ids.update(a.get("agent_id", "") for a in last_tree_stats["all_agents"] if a.get("agent_id"))
         if fetch_approvals_now:
             try:
                 pending = _pending_attention
@@ -699,9 +710,7 @@ async def poll_agent(
                         req_id = req.get("id")
                         if task.approval_handling == "auto_approve":
                             if req_id:
-                                await respond_to_attention_request(
-                                    base_url, req_id, "approved"
-                                )
+                                await respond_to_attention_request(base_url, req_id, "approved")
                                 approvals_resolved += 1
                                 print(f"    ✅ Auto-approved attention request {req_id[:8]}")
                         elif task.approval_handling == "prompt_user":
@@ -710,22 +719,18 @@ async def poll_agent(
                                 print(f"\n    🔔 APPROVAL REQUIRED: {question[:200]}")
                                 if not sys.stdin.isatty():
                                     print(f"    ⚠ Non-interactive environment — auto-denying {req_id[:8]}")
-                                    await respond_to_attention_request(
-                                        base_url, req_id, "denied"
-                                    )
+                                    await respond_to_attention_request(base_url, req_id, "denied")
                                     continue
                                 loop = asyncio.get_event_loop()
-                                answer = (await loop.run_in_executor(None, input, "    Approve? [y/n]: ")).strip().lower()
+                                answer = (
+                                    (await loop.run_in_executor(None, input, "    Approve? [y/n]: ")).strip().lower()
+                                )
                                 if answer in ("y", "yes"):
-                                    await respond_to_attention_request(
-                                        base_url, req_id, "approved"
-                                    )
+                                    await respond_to_attention_request(base_url, req_id, "approved")
                                     approvals_resolved += 1
                                     print(f"    ✅ User approved {req_id[:8]}")
                                 else:
-                                    await respond_to_attention_request(
-                                        base_url, req_id, "denied"
-                                    )
+                                    await respond_to_attention_request(base_url, req_id, "denied")
                                     print(f"    ❌ User denied {req_id[:8]}")
             except Exception as e:
                 print(f"    ⚠ Approval check error: {e}")
@@ -739,8 +744,10 @@ async def poll_agent(
                 tree_agents = ts.get("agent_count", 0)
                 tree_active = ts.get("active_count", 0)
                 tree_failed = ts.get("failed_count", 0)
-                print(f"    ... {status} | {tree_agents} agents ({tree_active} active, {tree_failed} failed) | "
-                      f"{root_msg_count} root msgs | {tree_cost}c | {elapsed:.0f}s")
+                print(
+                    f"    ... {status} | {tree_agents} agents ({tree_active} active, {tree_failed} failed) | "
+                    f"{root_msg_count} root msgs | {tree_cost}c | {elapsed:.0f}s"
+                )
             else:
                 print(f"    ... {status} ({root_msg_count} root msgs, {elapsed:.0f}s)")
 
@@ -750,6 +757,7 @@ async def poll_agent(
 # ============================================================
 # Evaluation
 # ============================================================
+
 
 def evaluate_task(
     task: BenchmarkTask,
@@ -784,9 +792,7 @@ def evaluate_task(
         return False, f"Agent status: {status} (expected COMPLETED)"
 
     # Check expected tools were called
-    all_metadata = " ".join(
-        json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")
-    ).lower()
+    all_metadata = " ".join(json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")).lower()
 
     for tool in task.expected_tools:
         if tool.lower() not in all_metadata:
@@ -807,6 +813,7 @@ def evaluate_task(
 # CSV row slicing
 # ============================================================
 
+
 def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
     """
     Slice a CSV file to only include data rows [row_start, row_end] (1-indexed, inclusive).
@@ -825,9 +832,7 @@ def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
     if not sliced:
         raise ValueError(f"No rows in range [{row_start}, {row_end}] (CSV has {len(rows)} data rows)")
 
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".csv", prefix="benchmark-slice-", delete=False, newline=""
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", prefix="benchmark-slice-", delete=False, newline="")
     writer = csv.writer(tmp)
     writer.writerow(header)
     writer.writerows(sliced)
@@ -840,13 +845,14 @@ def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
 # Run a single task
 # ============================================================
 
+
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
-    print(f"\n  {'='*50}")
+    print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
     print(f"     timeout={resolved_timeout}s, price_limit={task.price_limit_cents}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
@@ -854,14 +860,37 @@ async def run_single_task(
         print(f"     attachments={all_attachments}")
     if task.approval_handling:
         print(f"     approval={task.approval_handling}")
-    print(f"  {'='*50}")
+    print(f"  {'=' * 50}")
 
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
+    realtime_tree_task: Optional[asyncio.Task] = None
 
     temp_csv_paths: list = []  # track temp files for cleanup
+
+    async def start_realtime_capture() -> None:
+        nonlocal realtime_tree_task
+        if not agent_id:
+            return
+        status = await subscribe_supabase_realtime_agent(agent_id)
+        print(f"    🔌 Realtime capture {status}")
+
+        async def discover_tree_agents() -> None:
+            seen = {agent_id}
+            while True:
+                try:
+                    for agent_info in await get_agent_tree(base_url, agent_id):
+                        aid = agent_info.get("agent_id")
+                        if aid and aid not in seen:
+                            seen.add(aid)
+                            await subscribe_supabase_realtime_agent(aid)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+        realtime_tree_task = asyncio.create_task(discover_tree_agents(), name=f"realtime-capture-{agent_id[:8]}")
 
     async def start_realtime_monitor() -> None:
         nonlocal realtime_monitor
@@ -877,6 +906,7 @@ async def run_single_task(
         if all_attachments:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            await start_realtime_capture()
             await start_realtime_monitor()
 
             file_pointers = []
@@ -905,6 +935,7 @@ async def run_single_task(
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            await start_realtime_capture()
             await start_realtime_monitor()
 
         # Poll until done (or early-fail)
@@ -950,10 +981,7 @@ async def run_single_task(
             try:
                 tree_stats = await _fetch_tree_stats(base_url, agent_id)
                 all_agents = tree_stats.get("all_agents", [])
-                spawn_agent_count = sum(
-                    1 for a in all_agents
-                    if a.get("parent_agent_id") and a.get("output_schema")
-                )
+                spawn_agent_count = sum(1 for a in all_agents if a.get("parent_agent_id") and a.get("output_schema"))
                 if spawn_agent_count < task.min_agent_count:
                     passed = False
                     failure_reason = (
@@ -996,7 +1024,12 @@ async def run_single_task(
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
         log_summary = []
-        for key, label in [("backend_logs", "backend"), ("worker_logs", "worker"), ("research_logs", "research")]:
+        for key, label in [
+            ("backend_logs", "backend"),
+            ("worker_logs", "worker"),
+            ("research_logs", "research"),
+            ("realtime_logs", "realtime"),
+        ]:
             entries = logs.get(key, [])
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
@@ -1031,7 +1064,9 @@ async def run_single_task(
             print(f"       Reason: {failure_reason}")
         print(f"       Duration: {duration:.1f}s | Cost: {cost_cents:.1f}c | Messages: {len(messages)}")
         if total_input > 0:
-            print(f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%")
+            print(
+                f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
+            )
 
         # Clean up: delete the agent now that we've collected all data
         try:
@@ -1077,6 +1112,9 @@ async def run_single_task(
             logs=logs,
         )
     finally:
+        if realtime_tree_task:
+            realtime_tree_task.cancel()
+            await asyncio.gather(realtime_tree_task, return_exceptions=True)
         if realtime_monitor:
             await realtime_monitor.stop()
         for tmp in temp_csv_paths:
@@ -1089,6 +1127,7 @@ async def run_single_task(
 # ============================================================
 # Main
 # ============================================================
+
 
 def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
@@ -1169,9 +1208,7 @@ def _verify_worker_queue_alignment():
         sys.exit(1)
     expected_queue = f"navi-agent-tasks-{workspace}"
 
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,command="], capture_output=True, text=True
-    )
+    result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
     pids = _extract_worker_pids_from_ps(result.stdout)
     if not pids:
         print(f"  ❌ No worker process found (expected on queue {expected_queue})")
@@ -1249,7 +1286,9 @@ async def _terminate_stale_workflows():
         allow_cleanup = os.environ.get("ALLOW_TEMPORAL_CLEANUP", "").lower() == "true"
         is_worktree_scoped = bool(os.environ.get("CONDUCTOR_WORKSPACE_NAME"))
         if not is_local and not allow_cleanup and not is_worktree_scoped:
-            print(f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local, queue is not worktree-scoped, and ALLOW_TEMPORAL_CLEANUP is not set")
+            print(
+                f"  ⚠ Skipping workflow cleanup — Temporal address ({temporal_addr}) is not local, queue is not worktree-scoped, and ALLOW_TEMPORAL_CLEANUP is not set"
+            )
             return
 
         task_queue = f"navi-agent-tasks-{workspace}"
@@ -1304,21 +1343,23 @@ async def _fail_stale_active_agents():
     container = f"victoria-db-{workspace}"
     ps = subprocess.run(
         ["docker", "ps", "--filter", f"name=^{container}$", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if container not in ps.stdout:
         return
 
     sql = (
         'UPDATE "Agent" SET status = \'FAILED\', "updatedAt" = NOW() '
-        'WHERE status = \'ACTIVE\' AND "createdAt" < NOW() - INTERVAL \'30 minutes\' '
+        "WHERE status = 'ACTIVE' AND \"createdAt\" < NOW() - INTERVAL '30 minutes' "
         "RETURNING id;"
     )
     try:
         result = subprocess.run(
-            ["docker", "exec", container, "psql", "-U", "postgres", "-d", "victoria",
-             "-t", "-A", "-c", sql],
-            capture_output=True, text=True, timeout=10,
+            ["docker", "exec", container, "psql", "-U", "postgres", "-d", "victoria", "-t", "-A", "-c", sql],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
             ids = [line for line in result.stdout.splitlines() if line.strip() and line[0].isalnum()]
@@ -1357,7 +1398,7 @@ async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
         print(f"  {'Name':<25} {'Title':<35} {'Tags'}")
-        print(f"  {'-'*80}")
+        print(f"  {'-' * 80}")
         list_all_tasks()
         return
 
@@ -1444,8 +1485,10 @@ async def main_async(args):
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
             s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
-            print(f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
-                  f"(history n={s['count']}, recent_max={s['recent_max']}s)")
+            print(
+                f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
+                f"(history n={s['count']}, recent_max={s['recent_max']}s)"
+            )
             continue
         cap = get_smoke_cap(t.name)
         try:
@@ -1455,8 +1498,10 @@ async def main_async(args):
         else:
             s = _history_summary(t.name, max_seconds=cap)
             cap_note = f", cap={cap}s" if cap else ""
-            print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                  f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note})")
+            print(
+                f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
+                f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note})"
+            )
     if missing_history:
         print("\n  ❌ Timeout history is insufficient for the following tasks:")
         for m in missing_history:
@@ -1473,31 +1518,36 @@ async def main_async(args):
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()
     print(f"  📡 {fly_status}")
+    is_private_realtime = "localhost" not in base_url and "127.0.0.1" not in base_url
+    realtime_status = await start_supabase_realtime_collector(private=is_private_realtime)
+    print(f"  📡 {realtime_status}")
 
     suite_name = args.suite or args.task or "all"
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  Agent Benchmark Harness")
     print(f"  URL:   {base_url}")
     print(f"  Suite: {suite_name}")
     print(f"  Tasks: {len(tasks)}{f' (+{len(skipped_claude_tasks)} skipped)' if skipped_claude_tasks else ''}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
 
     # Record skipped Claude Code tasks in results
     for t in skipped_claude_tasks:
-        run.task_results.append(TaskResult(
-            name=t.name,
-            passed=False,
-            agent_id="",
-            status="SKIPPED",
-            progress_score=0,
-            duration_seconds=0,
-            cost_cents=0,
-            message_count=0,
-            failure_reason="Claude Code credentials unavailable (user needs to re-authenticate)",
-        ))
+        run.task_results.append(
+            TaskResult(
+                name=t.name,
+                passed=False,
+                agent_id="",
+                status="SKIPPED",
+                progress_score=0,
+                duration_seconds=0,
+                cost_cents=0,
+                message_count=0,
+                failure_reason="Claude Code credentials unavailable (user needs to re-authenticate)",
+            )
+        )
 
     try:
         if args.parallel:
@@ -1509,17 +1559,19 @@ async def main_async(args):
             )
             for task, result in zip(tasks, results):
                 if isinstance(result, BaseException):
-                    run.task_results.append(TaskResult(
-                        name=task.name,
-                        passed=False,
-                        agent_id="",
-                        status="ERROR",
-                        progress_score=0,
-                        duration_seconds=0,
-                        cost_cents=0,
-                        message_count=0,
-                        failure_reason=str(result),
-                    ))
+                    run.task_results.append(
+                        TaskResult(
+                            name=task.name,
+                            passed=False,
+                            agent_id="",
+                            status="ERROR",
+                            progress_score=0,
+                            duration_seconds=0,
+                            cost_cents=0,
+                            message_count=0,
+                            failure_reason=str(result),
+                        )
+                    )
                 else:
                     run.task_results.append(result)
         else:
@@ -1529,6 +1581,8 @@ async def main_async(args):
     finally:
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
+        realtime_total = await stop_supabase_realtime_collector()
+        print(f"  📡 Supabase realtime frame stream stopped ({realtime_total} frames captured)")
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
@@ -1537,8 +1591,8 @@ async def main_async(args):
 
     # Print summary
     s = run.summary
-    skipped_str = f", {s['skipped']} skipped" if s.get('skipped') else ""
-    print(f"\n{'='*60}")
+    skipped_str = f", {s['skipped']} skipped" if s.get("skipped") else ""
+    print(f"\n{'=' * 60}")
     print(f"  RESULTS: {s['passed']}/{s['total']} passed ({s['pass_rate']:.0%}{skipped_str})")
     print(f"  Cost: {s['total_cost_cents']:.1f}c | Duration: {s['total_duration_seconds']:.0f}s")
 
@@ -1549,7 +1603,7 @@ async def main_async(args):
     agg_cache_pct = round(agg_cache_read / agg_cache_total * 100, 1) if agg_cache_total > 0 else 0.0
     if agg_cache_total > 0:
         print(f"  Cache: read={agg_cache_read} write={agg_cache_write} hit={agg_cache_pct}%")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Per-task cache hit ratchets — each value is the floor for that smoke
     # task's prompt-cache hit %. Baseline values come from the run that
@@ -1564,11 +1618,11 @@ async def main_async(args):
     #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
     #   - ratchet 30%, observed 37.6% → bump to 35
     PER_TASK_CACHE_HIT_RATCHET = {
-        "chat-mode": 0.0,            # observed 0.0% (no LLM cache path)
-        "spawn-sub-agents": 20.0,    # observed 24.4%
-        "parallel-tool-calls": 25.0, # observed 29.1%
-        "claude-code-agent": 60.0,   # observed 63.9%
-        "browser-smoke": 45.0,       # observed 47.8%
+        "chat-mode": 0.0,  # observed 0.0% (no LLM cache path)
+        "spawn-sub-agents": 20.0,  # observed 24.4%
+        "parallel-tool-calls": 25.0,  # observed 29.1%
+        "claude-code-agent": 60.0,  # observed 63.9%
+        "browser-smoke": 45.0,  # observed 47.8%
     }
 
     cache_failures: list[tuple[str, str, float, float]] = []
@@ -1579,9 +1633,7 @@ async def main_async(args):
         per_task_total = r.cache_read_input_tokens + r.cache_creation_input_tokens
         if per_task_total <= 0:
             continue
-        per_task_pct = round(
-            r.cache_read_input_tokens / per_task_total * 100, 1
-        )
+        per_task_pct = round(r.cache_read_input_tokens / per_task_total * 100, 1)
         if per_task_pct < floor:
             cache_failures.append((r.name, r.agent_id, per_task_pct, floor))
 
@@ -1594,10 +1646,7 @@ async def main_async(args):
             "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
         )
         for name, aid, _pct, _floor in cache_failures:
-            print(
-                f"    cd agents && source venv/bin/activate && "
-                f"python benchmarks/agent_cache.py {aid}  # {name}"
-            )
+            print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {aid}  # {name}")
         print(
             "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
             "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
@@ -1645,8 +1694,8 @@ def main():
         "--bootstrap",
         action="store_true",
         help="Bootstrap timeout history: use tasks.json timeout_seconds as the "
-             "per-task ceiling even without history. Passed runs still record "
-             "to the corpus. Use until every task has ≥5 passes, then drop this flag.",
+        "per-task ceiling even without history. Passed runs still record "
+        "to the corpus. Use until every task has ≥5 passes, then drop this flag.",
     )
     parser.add_argument(
         "--row-start",

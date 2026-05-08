@@ -29,6 +29,10 @@ function sortByTimestampAsc(a: Message, b: Message): number {
   return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
 }
 
+function isInternalLivenessTool(message: Message): boolean {
+  return message.role === 'TOOL' && message.metadata?.toolName === 'agent_init';
+}
+
 function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   const raw = new Map<string, Message[]>();
   for (const m of messages) {
@@ -233,7 +237,9 @@ function buildWaitForChecks(
 export function deduplicateToolMessages(
   messages: Message[],
 ): [Message[], Map<string, ExploreStep[]>, Map<string, WaitForCheck[]>] {
-  const sortedMessages = [...messages].sort(sortByTimestampAsc);
+  const sortedMessages = messages
+    .filter((m) => !isInternalLivenessTool(m))
+    .sort(sortByTimestampAsc);
 
   const lastAssistantTimestamp =
     sortedMessages

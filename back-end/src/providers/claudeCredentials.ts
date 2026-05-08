@@ -367,8 +367,27 @@ export async function markUserTokenRateLimited(
   options?: {
     rateLimitedUntil?: string | Date | null;
     cooldownMs?: number;
+    failureReason?: string | null;
   }
 ): Promise<void> {
+  if (options?.failureReason === 'auth_error') {
+    await prisma.integration.updateMany({
+      where: {
+        userId,
+        name: 'claude_code',
+        status: 'CONNECTED',
+      },
+      data: {
+        status: 'EXPIRED',
+        isActive: false,
+        rateLimitedUntil: null,
+        failureReason: 'auth_error',
+      },
+    });
+    log.info(`User token for ${userId} disabled after auth_error`);
+    return;
+  }
+
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
   await prisma.integration.updateMany({
     where: {

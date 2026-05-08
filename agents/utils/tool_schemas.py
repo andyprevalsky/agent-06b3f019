@@ -362,6 +362,9 @@ class MessagePersonTool(BaseModel):
     )
 
 
+ForEachItem = Union[str, Dict[str, Union[str, List[str]]]]
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields."""
 
@@ -422,7 +425,7 @@ class SpawnAgentTool(BaseModel):
             "Prefer 'RESEARCH' when uncertain."
         ),
     )
-    items: Optional[List[Any]] = Field(
+    items: Optional[List[ForEachItem]] = Field(
         default=None,
         description=(
             "Required for type='for_each'. Ignored for any other type. For each item in the array, "
@@ -518,9 +521,9 @@ class CallPhoneNumberTool(BaseModel):
             "Instructions for the voice agent's identity, tone, and conversation goals during the call."
         )
     )
-    output_schema: Dict[str, str] = Field(
+    output_schema: ResponseSchemaConfig = Field(
         description=(
-            "Mapping of snake_case field name to a description of what to extract from the conversation."
+            "Fields to extract from the conversation when the call completes."
         )
     )
 

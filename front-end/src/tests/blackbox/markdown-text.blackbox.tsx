@@ -50,9 +50,7 @@ describe('MarkdownText', () => {
   });
 
   it('renders fenced code blocks inside <pre>', async () => {
-    const { container } = render(
-      <MarkdownText text={'```\nconst x = 1;\nconsole.log(x);\n```'} />,
-    );
+    const { container } = render(<MarkdownText text={'```\nconst x = 1;\nconsole.log(x);\n```'} />);
     await waitFor(() => expect(container.querySelector('pre')).not.toBeNull());
     expect(container.textContent).toContain('const x = 1;');
   });
@@ -81,9 +79,7 @@ describe('MarkdownText', () => {
   });
 
   it('normalizes literal \\n escape sequences to real newlines', async () => {
-    const { container } = render(
-      <MarkdownText text={'line one\\nline two'} breaks={true} />,
-    );
+    const { container } = render(<MarkdownText text={'line one\\nline two'} breaks={true} />);
     // breaks mode uses ReactMarkdown directly - synchronous
     await waitFor(() => {
       expect(container.textContent).toContain('line one');
@@ -104,12 +100,21 @@ describe('MarkdownText', () => {
   });
 
   it('passes className to FadeInMarkdown when not in breaks mode', async () => {
-    const { container } = render(
-      <MarkdownText text="hello" className="my-prose" />,
-    );
+    const { container } = render(<MarkdownText text="hello" className="my-prose" />);
     await waitFor(() => {
       expect(container.querySelector('.my-prose')).not.toBeNull();
     });
+  });
+
+  it('applies wrapping styles to the static markdown path', async () => {
+    const longUrl =
+      'https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fexample.com%2Fcheckout%2Fwith%2Fa%2Fvery%2Flong%2Funbroken%2Ftoken';
+    const { container } = render(<MarkdownText text={longUrl} breaks />);
+
+    await waitFor(() => expect(container.textContent).toContain('amazon.com'));
+    const style = container.querySelector('style');
+    expect(style?.textContent).toContain('overflow-wrap: anywhere');
+    expect(style?.textContent).toContain('word-break: normal');
   });
 
   it('shouldAnimate=true calls onComplete when last word animation completes', async () => {

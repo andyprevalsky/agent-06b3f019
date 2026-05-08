@@ -3815,6 +3815,105 @@ async function testRotation_poolAuthErrorDisablesToken() {
   }
 }
 
+async function testRotation_userAuthErrorDisablesToken() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(poolOwner.userId);
+  const existing = await existingComputePoolIds();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'claude',
+        source: 'user',
+        userId: caller.userId,
+        failureReason: 'auth_error',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const disabled = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(disabled !== null, 'Expected disabled user token row to exist');
+    assert(disabled.status === 'EXPIRED', 'auth_error must expire user token');
+    assert(disabled.isActive === false, 'auth_error must deactivate user token');
+    assert(disabled.rateLimitedUntil === null, 'auth_error disable must not use a cooldown');
+    assert(disabled.failureReason === 'auth_error', 'auth_error must be recorded');
+
+    const headers: Record<string, string> = { ...apiKeyHeaders(caller.userId) };
+    if (existing.length > 0) headers['X-Exclude-Pool-Tokens'] = existing.join(',');
+    const next = await request(`${BASE_URL}/api/integrations/compute-code/credentials/token`, {
+      headers,
+    });
+    assertStatus(next.status, 200, next.data);
+    const body = next.data as { source: string; poolTokenId?: string };
+    assert(
+      body.source === 'pool',
+      `Expected disabled user token to fall back to pool, got ${body.source}`
+    );
+    assert(
+      body.poolTokenId === poolToken.id,
+      `Expected pool token ${poolToken.id}, got ${body.poolTokenId}`
+    );
+  } finally {
+    await prisma.integration.deleteMany({ where: { id: { in: [userToken.id, poolToken.id] } } });
+  }
+}
+
+async function testRotation_gptUserAuthErrorDisablesToken() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(poolOwner.userId);
+  const existing = await existingComputePoolIds();
+  const userToken = await seedGptIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'gpt',
+        source: 'user',
+        userId: caller.userId,
+        failureReason: 'auth_error',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const disabled = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(disabled !== null, 'Expected disabled GPT user token row to exist');
+    assert(disabled.status === 'EXPIRED', 'auth_error must expire GPT user token');
+    assert(disabled.isActive === false, 'auth_error must deactivate GPT user token');
+    assert(disabled.rateLimitedUntil === null, 'auth_error disable must not use a cooldown');
+    assert(disabled.failureReason === 'auth_error', 'auth_error must be recorded');
+
+    const headers: Record<string, string> = { ...apiKeyHeaders(caller.userId) };
+    if (existing.length > 0) headers['X-Exclude-Pool-Tokens'] = existing.join(',');
+    const next = await request(`${BASE_URL}/api/integrations/compute-code/credentials/token`, {
+      headers,
+    });
+    assertStatus(next.status, 200, next.data);
+    const body = next.data as { type: string; source: string; poolTokenId?: string };
+    assert(body.type === 'claude', `Expected fallback pool token to be Claude, got ${body.type}`);
+    assert(
+      body.source === 'pool',
+      `Expected disabled GPT user token to fall back to pool, got ${body.source}`
+    );
+    assert(
+      body.poolTokenId === poolToken.id,
+      `Expected pool token ${poolToken.id}, got ${body.poolTokenId}`
+    );
+  } finally {
+    await prisma.integration.deleteMany({ where: { id: { in: [userToken.id, poolToken.id] } } });
+  }
+}
+
 // Test 3: Auto-expiry — a token whose rateLimitedUntil is in the past is available again.
 // Locks in that the filter is `rateLimitedUntil < now`, not a permanent disable flag.
 async function testRotation_autoExpiresAfterCooldown() {
@@ -4949,6 +5048,14 @@ async function runAll() {
     {
       name: 'rotation -- pool auth_error disables token',
       fn: testRotation_poolAuthErrorDisablesToken,
+    },
+    {
+      name: 'rotation -- user auth_error disables token',
+      fn: testRotation_userAuthErrorDisablesToken,
+    },
+    {
+      name: 'rotation -- GPT user auth_error disables token',
+      fn: testRotation_gptUserAuthErrorDisablesToken,
     },
     {
       name: 'rotation -- compute pool rotates across providers',

@@ -121,7 +121,18 @@ async function sync() {
         });
       }
     }
-    return upsertById(local.integration, all);
+    const synced = await upsertById(local.integration, all);
+    const syncedIds = all.map((integration) => integration.id);
+    const deleted = await local.integration.deleteMany({
+      where: {
+        name: { in: ['claude_code', 'gpt_code'] },
+        id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
+      },
+    });
+    if (deleted.count > 0) {
+      console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
+    }
+    return synced;
   });
 
   // ── Email Integration Credentials ──

@@ -6,7 +6,6 @@ import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal';
 import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPricing';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
-import { setResponseSchema } from '../../providers/setResponseSchema';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
 import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
@@ -117,14 +116,6 @@ async function startDirectWorkflow(
   priceLimitCents: number
 ): Promise<string> {
   const startPhase = body.start_phase!;
-  if (startPhase === 'execute') {
-    setResponseSchema(agentDbId).catch((err: unknown) => {
-      log.error('Failed to set response schema (background)', {
-        agent_id: agentDbId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }
   const workflowId = await startAgentWorkflow({
     agentId: agentDbId,
     userId,
