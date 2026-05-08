@@ -20,12 +20,18 @@ const STARTUP_MARKER = '@@ROSE_COMPILED_STARTUP@@';
 interface StartupProbe {
   windowCount: number;
   preloadPath: string;
+  loadFilePaths: string[];
   sandboxValues: Array<boolean | null>;
   exposedKey: string | null;
   hasApi: boolean;
   hasUpdateStatus: boolean;
   hasQuickQuerySubmit: boolean;
   ipcHandleCount: number;
+}
+
+interface StartupProbeOptions {
+  appPath?: string;
+  isPackaged?: boolean;
 }
 
 function compileMain(outDir: string): void {
@@ -44,7 +50,7 @@ function compileMain(outDir: string): void {
   );
 }
 
-function buildStartupProbe(mainEntry: string): string {
+function buildStartupProbe(mainEntry: string, options: StartupProbeOptions = {}): string {
   return `
 const Module = require('node:module');
 const path = require('node:path');
@@ -54,9 +60,12 @@ process.stdin.on = function noopOn() { return process.stdin; };
 
 const mainEntry = ${JSON.stringify(mainEntry)};
 const marker = ${JSON.stringify(STARTUP_MARKER)};
+const appPath = ${JSON.stringify(options.appPath ?? path.dirname(path.dirname(mainEntry)))};
+const isPackaged = ${JSON.stringify(options.isPackaged ?? false)};
 const rootRequire = Module.createRequire(${JSON.stringify(path.join(ROOT, 'package.json'))});
 const windows = [];
 const ipcHandles = [];
+const loadFilePaths = [];
 let exposed = null;
 
 function makeWebContents() {
@@ -97,7 +106,10 @@ function BrowserWindow(options) {
     setAlwaysOnTop() {},
     setWindowButtonVisibility() {},
     loadURL() { return Promise.resolve(); },
-    loadFile() { return Promise.resolve(); },
+    loadFile(filePath) {
+      loadFilePaths.push(filePath);
+      return Promise.resolve();
+    },
   };
   windows.push(win);
   return win;
@@ -169,8 +181,9 @@ class ClassicLevel {
 const electronStub = {
   app: {
     name: '',
-    isPackaged: false,
+    isPackaged,
     getPath() { return '/tmp/mac-app-compiled-startup'; },
+    getAppPath() { return appPath; },
     getName() { return 'rose-desktop-test'; },
     getVersion() { return '0.0.0-test'; },
     on() {},
@@ -284,6 +297,7 @@ function finish() {
     console.log(marker + JSON.stringify({
       windowCount: windows.length,
       preloadPath,
+      loadFilePaths,
       sandboxValues,
       exposedKey: exposed && exposed.key,
       hasApi: Boolean(api),
@@ -302,22 +316,18 @@ setImmediate(() => setImmediate(finish));
 `;
 }
 
-function runStartupProbe(outDir: string): StartupProbe {
-  const output = execFileSync(
-    process.execPath,
-    ['-e', buildStartupProbe(path.join(outDir, 'main', 'index.js'))],
-    {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        VITE_SUPABASE_URL: 'https://test.supabase.co',
-        VITE_SUPABASE_ANON_KEY: 'test-anon-key',
-        VITE_BACKEND_API_URL: 'http://localhost:3001',
-        MAC_APP_PORT: '59999',
-      },
-      encoding: 'utf8',
-    }
-  );
+function runStartupProbe(mainEntry: string, options: StartupProbeOptions = {}): StartupProbe {
+  const output = execFileSync(process.execPath, ['-e', buildStartupProbe(mainEntry, options)], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      VITE_SUPABASE_URL: 'https://test.supabase.co',
+      VITE_SUPABASE_ANON_KEY: 'test-anon-key',
+      VITE_BACKEND_API_URL: 'http://localhost:3001',
+      MAC_APP_PORT: '59999',
+    },
+    encoding: 'utf8',
+  });
   const markerLine = output.split('\n').find((line) => line.startsWith(STARTUP_MARKER));
   if (markerLine === undefined) {
     throw new Error(`Compiled startup probe did not emit marker. Output:\n${output}`);
@@ -343,8 +353,9 @@ describe('compiled Electron startup blackbox', () => {
       expect(fs.existsSync(preloadPath)).toBe(true);
       expect(fs.existsSync(preloadRuntimePath)).toBe(true);
 
-      const probe = runStartupProbe(outDir);
+      const probe = runStartupProbe(path.join(outDir, 'main', 'index.js'));
       expect(probe.windowCount).toBeGreaterThanOrEqual(2);
+      expect(probe.loadFilePaths).toEqual([]);
       expect(fs.realpathSync(probe.preloadPath)).toBe(fs.realpathSync(preloadPath));
       expect(probe.sandboxValues.every((value) => value === false)).toBe(true);
       expect(probe.exposedKey).toBe('api');
@@ -354,6 +365,30 @@ describe('compiled Electron startup blackbox', () => {
       expect(probe.ipcHandleCount).toBeGreaterThan(0);
     } finally {
       fs.rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads packaged renderer files from the app root dist/ui directory', () => {
+    const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-packaged-startup-'));
+    try {
+      const mainOutDir = path.join(packageRoot, 'dist', 'main');
+      const uiDir = path.join(packageRoot, 'dist', 'ui');
+      fs.mkdirSync(uiDir, { recursive: true });
+      fs.writeFileSync(path.join(uiDir, 'index.html'), '<!doctype html><div id="root"></div>');
+      fs.writeFileSync(path.join(uiDir, 'launcher.html'), '<!doctype html><div id="root"></div>');
+
+      compileMain(mainOutDir);
+
+      const probe = runStartupProbe(path.join(mainOutDir, 'main', 'index.js'), {
+        appPath: packageRoot,
+        isPackaged: true,
+      });
+
+      expect(probe.loadFilePaths).toContain(path.join(packageRoot, 'dist', 'ui', 'index.html'));
+      expect(probe.loadFilePaths).toContain(path.join(packageRoot, 'dist', 'ui', 'launcher.html'));
+      expect(probe.loadFilePaths.every((filePath) => fs.existsSync(filePath))).toBe(true);
+    } finally {
+      fs.rmSync(packageRoot, { recursive: true, force: true });
     }
   });
 });

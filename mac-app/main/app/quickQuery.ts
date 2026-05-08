@@ -1,6 +1,7 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
+import { getPackagedRendererPath } from './packagedPaths';
 
 interface QuickQueryPayload {
   query: string;
@@ -144,7 +145,7 @@ export class QuickQueryController {
     if (config.isDev) {
       void quickWindow.loadURL(this.getDevLauncherUrl());
     } else {
-      void quickWindow.loadFile(path.join(__dirname, '../../ui/launcher.html'));
+      void quickWindow.loadFile(getPackagedRendererPath('launcher.html'));
     }
 
     quickWindow.webContents.once('did-finish-load', () => {

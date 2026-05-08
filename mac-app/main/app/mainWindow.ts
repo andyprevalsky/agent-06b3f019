@@ -1,6 +1,7 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
+import { getPackagedIconBasePath, getPackagedRendererPath } from './packagedPaths';
 import { getWindowState } from './windowState';
 
 interface IconPaths {
@@ -17,7 +18,7 @@ interface CreateMainWindowOptions {
 function getIconPaths(): IconPaths {
   const iconBasePath = config.isDev
     ? path.join(__dirname, '../../../assets/icons')
-    : path.join(__dirname, '../assets/icons');
+    : getPackagedIconBasePath();
   const macIcnsPath = path.join(iconBasePath, 'app.icns');
   const macPngPath = path.join(iconBasePath, 'app.png');
 
@@ -91,7 +92,7 @@ export function createMainWindow({
     void mainWindow.loadURL(getDevRendererUrl());
     mainWindow.webContents.openDevTools();
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../../ui/index.html'));
+    void mainWindow.loadFile(getPackagedRendererPath('index.html'));
   }
 
   installNavigationGuards(mainWindow);

@@ -59,6 +59,7 @@ export function stubElectron(): void {
       name: '',
       isPackaged: false,
       getPath: vi.fn(() => '/tmp/mac-app-test'),
+      getAppPath: vi.fn(() => '/tmp/mac-app-test/app'),
       getName: vi.fn(() => 'rose-desktop-test'),
       getVersion: vi.fn(() => '0.0.0-test'),
       on: vi.fn(),
