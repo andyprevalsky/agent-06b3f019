@@ -16,25 +16,43 @@ export const filePointerSchema = z.object({
 });
 
 // Response schema field type
-export const ResponseSchemaFieldSchema = z.object({
+export const NestedResponseSchemaFieldSchema = z.object({
   name: z.string(),
-  type: z.enum([
-    'str',
-    'int',
-    'float',
-    'bool',
-    'list[str]',
-    'list[int]',
-    'object',
-    'list[object]',
-    'file_pointer',
-    'list[file_pointer]',
-    'session_file_pointer',
-    'list[session_file_pointer]',
-  ]),
-  required: z.boolean(),
-  description: z.string(),
+  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']),
 });
+
+export const ResponseSchemaFieldSchema = z
+  .object({
+    name: z.string(),
+    type: z.enum([
+      'str',
+      'int',
+      'float',
+      'bool',
+      'list[str]',
+      'list[int]',
+      'object',
+      'list[object]',
+      'file_pointer',
+      'list[file_pointer]',
+      'session_file_pointer',
+      'list[session_file_pointer]',
+    ]),
+    required: z.boolean(),
+    properties: z.array(NestedResponseSchemaFieldSchema).optional(),
+  })
+  .superRefine((field, ctx) => {
+    if (
+      (field.type === 'object' || field.type === 'list[object]') &&
+      (!field.properties || field.properties.length === 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'object and list[object] fields must include explicit properties',
+        path: ['properties'],
+      });
+    }
+  });
 
 // Response schema type (passed by parent agent for sub-agents)
 export const ResponseSchemaSchema = z.object({

@@ -74,18 +74,19 @@ def _load_tasks() -> List[BenchmarkTask]:
 
 
 def apply_sub_agent_count(task: BenchmarkTask, n: int) -> None:
-    """Substitute the {n} placeholder in prompt + eval_prompt with the chosen count.
+    """Substitute count placeholders in prompt + eval_prompt with the chosen count.
 
     Caches the original templates on the task so repeat calls (e.g. CLI override
     after JSON load already substituted) work correctly.
     """
     prompt_tpl = getattr(task, "_prompt_template", None) or task.prompt
     eval_tpl = getattr(task, "_eval_prompt_template", None) or task.eval_prompt
+    expected_sum = sum((i * i) + (i * 3) + 7 for i in range(1, n + 1))
     task._prompt_template = prompt_tpl
     task._eval_prompt_template = eval_tpl
     task.sub_agent_count = n
-    task.prompt = prompt_tpl.replace("{n}", str(n))
-    task.eval_prompt = eval_tpl.replace("{n}", str(n))
+    task.prompt = prompt_tpl.replace("{n}", str(n)).replace("{expected_sum}", str(expected_sum))
+    task.eval_prompt = eval_tpl.replace("{n}", str(n)).replace("{expected_sum}", str(expected_sum))
 
 
 _cached_tasks: Optional[List[BenchmarkTask]] = None

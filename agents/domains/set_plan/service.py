@@ -232,22 +232,51 @@ def build_plan_data(planner_result: dict[str, Any]) -> PlanData:
 def build_plan_message(plan_data: PlanData) -> str:
     """Build descriptive message based on plan structure."""
     title = plan_data["title"]
-    n_tasks = len(plan_data["tasks"])
+    tasks = plan_data["tasks"]
+    n_tasks = len(tasks)
     deps = plan_data["dependencies"]
     join = plan_data["join"]
 
+    task_lines = ["Tasks:"]
+    for idx, task in enumerate(tasks, start=1):
+        tool_name = task.get("tool_name") or "unknown"
+        goal = task.get("goal") or "(no goal)"
+        task_lines.append(f"{idx}. {goal} [{tool_name}]")
+
+    dependency_lines = ["Dependency Graph:"]
+    if deps:
+        for task_idx in sorted(deps.keys(), key=lambda value: (0, int(value)) if value.isdigit() else (1, value)):
+            predecessors = deps.get(task_idx) or []
+            display_idx = int(task_idx) + 1 if task_idx.isdigit() else task_idx
+            if predecessors:
+                display_predecessors = [
+                    str(int(pred) + 1) if isinstance(pred, str) and pred.isdigit() else str(pred)
+                    for pred in predecessors
+                ]
+                dependency_lines.append(f"- Task {display_idx} depends on: {', '.join(display_predecessors)}")
+            else:
+                dependency_lines.append(f"- Task {display_idx} has no dependencies.")
+    else:
+        dependency_lines.append("- No dependencies; all tasks can run in parallel.")
+
+    details = "\n\n".join(["\n".join(task_lines), "\n".join(dependency_lines), f"Join: {join}"])
+
     if join == "any":
-        return f"**{title}**\n\n{n_tasks} hypotheses to evaluate (any one may satisfy)."
+        summary = f"{n_tasks} hypotheses to evaluate (any one may satisfy)."
+        return f"**{title}**\n\n{summary}\n\n{details}"
 
     if not deps:
-        return f"**{title}**\n\n{n_tasks} tasks (parallel execution)."
+        summary = f"{n_tasks} tasks (parallel execution)."
+        return f"**{title}**\n\n{summary}\n\n{details}"
 
     # Determine if fully sequential or DAG
     is_sequential = all(deps.get(str(i)) == [str(i - 1)] for i in range(1, n_tasks)) and "0" not in deps
 
     if is_sequential:
-        return f"**{title}**\n\n{n_tasks} tasks (sequential execution)."
-    return f"**{title}**\n\n{n_tasks} tasks (staged execution with dependencies)."
+        summary = f"{n_tasks} tasks (sequential execution)."
+        return f"**{title}**\n\n{summary}\n\n{details}"
+    summary = f"{n_tasks} tasks (staged execution with dependencies)."
+    return f"**{title}**\n\n{summary}\n\n{details}"
 
 
 # ========================================

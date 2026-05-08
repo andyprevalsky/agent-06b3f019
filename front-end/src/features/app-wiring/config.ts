@@ -1,4 +1,5 @@
 import type { RouteEntry } from './types';
+import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
 import Index from '@/features/index';
 import Privacy from '@/features/privacy';
@@ -42,6 +43,4 @@ export const DEV_LOG_ENDPOINT = '/api/dev/log';
 export const IS_DEV = import.meta.env.DEV;
 
 /** Backend API base URL, with any trailing slash stripped. */
-export const BACKEND_URL = (
-  import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
-).replace(/\/$/, '');
+export const BACKEND_URL = BACKEND_BASE_URL;

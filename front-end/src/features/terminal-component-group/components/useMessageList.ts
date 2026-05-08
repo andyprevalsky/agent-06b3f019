@@ -61,7 +61,7 @@ function shouldAnimateAssistant(
     streamedTextsRef.current.delete(textKey);
     return false;
   }
-  return true;
+  return textKey.length > 0;
 }
 
 function shouldAnimateTool(next: Message): boolean {

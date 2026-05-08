@@ -1,4 +1,5 @@
 import type { FeatureItem, FeatureKey } from './types';
+import { backendApiUrl } from '@/lib/backendUrl';
 
 // ---------------------------------------------------------------------------
 // Hero
@@ -159,8 +160,7 @@ export const PRE_ORDER_CHECKOUT_URLS = {
 // ---------------------------------------------------------------------------
 
 export function getApiBaseUrl(): string {
-  const raw = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '');
-  return raw.endsWith('/api') ? raw : `${raw}/api`;
+  return backendApiUrl();
 }
 
 // ---------------------------------------------------------------------------

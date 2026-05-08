@@ -54,15 +54,17 @@ class AttemptCompletionManager(ToolManager):
         the verifier reads prior tool-call results, not this payload.
         """
         phase = tool_call.get("_phase")
+        verification_pending = bool(tool_call.get("_verification_pending")) and phase != "PLAN"
         event_title = PLAN_EVENT_TITLE if phase == "PLAN" else EVENT_TITLE
         event_message = PLAN_EVENT_MESSAGE if phase == "PLAN" else EVENT_MESSAGE
+        event_status = MessageStatus.IN_PROGRESS if verification_pending else MessageStatus.FINISHED
 
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=event_title,
                 message=event_message,
-                status=MessageStatus.FINISHED,
+                status=event_status,
             ),
             agent_id=agent_id,
             tool_call_id=tool_call_id,

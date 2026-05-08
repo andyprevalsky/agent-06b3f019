@@ -29,6 +29,21 @@ _desired_machine_count = 2  # Adaptive autoscaler output (min=2)
 _current_machine_count = 1  # Observed via Fly DNS
 _is_leader = False  # Whether this instance is the autoscaler leader
 _observed_task_capacity = 0  # Dynamic capacity from SDK resource-based tuner
+_machine_memory_used_percent = 0.0
+_autoscaler_memory_threshold_percent = 80.0
+_autoscaler_memory_signal_percent = 0.0
+
+
+def _process_tree_rss_bytes() -> tuple[int, int]:
+    """Return RSS bytes for this process and all currently alive children."""
+    process_rss = _process.memory_info().rss
+    child_rss = 0
+    for child in _process.children(recursive=True):
+        try:
+            child_rss += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return process_rss, child_rss
 
 
 def set_queue_metrics(
@@ -38,6 +53,9 @@ def set_queue_metrics(
     current_machines: int,
     is_leader: bool = False,
     observed_capacity: int = 0,
+    machine_memory_used_percent: float = 0.0,
+    autoscaler_memory_threshold_percent: float = 80.0,
+    autoscaler_memory_signal_percent: float = 0.0,
 ):
     """Update queue metrics from background poller. Thread-safe via GIL."""
     global \
@@ -46,13 +64,19 @@ def set_queue_metrics(
         _desired_machine_count, \
         _current_machine_count, \
         _is_leader, \
-        _observed_task_capacity
+        _observed_task_capacity, \
+        _machine_memory_used_percent, \
+        _autoscaler_memory_threshold_percent, \
+        _autoscaler_memory_signal_percent
     _task_queue_backlog = backlog
     _running_workflow_count = workflow_count
     _desired_machine_count = desired_machines
     _current_machine_count = current_machines
     _is_leader = is_leader
     _observed_task_capacity = observed_capacity
+    _machine_memory_used_percent = machine_memory_used_percent
+    _autoscaler_memory_threshold_percent = autoscaler_memory_threshold_percent
+    _autoscaler_memory_signal_percent = autoscaler_memory_signal_percent
 
 
 @app.route("/health")
@@ -71,6 +95,9 @@ def metrics():
     """Metrics endpoint (basic Prometheus format)."""
     uptime = (datetime.utcnow() - datetime.fromisoformat(worker_status["started_at"])).total_seconds()
     process_cpu_percent = _process.cpu_percent(interval=None)
+    process_rss_bytes, child_rss_bytes = _process_tree_rss_bytes()
+    tree_rss_bytes = process_rss_bytes + child_rss_bytes
+    vm = psutil.virtual_memory()
 
     metrics_text = f"""# HELP worker_healthy Worker health status (1=healthy, 0=unhealthy)
 # TYPE worker_healthy gauge
@@ -83,6 +110,30 @@ worker_uptime_seconds {uptime}
 # HELP worker_process_cpu_percent Process CPU usage percent since last scrape
 # TYPE worker_process_cpu_percent gauge
 worker_process_cpu_percent {process_cpu_percent}
+
+# HELP worker_process_rss_bytes Resident set size of the Python worker process
+# TYPE worker_process_rss_bytes gauge
+worker_process_rss_bytes {process_rss_bytes}
+
+# HELP worker_child_process_rss_bytes Resident set size of child processes spawned by the worker
+# TYPE worker_child_process_rss_bytes gauge
+worker_child_process_rss_bytes {child_rss_bytes}
+
+# HELP worker_process_tree_rss_bytes Resident set size of the worker process plus child processes
+# TYPE worker_process_tree_rss_bytes gauge
+worker_process_tree_rss_bytes {tree_rss_bytes}
+
+# HELP machine_memory_total_bytes Total memory visible to the worker process
+# TYPE machine_memory_total_bytes gauge
+machine_memory_total_bytes {vm.total}
+
+# HELP machine_memory_available_bytes Available memory visible to the worker process
+# TYPE machine_memory_available_bytes gauge
+machine_memory_available_bytes {vm.available}
+
+# HELP machine_memory_used_percent Memory usage percent visible to the worker process
+# TYPE machine_memory_used_percent gauge
+machine_memory_used_percent {_machine_memory_used_percent or vm.percent}
 
 # HELP task_queue_backlog Approximate tasks waiting in Temporal task queue (activity + workflow)
 # TYPE task_queue_backlog gauge
@@ -107,6 +158,14 @@ autoscaler_is_leader {1 if _is_leader else 0}
 # HELP observed_task_capacity Dynamic activity task capacity per machine (from SDK resource-based tuner)
 # TYPE observed_task_capacity gauge
 observed_task_capacity {_observed_task_capacity}
+
+# HELP autoscaler_memory_threshold_percent Machine memory percentage that triggers autoscaler scale-up/hold behavior
+# TYPE autoscaler_memory_threshold_percent gauge
+autoscaler_memory_threshold_percent {_autoscaler_memory_threshold_percent}
+
+# HELP autoscaler_memory_signal_percent Max machine memory percent considered by autoscaler
+# TYPE autoscaler_memory_signal_percent gauge
+autoscaler_memory_signal_percent {_autoscaler_memory_signal_percent or _machine_memory_used_percent or vm.percent}
 """
 
     return metrics_text, 200, {"Content-Type": "text/plain; charset=utf-8"}

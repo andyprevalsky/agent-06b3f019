@@ -53,7 +53,6 @@ async def test_initiation_boundary():
 
     with (
         patch("temporalio.activity.heartbeat"),
-        patch("tools.call_phone_number.save_phone_call_message", new_callable=AsyncMock),
         patch("tools.call_phone_number.asyncio.sleep", side_effect=_noop_sleep),
     ):
         from tools.call_phone_number import call_phone_number_activity
@@ -106,6 +105,42 @@ async def test_poll_boundary():
     poll = captures[1]
     assert "/api/vapi/call/call-test-123" in poll["url"]
     assert poll["method"] == "GET"
+
+
+async def test_finished_message_contains_call_evidence_for_verifier():
+    """Verify the persisted FINISHED message includes evidence the verifier can read."""
+    setup_mock_fn(_mock_handler)
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("tools.call_phone_number.save_phone_call_message", new_callable=AsyncMock),
+        patch("tools.call_phone_number.asyncio.sleep", side_effect=_noop_sleep),
+    ):
+        from tools.call_phone_number import call_phone_number_activity
+
+        result = await call_phone_number_activity(
+            to="+15559876543",
+            system_prompt="Tell them they are amazing.",
+            output_schema={"compliment_delivered": "Whether the compliment was delivered"},
+            agent_id="a-1",
+            tool_call_id="tc-1",
+        )
+
+    assert result["summary"] == "Called and discussed project details"
+    captures = get_captured_requests()
+    message_posts = [
+        capture
+        for capture in captures
+        if "/api/agents/a-1/messages" in capture["url"] and capture["method"] == "POST"
+    ]
+    assert message_posts, "Expected call completion to persist a TOOL message"
+
+    body = json.loads(message_posts[-1]["requestBody"])
+    message = body["message"]
+    assert "Summary: Called and discussed project details" in message
+    assert '"sentiment": "positive"' in message
+    assert "Transcript:" in message
+    assert "Hello, this is a test call." in message
 
 
 # -------------------- service.py tests --------------------
@@ -299,6 +334,10 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("initiation_boundary", test_initiation_boundary)
     await r.record_async("poll_boundary", test_poll_boundary)
+    await r.record_async(
+        "finished_message_contains_call_evidence_for_verifier",
+        test_finished_message_contains_call_evidence_for_verifier,
+    )
     r.record("format_phone_number_e164", test_format_phone_number_e164)
     r.record("format_phone_number_ten_digits", test_format_phone_number_ten_digits)
     r.record("format_phone_number_with_formatting", test_format_phone_number_with_formatting)

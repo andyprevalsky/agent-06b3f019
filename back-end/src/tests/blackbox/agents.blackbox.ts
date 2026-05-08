@@ -3063,6 +3063,10 @@ test('POST / — with response_schema parameter', async () => {
         type: 'list[object]',
         required: true,
         description: 'Rows with label and count',
+        properties: [
+          { name: 'label', type: 'str' },
+          { name: 'count', type: 'int' },
+        ],
       },
       {
         name: 'session_file',

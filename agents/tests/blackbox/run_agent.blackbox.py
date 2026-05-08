@@ -188,7 +188,10 @@ async def test_attempt_completion_skip_verification_returns_completed():
     ]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
+    completion_calls = []
+
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        completion_calls.append((tool_name, tool_args, tool_call_id))
         return {"message": "ac done"}
 
     result, posted, _ = await _run_single_iteration(
@@ -200,6 +203,7 @@ async def test_attempt_completion_skip_verification_returns_completed():
 
     assert result["status"] == "completed"
     assert result["final_response"] == ""
+    assert completion_calls == [("attempt_completion", {}, "tc-ac-1")]
 
 
 async def test_attempt_completion_result_used_when_skip_verification():
@@ -209,7 +213,10 @@ async def test_attempt_completion_result_used_when_skip_verification():
     ]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
+    completion_calls = []
+
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        completion_calls.append((tool_name, tool_args, tool_call_id))
         return {"message": "ac done"}
 
     result, posted, _ = await _run_single_iteration(
@@ -359,7 +366,10 @@ async def test_verifier_below_threshold_adds_feedback_and_loops():
     tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
+    completion_calls = []
+
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        completion_calls.append((tool_name, tool_args, tool_call_id))
         return {"message": "ac done"}
 
     result, _, _ = await _run_single_iteration(
@@ -376,6 +386,9 @@ async def test_verifier_below_threshold_adds_feedback_and_loops():
     # Final verifier ran and recorded progress
     assert result.get("verifier_progress") == 0.5
     assert "not quite" in (result.get("verifier_reasoning") or "")
+    assert completion_calls == [
+        ("attempt_completion", {"_verification_pending": True}, "tc-ac-1")
+    ]
 
 
 async def test_verifier_score_1_returns_completed():
@@ -383,7 +396,10 @@ async def test_verifier_score_1_returns_completed():
     tool_calls = [{"tool": "attempt_completion"}]
     detected_tools = [("attempt_completion", "tc-ac-1", 1.0)]
 
+    completion_calls = []
+
     async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        completion_calls.append((tool_name, tool_args, tool_call_id))
         return {"message": "ok"}
 
     result, _, _ = await _run_single_iteration(
@@ -399,6 +415,9 @@ async def test_verifier_score_1_returns_completed():
     assert result["status"] == "completed"
     assert result["score"] == 1.0
     assert result["message"] == "perfect"
+    assert completion_calls == [
+        ("attempt_completion", {"_verification_pending": True}, "tc-ac-1")
+    ]
 
 
 async def test_estimate_tokens():
@@ -515,7 +534,7 @@ async def test_compress_context_handles_string_return():
 
 
 async def test_run_verifier_posts_in_progress_and_finished():
-    """_run_verifier posts IN_PROGRESS + FINISHED TOOL messages with correct metadata."""
+    """_run_verifier can post progress as the original attempt_completion tool result."""
     from loop.run_agent import _run_verifier
 
     captured = []
@@ -542,6 +561,7 @@ async def test_run_verifier_posts_in_progress_and_finished():
         agent_id="agent-1",
         task_id=None,
         post_message=post_message,
+        tool_call_id="tc-attempt",
     )
 
     assert result["score"] == 0.75
@@ -550,6 +570,10 @@ async def test_run_verifier_posts_in_progress_and_finished():
     finished = captured[1]
     assert in_progress["metadata"]["toolStatus"] == "IN_PROGRESS"
     assert finished["metadata"]["toolStatus"] == "FINISHED"
+    assert in_progress["metadata"]["toolCallId"] == "tc-attempt"
+    assert finished["metadata"]["toolCallId"] == "tc-attempt"
+    assert "verifierMessage" not in in_progress["metadata"]
+    assert "verifierMessage" not in finished["metadata"]
     # Structured output rendered as Extracted Output
     assert "Extracted Output" in finished["text"]
     assert "42" in finished["text"]

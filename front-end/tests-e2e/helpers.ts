@@ -1,4 +1,10 @@
-import type { BrowserContext, ConsoleMessage, Page, Response } from '@playwright/test';
+import {
+  expect,
+  type BrowserContext,
+  type ConsoleMessage,
+  type Page,
+  type Response,
+} from '@playwright/test';
 
 export const BACKEND_URL =
   process.env.BACKEND_URL ?? `http://localhost:${process.env.BACKEND_PORT ?? '3001'}`;
@@ -19,8 +25,7 @@ const PROD_SESSION = process.env.PROD_SESSION ?? '';
 // env for CI or alternate environments.
 export const TEST_API_KEY =
   process.env.TEST_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
-export const TEST_USER_ID =
-  process.env.TEST_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+export const TEST_USER_ID = process.env.TEST_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 export const TEST_PHONE_DIGITS = process.env.TEST_PHONE_DIGITS ?? '9729777432';
 export const TEST_PHONE_E164 = process.env.TEST_PHONE_E164 ?? '+19729777432';
 export const TEST_OTP = process.env.TEST_OTP ?? '181818';
@@ -97,18 +102,48 @@ export async function expectProdSessionRecognized(page: Page): Promise<void> {
   }
 }
 
+export async function expectDevAuthenticated(page: Page, rec: Recorder): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const authCompleted = rec.console.some(
+          (m) =>
+            m.text.includes('[Auth] Dev auto-login complete') ||
+            m.text.includes('[Auth] Found non-anonymous session') ||
+            (m.text.includes('[Auth] State changed') && m.text.includes('isFullySignedIn: true')),
+        );
+        if (authCompleted) return true;
+
+        return page.evaluate(() => {
+          const raw = window.localStorage.getItem('rose-session');
+          if (!raw) return false;
+          try {
+            const session = JSON.parse(raw);
+            return Boolean(session?.access_token && session?.user?.is_anonymous === false);
+          } catch {
+            return false;
+          }
+        });
+      },
+      { timeout: 15_000, message: 'Dev authenticated session was not established' },
+    )
+    .toBe(true);
+}
+
 /**
  * Dev builds auto-login with test credentials. To exercise the logged-out
  * flow we block the auto-login endpoints before navigation, then unblock
  * before the real login attempt.
  */
 export async function forceLoggedOut(context: BrowserContext): Promise<void> {
+  await context.route('**/api/auth/send-otp', (r) => r.abort());
   await context.route('**/api/auth/verify-otp', (r) => r.abort());
   await context.route('**/api/auth/anonymous', (r) => r.abort());
   await context.route('**/auth/v1/signup**', (r) => r.abort());
 }
 
 export async function allowAuthEndpoints(context: BrowserContext): Promise<void> {
+  await context.unroute('**/api/auth/send-otp').catch(() => {});
   await context.unroute('**/api/auth/verify-otp').catch(() => {});
   await context.unroute('**/api/auth/anonymous').catch(() => {});
   await context.unroute('**/auth/v1/signup**').catch(() => {});

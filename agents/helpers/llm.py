@@ -942,11 +942,6 @@ async def build_llm_messages(  # noqa: C901
             continue
 
         if role == "TOOL":
-            # Verifier messages are already mirrored back into context as SYSTEM text.
-            # Skip raw verifier TOOL rows to avoid duplicate context.
-            if metadata.get("verifierMessage"):
-                continue
-
             if _is_cloud_agent_lifecycle_tool(metadata):
                 continue
 
@@ -2747,7 +2742,10 @@ def _extract_structured_responses_from_verifier_messages(messages: List[Dict[str
         return []
 
     for message in messages:
-        for text in iter_text_parts(message.get("content")):
+        parts = iter_text_parts(message.get("content"))
+        if isinstance(message.get("text"), str):
+            parts.append(message["text"])
+        for text in parts:
             start = 0
             while True:
                 marker_index = text.find("Structured Response:", start)
@@ -2806,7 +2804,6 @@ def _fill_missing_verifier_output_from_messages(
                 output[name] = source[name]
                 filled.append(name)
                 break
-
     if filled:
         logger.info(
             "Filled missing verifier output fields from structured tool response",
@@ -2834,6 +2831,53 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
         return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
     return True
+
+
+def _normalize_schema_field_type(field_type: Any) -> Optional[str]:
+    if not isinstance(field_type, str):
+        return None
+    normalized = field_type.strip().lower()
+    aliases = {
+        "string": "str",
+        "integer": "int",
+        "number": "float",
+        "boolean": "bool",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _nested_fields_for_object_field(field: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return explicitly declared subfields for object outputs."""
+    explicit = field.get("properties")
+    if isinstance(explicit, list):
+        fields: List[Dict[str, Any]] = []
+        for item in explicit:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            field_type = _normalize_schema_field_type(item.get("type"))
+            if isinstance(name, str) and name and field_type:
+                fields.append({
+                    "name": name,
+                    "type": field_type,
+                    "description": item.get("description", ""),
+                })
+        if fields:
+            return fields
+    if isinstance(explicit, dict):
+        fields = []
+        for name, spec in explicit.items():
+            if isinstance(spec, dict):
+                field_type = _normalize_schema_field_type(spec.get("type"))
+                description = spec.get("description", "")
+            else:
+                field_type = _normalize_schema_field_type(spec)
+                description = ""
+            if isinstance(name, str) and name and field_type:
+                fields.append({"name": name, "type": field_type, "description": description})
+        if fields:
+            return fields
+    return []
 
 
 def _structured_response_satisfies_schema(
@@ -2900,9 +2944,9 @@ def _build_verifier_response_model(
     if response_schema and response_schema.get("fields"):
         output_fields: Dict[str, Any] = {}
         for field in response_schema["fields"]:
-            if field.get("type") in ("object", "list[object]"):
+            if field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field):
                 openai_strict = False
-            annotation = _verifier_field_annotation(field.get("type"))
+            annotation = _verifier_field_annotation_for_field(field)
             output_fields[field["name"]] = (
                 annotation,
                 Field(..., description=field.get("description", "")),
@@ -2929,6 +2973,140 @@ def _build_verifier_response_model(
     model = create_model(name, **fields)
     setattr(model, "rose_openai_strict", openai_strict)
     return model
+
+
+def _verifier_field_annotation_for_field(field: Dict[str, Any]) -> Any:
+    field_type = field.get("type")
+    nested_fields = _nested_fields_for_object_field(field)
+    if field_type == "object" and nested_fields:
+        return _build_nested_verifier_model(field.get("name") or "object", nested_fields)
+    if field_type == "list[object]" and nested_fields:
+        return List[_build_nested_verifier_model(field.get("name") or "item", nested_fields)]
+    return _verifier_field_annotation(field_type)
+
+
+def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]]) -> Type[BaseModel]:
+    safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") or "Object"
+    model_fields: Dict[str, Any] = {}
+    for nested in nested_fields:
+        nested_name = nested.get("name")
+        if not isinstance(nested_name, str) or not nested_name:
+            continue
+        model_fields[nested_name] = (
+            _verifier_field_annotation(nested.get("type")),
+            Field(..., description=nested.get("description", "")),
+        )
+    return create_model(f"Verifier{safe_name.title().replace('_', '')}", **model_fields)
+
+
+def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+    """Return JSON Schema for one response field and whether it is open-shape."""
+    field_type = field.get("type")
+
+    if field_type == "str":
+        return {"type": "string"}, False
+    if field_type == "int":
+        return {"type": "integer"}, False
+    if field_type == "float":
+        return {"type": "number"}, False
+    if field_type == "bool":
+        return {"type": "boolean"}, False
+    if field_type == "list[str]":
+        return {"type": "array", "items": {"type": "string"}}, False
+    if field_type == "list[int]":
+        return {"type": "array", "items": {"type": "integer"}}, False
+    if field_type in ("object", "list[object]"):
+        nested_fields = _nested_fields_for_object_field(field)
+        if nested_fields:
+            nested_properties: Dict[str, Any] = {}
+            nested_required: List[str] = []
+            nested_open = False
+            for nested in nested_fields:
+                nested_name = nested.get("name")
+                if not isinstance(nested_name, str) or not nested_name:
+                    continue
+                nested_schema, is_open = _json_schema_for_response_field(nested)
+                nested_properties[nested_name] = nested_schema
+                nested_required.append(nested_name)
+                nested_open = nested_open or is_open
+            object_schema = {
+                "type": "object",
+                "properties": nested_properties,
+                "required": nested_required,
+                "additionalProperties": False,
+            }
+            if field_type == "object":
+                return object_schema, nested_open
+            return {"type": "array", "items": object_schema}, nested_open
+
+        # Legacy stored schemas may predate explicit object properties. New
+        # schemas are validated at generation/API boundaries, but old rows
+        # should still run without inventing nested requirements from prose.
+        open_schema = {
+            "type": "object",
+            "additionalProperties": True,
+        }
+        if field.get("description"):
+            open_schema["description"] = field["description"]
+        if field_type == "object":
+            return open_schema, True
+        array_schema = {"type": "array", "items": open_schema}
+        if field.get("description"):
+            array_schema["description"] = field["description"]
+        return array_schema, True
+    if field_type == "file_pointer":
+        file_pointer_schema = {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "File UUID. MUST copy exactly from Structured Response.",
+                },
+                "storage_path": {
+                    "type": "string",
+                    "description": "Supabase storage path. MUST copy exactly from Structured Response.",
+                },
+                "original_filename": {
+                    "type": "string",
+                    "description": "Original filename.",
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type (e.g., image/jpeg).",
+                },
+                "size_bytes": {
+                    "type": "integer",
+                    "description": "File size in bytes.",
+                },
+                "created_at": {
+                    "type": "string",
+                    "description": "ISO timestamp.",
+                },
+            },
+            "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
+            "additionalProperties": False,
+        }
+        return file_pointer_schema, False
+    if field_type == "list[file_pointer]":
+        item_schema, _ = _json_schema_for_response_field({"type": "file_pointer"})
+        return {"type": "array", "items": item_schema}, False
+    if field_type == "session_file_pointer":
+        session_file_pointer_schema = {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "ABSOLUTE file path starting with /.",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        }
+        return session_file_pointer_schema, False
+    if field_type == "list[session_file_pointer]":
+        item_schema, _ = _json_schema_for_response_field({"type": "session_file_pointer"})
+        return {"type": "array", "items": item_schema}, False
+    return {"type": "string"}, False
 
 
 def _verifier_field_annotation(field_type: Optional[str]) -> Any:
@@ -3003,148 +3181,8 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 
         for field in response_schema["fields"]:
             field_name = field["name"]
-            field_type = field["type"]
-
-            # Map our types to JSON schema types
-            if field_type == "str":
-                json_type = {"type": "string"}
-            elif field_type == "int":
-                json_type = {"type": "integer"}
-            elif field_type == "float":
-                json_type = {"type": "number"}
-            elif field_type == "bool":
-                json_type = {"type": "boolean"}
-            elif field_type == "list[str]":
-                json_type = {"type": "array", "items": {"type": "string"}}
-            elif field_type == "list[int]":
-                json_type = {"type": "array", "items": {"type": "integer"}}
-            elif field_type == "object":
-                # Open-shape object — sub-fields are described in `description`
-                # rather than declared in JSON schema. The verifier is expected
-                # to populate per the description text. additionalProperties=True
-                # is incompatible with OpenAI strict mode, so we disable strict
-                # at the envelope level when this branch is taken.
-                has_open_object = True
-                json_type = {
-                    "type": "object",
-                    "additionalProperties": True,
-                    "description": field.get("description", ""),
-                }
-            elif field_type == "list[object]":
-                # Open-shape list of objects. See note on `object` above.
-                has_open_object = True
-                json_type = {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": True,
-                    },
-                    "description": field.get("description", ""),
-                }
-            elif field_type == "file_pointer":
-                # Full FilePointer schema - used by main agent and spawn_sub_agent verifiers
-                # Expects context to contain full FilePointer with all fields populated
-                file_pointer_schema = {
-                    "type": "object",
-                    "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "File UUID. MUST copy exactly from Structured Response.",
-                        },
-                        "storage_path": {
-                            "type": "string",
-                            "description": "Supabase storage path. MUST copy exactly from Structured Response.",
-                        },
-                        "original_filename": {
-                            "type": "string",
-                            "description": "Original filename. MUST copy exactly from Structured Response.",
-                        },
-                        "mime_type": {
-                            "type": "string",
-                            "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response.",
-                        },
-                        "size_bytes": {
-                            "type": "integer",
-                            "description": "File size in bytes. MUST copy exactly from Structured Response.",
-                        },
-                        "created_at": {
-                            "type": "string",
-                            "description": "ISO timestamp. MUST copy exactly from Structured Response.",
-                        },
-                    },
-                    "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
-                    "additionalProperties": False,
-                }
-                json_type = file_pointer_schema
-            elif field_type == "list[file_pointer]":
-                # List of full FilePointers
-                file_pointer_schema = {
-                    "type": "object",
-                    "description": "Full file reference with all metadata. Copy ALL fields exactly from 'Structured Response' in context.",
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "File UUID. MUST copy exactly from Structured Response.",
-                        },
-                        "storage_path": {
-                            "type": "string",
-                            "description": "Supabase storage path. MUST copy exactly from Structured Response.",
-                        },
-                        "original_filename": {
-                            "type": "string",
-                            "description": "Original filename. MUST copy exactly from Structured Response.",
-                        },
-                        "mime_type": {
-                            "type": "string",
-                            "description": "MIME type (e.g., image/jpeg). MUST copy exactly from Structured Response.",
-                        },
-                        "size_bytes": {
-                            "type": "integer",
-                            "description": "File size in bytes. MUST copy exactly from Structured Response.",
-                        },
-                        "created_at": {
-                            "type": "string",
-                            "description": "ISO timestamp. MUST copy exactly from Structured Response.",
-                        },
-                    },
-                    "required": ["id", "storage_path", "original_filename", "mime_type", "size_bytes", "created_at"],
-                    "additionalProperties": False,
-                }
-                json_type = {"type": "array", "items": file_pointer_schema}
-            elif field_type == "session_file_pointer":
-                # Session file pointer - used by cloud agent verifiers (spawn_claude_code_agent, spawn_browser_agent)
-                # Only extracts the path from terminal output - activity handles download/upload
-                session_file_pointer_schema = {
-                    "type": "object",
-                    "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output.",
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                }
-                json_type = session_file_pointer_schema
-            elif field_type == "list[session_file_pointer]":
-                # List of session file pointers
-                session_file_pointer_schema = {
-                    "type": "object",
-                    "description": "File reference from remote session. Extract the ABSOLUTE file path from terminal output.",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "ABSOLUTE file path starting with /. Example: '/home/user/output/report.pdf'. Extract the full path exactly as shown in terminal output.",
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": False,
-                }
-                json_type = {"type": "array", "items": session_file_pointer_schema}
-            else:
-                json_type = {"type": "string"}  # Default fallback
+            json_type, is_open = _json_schema_for_response_field(field)
+            has_open_object = has_open_object or is_open
 
             output_properties[field_name] = json_type
 

@@ -233,6 +233,11 @@ async def test_manager_happy_path_yields_pre_and_post_events():
     assert pre.metadata is not None
     assert "requestUserApproval" in pre.metadata
     assert pre.metadata["requestUserApproval"]["attentionRequestId"] == "req-abc"
+    post = next(e for e in events if e.status == MessageStatus.FINISHED)
+    assert "Approval request:" in post.message
+    assert "Approve?" in post.message
+    assert "User response:" in post.message
+    assert "Approved!" in post.message
 
 
 async def test_manager_create_request_failure_yields_error():
@@ -352,6 +357,11 @@ async def test_direct_approval_returns_response_text():
     assert result["response"] == "Go ahead"
     assert result["question"] == "Send?"
     assert result["attention_request_id"] == "req-q"
+    post = next(ev for ev, _, _ in wf.handled_events if ev.status.name == "FINISHED")
+    assert "Approval request:" in post.message
+    assert "Send?" in post.message
+    assert "User response:" in post.message
+    assert "Go ahead" in post.message
 
 
 async def test_direct_create_failure_propagates():

@@ -105,6 +105,13 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(screen.getByText('Thought')).toBeInTheDocument());
   });
 
+  it('does not render ASSISTANT thought card when the message has no content', () => {
+    const msg = baseMessage({ role: 'ASSISTANT', text: '   ' });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    expect(screen.queryByText('Thought')).not.toBeInTheDocument();
+    expect(container.firstChild).toBeNull();
+  });
+
   it('renders ASSISTANT with shouldType=true as Thinking (IN_PROGRESS)', async () => {
     const msg = baseMessage({ role: 'ASSISTANT', text: 'working' });
     const onComplete = vi.fn();
@@ -135,6 +142,24 @@ describe('MessageBubble', () => {
     renderBubble(<MessageBubble message={msg} />);
     await waitFor(() => expect(screen.getByText('output.txt')).toBeInTheDocument());
     expect(screen.getByText('see file')).toBeInTheDocument();
+  });
+
+  it('renders ASSISTANT attachment row even when the message has no text', async () => {
+    const msg = baseMessage({
+      role: 'ASSISTANT',
+      text: '',
+      file_pointer: {
+        id: 'fp3',
+        storage_path: '',
+        original_filename: 'empty-output.txt',
+        mime_type: 'text/plain',
+        size_bytes: 32,
+        created_at: new Date().toISOString(),
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => expect(screen.getByText('empty-output.txt')).toBeInTheDocument());
+    expect(screen.queryByText('Thought')).not.toBeInTheDocument();
   });
 
   it('renders TOOL FINISHED as tool card with title and chevron', async () => {

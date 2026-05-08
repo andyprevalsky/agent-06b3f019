@@ -32,6 +32,27 @@ from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 
 logger = structlog.get_logger()
 
+COMMON_CSV_HEADER_NAMES = {
+    "address",
+    "city",
+    "company",
+    "contact",
+    "country",
+    "email",
+    "first_name",
+    "firstname",
+    "last_name",
+    "lastname",
+    "linkedin",
+    "name",
+    "phone",
+    "state",
+    "title",
+    "url",
+    "website",
+    "zip",
+}
+
 
 # =============================================================================
 # VALIDATION
@@ -91,6 +112,16 @@ def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
     return "execute" if phase == "EXECUTE" else "plan"
 
 
+def _looks_like_common_csv_header(row: List[str]) -> bool:
+    """Return True for common field-name headers when csv.Sniffer is inconclusive."""
+    cleaned = [str(cell).strip() for cell in row if str(cell).strip()]
+    if len(cleaned) < 2 or len(set(cell.lower() for cell in cleaned)) != len(cleaned):
+        return False
+
+    normalized = [cell.lower().replace(" ", "_").replace("-", "_") for cell in cleaned]
+    return any(cell in COMMON_CSV_HEADER_NAMES for cell in normalized)
+
+
 def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
     """Parse for_each items from list or CSV input."""
     items = tool_call.get("items")
@@ -111,6 +142,13 @@ def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
         has_header = csv.Sniffer().has_header(text[:4096])
     except Exception:
         has_header = False
+
+    if not has_header:
+        try:
+            first_row = next(csv.reader(io.StringIO(text)), [])
+            has_header = _looks_like_common_csv_header(first_row)
+        except Exception:
+            has_header = False
 
     if has_header:
         try:

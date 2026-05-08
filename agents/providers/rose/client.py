@@ -46,6 +46,7 @@ from providers.rose.gpt_auth import gpt_auth_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.pools import PoolName, get_pool
 from providers.rose.schema import (
+    SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
     tool_requires_forced_choice,
@@ -74,6 +75,15 @@ _FALL_THROUGH_ERRORS = (
     RoseAuthError,
     RoseRateLimitError,
 )
+
+
+def _is_synthetic_output_toolset(tools: Optional[List[Dict[str, Any]]]) -> bool:
+    return (
+        isinstance(tools, list)
+        and len(tools) == 1
+        and isinstance(tools[0], dict)
+        and tools[0].get("name") == SYNTHETIC_OUTPUT_TOOL_NAME
+    )
 
 
 class _FallThrough(Exception):
@@ -185,11 +195,19 @@ class RoseClient:
                 model=pool_spec.claude_auth_model,
             )
         if claude_auth is not None:
-            claude_auth_tools = direct_auth_tools
+            # Plain structured-output models are better enforced by Anthropic
+            # `output_config.format` than by a synthetic submit tool. Keep
+            # native tools only for real tool-call models.
+            if not _is_synthetic_output_toolset(direct_auth_tools):
+                claude_auth_tools = direct_auth_tools
             if claude_auth_tools and any(tool_requires_forced_choice(tool) for tool in claude_auth_tools):
                 claude_auth_tool_choice = "any"
         if gpt_auth is not None:
-            gpt_auth_tools = direct_auth_tools
+            # Plain structured-output models are better enforced by the
+            # Responses `text.format` JSON schema than by a synthetic submit
+            # tool. Keep native tools only for real tool-call models.
+            if not _is_synthetic_output_toolset(direct_auth_tools):
+                gpt_auth_tools = direct_auth_tools
             if gpt_auth_tools:
                 gpt_auth_tool_choice = "any"
 
@@ -290,7 +308,7 @@ class RoseClient:
                             messages=messages,
                             tools=claude_auth_tools,
                             tool_choice=claude_auth_tool_choice,
-                            response_format=None,
+                            response_format=None if claude_auth_tools else openrouter_response_format,
                             max_tokens=max_tokens,
                             skip_cache_write=skip_cache_write,
                             auth=cast(ClaudeAuthContext, attempt_auth),

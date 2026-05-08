@@ -93,6 +93,15 @@ async def generate_message_activity(
     person_email: str | None = None,
     general_messages_context: str = "",
     agent_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    claude_token_user_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    gpt_token_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Generate a message for a person using the inherited LLM model.
 
@@ -212,6 +221,15 @@ async def generate_message_activity(
         max_tokens=1024,
         call_site="message_person",
         agent_id=agent_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        claude_token_user_id=claude_token_user_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        gpt_token_user_id=gpt_token_user_id,
     )
 
     content = result.get("content", "").strip()

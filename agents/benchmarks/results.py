@@ -35,6 +35,7 @@ class BenchmarkRun:
     suite: str = "all"
     base_url: str = ""
     task_results: List[TaskResult] = field(default_factory=list)
+    memory_summary: Optional[dict] = None
 
     @property
     def summary(self) -> dict:
@@ -71,6 +72,7 @@ class BenchmarkRun:
             "suite": self.suite,
             "base_url": self.base_url,
             "summary": self.summary,
+            "memory_summary": self.memory_summary,
             "tasks": [asdict(r) for r in self.task_results],
         }
 
@@ -125,6 +127,7 @@ class BenchmarkRun:
             timestamp=data["timestamp"],
             suite=data["suite"],
             base_url=data["base_url"],
+            memory_summary=data.get("memory_summary"),
         )
         for t in data["tasks"]:
             run.task_results.append(TaskResult(**t))

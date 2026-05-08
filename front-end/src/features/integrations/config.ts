@@ -1,8 +1,7 @@
 import type { BrowserType } from '@/features/integration-handlers-context';
+import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
-export const API_BASE_URL = (
-  import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
-).replace(/\/$/, '');
+export const API_BASE_URL = BACKEND_BASE_URL;
 
 export const API_BASE_WITH_PATH = `${API_BASE_URL}/api`;
 

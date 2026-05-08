@@ -1,8 +1,9 @@
 /**
  * Fallback routes. If the specialised-bubble router returned undefined and we
- * have generic toolData, render a generic ToolMessage. Otherwise choose
- * between UserBubble, AssistantAttachmentBubble, or DefaultBubble based on
- * the message role + file_pointer presence.
+ * have generic toolData, render a generic ToolMessage. Empty synthetic thought
+ * messages render nothing. Otherwise choose between UserBubble,
+ * AssistantAttachmentBubble, or DefaultBubble based on the message role +
+ * file_pointer presence.
  */
 import type { ReactElement } from 'react';
 import { cn } from '@/lib/utils';
@@ -19,7 +20,7 @@ interface Args {
   toolData: ToolMessageData | null;
 }
 
-export function renderFallbackBubble({ props, routing, toolData }: Args): ReactElement {
+export function renderFallbackBubble({ props, routing, toolData }: Args): ReactElement | null {
   const {
     message,
     shouldType = false,
@@ -45,6 +46,10 @@ export function renderFallbackBubble({ props, routing, toolData }: Args): ReactE
 
   if (routing.isAssistant && message.file_pointer) {
     return <AssistantAttachmentBubble message={message} agentId={agentId} />;
+  }
+
+  if (routing.isAssistant && !isStreaming && message.text.trim().length === 0) {
+    return null;
   }
 
   return <DefaultBubble message={message} isStreaming={isStreaming} />;

@@ -244,8 +244,13 @@ class FlyLogCollector:
         except Exception:
             pass
 
-    def get_logs_for_agent(self, agent_id: str) -> List[str]:
-        """Filter captured logs for a specific agent_id."""
+    def get_logs_for_agent(self, agent_id: str, limit: Optional[int] = None) -> List[str]:
+        """Filter captured logs for a specific agent_id.
+
+        ``limit`` is accepted for backwards compatibility with older callers,
+        but intentionally ignored. Benchmark diagnostics should preserve the
+        full live stream so latency analysis is not biased by truncation.
+        """
         with self._lock:
             snapshot = list(self._lines)
 

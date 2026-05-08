@@ -7,6 +7,7 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -499,6 +500,7 @@ class SpawnAgentManager(ToolManager):
 
         sub_manager = get_sub_agent_manager()
         failed_count = 0
+        child_outputs: List[Dict[str, Any]] = []
 
         async def _drain_child(idx: int, child_info: Dict[str, Any]):
             nonlocal failed_count
@@ -516,6 +518,16 @@ class SpawnAgentManager(ToolManager):
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:
                         saw_error = True
+                    if isinstance(event, ToolEvent) and event.status == MessageStatus.FINISHED:
+                        event_metadata = event.metadata or {}
+                        child_outputs.append(
+                            {
+                                "index": idx,
+                                "agent_id": child_info.get("agent_id"),
+                                "summary": event.message or "",
+                                "structured_response": event_metadata.get("structured_response"),
+                            }
+                        )
             except Exception as exc:
                 saw_error = True
                 logger.warning("for_each child finalize failed", tcid=tcid, error=str(exc))
@@ -533,9 +545,32 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
-        # All succeeded -- no events to yield (already posted directly)
-        return
-        yield  # make this an async generator
+        # The per-child events use suffixed IDs (`parent:idx`) for UI routing.
+        # Also yield one terminal event for the declared parent tool_call_id so
+        # the next LLM context has a valid assistant tool_use -> tool_result pair.
+        child_outputs.sort(key=lambda item: item.get("index", 0))
+        child_summary_lines = []
+        for item in child_outputs:
+            idx = item.get("index")
+            structured = item.get("structured_response")
+            if structured:
+                child_summary_lines.append(f"- item {idx}: {json.dumps(structured, sort_keys=True)}")
+            elif item.get("summary"):
+                child_summary_lines.append(f"- item {idx}: {item['summary']}")
+        child_summary_text = "\n".join(child_summary_lines)
+        message = f"Completed for_each delegation for {len(child_outputs)} items."
+        if child_summary_text:
+            message = f"{message}\n\nChild outputs:\n{child_summary_text}"
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="for_each complete",
+            message=message,
+            status=MessageStatus.FINISHED,
+            metadata={
+                "toolName": "spawn_sub_agent_for_each",
+                "structured_response": {"items": child_outputs},
+            },
+        )
 
 
 def get_manager():

@@ -37,7 +37,7 @@ ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 # preserved here so the call site stays explicit, but it's effectively
 # advisory.
 VERIFIER_ULTRA_MODEL = "rose-labs/rose-1-ultra"
-VERIFIER_ULTRA_TIMEOUT_SECONDS = 7
+VERIFIER_ULTRA_TIMEOUT_SECONDS = 60
 
 # Write lock approval timeout
 WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120

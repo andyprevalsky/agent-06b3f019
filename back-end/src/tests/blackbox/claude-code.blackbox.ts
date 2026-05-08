@@ -1072,6 +1072,44 @@ async function testGetByAgent_validUuidEmpty() {
   }
 }
 
+async function testParseClaudeCodeUsage_nestedMessageUsage() {
+  const { parseClaudeCodeUsage } = await import('../../providers/e2b');
+  const jsonl = [
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        usage: {
+          input_tokens: 100,
+          output_tokens: 25,
+          cache_read_input_tokens: 60,
+          cache_creation_input_tokens: 40,
+        },
+      },
+    }),
+    JSON.stringify({
+      usage: {
+        input_tokens: 10,
+        output_tokens: 2,
+        cache_read_input_tokens: 6,
+        cache_creation_input_tokens: 4,
+      },
+    }),
+    '{not json',
+  ].join('\n');
+
+  const usage = parseClaudeCodeUsage(jsonl);
+  assert(usage.inputTokens === 110, `expected 110 input tokens, got ${usage.inputTokens}`);
+  assert(usage.outputTokens === 27, `expected 27 output tokens, got ${usage.outputTokens}`);
+  assert(
+    usage.cacheReadInputTokens === 66,
+    `expected 66 cache read tokens, got ${usage.cacheReadInputTokens}`
+  );
+  assert(
+    usage.cacheCreationInputTokens === 44,
+    `expected 44 cache creation tokens, got ${usage.cacheCreationInputTokens}`
+  );
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -1154,6 +1192,10 @@ async function runAll() {
     {
       name: 'GET /agent/:agentId -- valid UUID returns empty sessions',
       fn: testGetByAgent_validUuidEmpty,
+    },
+    {
+      name: 'usage parser -- nested Claude Code message usage',
+      fn: testParseClaudeCodeUsage_nestedMessageUsage,
     },
   ];
 

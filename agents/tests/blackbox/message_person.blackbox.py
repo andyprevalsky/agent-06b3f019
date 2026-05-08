@@ -99,6 +99,47 @@ async def test_no_httpx_from_generate_message():
     assert len(captures) == 0
 
 
+async def test_generate_message_activity_forwards_compute_tokens_to_llm():
+    """Nested message generation uses the workflow-selected direct compute token."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm") as mock_llm,
+    ):
+        mock_llm.return_value = {
+            "content": "Subject: Hello\nHi Alice!",
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        }
+        from tools.message_person import generate_message_activity
+
+        result = await generate_message_activity(
+            model="rose-labs/rose-1-lite",
+            system_name="Navi",
+            conversation_context="User asked to message Alice",
+            person_name="Alice",
+            messages_context="Recent thread with Alice",
+            exa_context="",
+            intent="Follow up on project",
+            channel="email",
+            person_email="alice@example.com",
+            general_messages_context="Recent user style",
+            agent_id="agent-1",
+            gpt_token="gpt-token-1",
+            gpt_account_id="acct-1",
+            gpt_token_source="pool",
+            gpt_token_pool_id="pool-token-1",
+            gpt_token_user_id="user-1",
+        )
+
+    assert result["subject"] == "Hello"
+    _, kwargs = mock_llm.call_args
+    assert kwargs["gpt_token"] == "gpt-token-1"
+    assert kwargs["gpt_account_id"] == "acct-1"
+    assert kwargs["gpt_token_source"] == "pool"
+    assert kwargs["gpt_token_pool_id"] == "pool-token-1"
+    assert kwargs["gpt_token_user_id"] == "user-1"
+
+
 # ── classify_person_id ──────────────────────────────────────────────
 
 
@@ -428,10 +469,12 @@ def test_build_finished_event_email_with_subject():
 class _FakeWFModule:
     def __init__(self, activity_results=None):
         self._results = activity_results or {}
+        self.calls = []
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
+        self.calls.append({"name": name, "args": args or [], "kwargs": kwargs})
         if name in self._results:
             value = self._results[name]
             if isinstance(value, Exception):
@@ -467,6 +510,30 @@ class _WFInstance:
 
     async def _handle_tool_event(self, event, tool_call_id, tool_name):
         self.handled.append((event, tool_call_id, tool_name))
+
+    async def _refresh_compute_token(self, user_id):
+        self.refreshed_user_id = user_id
+
+    def _active_claude_token(self):
+        return None
+
+    def _active_claude_source(self):
+        return None
+
+    def _active_claude_pool_id(self):
+        return None
+
+    def _active_gpt_token(self):
+        return "gpt-token-1"
+
+    def _active_gpt_account_id(self):
+        return "acct-1"
+
+    def _active_gpt_source(self):
+        return "pool"
+
+    def _active_gpt_pool_id(self):
+        return "pool-token-1"
 
 
 async def _collect(gen):
@@ -640,6 +707,48 @@ async def test_handler_empty_generated_message_yields_error():
     assert any("Empty message" in (e.title or "") for e in errs)
 
 
+async def test_handler_passes_workflow_compute_token_to_generate_activity():
+    """message_person generation activity inherits the agent workflow compute token."""
+    from domains.message_person.handler import MessagePersonManager
+
+    fake = _FakeWFModule(
+        activity_results={
+            "generate_message_activity": {"message": "Hi Alice!", "usage": {}},
+        }
+    )
+    wf = _WFInstance()
+    restore = _patch_handler_workflow(fake)
+    try:
+        result = await MessagePersonManager()._generate_message(
+            wf,
+            "rose-labs/rose-1-lite",
+            "Navi",
+            "conversation",
+            "Alice Smith",
+            "messages",
+            "",
+            "say hi",
+            "imessage",
+            "alice@example.com",
+            "voice",
+            "agent-1",
+        )
+    finally:
+        restore()
+
+    assert result["message"] == "Hi Alice!"
+    call = fake.calls[-1]
+    assert call["name"] == "generate_message_activity"
+    assert call["args"][-5:] == [
+        "gpt-token-1",
+        "acct-1",
+        "pool",
+        "pool-token-1",
+        "user-1",
+    ]
+    assert wf.refreshed_user_id == "user-1"
+
+
 async def test_handler_generate_message_raises_yields_error():
     """generate_message_activity raising -> propagates as error."""
     from domains.message_person.handler import MessagePersonManager
@@ -806,6 +915,10 @@ async def run_all_tests():
     await r.record_async("fetch_recent_messages_happy_path", test_fetch_recent_messages_happy_path)
     await r.record_async("fetch_recent_messages_boundary", test_fetch_recent_messages_boundary)
     await r.record_async("no_httpx_from_generate_message", test_no_httpx_from_generate_message)
+    await r.record_async(
+        "generate_message_forwards_compute_token",
+        test_generate_message_activity_forwards_compute_tokens_to_llm,
+    )
     # classify_person_id
     r.record("classify_phone_full", test_classify_person_id_phone_full)
     r.record("classify_phone_10digit", test_classify_person_id_phone_10_digit)
@@ -855,6 +968,10 @@ async def run_all_tests():
     await r.record_async("handler_no_person_no_id", test_handler_no_person_found_no_id_yields_error)
     await r.record_async("handler_channel_mismatch", test_handler_channel_mismatch_no_phone)
     await r.record_async("handler_empty_message", test_handler_empty_generated_message_yields_error)
+    await r.record_async(
+        "handler_compute_token_to_generate",
+        test_handler_passes_workflow_compute_token_to_generate_activity,
+    )
     await r.record_async("handler_gen_raises", test_handler_generate_message_raises_yields_error)
     await r.record_async("handler_cold_outreach_email", test_handler_cold_outreach_email_path)
     await r.record_async("handler_user_rejects", test_handler_user_rejects_approval)

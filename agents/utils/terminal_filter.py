@@ -5,7 +5,12 @@ ANSI escape sequences, handles cursor movement, line overwrites, etc.
 This provides clean, deduped output for the parent LLM.
 """
 
+import re
+
 import pyte
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class TerminalFilter:
@@ -33,6 +38,7 @@ class TerminalFilter:
         self.rows = rows
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.Stream(self.screen)
+        self._raw_chunks: list[str] = []
 
     def feed(self, data: str) -> None:
         """
@@ -41,6 +47,7 @@ class TerminalFilter:
         Args:
             data: Raw terminal output including ANSI codes
         """
+        self._raw_chunks.append(data)
         self.stream.feed(data)
 
     def get_display(self) -> str:
@@ -66,9 +73,19 @@ class TerminalFilter:
         """
         return "\n".join(line.rstrip() for line in self.screen.display)
 
+    def get_raw_output(self) -> str:
+        """
+        Get raw terminal output with ANSI control sequences removed.
+
+        This preserves machine-readable lines before terminal emulation wraps
+        them to the screen width, which matters for structured JSON output.
+        """
+        return ANSI_ESCAPE_RE.sub("", "".join(self._raw_chunks))
+
     def reset(self) -> None:
         """Reset the terminal state (e.g., on reconnection with new buffer)."""
         self.screen.reset()
+        self._raw_chunks.clear()
 
     def get_cursor_position(self) -> tuple[int, int]:
         """

@@ -431,44 +431,48 @@ def test_build_verifier_json_schema_all_types():
 
 
 def test_build_verifier_json_schema_object_type():
-    """_build_verifier_json_schema accepts `object` and disables strict mode.
-
-    Open-object fields (additionalProperties: True) are incompatible with
-    OpenAI strict mode. The schema builder must emit a sensible JSON Schema
-    for `object` AND drop the `strict` flag at the envelope level so the
-    payload is accepted by structured-output models.
-    """
+    """`object` fields with explicit properties emit closed nested schema."""
     from helpers.llm import _build_verifier_json_schema
 
     response_schema = {
         "fields": [
-            {"name": "meta", "type": "object", "description": "Generic object meta"},
+            {
+                "name": "selected_beanie",
+                "type": "object",
+                "properties": [
+                    {"name": "title", "type": "str"},
+                    {"name": "price_usd", "type": "float"},
+                ],
+            },
         ]
     }
     result = _build_verifier_json_schema(response_schema)
     output = result["json_schema"]["schema"]["properties"]["output"]
     props = output["properties"]
 
-    assert props["meta"]["type"] == "object"
-    assert props["meta"]["additionalProperties"] is True, (
-        "object fields must be open-shape (additionalProperties=True) — sub-fields are "
-        "described in the description text, not declared in the schema."
-    )
-    assert props["meta"]["description"] == "Generic object meta"
-    # Open-object types force strict=False at the envelope level.
-    assert result["json_schema"]["strict"] is False, (
-        "An `object` field requires additionalProperties=True, which is forbidden "
-        "by OpenAI strict mode. The envelope MUST flip strict to False."
-    )
+    beanie = props["selected_beanie"]
+    assert beanie["type"] == "object"
+    assert beanie["additionalProperties"] is False
+    assert beanie["required"] == ["title", "price_usd"]
+    assert beanie["properties"]["title"]["type"] == "string"
+    assert beanie["properties"]["price_usd"]["type"] == "number"
+    assert result["json_schema"]["strict"] is True
 
 
 def test_build_verifier_json_schema_list_object_type():
-    """_build_verifier_json_schema accepts `list[object]` and disables strict mode."""
+    """`list[object]` fields with explicit properties emit closed item schema."""
     from helpers.llm import _build_verifier_json_schema
 
     response_schema = {
         "fields": [
-            {"name": "items", "type": "list[object]", "description": "List of items"},
+            {
+                "name": "items",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "name", "type": "str"},
+                    {"name": "rank", "type": "int"},
+                ],
+            },
         ]
     }
     result = _build_verifier_json_schema(response_schema)
@@ -477,34 +481,75 @@ def test_build_verifier_json_schema_list_object_type():
 
     assert props["items"]["type"] == "array"
     assert props["items"]["items"]["type"] == "object"
-    assert props["items"]["items"]["additionalProperties"] is True, (
-        "list[object] items must be open-shape — same reasoning as `object`."
-    )
-    assert props["items"]["description"] == "List of items"
-    # Open-object types force strict=False at the envelope level.
-    assert result["json_schema"]["strict"] is False, (
-        "A `list[object]` field requires items.additionalProperties=True, which "
-        "is forbidden by OpenAI strict mode. The envelope MUST flip strict to False."
-    )
+    assert props["items"]["items"]["additionalProperties"] is False
+    assert props["items"]["items"]["required"] == ["name", "rank"]
+    assert result["json_schema"]["strict"] is True
 
 
-def test_build_verifier_json_schema_mixed_open_and_closed():
-    """A schema mixing closed types and an open-object type must still drop strict.
-
-    The strict flag is a single envelope-level boolean — even one open-object
-    field anywhere in the schema must flip it to False.
-    """
+def test_build_verifier_json_schema_mixed_object_properties_stays_strict():
+    """A schema mixing primitives and explicit object properties stays strict."""
     from helpers.llm import _build_verifier_json_schema
 
     response_schema = {
         "fields": [
             {"name": "name", "type": "str"},
             {"name": "count", "type": "int"},
-            {"name": "meta", "type": "object", "description": "metadata blob"},
+            {
+                "name": "meta",
+                "type": "object",
+                "properties": [{"name": "source", "type": "str"}],
+            },
         ]
     }
     result = _build_verifier_json_schema(response_schema)
-    assert result["json_schema"]["strict"] is False
+    assert result["json_schema"]["strict"] is True
+
+
+def test_build_verifier_response_model_requires_nested_object_properties():
+    """Verifier Pydantic model rejects partial nested objects when properties are explicit."""
+    from pydantic import ValidationError
+
+    from helpers.llm import _build_verifier_response_model
+
+    response_schema = {
+        "fields": [
+            {
+                "name": "selected_beanie",
+                "type": "object",
+                "properties": [
+                    {"name": "title", "type": "str"},
+                    {"name": "price_usd", "type": "float"},
+                ],
+            },
+            {"name": "added_to_cart", "type": "bool"},
+        ]
+    }
+    model = _build_verifier_response_model(response_schema)
+
+    parsed = model.model_validate({
+        "output": {
+            "selected_beanie": {"title": "Ribbed beanie", "price_usd": 12.99},
+            "added_to_cart": True,
+        },
+        "reasoning": "The cart shows the selected beanie.",
+        "score": 1,
+    })
+    assert parsed.output.selected_beanie.title == "Ribbed beanie"
+
+    raised = False
+    try:
+        model.model_validate({
+            "output": {
+                "selected_beanie": {"title": "Ribbed beanie"},
+                "added_to_cart": True,
+            },
+            "reasoning": "Partial cart state.",
+            "score": 0.5,
+        })
+    except ValidationError as exc:
+        raised = True
+        assert "price_usd" in str(exc)
+    assert raised
 
 
 async def test_fetch_claude_max_token_activity():
@@ -990,8 +1035,8 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
             assert "cache_control" not in block, "message breakpoint should be stripped"
 
 
-async def test_call_llm_rose_response_model_uses_submit_tool():
-    """call_llm response_model routes Rose claudeAuth through native submit_response tool."""
+async def test_call_llm_rose_response_model_uses_output_config():
+    """call_llm response_model routes Rose claudeAuth through structured output config."""
     import httpx
     from pydantic import BaseModel
     from helpers.httpx_capture import set_mock_handler
@@ -1002,13 +1047,8 @@ async def test_call_llm_rose_response_model_uses_submit_tool():
         ok: bool
 
     sse = _anthropic_sse_body(
-        tool_calls=[
-            {
-                "name": "submit_response",
-                "input": {"answer": "done", "ok": True},
-            }
-        ],
-        stop_reason="tool_use",
+        text='{"answer":"done","ok":true}',
+        stop_reason="end_turn",
     )
     captured: dict = {}
 
@@ -1029,9 +1069,10 @@ async def test_call_llm_rose_response_model_uses_submit_tool():
         )
 
     body = captured["body"]
-    assert "format" not in body.get("output_config", {})
-    assert body["tool_choice"] == {"type": "any"}
-    assert body["tools"][0]["name"] == "submit_response"
+    assert "tools" not in body
+    assert "tool_choice" not in body
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert set(body["output_config"]["format"]["schema"]["properties"]) == {"answer", "ok"}
     assert json.loads(result["content"]) == {"answer": "done", "ok": True}
 
 
@@ -2413,40 +2454,47 @@ async def test_build_verifier_json_schema_unknown_type_fallback():
     assert weird_prop == {"type": "string"}
 
 
-async def test_build_verifier_json_schema_object_type_open_shape():
-    """`object` field emits an open-shape object (additionalProperties: True) and disables strict."""
+async def test_build_verifier_json_schema_object_type_explicit_shape():
+    """`object` field with properties emits closed object schema."""
     from helpers.llm import _build_verifier_json_schema
 
     schema = {
         "fields": [
-            {"name": "meta", "type": "object", "description": "metadata blob"},
+            {
+                "name": "meta",
+                "type": "object",
+                "properties": [{"name": "source", "type": "str"}],
+            },
         ]
     }
     result = _build_verifier_json_schema(schema)
     meta_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["meta"]
     assert meta_prop["type"] == "object"
-    assert meta_prop["additionalProperties"] is True
-    assert meta_prop["description"] == "metadata blob"
-    # OpenAI strict mode forbids additionalProperties: True. Verifier must drop strict.
-    assert result["json_schema"]["strict"] is False
+    assert meta_prop["additionalProperties"] is False
+    assert meta_prop["required"] == ["source"]
+    assert result["json_schema"]["strict"] is True
 
 
-async def test_build_verifier_json_schema_list_object_type_open_shape():
-    """`list[object]` field emits array-of-open-objects and disables strict."""
+async def test_build_verifier_json_schema_list_object_type_explicit_shape():
+    """`list[object]` field with properties emits closed item schema."""
     from helpers.llm import _build_verifier_json_schema
 
     schema = {
         "fields": [
-            {"name": "rows", "type": "list[object]", "description": "rows of data"},
+            {
+                "name": "rows",
+                "type": "list[object]",
+                "properties": [{"name": "label", "type": "str"}],
+            },
         ]
     }
     result = _build_verifier_json_schema(schema)
     rows_prop = result["json_schema"]["schema"]["properties"]["output"]["properties"]["rows"]
     assert rows_prop["type"] == "array"
     assert rows_prop["items"]["type"] == "object"
-    assert rows_prop["items"]["additionalProperties"] is True
-    assert rows_prop["description"] == "rows of data"
-    assert result["json_schema"]["strict"] is False
+    assert rows_prop["items"]["additionalProperties"] is False
+    assert rows_prop["items"]["required"] == ["label"]
+    assert result["json_schema"]["strict"] is True
 
 
 async def test_build_verifier_json_schema_strict_true_when_no_open_objects():
@@ -2731,6 +2779,54 @@ async def test_build_llm_messages_filters_inprogress_keeps_latest_finished():
     assert "new finished" in tool_msgs[0]["content"]
     # No IN_PROGRESS content should appear
     assert not any("in-progress" in str(m.get("content", "")) for m in msgs)
+
+
+async def test_build_llm_messages_attempt_completion_verifier_result_is_tool_result():
+    """Verifier progress should be the terminal result for the original attempt_completion call."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "finish", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": "tc-ac-1"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Running verifier to check completion...",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolCallId": "tc-ac-1",
+                "toolStatus": "IN_PROGRESS",
+                "toolName": "attempt_completion",
+                "title": "Attempting completion",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Needs more evidence",
+            "timestamp": "2024-01-01T00:00:03Z",
+            "metadata": {
+                "toolCallId": "tc-ac-1",
+                "toolStatus": "FINISHED",
+                "toolName": "attempt_completion",
+                "title": "Progress: 50%",
+            },
+        },
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        msgs = await build_llm_messages(context, "sys")
+
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "tc-ac-1"
+    assert tool_msgs[0]["name"] == "attempt_completion"
+    assert "Progress: 50%" in tool_msgs[0]["content"]
+    assert "Needs more evidence" in tool_msgs[0]["content"]
+    assert "Running verifier" not in tool_msgs[0]["content"]
 
 
 async def test_build_llm_messages_strips_cloud_agent_lifecycle_tools():
@@ -4110,7 +4206,14 @@ async def run_all_tests():
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
     r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
     r.record("build_verifier_json_schema_list_object_type", test_build_verifier_json_schema_list_object_type)
-    r.record("build_verifier_json_schema_mixed_open_and_closed", test_build_verifier_json_schema_mixed_open_and_closed)
+    r.record(
+        "build_verifier_json_schema_mixed_object_properties",
+        test_build_verifier_json_schema_mixed_object_properties_stays_strict,
+    )
+    r.record(
+        "build_verifier_response_model_requires_nested_object_properties",
+        test_build_verifier_response_model_requires_nested_object_properties,
+    )
     await r.record_async("fetch_claude_max_token_activity", test_fetch_claude_max_token_activity)
     await r.record_async("fetch_claude_max_token_activity_not_found", test_fetch_claude_max_token_activity_not_found)
     await r.record_async(
@@ -4155,7 +4258,7 @@ async def run_all_tests():
         "call_llm_rose_with_claude_token_and_skip_cache_write",
         test_call_llm_rose_with_claude_token_and_skip_cache_write,
     )
-    await r.record_async("call_llm_rose_response_model_submit_tool", test_call_llm_rose_response_model_uses_submit_tool)
+    await r.record_async("call_llm_rose_response_model_output_config", test_call_llm_rose_response_model_uses_output_config)
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async(
         "build_llm_messages_preserves_tool_calls_and_tool_role",
@@ -4192,6 +4295,10 @@ async def run_all_tests():
     await r.record_async(
         "build_llm_messages_filters_inprogress_keeps_latest_finished",
         test_build_llm_messages_filters_inprogress_keeps_latest_finished,
+    )
+    await r.record_async(
+        "build_llm_messages_attempt_completion_verifier_result",
+        test_build_llm_messages_attempt_completion_verifier_result_is_tool_result,
     )
     await r.record_async(
         "build_llm_messages_strips_cloud_agent_lifecycle_tools",
@@ -4235,9 +4342,9 @@ async def run_all_tests():
         "verifier_schema_list_session_file_pointer", test_build_verifier_json_schema_list_session_file_pointer_type
     )
     await r.record_async("verifier_schema_unknown_fallback", test_build_verifier_json_schema_unknown_type_fallback)
-    await r.record_async("verifier_schema_object_type", test_build_verifier_json_schema_object_type_open_shape)
+    await r.record_async("verifier_schema_object_type", test_build_verifier_json_schema_object_type_explicit_shape)
     await r.record_async(
-        "verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_open_shape
+        "verifier_schema_list_object_type", test_build_verifier_json_schema_list_object_type_explicit_shape
     )
     await r.record_async(
         "verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects

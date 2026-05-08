@@ -1014,13 +1014,16 @@ async def run_agent(  # noqa: C901
                 # Execute the tool first (it posts its own IN_PROGRESS/FINISHED)
                 if execute_tool:
                     try:
+                        execution_tool_args = dict(tool_args)
+                        if not skip_verification and not is_plan_loop:
+                            execution_tool_args["_verification_pending"] = True
                         async with span(
                             "tool_dispatch",
                             agent_id=agent_id,
                             tool_name=tool_name,
                             tool_call_id=tool_call_id,
                         ):
-                            await execute_tool(tool_name, tool_args, tool_call_id)
+                            await execute_tool(tool_name, execution_tool_args, tool_call_id)
                     except Exception as e:
                         logger.warning(f"attempt_completion tool error (non-fatal): {e}")
 
@@ -1127,6 +1130,7 @@ async def run_agent(  # noqa: C901
                     gpt_token_pool_id=verifier_gpt_token_pool_id,
                     gpt_token_user_id=user_id,
                     is_plan_loop=is_plan_loop,
+                    tool_call_id=tool_call_id,
                 )
 
                 # Track verifier tokens
@@ -1209,14 +1213,20 @@ async def run_agent(  # noqa: C901
                     trend = " → ".join(f"{s * 100:.0f}%" for s in recent_verifier_scores)
                     feedback_text += f"\nScore trend: {trend}"
                 feedback_text += "\n\nIMPORTANT: Your ASSISTANT text responses are NOT visible to the verifier. Only TOOL results (tool call outputs, files, structured responses) are evaluated. If you have completed work but scored low, you must produce visible output through tool calls — e.g., use spawn_claude_code_agent to write results to files, or use other tools that produce visible TOOL messages."
-                context.append(
-                    {
-                        "role": "TOOL",
-                        "text": feedback_text,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {"verifierMessage": True},
-                    }
-                )
+                if not poll_messages:
+                    context.append(
+                        {
+                            "role": "TOOL",
+                            "text": feedback_text,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "metadata": {
+                                "toolCallId": tool_call_id,
+                                "toolName": "attempt_completion",
+                                "toolStatus": "FINISHED",
+                                "title": f"Progress: {score * 100:.0f}%",
+                            },
+                        }
+                    )
 
         # Handle no-tool-calls: if LLM returned text but no tools, nudge it
         if not tool_calls and not attempt_completion_tool:
@@ -1455,9 +1465,10 @@ async def _run_verifier(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     is_plan_loop: bool = False,
+    tool_call_id: Optional[str] = None,
 ) -> Dict:
     """Run verifier to check completion."""
-    verifier_call_id = str(uuid.uuid4())
+    verifier_call_id = tool_call_id or str(uuid.uuid4())
 
     # Post IN_PROGRESS
     # C5: Tag the verifier message as the TOOL result of `attempt_completion`
@@ -1472,7 +1483,6 @@ async def _run_verifier(
                 "toolName": "attempt_completion",
                 "toolStatus": "IN_PROGRESS",
                 "title": "⚖️ Verifying completion",
-                "verifierMessage": True,
                 "subAgentId": task_id,
             },
         )
@@ -1546,7 +1556,6 @@ async def _run_verifier(
                 "toolName": "attempt_completion",
                 "toolStatus": "FINISHED",
                 "title": f"⚖️ Progress: {score * 100:.0f}%",
-                "verifierMessage": True,
                 "subAgentId": task_id,
             },
         )

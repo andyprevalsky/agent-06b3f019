@@ -358,6 +358,11 @@ def test_build_plan_message_dag():
         }
     )
     assert "staged" in msg.lower() or "dependencies" in msg.lower()
+    assert "1. A" in msg
+    assert "2. B" in msg
+    assert "3. C" in msg
+    assert "Dependency Graph" in msg
+    assert "Task 3 depends on: 1, 2" in msg
 
 
 # ── get_planner_tools_description ───────────────────────────────────────

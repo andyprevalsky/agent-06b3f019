@@ -132,19 +132,58 @@ class PlannerResponse(BaseModel):
 # ============================================================================
 
 
+ResponseSchemaPrimitiveType = Literal[
+    "str",
+    "int",
+    "float",
+    "bool",
+    "list[str]",
+    "list[int]",
+    "file_pointer",
+    "list[file_pointer]",
+]
+
+
+class ResponseSchemaNestedFieldConfig(BaseModel):
+    """Configuration for a nested field in an object output."""
+
+    name: str = Field(description="Field name in snake_case.")
+    type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
+    description: str = Field(default="", description="Optional semantic description; not used for object shape.")
+
+
 class ResponseSchemaFieldConfig(BaseModel):
     """Configuration for a single field in the output schema."""
 
     name: str = Field(description="Field name in snake_case.")
-    type: Literal["str", "int", "float", "bool", "list[str]", "list[int]", "file_pointer", "list[file_pointer]"] = (
-        Field(
-            description=(
-                "Field type. Use 'file_pointer' or 'list[file_pointer]' for file outputs to enable transfer."
-            )
+    type: Literal[
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list[str]",
+        "list[int]",
+        "object",
+        "list[object]",
+        "file_pointer",
+        "list[file_pointer]",
+    ] = Field(
+        description=(
+            "Field type. For object/list[object], set properties explicitly instead of describing subfields in prose."
         )
     )
     required: bool = Field(description="Whether this field is required in the output.")
-    description: str = Field(description="Brief description of what this field contains.")
+    description: str = Field(default="", description="Optional semantic description; not used for object shape.")
+    properties: Optional[List[ResponseSchemaNestedFieldConfig]] = Field(
+        default=None,
+        description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
+    )
+
+    @model_validator(mode="after")
+    def _object_fields_require_properties(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object and list[object] output_schema fields require explicit properties")
+        return self
 
 
 class ResponseSchemaConfig(BaseModel):

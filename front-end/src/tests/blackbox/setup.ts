@@ -100,6 +100,64 @@ if (!globalThis.visualViewport) {
   };
 }
 
+class MockWebSocket extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+
+  readonly CONNECTING = MockWebSocket.CONNECTING;
+  readonly OPEN = MockWebSocket.OPEN;
+  readonly CLOSING = MockWebSocket.CLOSING;
+  readonly CLOSED = MockWebSocket.CLOSED;
+
+  binaryType: BinaryType = 'blob';
+  bufferedAmount = 0;
+  extensions = '';
+  onclose: ((event: CloseEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onopen: ((event: Event) => void) | null = null;
+  protocol = '';
+  readyState = MockWebSocket.CONNECTING;
+
+  constructor(
+    readonly url: string | URL,
+    protocols?: string | string[],
+  ) {
+    super();
+    if (Array.isArray(protocols)) this.protocol = protocols[0] ?? '';
+    else this.protocol = protocols ?? '';
+    setTimeout(() => {
+      this.readyState = MockWebSocket.OPEN;
+      const event = new Event('open');
+      this.onopen?.(event);
+      this.dispatchEvent(event);
+    }, 0);
+  }
+
+  close(): void {
+    if (this.readyState === MockWebSocket.CLOSED) return;
+    this.readyState = MockWebSocket.CLOSED;
+    const event = new CloseEvent('close');
+    this.onclose?.(event);
+    this.dispatchEvent(event);
+  }
+
+  send(): void {}
+}
+
+Object.defineProperty(window, 'WebSocket', {
+  configurable: true,
+  writable: true,
+  value: MockWebSocket,
+});
+Object.defineProperty(globalThis, 'WebSocket', {
+  configurable: true,
+  writable: true,
+  value: MockWebSocket,
+});
+
 // Mock HTMLMediaElement methods (not available in jsdom)
 HTMLMediaElement.prototype.play = () => Promise.resolve();
 HTMLMediaElement.prototype.pause = () => {};

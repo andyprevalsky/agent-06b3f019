@@ -85,6 +85,7 @@ async def test_result_arg_is_returned_but_not_posted():
     call_kwargs = mock_handle.await_args.kwargs
     assert "event" in call_kwargs, f"event kwarg missing in {call_kwargs!r}"
     posted_message = call_kwargs["event"].message
+    assert call_kwargs["event"].status.value == "FINISHED"
     assert posted_message == EVENT_MESSAGE, (
         f"attempt_completion message must equal EVENT_MESSAGE exactly — "
         f"args must NOT leak. Got: {posted_message!r}"
@@ -117,6 +118,49 @@ async def test_plan_phase_posts_execute_transition_message():
     event = mock_handle.await_args.kwargs["event"]
     assert event.title == PLAN_EVENT_TITLE
     assert event.message == PLAN_EVENT_MESSAGE
+    assert event.status.value == "FINISHED"
+
+
+async def test_verification_pending_posts_in_progress_only_outside_plan():
+    """Verified execute completions remain open until verifier posts the terminal result."""
+    from tools.attempt_completion import AttemptCompletionManager
+
+    manager = AttemptCompletionManager()
+    mock_execute = AsyncMock()
+    mock_handle = AsyncMock()
+
+    with patch("domains.attempt_completion.handler.handle_tool_event", new=mock_handle):
+        await manager.execute_tool(
+            execute_activity=mock_execute,
+            tool_call={"_phase": "EXECUTE", "_verification_pending": True},
+            tool_call_id="tc-execute-complete",
+            agent_id="agent-execute",
+            user_id="user-execute",
+        )
+
+    event = mock_handle.await_args.kwargs["event"]
+    assert event.status.value == "IN_PROGRESS"
+
+
+async def test_plan_phase_ignores_verification_pending_flag():
+    """Research/PLAN completion must never be left pending if an internal flag leaks in."""
+    from tools.attempt_completion import AttemptCompletionManager
+
+    manager = AttemptCompletionManager()
+    mock_execute = AsyncMock()
+    mock_handle = AsyncMock()
+
+    with patch("domains.attempt_completion.handler.handle_tool_event", new=mock_handle):
+        await manager.execute_tool(
+            execute_activity=mock_execute,
+            tool_call={"_phase": "PLAN", "_verification_pending": True},
+            tool_call_id="tc-plan-complete",
+            agent_id="agent-plan",
+            user_id="user-plan",
+        )
+
+    event = mock_handle.await_args.kwargs["event"]
+    assert event.status.value == "FINISHED"
 
 
 async def run_all_tests():
@@ -126,6 +170,8 @@ async def run_all_tests():
     await r.record_async("no_outbound_http_calls", test_no_outbound_http_calls)
     await r.record_async("result_arg_is_returned_but_not_posted", test_result_arg_is_returned_but_not_posted)
     await r.record_async("plan_phase_posts_execute_transition_message", test_plan_phase_posts_execute_transition_message)
+    await r.record_async("verification_pending_posts_in_progress", test_verification_pending_posts_in_progress_only_outside_plan)
+    await r.record_async("plan_phase_ignores_verification_pending", test_plan_phase_ignores_verification_pending_flag)
     teardown_mock()
     return r.all_passed
 

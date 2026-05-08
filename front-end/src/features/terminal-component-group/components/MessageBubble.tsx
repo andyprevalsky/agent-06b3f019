@@ -15,6 +15,7 @@
  *   - Generic tool data  → ToolMessage
  *   - USER role          → UserBubble
  *   - ASSISTANT + file   → AssistantAttachmentBubble
+ *   - Empty thought      → null
  *   - else               → DefaultBubble (SYSTEM / plain ASSISTANT)
  *
  * Each sub-bubble owns its own state machine; this file is stateless.

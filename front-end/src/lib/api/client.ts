@@ -1,9 +1,8 @@
 import { getSession } from '../supabase';
+import { BACKEND_BASE_URL } from '../backendUrl';
 
 // API Configuration
-export const API_BASE_URL = (
-  import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001'
-).replace(/\/$/, '');
+export const API_BASE_URL = BACKEND_BASE_URL;
 export const API_BASE_WITH_PATH = API_BASE_URL.endsWith('/api')
   ? API_BASE_URL
   : `${API_BASE_URL}/api`;

@@ -5,6 +5,7 @@ import { CreditCard, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import SubscriptionModal from './SubscriptionModal';
 import { getStoredSession } from '@/lib/supabase';
+import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
 interface UsageData {
   total: number;
@@ -36,15 +37,12 @@ export default function UsageDisplay({ className }: UsageDisplayProps) {
         return;
       }
 
-      const response = await fetch(
-        `${(import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(/\/$/, '')}/api/credits/usage`,
-        {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
+      const response = await fetch(`${BACKEND_BASE_URL}/api/credits/usage`, {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
         },
-      );
+      });
 
       if (response.ok) {
         const data = await response.json();

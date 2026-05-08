@@ -41,6 +41,44 @@ assign_ports() {
     export ALLOWED_ORIGINS=http://localhost:$FRONTEND_PORT,http://localhost:$MAC_APP_PORT
 }
 
+docker_ps_ports_quick() {
+    local tmp pid status
+    tmp=$(mktemp)
+    docker ps --format "$1" >"$tmp" 2>/dev/null &
+    pid=$!
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            cat "$tmp"
+            rm -f "$tmp"
+            return $status
+        fi
+        sleep 0.2
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$tmp"
+    return 1
+}
+
+docker_info_quick() {
+    local pid status
+    docker info >/dev/null 2>&1 &
+    pid=$!
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            return $status
+        fi
+        sleep 0.2
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 1
+}
+
 # Check if a port is held by a process from a DIFFERENT worktree (not stale from ours).
 port_held_by_other_worktree() {
     local port=$1
@@ -58,7 +96,7 @@ port_held_by_other_worktree() {
     done
     # Check if a Docker container from a DIFFERENT workspace maps to this port
     local foreign_container
-    foreign_container=$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+    foreign_container=$(docker_ps_ports_quick '{{.Names}}\t{{.Ports}}' \
         | grep ":${port}->" \
         | grep -vw "${CONDUCTOR_WORKSPACE_NAME}" \
         | head -1 | cut -f1)
@@ -94,7 +132,7 @@ if $COLLISION; then
                 break
             fi
             # Also check Docker containers binding to this port
-            if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${p}->"; then
+            if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${p}->"; then
                 RANGE_FREE=false
                 break
             fi
@@ -195,7 +233,7 @@ fi
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
 DOCKER_OK=false
-if docker info >/dev/null 2>&1; then
+if docker_info_quick; then
     DOCKER_OK=true
 fi
 
@@ -422,6 +460,84 @@ fi
 PIDS=()
 NAMES=()
 SHUTTING_DOWN=false
+SERVICE_STATUS=starting
+
+write_services_manifest() {
+    mkdir -p .context
+    local names_csv pids_csv
+    names_csv="$(IFS=,; echo "${NAMES[*]:-}")"
+    pids_csv="$(IFS=,; echo "${PIDS[*]:-}")"
+    SERVICE_NAMES="$names_csv" SERVICE_PIDS="$pids_csv" SERVICE_STATUS="$SERVICE_STATUS" \
+        BENCHMARK_MODE="$BENCHMARK_MODE" DB_CONTAINER="$DB_CONTAINER" \
+        DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
+        RUN_SH_PID="$$" python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+
+
+def env_int(name: str, default: int = 0) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+names = [part for part in os.environ.get("SERVICE_NAMES", "").split(",") if part]
+pids_raw = [part for part in os.environ.get("SERVICE_PIDS", "").split(",") if part]
+services = []
+for index, name in enumerate(names):
+    pid = env_int("__missing__", 0)
+    if index < len(pids_raw):
+        try:
+            pid = int(pids_raw[index])
+        except ValueError:
+            pid = 0
+    services.append({"name": name, "pid": pid})
+
+root = os.getcwd()
+data = {
+    "schema_version": 1,
+    "status": os.environ.get("SERVICE_STATUS", "unknown"),
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "worktree": root,
+    "run_sh_pid": env_int("RUN_SH_PID"),
+    "benchmark_mode": os.environ.get("BENCHMARK_MODE", "false").lower() == "true",
+    "ports": {
+        "backend": env_int("BACKEND_PORT"),
+        "frontend": env_int("FRONTEND_PORT"),
+        "health": env_int("HEALTH_PORT"),
+        "mac_app": env_int("MAC_APP_PORT"),
+        "sdk_metrics": env_int("SDK_METRICS_PORT"),
+        "local_db": env_int("LOCAL_DB_PORT"),
+    },
+    "urls": {
+        "backend": os.environ.get("BACKEND_URL", ""),
+        "backend_api": os.environ.get("BACKEND_API_URL", ""),
+        "frontend": f"http://localhost:{os.environ.get('FRONTEND_PORT', '')}",
+        "health": f"http://localhost:{os.environ.get('HEALTH_PORT', '')}",
+        "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
+    },
+    "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
+    "database": {
+        "container": os.environ.get("DB_CONTAINER", ""),
+        "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
+        "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+    },
+    "logs": {
+        "backend": os.path.join(root, "back-end", "backend-logs.log"),
+        "worker": os.path.join(root, "agents", "navi-worker-log.txt"),
+    },
+    "services": services,
+}
+tmp_path = os.path.join(root, ".context", "services.json.tmp")
+path = os.path.join(root, ".context", "services.json")
+with open(tmp_path, "w") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(tmp_path, path)
+PY
+}
 
 kill_tree() {
     local pid=$1
@@ -454,6 +570,8 @@ cleanup() {
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi
+    SERVICE_STATUS=stopped
+    write_services_manifest || true
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
@@ -484,8 +602,10 @@ PIDS+=($!); NAMES+=("back-end")
 
 # Front-end is always launched — benchmark mode needs it for semantic tests
 # (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
-PIDS+=($!); NAMES+=("front-end")
+if ! $BENCHMARK_MODE; then
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+    PIDS+=($!); NAMES+=("front-end")
+fi
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
@@ -495,6 +615,10 @@ fi
 
 run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
 PIDS+=($!); NAMES+=("agents")
+
+SERVICE_STATUS=running
+write_services_manifest
+echo "🧭 Service manifest: .context/services.json"
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

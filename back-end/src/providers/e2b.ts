@@ -359,7 +359,16 @@ export interface ClaudeCodeUsage {
  * Parse Claude Code JSONL logs to extract token usage.
  * Claude Code logs each message with usage data in ~/.claude/projects/
  */
-function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function numericUsageValue(usage: Record<string, unknown>, key: string): number {
+  const value = usage[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
   const usage: ClaudeCodeUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -371,14 +380,22 @@ function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
 
   for (const line of lines) {
     try {
-      const entry = JSON.parse(line);
-      // Claude Code JSONL format has usage in message entries
-      if (entry.usage) {
-        usage.inputTokens += entry.usage.input_tokens || 0;
-        usage.outputTokens += entry.usage.output_tokens || 0;
-        usage.cacheReadInputTokens += entry.usage.cache_read_input_tokens || 0;
-        usage.cacheCreationInputTokens += entry.usage.cache_creation_input_tokens || 0;
-      }
+      const entry = JSON.parse(line) as unknown;
+      if (!isJsonObject(entry)) continue;
+
+      const message = isJsonObject(entry.message) ? entry.message : undefined;
+      const rawUsage = isJsonObject(entry.usage)
+        ? entry.usage
+        : message !== undefined && isJsonObject(message.usage)
+          ? message.usage
+          : undefined;
+
+      if (rawUsage === undefined) continue;
+
+      usage.inputTokens += numericUsageValue(rawUsage, 'input_tokens');
+      usage.outputTokens += numericUsageValue(rawUsage, 'output_tokens');
+      usage.cacheReadInputTokens += numericUsageValue(rawUsage, 'cache_read_input_tokens');
+      usage.cacheCreationInputTokens += numericUsageValue(rawUsage, 'cache_creation_input_tokens');
     } catch {
       // Skip malformed lines
     }

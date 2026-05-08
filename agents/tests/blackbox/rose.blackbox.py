@@ -58,6 +58,7 @@ from providers.rose.claude_auth import (
 from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
+    build_openai_response_format,
 )
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
@@ -1920,6 +1921,84 @@ def test_build_codex_responses_body_converts_orphan_tool_rows_to_context():
     }
 
 
+def _nested_verifier_response_format():
+    from pydantic import BaseModel
+
+    class SelectedBeanie(BaseModel):
+        title: str
+        price_usd: float
+
+    class VerifierOutput(BaseModel):
+        selected_beanie: SelectedBeanie
+        added_to_cart: bool
+
+    class ProgressScoreWithOutput(BaseModel):
+        output: VerifierOutput
+        reasoning: str
+        score: float
+
+    return build_openai_response_format(ProgressScoreWithOutput)
+
+
+def _assert_nested_beanie_schema(schema):
+    output = schema["properties"]["output"]
+    selected = output["properties"]["selected_beanie"]
+    assert output["required"] == ["selected_beanie", "added_to_cart"]
+    assert selected["type"] == "object"
+    assert selected["required"] == ["title", "price_usd"]
+    assert selected["additionalProperties"] is False
+    assert selected["properties"]["title"]["type"] == "string"
+    assert selected["properties"]["price_usd"]["type"] == "number"
+
+
+def test_openrouter_response_format_preserves_nested_required_properties():
+    response_format = _nested_verifier_response_format()
+    body = build_openrouter_body(
+        model="openai/gpt-5.1-mini",
+        messages=[{"role": "user", "content": "score cart state"}],
+        tools=None,
+        tool_choice=None,
+        response_format=response_format,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+
+    assert body["response_format"]["json_schema"]["strict"] is True
+    _assert_nested_beanie_schema(body["response_format"]["json_schema"]["schema"])
+
+
+def test_claude_auth_output_config_preserves_nested_required_properties():
+    pool = get_pool("rose-1-lite")
+    body = build_anthropic_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "score cart state"}],
+        tools=None,
+        tool_choice=None,
+        response_format=_nested_verifier_response_format(),
+        max_tokens=None,
+    )
+
+    assert "tools" not in body
+    assert "tool_choice" not in body
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    _assert_nested_beanie_schema(body["output_config"]["format"]["schema"])
+
+
+def test_gpt_auth_text_format_preserves_nested_required_properties():
+    pool = get_pool("rose-1-lite")
+    body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "score cart state"}],
+        response_format=_nested_verifier_response_format(),
+        request_id="rid-nested-schema",
+    )
+
+    assert body["text"]["format"]["type"] == "json_schema"
+    assert body["text"]["format"]["strict"] is True
+    _assert_nested_beanie_schema(body["text"]["format"]["schema"])
+
+
 # =====================================================================
 # waterfall
 # =====================================================================
@@ -2437,7 +2516,7 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
     assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
 
 
-async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
+async def test_client_plain_pydantic_model_uses_claude_output_config():
     from pydantic import BaseModel, Field
 
     class ProgressScore(BaseModel):
@@ -2457,12 +2536,7 @@ async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
         {
             "type": "content_block_start",
             "index": 0,
-            "content_block": {
-                "type": "tool_use",
-                "id": "toolu_submit",
-                "name": "submit_response",
-                "input": {},
-            },
+            "content_block": {"type": "text", "text": ""},
         },
     )
     sse_lines += _ev(
@@ -2470,10 +2544,7 @@ async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
         {
             "type": "content_block_delta",
             "index": 0,
-            "delta": {
-                "type": "input_json_delta",
-                "partial_json": '{"reasoning":"done","score":1}',
-            },
+            "delta": {"type": "text_delta", "text": '{"reasoning":"done","score":1}'},
         },
     )
     sse_lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
@@ -2481,7 +2552,7 @@ async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
         "message_delta",
         {
             "type": "message_delta",
-            "delta": {"stop_reason": "tool_use"},
+            "delta": {"stop_reason": "end_turn"},
             "usage": {"output_tokens": 5},
         },
     )
@@ -2509,22 +2580,17 @@ async def test_client_splits_plain_pydantic_model_to_forced_submit_tool():
     ):
         chunks.append(chunk)
 
-    assert "format" not in seen_body.get("output_config", {})
-    assert seen_body["tool_choice"] == {"type": "any"}
-    assert "thinking" not in seen_body
-    assert len(seen_body["tools"]) == 1
-    tool = seen_body["tools"][0]
-    assert tool["name"] == "submit_response"
-    assert "__rose_force_tool_choice" not in tool
-    assert tool["input_schema"]["properties"]["score"]["minimum"] == 0
-    assert tool["input_schema"]["properties"]["score"]["maximum"] == 1
+    assert "tools" not in seen_body
+    assert "tool_choice" not in seen_body
+    assert seen_body["output_config"]["format"]["type"] == "json_schema"
+    schema = seen_body["output_config"]["format"]["schema"]
+    assert schema["properties"]["score"]["type"] == "number"
 
-    tool_call = next(c for c in chunks if c.kind == "tool_call")
-    assert tool_call.data["name"] == "submit_response"
-    assert json.loads(tool_call.data["arguments"]) == {"reasoning": "done", "score": 1}
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert json.loads(content) == {"reasoning": "done", "score": 1}
 
 
-async def test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool():
+async def test_client_plain_pydantic_model_uses_gpt_text_format():
     from pydantic import BaseModel, Field
 
     class ProgressScore(BaseModel):
@@ -2533,16 +2599,8 @@ async def test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool():
 
     sse_lines = []
     sse_lines += _ev(
-        "response.output_item.done",
-        {
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "call_id": "call_submit",
-                "name": "submit_response",
-                "arguments": '{"reasoning":"done","score":1}',
-            },
-        },
+        "response.output_text.delta",
+        {"type": "response.output_text.delta", "delta": '{"reasoning":"done","score":1}'},
     )
     sse_lines += _ev(
         "response.completed",
@@ -2580,18 +2638,13 @@ async def test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool():
     ):
         chunks.append(chunk)
 
-    assert "text" not in seen_body
-    assert seen_body["tool_choice"] == "required"
-    assert len(seen_body["tools"]) == 1
-    tool = seen_body["tools"][0]
-    assert tool["name"] == "submit_response"
-    assert "__rose_force_tool_choice" not in tool
-    assert tool["parameters"]["properties"]["score"]["minimum"] == 0
-    assert tool["parameters"]["properties"]["score"]["maximum"] == 1
+    assert "tools" not in seen_body
+    assert seen_body["tool_choice"] == "auto"
+    assert seen_body["text"]["format"]["type"] == "json_schema"
+    assert seen_body["text"]["format"]["schema"]["properties"]["score"]["type"] == "number"
 
-    tool_call = next(c for c in chunks if c.kind == "tool_call")
-    assert tool_call.data["name"] == "submit_response"
-    assert json.loads(tool_call.data["arguments"]) == {"reasoning": "done", "score": 1}
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert json.loads(content) == {"reasoning": "done", "score": 1}
 
 
 async def test_client_deadline_enforced():
@@ -2910,6 +2963,18 @@ async def run_all_tests():
         "codex_body_tool_history_multimodal", test_build_codex_responses_body_preserves_tool_history_and_multimodal
     )
     r.record("codex_body_orphan_tool_context", test_build_codex_responses_body_converts_orphan_tool_rows_to_context)
+    r.record(
+        "openrouter_nested_response_schema",
+        test_openrouter_response_format_preserves_nested_required_properties,
+    )
+    r.record(
+        "claude_auth_nested_response_schema",
+        test_claude_auth_output_config_preserves_nested_required_properties,
+    )
+    r.record(
+        "gpt_auth_nested_response_schema",
+        test_gpt_auth_text_format_preserves_nested_required_properties,
+    )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
@@ -2932,10 +2997,10 @@ async def run_all_tests():
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
     )
     await r.record_async(
-        "client_pydantic_submit_tool_split", test_client_splits_plain_pydantic_model_to_forced_submit_tool
+        "client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config
     )
     await r.record_async(
-        "client_gpt_pydantic_submit_tool_split", test_client_splits_plain_pydantic_model_to_gpt_required_submit_tool
+        "client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format
     )
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
 

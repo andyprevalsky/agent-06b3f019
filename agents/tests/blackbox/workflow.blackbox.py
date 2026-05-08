@@ -2251,6 +2251,35 @@ async def test_workflow_does_not_advance_terminal_cloud_agent_tool():
         _restore_workflow(original)
 
 
+async def test_workflow_caches_missing_cloud_agent_tool():
+    """No cloud_agent row means direct agent workflows should stop rescanning."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "TOOL",
+            "text": "Agent initialization complete.",
+            "metadata": {
+                "toolCallId": "tc-agent-init",
+                "toolName": "agent_init",
+                "toolStatus": "FINISHED",
+            },
+        }
+    ]
+    original = _patch_workflow(fake)
+    try:
+        await wf._advance_cloud_agent_lifecycle("Preparing Cloud Agent", "IN_PROGRESS")
+        await wf._advance_cloud_agent_lifecycle("Cloud Agent Ready", "FINISHED")
+        polls = [c for c in fake.activity_calls if c[0] == "poll_new_messages"]
+        posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert len(polls) == 1
+        assert posts == []
+        assert wf._cloud_agent_lifecycle_finished is True
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_run_covers_chat_agent_startup_and_completion():
     """Direct run() smoke covers startup lifecycle, context gates, schema generation, and completion."""
     wf = _bare_workflow_instance()
@@ -3131,6 +3160,7 @@ async def run_all_tests():
     await r.record_async("wf_post_message_failure", test_workflow_post_message_failure_logs_warning)
     await r.record_async("wf_advance_cloud_agent_tool", test_workflow_advances_pending_cloud_agent_tool)
     await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
+    await r.record_async("wf_missing_cloud_agent_tool", test_workflow_caches_missing_cloud_agent_tool)
     await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)

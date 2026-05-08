@@ -159,6 +159,13 @@ def test_check_fatal_errors_rate_limit_options():
     assert "rate-limited" in msg
 
 
+def test_verifier_activity_timeout_allows_llm_call():
+    """Claude Code verifier wraps an LLM activity, so it must allow at least 60s."""
+    from domains.spawn_claude_code_agent.service import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+
+    assert VERIFIER_ACTIVITY_TIMEOUT_SECONDS >= 60
+
+
 # ── safe_time ────────────────────────────────────────────────────────
 
 
@@ -477,16 +484,28 @@ def test_build_usage_items_both_llm_and_service():
         model="rose-1-lite",
         model_pricing=pricing,
         execution_time_ms=10_000,
+        claude_code_usage={
+            "inputTokens": 5,
+            "outputTokens": 7,
+            "cacheReadInputTokens": 300,
+            "cacheCreationInputTokens": 100,
+        },
     )
-    # LLM + service
-    assert len(items) == 2
+    # Verifier LLM + Claude Code CLI usage + service
+    assert len(items) == 3
     llm = items[0]
     assert llm["type"] == "llm"
     assert llm["model"] == "rose-1-lite"
     assert llm["input_tokens"] == 1000
     # 1000/1000 * 0.3 + 500/1000 * 1.5 = 0.3 + 0.75 = 1.05
     assert abs(llm["cost_cents"] - 1.05) < 1e-6
-    svc = items[1]
+    claude_code = items[1]
+    assert claude_code["type"] == "llm"
+    assert claude_code["provider"] == "Claude Code CLI (user plan)"
+    assert claude_code["cost_cents"] == 0
+    assert claude_code["cache_read_input_tokens"] == 300
+    assert claude_code["cache_creation_input_tokens"] == 100
+    svc = items[2]
     assert svc["type"] == "service"
     # 10s * 0.0028 cents/s = 0.028
     assert abs(svc["cost_cents"] - 0.028) < 1e-4
@@ -1922,6 +1941,7 @@ async def run_all_tests():
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
     r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
     r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
+    r.record("verifier_timeout_minimum", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
     r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)

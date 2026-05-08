@@ -4,7 +4,8 @@ Pydantic models are the semantic boundary. Provider-specific JSON Schema
 shapes are adapter outputs:
 
 - OpenRouter/OpenAI receives strict `response_format`.
-- claudeAuth receives Anthropic native `tools[].input_schema`.
+- claudeAuth receives `output_config.format` for plain structured outputs,
+  or Anthropic native `tools[].input_schema` for real tool-call models.
 """
 
 from __future__ import annotations

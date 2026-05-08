@@ -75,6 +75,13 @@ def _encrypt_envelope(plaintext: bytes, public_key, version: int = 1) -> str:
     return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("utf-8")
 
 
+def test_verifier_activity_timeout_allows_llm_call():
+    """Browser verifier wraps an LLM activity, so it must allow at least 60s."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_ULTRA_TIMEOUT_SECONDS
+
+    assert VERIFIER_ULTRA_TIMEOUT_SECONDS >= 60
+
+
 def _fake_config(
     backend_url: str = "https://backend.example.com",
     backend_api_key: str = "test-backend-key",
@@ -3174,6 +3181,31 @@ def test_get_manager_singleton():
     assert m1.tool_name == "spawn_browser_agent"
 
 
+async def test_stop_playwright_resources_closes_browser_and_stops_instance():
+    from domains.spawn_browser_agent_v3.handler import _stop_playwright_resources
+
+    browser = AsyncMock()
+    playwright = AsyncMock()
+
+    await _stop_playwright_resources(browser, playwright, "agent-1")
+
+    browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+
+
+async def test_stop_playwright_resources_stops_instance_when_browser_close_fails():
+    from domains.spawn_browser_agent_v3.handler import _stop_playwright_resources
+
+    browser = AsyncMock()
+    browser.close.side_effect = RuntimeError("connection already closed")
+    playwright = AsyncMock()
+
+    await _stop_playwright_resources(browser, playwright, "agent-1")
+
+    browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+
+
 async def test_spawn_browser_activity_requires_output_schema():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -3267,6 +3299,8 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+
+    r.record("verifier_timeout_minimum", test_verifier_activity_timeout_allows_llm_call)
 
     # service_crypto — pure
     r.record("normalize_rate_limited_until_epoch_int", test_normalize_rate_limited_until_handles_epoch_int)
@@ -3497,6 +3531,11 @@ async def run_all_tests():
     # handler statics
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)
+    await r.record_async("stop_playwright_resources", test_stop_playwright_resources_closes_browser_and_stops_instance)
+    await r.record_async(
+        "stop_playwright_resources_close_fails",
+        test_stop_playwright_resources_stops_instance_when_browser_close_fails,
+    )
     await r.record_async("call_browser_use_gpt_auth", test_call_browser_use_with_rotation_uses_gpt_auth)
     await r.record_async(
         "call_browser_use_rotates_claude",

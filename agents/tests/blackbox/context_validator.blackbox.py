@@ -211,6 +211,37 @@ def test_file_output_assistant_does_not_break_tool_result_pairing():
     )
 
 
+def test_for_each_aggregate_parent_result_pairs_declared_tool_use():
+    """for_each child result rows use suffixed ids, but the parent tool_call id
+    still needs its own terminal result for Anthropic pairing.
+    """
+    from context_validator import validate_context
+
+    parent_id = "call_for_each_parent"
+    messages = [
+        _make_msg("USER", "Process rows.", ts="2024-01-01T00:00:00.000Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", parent_id)],
+            ts="2024-01-01T00:00:01.000Z",
+        ),
+        _tool_result(f"{parent_id}:0", "child 0", ts="2024-01-01T00:00:02.000Z"),
+        _tool_result(f"{parent_id}:1", "child 1", ts="2024-01-01T00:00:03.000Z"),
+        _tool_result(parent_id, "Completed for_each delegation.", ts="2024-01-01T00:00:04.000Z"),
+    ]
+    messages[2]["metadata"]["toolName"] = "spawn_sub_agent"
+    messages[3]["metadata"]["toolName"] = "spawn_sub_agent"
+    messages[4]["metadata"]["toolName"] = "spawn_sub_agent_for_each"
+
+    violations = validate_context(messages)
+    pairing_errors = [
+        v for v in violations
+        if v.rule == "tool_result_pairing" and v.severity == "error"
+    ]
+    assert not pairing_errors, f"for_each aggregate result should pair parent id: {pairing_errors}"
+
+
 async def run_all_tests():
     print("context_validator blackbox tests:")
     r = BlackboxResult()
@@ -220,6 +251,7 @@ async def run_all_tests():
     r.record("role_alternation_tools_then_text_only_flagged", test_role_alternation_tools_then_text_only_flagged)
     r.record("two_consecutive_text_only_assistants_exempt", test_two_consecutive_text_only_assistants_exempt)
     r.record("file_output_assistant_does_not_break_tool_result_pairing", test_file_output_assistant_does_not_break_tool_result_pairing)
+    r.record("for_each_aggregate_parent_result_pairs_declared_tool_use", test_for_each_aggregate_parent_result_pairs_declared_tool_use)
     return r.all_passed
 
 

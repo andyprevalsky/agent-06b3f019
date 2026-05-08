@@ -29,6 +29,12 @@ from .types import ApprovalResult, UserRejectedError
 logger = structlog.get_logger()
 
 
+def _build_approval_completion_message(question: str, response_text: str) -> str:
+    """Render approval evidence into message text for verifier/model context."""
+    response = response_text.strip() if response_text else "Approved"
+    return f"Approval request:\n{question}\n\nUser response:\n{response}"
+
+
 class RequestUserApprovalManager(ToolManager):
     """Manager for user approval requests (used by tools, not LLM directly)."""
 
@@ -147,7 +153,7 @@ class RequestUserApprovalManager(ToolManager):
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="✓ User approval received",
-            message="",
+            message=_build_approval_completion_message(question, response_text),
             status=MessageStatus.FINISHED,
             metadata=event_metadata,
         )
@@ -323,7 +329,7 @@ async def request_user_approval_direct(
     post_event = ToolEvent(
         type=EventType.POST_MESSAGE,
         title="✓ User approval received",
-        message="",
+        message=_build_approval_completion_message(question, response_text),
         status=MessageStatus.FINISHED,
         metadata=event_metadata,
     )

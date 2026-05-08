@@ -1312,6 +1312,12 @@ class AgentWorkflow:
 
         if pending_tool_call_id in terminal_tool_call_ids:
             self._cloud_agent_lifecycle_finished = True
+        elif pending_tool_call_id is None:
+            # Most agent-mode workflows are created directly and never receive
+            # the chat-mode cloud_agent lifecycle row. Cache that absence after
+            # the first scan so later token callbacks do not keep scheduling
+            # message-poll activities before user-visible tool execution.
+            self._cloud_agent_lifecycle_finished = True
 
         return None
 

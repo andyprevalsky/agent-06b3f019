@@ -117,7 +117,7 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 - **Agents** requires 80% line+branch (see `agents/pyproject.toml` → `[tool.coverage.report]`). Current: 81%.
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. **IMPORTANT:** Benchmarks require `--port N` for local runs (e.g. `--port 3001`) — local services must be running (back-end + agents; no front-end or mac-app needed). The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
+**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. For local iteration, prefer `cd agents && python benchmarks/local.py <task...>` or `cd agents && python benchmarks/local.py --rerun-failed latest`; the local wrapper starts `scripts/run.sh --benchmark`, reads `.context/services.json`, runs non-load tasks with max concurrency 5, runs `load-test-sias` by itself, keeps failed agents long enough to run `agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services down. Use `python benchmarks/local.py --full` only when you intentionally want the whole local suite. Direct `run_benchmark.py --port N` remains the lower-level path for already-running services or special cases. The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
 
 ## Log Files
 
@@ -186,6 +186,11 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
        run_tests()
    ```
 
+   When fixing a new issue that is not illuminated by a failing test:
+   1. Diagnose the issue
+   2. Create a test that reproduces the issue
+   3. Fix the issue until the test passes
+
 2. **API changes require tests** - Add to `back-end/src/tests/blackbox/<domain>.blackbox.ts`
 
 3. **No .md files** - Never create markdown docs unless explicitly requested
@@ -241,6 +246,8 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 20. **Never disable linters** - Do NOT add `eslint-disable`, `// eslint-disable-next-line`, `/* eslint-disable */`, `// @ts-ignore`, `// @ts-expect-error`, `# noqa`, `# type: ignore`, `# pylint: disable`, `ruff: noqa`, or any equivalent escape hatch to silence a rule. Fix the underlying issue. Existing disables in the codebase should be removed when you touch the file.
 
 21. **Clean up tech debt as you discover it — scope increase is expected** - When a file under edit has pre-existing lint errors, type errors, test failures, dead code, or other debt, fix it in the same PR. Do NOT rationalize "pre-existing" or "out of scope" to leave it. Scope increase beyond the narrow task is not only allowed but anticipated — bundle the cleanup with the change that exposed it. **Any error surfaced by a failing test, lint, typecheck, coverage check, or other gate is automatically in scope — even in files you did not touch.** If the deploy pipeline (or any required check) reports the error, fix it; do not skip it as "not my file" or "not my change."
+
+22. **No benchmark reward hacking** - Never change benchmark task definitions, prompts, expected tools, pass criteria, load sizes, timeouts, concurrency limits, or production behavior just to make a benchmark pass. Do not raise a benchmark/tool timeout as a workaround for a timeout failure. First prove why it timed out with diagnostics: resource contention, memory growth, blocked external tool/session, retry loop, verifier/schema issue, slow database/API calls, or an unintended parameter/config change. Then reduce the underlying resource use, remove the stall, or fix the broken flow. Get explicit approval before changing any benchmark definition or timeout. General reliability rule: any Temporal activity wrapper that calls an LLM must allow at least 60 seconds; sub-60-second verifier/LLM activity timeouts are product bugs, not benchmark tuning.
 
 ## Plans
 

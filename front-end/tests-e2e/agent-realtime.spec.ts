@@ -17,6 +17,7 @@ import {
   attachRecorder,
   createAgent,
   deleteAgent,
+  expectDevAuthenticated,
   expectProdSessionRecognized,
   hasUncaughtErrors,
   injectProdSession,
@@ -44,13 +45,7 @@ test.describe('agent-realtime', () => {
       if (IS_PROD) {
         await expectProdSessionRecognized(page);
       } else {
-        // Dev: auto-login fires automatically for the real test user (+19729777432).
-        await expect
-          .poll(() => rec.console.some((m) => m.text.includes('[Auth] Dev auto-login complete')), {
-            timeout: 15_000,
-            message: 'Dev auto-login did not complete',
-          })
-          .toBe(true);
+        await expectDevAuthenticated(page, rec);
       }
 
       // ── Step 1: Channel subscribes ─────────────────────────────────────
@@ -120,8 +115,7 @@ test.describe('agent-realtime', () => {
       ).toEqual([]);
 
       const firstSignedInIndex = rec.console.findIndex(
-        (m) =>
-          m.text.includes('[Auth] State changed') && m.text.includes('isFullySignedIn: true'),
+        (m) => m.text.includes('[Auth] State changed') && m.text.includes('isFullySignedIn: true'),
       );
       const authMessagesAfterSignIn =
         firstSignedInIndex === -1 ? [] : rec.console.slice(firstSignedInIndex + 1);

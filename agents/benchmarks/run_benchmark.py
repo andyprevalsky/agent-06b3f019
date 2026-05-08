@@ -89,11 +89,17 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # step of research-heavy smoke tasks.
 AGENT_STALL_SECONDS = 180
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
+CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets")
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
+SMOKE_MEMORY_MAX_END_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_END_MB", "1800"))
+SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS = os.environ.get(
+    "BENCHMARK_SMOKE_FORBID_PLAYWRIGHT_DRIVERS", "true"
+).lower() not in ("0", "false", "no")
 
 
 class AgentNotFoundError(Exception):
@@ -104,6 +110,26 @@ class AgentNotFoundError(Exception):
 
 # Terminal agent statuses
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
+
+
+def _contains_calendly_link(value) -> bool:
+    """Return True when nested approval/message content includes a Calendly URL."""
+    if isinstance(value, str):
+        return "calendly.com/" in value.lower()
+    if isinstance(value, dict):
+        return any(_contains_calendly_link(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_calendly_link(v) for v in value)
+    return False
+
+
+def _normalize_attention_requests_response(data) -> list:
+    """Normalize supported /api/attention-requests response shapes."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("requests"), list):
+        return data["requests"]
+    raise RuntimeError(f"Unexpected attention-requests response shape: {type(data).__name__}")
 
 
 def _ci_should_fail(summary: dict) -> bool:
@@ -217,7 +243,7 @@ async def get_attention_requests(base_url: str) -> list:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{base_url}/api/attention-requests", headers=headers)
         if resp.status_code == 200:
-            return resp.json()
+            return _normalize_attention_requests_response(resp.json())
         return []
 
 
@@ -232,6 +258,11 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
         )
 
 
+def _count_only_release_response() -> str:
+    """Response used to unblock counted approval requests without approving side effects."""
+    return "denied"
+
+
 async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
     """GET /api/agents/tree?busId=X — all agents sharing a bus (root + descendants)."""
     headers = await _api_headers()
@@ -243,11 +274,72 @@ async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
         return data.get("agents", [])
 
 
-async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, int]:
-    """Count toolName occurrences across all agents in the tree.
+def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
+    """Return a logical tool-call key for benchmark count checks.
 
-    Fetches messages for every agent in the tree and counts FINISHED tool
-    messages by their ``toolName`` metadata field.
+    Tool execution posts multiple FINISHED progress messages for long-running
+    tools. Count only the user-facing completion for each logical tool call.
+    """
+    tool_name = meta.get("toolName")
+    status = meta.get("toolStatus")
+    if not tool_name:
+        return None
+
+    tool_call_id = meta.get("toolCallId")
+    action_type = meta.get("action_type")
+
+    if tool_name == "message_person":
+        if status not in {"IN_PROGRESS", "FINISHED"} or not tool_call_id:
+            return None
+        return tool_name, str(tool_call_id)
+
+    if status != "FINISHED":
+        return None
+
+    if tool_name == "spawn_agent":
+        if meta.get("subAgentId"):
+            return None
+        if not tool_call_id:
+            return None
+        return tool_name, str(tool_call_id)
+
+    if tool_name == "spawn_sub_agent":
+        if not tool_call_id:
+            return None
+        return tool_name, str(tool_call_id)
+
+    if tool_name in {"spawn_browser_agent", "spawn_claude_code_agent"}:
+        if action_type != "task_complete" or meta.get("subAgentId"):
+            return None
+        if not tool_call_id:
+            return None
+        return tool_name, str(tool_call_id)
+
+    if not tool_call_id:
+        return None
+    return tool_name, str(tool_call_id)
+
+
+def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, int]:
+    seen: set[Tuple[str, str]] = set()
+    counts: Dict[str, int] = {}
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        key = _logical_tool_count_key(meta)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        tool_name, _ = key
+        counts[tool_name] = counts.get(tool_name, 0) + 1
+    return counts
+
+
+async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, int]:
+    """Count logical tool calls across all agents in the tree.
+
+    Fetches messages for every agent in the tree and counts completed logical
+    tool invocations. Long-running tools emit extra FINISHED status messages
+    for observations/verifier progress; those are excluded.
     """
     agents = await get_agent_tree(base_url, root_agent_id)
     agent_ids = [a["agent_id"] for a in agents] if agents else [root_agent_id]
@@ -258,12 +350,8 @@ async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, 
             data = await get_agent(base_url, aid)
         except Exception:
             continue
-        for msg in data.get("messages", []):
-            meta = msg.get("metadata") or {}
-            tool_name = meta.get("toolName")
-            status = meta.get("toolStatus")
-            if tool_name and status == "FINISHED":
-                counts[tool_name] = counts.get(tool_name, 0) + 1
+        for tool_name, count in _count_logical_tool_calls_from_messages(data.get("messages", [])).items():
+            counts[tool_name] = counts.get(tool_name, 0) + count
     return counts
 
 
@@ -446,6 +534,7 @@ async def poll_agent(
     # Per-agent stall tracking: agent_id → {count, last_change_time, status}.
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
+    seen_attention_ids: set[str] = set()
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
 
@@ -463,7 +552,7 @@ async def poll_agent(
 
         # Hot-path HTTP — fetch root agent and (if the task handles approvals)
         # attention-requests in parallel. Saves ~150ms per poll.
-        fetch_approvals_now = task.approval_handling in ("auto_approve", "ignore", "prompt_user")
+        fetch_approvals_now = task.approval_handling in ("auto_approve", "ignore", "prompt_user", "count_only")
         try:
             if fetch_approvals_now:
                 data, _pending_attention = await asyncio.gather(
@@ -706,8 +795,32 @@ async def poll_agent(
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
                     if req_agent_id in tree_agent_ids and not req.get("response"):
-                        approvals_triggered += 1
                         req_id = req.get("id")
+                        if req_id and req_id not in seen_attention_ids:
+                            seen_attention_ids.add(req_id)
+                            approvals_triggered += 1
+                            if task.approval_handling == "count_only":
+                                await respond_to_attention_request(base_url, req_id, _count_only_release_response())
+                                approvals_resolved += 1
+                                print(f"    ✅ Counted and released approval request {req_id[:8]}")
+                            if task.approval_handling == "ignore":
+                                print(f"    ✅ Approval request observed {req_id[:8]}")
+                                return data, approvals_triggered, approvals_resolved, None
+                        if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
+                            data["_benchmark"] = {"calendly_link_approval_seen": True}
+                            print("    ✅ Calendly link approval request observed")
+                            return data, approvals_triggered, approvals_resolved, None
+                        if (
+                            task.approval_handling == "count_only"
+                            and task.expected_approval_count is not None
+                            and approvals_triggered >= task.expected_approval_count
+                        ):
+                            data["_benchmark"] = {"expected_approval_count_seen": approvals_triggered}
+                            print(
+                                f"    ✅ Expected approval count observed "
+                                f"({approvals_triggered}/{task.expected_approval_count})"
+                            )
+                            return data, approvals_triggered, approvals_resolved, None
                         if task.approval_handling == "auto_approve":
                             if req_id:
                                 await respond_to_attention_request(base_url, req_id, "approved")
@@ -787,6 +900,21 @@ def evaluate_task(
             return False, "Expected approval request (to ignore) but none were triggered"
         return True, None
 
+    if task.name == CALENDLY_TASK_NAME:
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("calendly_link_approval_seen"):
+            return True, None
+
+    if task.approval_handling == "count_only":
+        expected = task.expected_approval_count
+        if expected is None:
+            return False, "count_only task missing expected_approval_count"
+        benchmark_state = data.get("_benchmark", {})
+        observed = benchmark_state.get("expected_approval_count_seen", approvals_triggered)
+        if observed >= expected:
+            return True, None
+        return False, f"Expected {expected} approval requests, observed {observed}"
+
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"
@@ -807,6 +935,21 @@ def evaluate_task(
         return False, f"Low progress score: {progress:.2f}"
 
     return True, None
+
+
+def _approval_mode_allows_open_tool_context(
+    task: BenchmarkTask,
+    data: dict,
+    approvals_triggered: int,
+) -> bool:
+    """Return true when a benchmark intentionally stops while approval blocks a tool."""
+    if task.approval_handling == "ignore" and approvals_triggered > 0:
+        return True
+    if task.approval_handling != "count_only" or task.expected_approval_count is None:
+        return False
+    benchmark_state = data.get("_benchmark", {})
+    observed = benchmark_state.get("expected_approval_count_seen", approvals_triggered)
+    return observed >= task.expected_approval_count
 
 
 # ============================================================
@@ -846,9 +989,15 @@ def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
 # ============================================================
 
 
+def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bool:
+    """Return whether benchmark cleanup should delete the created agent."""
+    return passed or not keep_failed_agents
+
+
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
+    keep_failed_agents: bool = False,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
@@ -874,7 +1023,10 @@ async def run_single_task(
         nonlocal realtime_tree_task
         if not agent_id:
             return
-        status = await subscribe_supabase_realtime_agent(agent_id)
+        try:
+            status = await subscribe_supabase_realtime_agent(agent_id)
+        except Exception as exc:
+            status = f"[supabase-realtime] capture disabled for agent:{agent_id[:12]} ({exc})"
         print(f"    🔌 Realtime capture {status}")
 
         async def discover_tree_agents() -> None:
@@ -897,8 +1049,16 @@ async def run_single_task(
         if "smoke" not in task.tags:
             return
         is_private = "localhost" not in base_url and "127.0.0.1" not in base_url
+        if is_private:
+            print(f"    ⚠ Realtime monitor disabled for prod agent:{agent_id[:12]} (private channels require JWT auth)")
+            return
         realtime_monitor = SupabaseRealtimeSmokeMonitor(agent_id, private=is_private)
-        await realtime_monitor.start()
+        try:
+            await realtime_monitor.start()
+        except Exception as exc:
+            print(f"    ⚠ Realtime monitor disabled for agent:{agent_id[:12]} ({exc})")
+            realtime_monitor = None
+            return
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
@@ -1011,7 +1171,12 @@ async def run_single_task(
         final_violations = validate_context(messages)
         context_violation_dicts = [v.to_dict() for v in final_violations]
         context_errors = [v for v in final_violations if v.severity == "error"]
-        if context_errors and passed:
+        approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(
+            task,
+            data,
+            approvals_triggered,
+        )
+        if context_errors and passed and not approval_mode_blocked_on_approval:
             # Override pass → fail if context has well-formedness errors
             passed = False
             failure_reason = f"Context well-formedness errors: {context_errors[0].message}"
@@ -1068,14 +1233,77 @@ async def run_single_task(
                 f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
             )
 
-        # Clean up: delete the agent now that we've collected all data
-        try:
-            await delete_agent(base_url, agent_id)
-            print(f"    🗑  Deleted agent {agent_id[:12]}")
-        except Exception:
-            print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
+        # Clean up: delete the agent now that we've collected all data, unless
+        # the caller explicitly wants failed agents kept alive for diagnostics.
+        if _should_delete_agent_after_run(passed, keep_failed_agents):
+            try:
+                await delete_agent(base_url, agent_id)
+                print(f"    🗑  Deleted agent {agent_id[:12]}")
+            except Exception:
+                print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
+        else:
+            print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
 
         return result
+
+    except asyncio.CancelledError:
+        duration = time.time() - start
+        print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
+        if realtime_monitor:
+            await realtime_monitor.stop()
+            realtime_monitor = None
+        logs = None
+        messages = []
+        status = "CANCELLED"
+        progress_score = 0
+        if agent_id:
+            try:
+                data = await get_agent(base_url, agent_id)
+                agent = data.get("agent", {})
+                messages = data.get("messages", [])
+                status = agent.get("status", "CANCELLED")
+                progress_score = agent.get("progress", 0)
+            except Exception:
+                data = {}
+            try:
+                print("    Collecting prod logs...")
+                logs = await collect_logs(agent_id, data, start_time)
+                log_summary = []
+                for key, label in [
+                    ("backend_logs", "backend"),
+                    ("worker_logs", "worker"),
+                    ("research_logs", "research"),
+                    ("realtime_logs", "realtime"),
+                ]:
+                    entries = logs.get(key, [])
+                    log_summary.append(f"{label}={len(entries)}")
+                log_summary.append(f"messages={len(logs.get('messages', []))}")
+                print(f"    Logs collected: {', '.join(log_summary)}")
+            except Exception as log_exc:
+                print(f"    ⚠ Failed to collect cancellation logs: {log_exc}")
+            try:
+                if not keep_failed_agents:
+                    await delete_agent(base_url, agent_id)
+                    print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                else:
+                    print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
+            except Exception:
+                print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
+        return TaskResult(
+            name=task.name,
+            passed=False,
+            agent_id=agent_id,
+            status=status,
+            progress_score=progress_score,
+            duration_seconds=round(duration, 1),
+            cost_cents=0,
+            message_count=len(messages),
+            failure_reason=(
+                "Benchmark interrupted; prod logs were collected before shutdown"
+                + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
+            ),
+            logs=logs,
+        )
 
     except Exception as e:
         duration = time.time() - start
@@ -1091,8 +1319,11 @@ async def run_single_task(
             except Exception:
                 pass
             try:
-                await delete_agent(base_url, agent_id)
-                print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
+                if not keep_failed_agents:
+                    await delete_agent(base_url, agent_id)
+                    print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
+                else:
+                    print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
             except Exception:
                 print(f"    ⚠ Failed to delete orphaned agent {agent_id[:12]}")
         return TaskResult(
@@ -1132,13 +1363,27 @@ async def run_single_task(
 def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
     if args.task:
-        return [get_task_by_name(args.task)]
+        tasks = [get_task_by_name(args.task)]
     elif args.suite:
         if args.suite == "all":
-            return all_tasks()
-        return get_tasks_by_tag(args.suite)
+            tasks = all_tasks()
+        else:
+            tasks = get_tasks_by_tag(args.suite)
     else:
-        return all_tasks()
+        tasks = all_tasks()
+
+    excluded_names: set[str] = set()
+    for value in getattr(args, "exclude_task", []) or []:
+        excluded_names.update(name.strip() for name in value.split(",") if name.strip())
+    if not excluded_names:
+        return tasks
+
+    known_names = {task.name for task in all_tasks()}
+    unknown_names = sorted(excluded_names - known_names)
+    if unknown_names:
+        raise ValueError(f"Unknown --exclude-task value(s): {', '.join(unknown_names)}")
+
+    return [task for task in tasks if task.name not in excluded_names]
 
 
 async def _warmup_edge_functions(base_url: str):
@@ -1255,6 +1500,133 @@ def _extract_worker_pids_from_ps(ps_output: str) -> list[str]:
     return pids
 
 
+def _memory_mb(byte_count: int) -> float:
+    return round(byte_count / 1024 / 1024, 1)
+
+
+def _sample_local_worker_memory() -> dict:
+    """Return worker process-tree memory for local smoke leak detection."""
+    import subprocess
+
+    try:
+        import psutil
+    except Exception as e:
+        return {"available": False, "reason": f"psutil unavailable: {e}"}
+
+    result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    root_pids = _extract_worker_pids_from_ps(result.stdout)
+    if not root_pids:
+        return {"available": False, "reason": "no local python worker.py process found"}
+
+    seen: set[int] = set()
+    processes: list[dict] = []
+    total_rss_bytes = 0
+    playwright_driver_count = 0
+    playwright_driver_rss_bytes = 0
+
+    for root_pid in root_pids:
+        try:
+            root = psutil.Process(int(root_pid))
+            tree = [root] + root.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            continue
+
+        for proc in tree:
+            if proc.pid in seen:
+                continue
+            seen.add(proc.pid)
+            try:
+                rss_bytes = proc.memory_info().rss
+                command = " ".join(proc.cmdline()) or proc.name()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+            total_rss_bytes += rss_bytes
+            is_playwright_driver = "playwright/driver" in command and "run-driver" in command
+            if is_playwright_driver:
+                playwright_driver_count += 1
+                playwright_driver_rss_bytes += rss_bytes
+            processes.append(
+                {
+                    "pid": proc.pid,
+                    "rss_mb": _memory_mb(rss_bytes),
+                    "is_playwright_driver": is_playwright_driver,
+                    "command": command[:240],
+                }
+            )
+
+    return {
+        "available": True,
+        "root_pids": root_pids,
+        "process_count": len(processes),
+        "total_rss_mb": _memory_mb(total_rss_bytes),
+        "playwright_driver_count": playwright_driver_count,
+        "playwright_driver_rss_mb": _memory_mb(playwright_driver_rss_bytes),
+        "processes": sorted(processes, key=lambda p: p["rss_mb"], reverse=True),
+    }
+
+
+def _build_smoke_memory_summary(before: dict, after: dict) -> dict:
+    """Build memory leak gate output for local smoke runs."""
+    summary = {
+        "enabled": True,
+        "before": before,
+        "after": after,
+        "thresholds": {
+            "max_growth_mb": SMOKE_MEMORY_MAX_GROWTH_MB,
+            "max_end_mb": SMOKE_MEMORY_MAX_END_MB,
+            "forbid_playwright_drivers": SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS,
+        },
+        "failures": [],
+    }
+    if not before.get("available") or not after.get("available"):
+        summary["failures"].append(
+            f"memory sampling unavailable: before={before.get('reason')} after={after.get('reason')}"
+        )
+        return summary
+
+    growth_mb = round(after["total_rss_mb"] - before["total_rss_mb"], 1)
+    summary["growth_mb"] = growth_mb
+
+    if growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
+        summary["failures"].append(
+            f"worker process-tree RSS grew by {growth_mb} MB (> {SMOKE_MEMORY_MAX_GROWTH_MB} MB)"
+        )
+    if after["total_rss_mb"] > SMOKE_MEMORY_MAX_END_MB:
+        summary["failures"].append(
+            f"worker process-tree RSS ended at {after['total_rss_mb']} MB (> {SMOKE_MEMORY_MAX_END_MB} MB)"
+        )
+    if SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS and after["playwright_driver_count"] > 0:
+        summary["failures"].append(
+            f"{after['playwright_driver_count']} Playwright driver process(es) still alive "
+            f"after smoke ({after['playwright_driver_rss_mb']} MB RSS)"
+        )
+
+    return summary
+
+
+def _docker_daemon_ping(timeout_seconds: float = 1.0) -> bool:
+    """Return True only when the local Docker daemon responds to /_ping quickly."""
+    import socket
+
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host.startswith("unix://"):
+        socket_path = docker_host.removeprefix("unix://")
+    elif docker_host:
+        return False
+    else:
+        socket_path = "/var/run/docker.sock"
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_seconds)
+            sock.connect(socket_path)
+            sock.sendall(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
+            return b"OK" in sock.recv(128)
+    except Exception:
+        return False
+
+
 async def _terminate_stale_workflows():
     """Terminate all running Temporal workflows on the local task queue.
 
@@ -1339,6 +1711,9 @@ async def _fail_stale_active_agents():
 
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
     if not workspace:
+        return
+    if not _docker_daemon_ping():
+        print("  ⚠ Skipping stale ACTIVE agent cleanup — Docker daemon did not respond")
         return
     container = f"victoria-db-{workspace}"
     ps = subprocess.run(
@@ -1447,8 +1822,10 @@ async def main_async(args):
 
     # Authenticate
     print("\n  Authenticating...")
+    authenticated_jwt = False
     try:
         await authenticate()
+        authenticated_jwt = True
         print("  ✅ Authenticated")
     except Exception as e:
         print(f"  ⚠ Auth failed ({e}), falling back to API key")
@@ -1459,7 +1836,10 @@ async def main_async(args):
     # (which handles the process/container side); this block handles the Temporal + DB side.
     if not args.prod and base_url.startswith("http://localhost"):
         _verify_worker_queue_alignment()
-        await _terminate_stale_workflows()
+        try:
+            await asyncio.wait_for(_terminate_stale_workflows(), timeout=30)
+        except asyncio.TimeoutError:
+            print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
         await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
 
@@ -1519,7 +1899,12 @@ async def main_async(args):
     fly_status = await start_fly_log_collector()
     print(f"  📡 {fly_status}")
     is_private_realtime = "localhost" not in base_url and "127.0.0.1" not in base_url
-    realtime_status = await start_supabase_realtime_collector(private=is_private_realtime)
+    realtime_started = False
+    if is_private_realtime and not authenticated_jwt:
+        realtime_status = "supabase realtime frame collector disabled (prod private channels require JWT auth)"
+    else:
+        realtime_status = await start_supabase_realtime_collector(private=is_private_realtime)
+        realtime_started = True
     print(f"  📡 {realtime_status}")
 
     suite_name = args.suite or args.task or "all"
@@ -1532,6 +1917,21 @@ async def main_async(args):
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    memory_gate_enabled = (
+        suite_name == "smoke"
+        and not args.prod
+        and (base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"))
+    )
+    memory_before = _sample_local_worker_memory() if memory_gate_enabled else {"available": False, "reason": "disabled"}
+    if memory_gate_enabled:
+        if memory_before.get("available"):
+            print(
+                "  🧠 Worker memory before smoke: "
+                f"{memory_before['total_rss_mb']} MB RSS, "
+                f"playwright_drivers={memory_before['playwright_driver_count']}"
+            )
+        else:
+            print(f"  ⚠ Worker memory sampling unavailable before smoke: {memory_before.get('reason')}")
 
     # Record skipped Claude Code tasks in results
     for t in skipped_claude_tasks:
@@ -1551,38 +1951,100 @@ async def main_async(args):
 
     try:
         if args.parallel:
-            # Run all tasks concurrently
-            print(f"\n  Running {len(tasks)} tasks in parallel...")
-            results = await asyncio.gather(
-                *(run_single_task(base_url, task) for task in tasks),
-                return_exceptions=True,
-            )
-            for task, result in zip(tasks, results):
-                if isinstance(result, BaseException):
-                    run.task_results.append(
-                        TaskResult(
-                            name=task.name,
-                            passed=False,
-                            agent_id="",
-                            status="ERROR",
-                            progress_score=0,
-                            duration_seconds=0,
-                            cost_cents=0,
-                            message_count=0,
-                            failure_reason=str(result),
+            max_concurrency = args.max_concurrency
+            if max_concurrency is None and args.prod:
+                max_concurrency = int(os.environ.get("BENCHMARK_PROD_MAX_CONCURRENCY", "2"))
+            if max_concurrency is not None and max_concurrency < 1:
+                raise ValueError("--max-concurrency must be >= 1")
+
+            if max_concurrency is None or max_concurrency >= len(tasks):
+                print(f"\n  Running {len(tasks)} tasks in parallel...")
+                task_runners = [run_single_task(base_url, task, args.keep_failed_agents) for task in tasks]
+            else:
+                print(f"\n  Running {len(tasks)} tasks in parallel (max_concurrency={max_concurrency})...")
+                semaphore = asyncio.Semaphore(max_concurrency)
+
+                async def run_limited(task: BenchmarkTask) -> TaskResult:
+                    async with semaphore:
+                        return await run_single_task(base_url, task, args.keep_failed_agents)
+
+                task_runners = [run_limited(task) for task in tasks]
+
+            pending_results: dict[asyncio.Task, BenchmarkTask] = {
+                asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
+                for task, runner in zip(tasks, task_runners)
+            }
+            pending = set(pending_results)
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    for task_future in done:
+                        task = pending_results[task_future]
+                        try:
+                            result = task_future.result()
+                        except BaseException as exc:
+                            run.task_results.append(
+                                TaskResult(
+                                    name=task.name,
+                                    passed=False,
+                                    agent_id="",
+                                    status="ERROR",
+                                    progress_score=0,
+                                    duration_seconds=0,
+                                    cost_cents=0,
+                                    message_count=0,
+                                    failure_reason=str(exc),
+                                )
+                            )
+                        else:
+                            run.task_results.append(result)
+            except asyncio.CancelledError:
+                for task_future in pending:
+                    task_future.cancel()
+                cancelled = await asyncio.gather(*pending, return_exceptions=True)
+                for task_future, result in zip(pending, cancelled):
+                    task = pending_results[task_future]
+                    if isinstance(result, TaskResult):
+                        run.task_results.append(result)
+                    else:
+                        run.task_results.append(
+                            TaskResult(
+                                name=task.name,
+                                passed=False,
+                                agent_id="",
+                                status="CANCELLED",
+                                progress_score=0,
+                                duration_seconds=0,
+                                cost_cents=0,
+                                message_count=0,
+                                failure_reason=f"Benchmark interrupted before task produced logs: {result}",
+                            )
                         )
-                    )
-                else:
-                    run.task_results.append(result)
+                raise
         else:
             for task in tasks:
-                result = await run_single_task(base_url, task)
+                result = await run_single_task(base_url, task, args.keep_failed_agents)
                 run.task_results.append(result)
     finally:
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
-        realtime_total = await stop_supabase_realtime_collector()
-        print(f"  📡 Supabase realtime frame stream stopped ({realtime_total} frames captured)")
+        if realtime_started:
+            realtime_total = await stop_supabase_realtime_collector()
+            print(f"  📡 Supabase realtime frame stream stopped ({realtime_total} frames captured)")
+
+        if memory_gate_enabled:
+            memory_after = _sample_local_worker_memory()
+            run.memory_summary = _build_smoke_memory_summary(memory_before, memory_after)
+            if memory_after.get("available"):
+                growth = run.memory_summary.get("growth_mb")
+                print(
+                    "  🧠 Worker memory after smoke: "
+                    f"{memory_after['total_rss_mb']} MB RSS "
+                    f"(growth={growth:+.1f} MB), "
+                    f"playwright_drivers={memory_after['playwright_driver_count']}"
+                )
+            else:
+                print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
@@ -1603,7 +2065,23 @@ async def main_async(args):
     agg_cache_pct = round(agg_cache_read / agg_cache_total * 100, 1) if agg_cache_total > 0 else 0.0
     if agg_cache_total > 0:
         print(f"  Cache: read={agg_cache_read} write={agg_cache_write} hit={agg_cache_pct}%")
+    memory_failures = (run.memory_summary or {}).get("failures", [])
+    if run.memory_summary:
+        growth = run.memory_summary.get("growth_mb")
+        after = run.memory_summary.get("after", {})
+        if growth is not None and after.get("available"):
+            print(f"  Memory: worker RSS={after['total_rss_mb']} MB growth={growth:+.1f} MB")
     print(f"{'=' * 60}")
+
+    if memory_failures:
+        print("\n  ❌ MEMORY RATCHET FAILED (local smoke worker process tree):")
+        for failure in memory_failures:
+            print(f"    - {failure}")
+        print(
+            "\n  Inspect the saved run's memory_summary.processes and check for child"
+            "\n  processes retained after browser-smoke, especially Playwright drivers."
+        )
+        sys.exit(1)
 
     # Per-task cache hit ratchets — each value is the floor for that smoke
     # task's prompt-cache hit %. Baseline values come from the run that
@@ -1686,6 +2164,13 @@ def main():
         help="Run tasks concurrently instead of sequentially",
     )
     parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum concurrent benchmark tasks when --parallel is set. "
+        "Defaults to BENCHMARK_PROD_MAX_CONCURRENCY or 2 for --prod; otherwise unbounded.",
+    )
+    parser.add_argument(
         "--ci",
         action="store_true",
         help="CI mode: exit with non-zero status if any task fails",
@@ -1714,6 +2199,18 @@ def main():
         type=int,
         default=None,
         help="Override sub_agent_count — substitutes {n} in prompt/eval_prompt for load-test tasks",
+    )
+    parser.add_argument(
+        "--exclude-task",
+        action="append",
+        default=[],
+        help="Exclude a benchmark task by name. Repeatable; comma-separated names are also accepted.",
+    )
+    parser.add_argument(
+        "--keep-failed-agents",
+        action="store_true",
+        help="Do not delete failed/cancelled benchmark agents after log collection. "
+        "Useful for local diagnostic wrappers.",
     )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(

@@ -33,6 +33,7 @@ import {
   attachRecorder,
   createAgent,
   deleteAgent,
+  expectDevAuthenticated,
   expectProdSessionRecognized,
   hasUncaughtErrors,
   injectProdSession,
@@ -68,12 +69,7 @@ async function waitForDevLogin(
   if (IS_PROD) {
     await expectProdSessionRecognized(page);
   } else {
-    await expect
-      .poll(() => rec.console.some((m) => m.text.includes('[Auth] Dev auto-login complete')), {
-        timeout: 15_000,
-        message: 'Dev auto-login did not complete',
-      })
-      .toBe(true);
+    await expectDevAuthenticated(page, rec);
   }
 }
 

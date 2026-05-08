@@ -9,6 +9,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/test.sh                              # offline + smoke + semantic (auto-port from CONDUCTOR_PORT)
 #   bash scripts/test.sh --port=3001                   # explicit port
+#   bash scripts/test.sh --full                        # offline + full benchmark suite against prod
 #   bash scripts/test.sh --no-smoke                    # offline-only (skips smoke + semantic)
 #   bash scripts/test.sh --mandatory-human-approval-retrieved=true
 #                                                       # required when prompt edits are present
@@ -33,13 +34,16 @@ IS_MAC=false
 REPO=""
 DOMAIN=""
 SMOKE=true
+FULL=false
 PORT=""
 LIST=false
 VERBOSE=false
 PROMPT_HUMAN_APPROVAL_RETRIEVED=false
+FULL_MAX_CONCURRENCY="${BENCHMARK_PROD_MAX_CONCURRENCY:-5}"
 
 for arg in "$@"; do
   case "$arg" in
+    --full) FULL=true ;;
     --no-smoke) SMOKE=false ;;
     --port=*) PORT="${arg#--port=}" ;;
     --list) LIST=true ;;
@@ -52,7 +56,7 @@ for arg in "$@"; do
       ;;
     -*)
       echo "Unknown flag: $arg"
-      echo "Usage: bash scripts/test.sh [repo] [domain] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true]"
+      echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true]"
       exit 1
       ;;
     *)
@@ -82,6 +86,11 @@ if $LIST; then
   echo ""
   echo "  mac-app"
   (cd mac-app && bash scripts/run-blackbox-tests.sh --list 2>/dev/null) | sed 's/^/    /'
+  echo ""
+  echo "  benchmarks"
+  (cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --list 2>/dev/null) | sed 's/^/    /'
+  echo "    (--full runs load-test-sias separately)"
+  echo "    (--full prod max concurrency: $FULL_MAX_CONCURRENCY)"
   exit 0
 fi
 
@@ -89,16 +98,31 @@ fi
 # Smoke only runs on full-repo (unscoped) invocations. When REPO is set
 # (e.g. `scripts/test.sh back-end`), smoke is off regardless of default.
 if [ -n "$REPO" ]; then
+  if $FULL; then
+    echo "ERROR: --full runs the full prod benchmark suite and cannot be combined with repo/domain filters."
+    echo "Use: bash scripts/test.sh --full"
+    exit 1
+  fi
   SMOKE=false
+fi
+if $FULL && ! $SMOKE; then
+  echo "ERROR: --full cannot be combined with --no-smoke."
+  echo "Use: bash scripts/test.sh --full"
+  exit 1
 fi
 
 # Auto-derive port from CONDUCTOR_PORT if --port not explicitly passed
-if $SMOKE && [ -z "$PORT" ] && [ -n "${CONDUCTOR_PORT:-}" ]; then
+if $SMOKE && ! $FULL && [ -z "$PORT" ] && [ -n "${CONDUCTOR_PORT:-}" ]; then
   PORT="$CONDUCTOR_PORT"
 fi
-if $SMOKE && [ -z "$PORT" ]; then
+if $SMOKE && ! $FULL && [ -z "$PORT" ]; then
   echo "ERROR: smoke requires a port (set CONDUCTOR_PORT or pass --port=N; pass --no-smoke to skip)."
   echo "Example: bash scripts/test.sh --port=3001"
+  exit 1
+fi
+if $FULL && [ -n "$PORT" ]; then
+  echo "ERROR: --full runs benchmarks against prod and cannot be combined with --port."
+  echo "Use local smoke without --full when targeting localhost."
   exit 1
 fi
 # Validate PORT is a decimal integer in the IANA range — downstream arithmetic
@@ -283,27 +307,35 @@ fi
 # ── Wait for all blackbox suites ──
 collect_bg_suites
 
-# ── Smoke tests (parallel, only if --smoke --port=N) ──
+# ── Smoke tests (parallel, only if --smoke --port=N; --full targets prod) ──
 if $SMOKE; then
-  # Frontend semantic tests require a running frontend — guard BEFORE any
-  # background smoke process spawns, so a missing frontend can't leave
-  # orphaned benchmark runs behind.
-  SEMANTIC_BACKEND_PORT="$PORT"
-  SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
-  if ! curl -sf "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
-    echo "ERROR: semantic tests require frontend on port $SEMANTIC_FRONTEND_PORT (start it or pass --no-smoke to skip)."
-    exit 1
-  fi
+  if $FULL; then
+    bg_suite "Full Benchmarks (prod non-load)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY --exclude-task load-test-sias"
+    collect_bg_suites
 
-  if [ -z "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
-    echo "ERROR: CONDUCTOR_WORKSPACE_NAME not set — cannot derive Temporal task queue for smoke benchmarks."
-    exit 1
-  fi
-  SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME}"
-  bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
-  bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
+    bg_suite "Full Load Benchmark (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --task load-test-sias --prod --ci"
+    collect_bg_suites
+  else
+    # Frontend semantic tests require a running frontend — guard BEFORE any
+    # background smoke process spawns, so a missing frontend can't leave
+    # orphaned benchmark runs behind.
+    SEMANTIC_BACKEND_PORT="$PORT"
+    SEMANTIC_FRONTEND_PORT="$((PORT + 1))"
+    if ! curl -sf "http://localhost:$SEMANTIC_FRONTEND_PORT" > /dev/null 2>&1; then
+      echo "ERROR: semantic tests require frontend on port $SEMANTIC_FRONTEND_PORT (start it or pass --no-smoke to skip)."
+      exit 1
+    fi
 
-  collect_bg_suites
+    if [ -z "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
+      echo "ERROR: CONDUCTOR_WORKSPACE_NAME not set — cannot derive Temporal task queue for smoke benchmarks."
+      exit 1
+    fi
+    SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME}"
+    bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
+    bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
+
+    collect_bg_suites
+  fi
 fi
 
 # ── Collect build results (waited until blackbox tests finish) ──

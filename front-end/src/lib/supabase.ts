@@ -6,6 +6,7 @@
  */
 
 import { createClient, type Session, type User } from '@supabase/supabase-js';
+import { BACKEND_BASE_URL } from './backendUrl';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -19,10 +20,7 @@ const SESSION_KEY = 'rose-session';
 const USER_CACHE_KEY = 'app-user';
 
 // API Configuration
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
-  /\/$/,
-  '',
-);
+const API_BASE_URL = BACKEND_BASE_URL;
 
 // =============================================================================
 // Clear stale Supabase auth keys on load

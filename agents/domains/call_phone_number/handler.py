@@ -328,7 +328,8 @@ async def call_phone_number_activity(
             if status == "ended":
                 # Call completed - extract all results
                 transcript = poll_result.get("transcript", "")
-                summary = poll_result.get("summary", "")
+                analysis = poll_result.get("analysis", {})
+                summary = poll_result.get("summary") or analysis.get("summary", "")
                 recording_url = poll_result.get("recordingUrl", "")
                 ended_reason = poll_result.get("endedReason", "unknown")
 
@@ -337,8 +338,10 @@ async def call_phone_number_activity(
                     poll_result.get("endedAt"),
                 )
 
-                analysis = poll_result.get("analysis", {})
                 structured_data = analysis.get("structuredData", {})
+                completion_message = build_completion_message(
+                    formatted_phone, duration, summary, structured_data, transcript
+                )
 
                 logger.info(
                     "Call completed",
@@ -354,7 +357,7 @@ async def call_phone_number_activity(
                 await save_phone_call_message(
                     agent_id=agent_id,
                     title="\u2705 Call completed",
-                    message=f"**To:** {formatted_phone}\n**Duration:** {duration}s",
+                    message=completion_message,
                     status=MessageStatus.FINISHED,
                     tool_call_id=tool_call_id,
                     phone_metadata={
@@ -372,9 +375,7 @@ async def call_phone_number_activity(
 
                 return {
                     "success": True,
-                    "message": build_completion_message(
-                        formatted_phone, duration, summary, structured_data, transcript
-                    ),
+                    "message": completion_message,
                     "call_id": call_id,
                     "structured_data": structured_data,
                     "duration": duration,

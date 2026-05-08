@@ -42,6 +42,8 @@ from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()
 
+VERIFIER_ACTIVITY_TIMEOUT_SECONDS = 60
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -809,8 +811,10 @@ async def _run_verifier(
         )
 
         final_output = terminal.get_display()
+        raw_output = terminal.get_raw_output()
+        codex_output = raw_output or final_output
         if code_provider == "codex" and (exit_code is None or exit_code == 0):
-            structured_response = _synthesize_codex_structured_response(final_output, output_schema)
+            structured_response = _synthesize_codex_structured_response(codex_output, output_schema)
             if structured_response:
                 v_reasoning = (
                     "Codex exited successfully and terminal evidence satisfies the requested schema; "
@@ -835,7 +839,8 @@ async def _run_verifier(
 
         verifier_terminal_output = final_output[-5000:]
         if code_provider == "codex":
-            codex_evidence = _build_codex_evidence_summary(final_output)
+            verifier_terminal_output = codex_output[-5000:]
+            codex_evidence = _build_codex_evidence_summary(codex_output)
             if codex_evidence:
                 verifier_terminal_output = (
                     f"{codex_evidence}\n\nRecent Codex terminal output:\n\n{verifier_terminal_output}"
@@ -893,7 +898,7 @@ async def _run_verifier(
                 gpt_token_pool_id,
                 gpt_token_user_id,
             ],
-            start_to_close_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
@@ -961,7 +966,7 @@ async def _run_verifier(
 
     except Exception as verifier_error:
         if code_provider == "codex" and (exit_code is None or exit_code == 0):
-            final_output = terminal.get_display()
+            final_output = terminal.get_raw_output() or terminal.get_display()
             structured_response = _synthesize_codex_structured_response(final_output, output_schema)
             if structured_response:
                 v_reasoning = (
@@ -1040,6 +1045,7 @@ def build_usage_items(
     model: str,
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
+    claude_code_usage: Optional[Dict[str, Any]] = None,
 ) -> list[Dict[str, Any]]:
     """Build standardized usage items for cost tracking."""
     usage_items: list[Dict[str, Any]] = []
@@ -1060,6 +1066,26 @@ def build_usage_items(
                 "output_tokens": total_output_tokens,
             }
         )
+
+    if claude_code_usage:
+        input_tokens = int(claude_code_usage.get("inputTokens", 0) or 0)
+        output_tokens = int(claude_code_usage.get("outputTokens", 0) or 0)
+        cache_read = int(claude_code_usage.get("cacheReadInputTokens", 0) or 0)
+        cache_create = int(claude_code_usage.get("cacheCreationInputTokens", 0) or 0)
+        if input_tokens > 0 or output_tokens > 0 or cache_read > 0 or cache_create > 0:
+            usage_items.append(
+                {
+                    "type": "llm",
+                    "cost_cents": 0,
+                    "provider": "Claude Code CLI (user plan)",
+                    "model": "claude-code",
+                    "number_of_tokens": input_tokens + output_tokens,
+                    "tokens_in": input_tokens,
+                    "tokens_out": output_tokens,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_create,
+                }
+            )
 
     e2b_cost_cents = round((execution_time_ms / 1000) * E2B_COST_CENTS_PER_SECOND, 4)
     usage_items.append(
@@ -1327,7 +1353,12 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         execution_time_ms = (safe_time() - start_time) * 1000
         usage_items = build_usage_items(
-            total_input_tokens, total_output_tokens, model, model_pricing, execution_time_ms
+            total_input_tokens,
+            total_output_tokens,
+            model,
+            model_pricing,
+            execution_time_ms,
+            claude_code_usage,
         )
 
         if log_collector:

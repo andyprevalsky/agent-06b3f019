@@ -4,14 +4,13 @@
  * Constants, display mappings, and defaults shared across terminal UI components.
  */
 
+import { BACKEND_BASE_URL, backendApiUrl } from '@/lib/backendUrl';
+
 /** Backend API base URL (trailing slash stripped). Read once at module load. */
-export const API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:3001').replace(
-  /\/$/,
-  '',
-);
+export const API_URL = BACKEND_BASE_URL;
 
 /** Backend API base URL including /api prefix. */
-export const API_BASE_WITH_PATH = API_URL.endsWith('/api') ? API_URL : `${API_URL}/api`;
+export const API_BASE_WITH_PATH = backendApiUrl();
 
 /** ClaudeCodeChip WebSocket retry backoff (ms between attempts). */
 export const CLAUDE_CODE_WS_RETRY_DELAYS = [100, 400, 800];

@@ -41,12 +41,10 @@ const log = createLogger('ResponseSchema');
 // Type system notes:
 //   - 'str' | 'int' | 'float' | 'bool' — primitives
 //   - 'list[str]' | 'list[int]'         — homogeneous primitive lists
-//   - 'object'                          — nested object; use the field
-//                                         description to spell out sub-fields
-//                                         (e.g. "Object with: name (str),
-//                                         population (int), notes (str)")
-//   - 'list[object]'                    — list of objects; description must
-//                                         describe each item shape
+//   - 'object'                          — nested object; use `properties`
+//                                         to spell out sub-fields
+//   - 'list[object]'                    — list of objects; `properties`
+//                                         describes each item shape
 //   - 'file_pointer' | 'list[file_pointer]'
 //                                       — file outputs (image, doc, etc.) —
 //                                         the verifier extracts the full
@@ -62,18 +60,9 @@ const log = createLogger('ResponseSchema');
 //                                         so we skip the full FilePointer
 //                                         round-trip.
 //
-// 'object' / 'list[object]' are accepted by the Pydantic verifier as
-// JSON-schema 'object' (additionalProperties: true) — the verifier reads
-// the description to populate sub-fields. Keep descriptions concrete. When
-// any field uses 'object' or 'list[object]', the verifier on the Python
-// side flips `strict: false` on the response-format envelope (open shapes
-// are incompatible with OpenAI strict mode). The Python helper handles that
-// automatically via `_build_verifier_json_schema`; we don't need to do
-// anything extra here on the TS schema-gen side because the schema-gen
-// response_format itself stays closed-shape — the LLM chooses a string from
-// the type enum, never produces an open-shape object directly. The
-// open-shape gymnastics happen at verifier-call time on the Python side,
-// using the field types this generator emitted.
+// 'object' / 'list[object]' must carry explicit `properties`. The Python
+// verifier turns those properties into a closed nested schema so OpenRouter,
+// claudeAuth, and gptAuth all enforce the same required fields.
 const FieldTypeSchema = z.enum([
   'str',
   'int',
@@ -89,12 +78,37 @@ const FieldTypeSchema = z.enum([
   'list[session_file_pointer]',
 ]);
 
-// Individual field definition (no 'required' - we hardcode it to true)
-const SchemaFieldSchema = z.object({
-  name: z.string().describe('Field name in snake_case'),
-  type: FieldTypeSchema.describe('Field type'),
-  description: z.string().describe('Brief description of what this field contains'),
+const NestedSchemaFieldSchema = z.object({
+  name: z.string().describe('Nested field name in snake_case'),
+  type: z
+    .enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'])
+    .describe('Nested field type'),
 });
+
+// Individual field definition (no 'required' - we hardcode it to true)
+const SchemaFieldSchema = z
+  .object({
+    name: z.string().describe('Field name in snake_case'),
+    type: FieldTypeSchema.describe('Field type'),
+    properties: z
+      .array(NestedSchemaFieldSchema)
+      .optional()
+      .describe(
+        'Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.'
+      ),
+  })
+  .superRefine((field, ctx) => {
+    if (
+      (field.type === 'object' || field.type === 'list[object]') &&
+      (!field.properties || field.properties.length === 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'object and list[object] fields must include explicit properties',
+        path: ['properties'],
+      });
+    }
+  });
 
 // The response schema structure.
 //
@@ -132,7 +146,10 @@ export type ResponseSchema = {
       | 'session_file_pointer'
       | 'list[session_file_pointer]';
     required: boolean;
-    description: string;
+    properties?: Array<{
+      name: string;
+      type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+    }>;
   }>;
 };
 
@@ -182,13 +199,29 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
             ],
             description: 'Field type',
           },
-          description: {
-            type: 'string',
+          properties: {
+            type: 'array',
             description:
-              'Concrete description of what this field contains. For object/list[object], spell out sub-field names and types.',
+              'Required when type is object or list[object]. Explicit subfields for the object, never prose.',
+            items: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  description: 'Nested field name in snake_case.',
+                },
+                type: {
+                  type: 'string',
+                  enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'],
+                  description: 'Nested field type.',
+                },
+              },
+              required: ['name', 'type'],
+              additionalProperties: false,
+            },
           },
         },
-        required: ['name', 'type', 'description'],
+        required: ['name', 'type'],
         additionalProperties: false,
       },
     },
@@ -230,7 +263,7 @@ Your output is consumed by an automated verifier that scores 1.0 IFF every field
 
 4. CONCRETE TYPES. Pick the most precise type the goal allows. \`int\` beats \`str\` for a population. \`list[object]\` beats \`str\` for a comparison table.
 
-5. CONCRETE DESCRIPTIONS. The description tells the verifier exactly what counts as "populated." Include units, formats, examples where useful (e.g. "Population of Tokyo Metropolis as a single integer (e.g. 13960000)").
+5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For \`object\` and \`list[object]\`, put every required nested field in \`properties\`. The verifier enforces those properties as the object shape.
 
 # BANNED FIELD NAMES
 
@@ -255,8 +288,8 @@ Always replace with a goal-anchored name. Examples:
   - bool:                       True/false
   - list[str]:                  List of strings
   - list[int]:                  List of integers
-  - object:                     Nested object — describe sub-fields in the description (e.g. "Object with: name (str), population (int), notes (str)")
-  - list[object]:               List of objects — describe each item's shape in the description
+  - object:                     Nested object — MUST include properties: [{ name, type }]
+  - list[object]:               List of objects — MUST include properties describing each item shape
   - file_pointer:               Reference to a file produced by the agent (image, doc, etc.). Use for tasks that produce files. The verifier extracts full file metadata: path, id, storage_path, original_filename, mime_type, size_bytes, created_at.
   - list[file_pointer]:         List of file references. Use when multiple files are produced.
   - session_file_pointer:       Cheap variant of file_pointer for cloud-agent goals (spawn_claude_code_agent / spawn_browser_agent). The verifier extracts ONLY the absolute path from terminal output — the spawning activity handles download/upload, so you avoid the full FilePointer round-trip. Prefer this over file_pointer when the goal is delegated to a cloud sandbox or browser session.
@@ -272,13 +305,12 @@ Goal: "What is Tokyo's current population?"
 
 GOOD:
   fields: [
-    { name: "population", type: "int",
-      description: "Population of Tokyo Metropolis as a single integer (e.g. 13960000). Most recent year available." }
+    { name: "population", type: "int" }
   ]
 
 BAD (anti-pattern — uses catch-all name):
   fields: [
-    { name: "result", type: "str", description: "the answer" }
+    { name: "result", type: "str" }
   ]
 
 ## Example 2 — multi-field extraction
@@ -287,15 +319,13 @@ Goal: "Find this person's email and LinkedIn URL."
 
 GOOD:
   fields: [
-    { name: "email", type: "str",
-      description: "Primary email address for the target person, e.g. 'jane@example.com'" },
-    { name: "linkedin_url", type: "str",
-      description: "Full LinkedIn profile URL (https://www.linkedin.com/in/...)" }
+    { name: "email", type: "str" },
+    { name: "linkedin_url", type: "str" }
   ]
 
 BAD (anti-pattern — collapses two distinct outputs into one catch-all):
   fields: [
-    { name: "data", type: "str", description: "email and LinkedIn" }
+    { name: "data", type: "str" }
   ]
 
 ## Example 3 — derived value
@@ -304,12 +334,9 @@ Goal: "Multiply Tokyo's population by NYC's population."
 
 GOOD:
   fields: [
-    { name: "tokyo_population", type: "int",
-      description: "Population of Tokyo Metropolis as a single integer (most recent year)." },
-    { name: "nyc_population", type: "int",
-      description: "Population of New York City as a single integer (most recent year)." },
-    { name: "product", type: "int",
-      description: "Tokyo population multiplied by NYC population, as a single integer." }
+    { name: "tokyo_population", type: "int" },
+    { name: "nyc_population", type: "int" },
+    { name: "product", type: "int" }
   ]
 
 Why three fields and not one: the verifier scores both intermediate evidence (the two populations from search results) AND the derived value. Listing them all forces the agent to actually surface the source numbers, which prevents fabricated multiplication.
@@ -321,7 +348,11 @@ Goal: "Compare three cities by cost of living and rank them."
 GOOD:
   fields: [
     { name: "cities", type: "list[object]",
-      description: "Each item is an object with: name (str), cost_of_living_index (number), rank (int, 1=cheapest)." }
+      properties: [
+        { name: "name", type: "str" },
+        { name: "cost_of_living_index", type: "float" },
+        { name: "rank", type: "int" }
+      ] }
   ]
 
 ## Example 5 — file output
@@ -330,15 +361,14 @@ Goal: "Generate a logo as a PNG."
 
 GOOD:
   fields: [
-    { name: "logo", type: "file_pointer",
-      description: "PNG file containing the generated logo (mime_type=image/png)." }
+    { name: "logo", type: "file_pointer" }
   ]
 
 # YOUR JOB
 
 Given a goal, return JSON with:
   - reasoning: 1-3 sentences on what concrete outputs the goal requires.
-  - fields: the minimal MUST-HAVE list, with AT LEAST ONE field. Specific names, concrete types, concrete descriptions. A zero-length \`fields\` array is invalid and will be rejected.
+  - fields: the minimal MUST-HAVE list, with AT LEAST ONE field. Specific names and concrete types. For object/list[object], include explicit \`properties\`; never put subfields in prose. A zero-length \`fields\` array is invalid and will be rejected.
 
 Output JSON only. Do not include prose outside the JSON envelope.`;
 
@@ -557,7 +587,7 @@ export async function generateResponseSchema(
         name: f.name,
         type: f.type,
         required: true as const,
-        description: f.description,
+        ...(f.properties ? { properties: f.properties } : {}),
       }));
 
       return {

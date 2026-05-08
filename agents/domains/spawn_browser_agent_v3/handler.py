@@ -84,6 +84,27 @@ from .types import ClaudeTokenState
 logger = structlog.get_logger()
 
 
+async def _stop_playwright_resources(
+    playwright_browser: Optional[Any],
+    playwright_instance: Optional[Any],
+    agent_id: str,
+) -> None:
+    """Disconnect Playwright's CDP client and stop its local driver process."""
+    if playwright_browser:
+        try:
+            await playwright_browser.close()
+            logger.info("Playwright browser CDP connection closed", agent_id=agent_id)
+        except Exception as e:
+            logger.warning("Failed to close Playwright browser CDP connection", agent_id=agent_id, error=str(e))
+
+    if playwright_instance:
+        try:
+            await playwright_instance.stop()
+            logger.info("Playwright instance stopped", agent_id=agent_id)
+        except Exception as e:
+            logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
+
+
 async def _call_browser_use_with_rotation(  # noqa: C901
     *,
     rose_client: RoseClient,
@@ -269,6 +290,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     from helpers.llm import check_progress
 
     dom_service = None
+    playwright_browser = None
+    playwright_instance = None
     action_history = ActionHistory()
     browser_url = None
     current_url = ""
@@ -442,7 +465,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
             _record_timing("parallel.browser.humanizer", t)
 
-            return _dom_service, _dom_page, _input_page, _humanizer, _playwright_instance
+            return _dom_service, _dom_page, _input_page, _humanizer, _playwright_browser, _playwright_instance
 
         async def _process_data():
             """Save init messages + process user data (no browser needed)."""
@@ -596,7 +619,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         )
         _record_timing("parallel_setup_total", t_parallel)
 
-        dom_service, dom_page, input_page, humanizer, playwright_instance = browser_result
+        dom_service, dom_page, input_page, humanizer, playwright_browser, playwright_instance = browser_result
 
         (
             shipping_section,
@@ -1072,7 +1095,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     # claimed answer.
                     dom_tree = browser_state.get("dom_tree", "") or ""
                     final_screenshot_b64 = browser_state.get("screenshot")
-
                     session_files = await list_session_files(session_id)
                     files_text = "Downloaded Files in Session:\n"
                     if session_files:
@@ -1126,7 +1148,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                                 "the entire scrollable page). Treat the DOM tree above as "
                                 "ground truth; the screenshot is supplementary."
                                 if final_screenshot_b64
-                                else "No final-state screenshot available."
+                                else "No final-state screenshot included; DOM tree is the verifier ground truth."
                             ),
                             "metadata": {
                                 "toolName": "final_screenshot",
@@ -1575,6 +1597,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
         raise
+    finally:
+        await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
 
 
 # ========================================

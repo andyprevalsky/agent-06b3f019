@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 
+import psutil
 import structlog
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
@@ -174,7 +175,9 @@ import httpx
 # No hardcoded magic numbers — the tuner adjusts slots based on CPU/memory.
 #
 # Scale-up (eager):   backlog >= 20% of observed capacity → add machines
-# Scale-down (probe): 60s of zero backlog → remove 1 machine, watch for backlog
+#                     or machine memory >= threshold with running workflows
+# Scale-down (probe): 60s of zero backlog and no memory pressure → remove 1
+#                     machine, watch for backlog
 # ─────────────────────────────────────────────────────────────────────────
 
 MIN_MACHINES = 2
@@ -185,7 +188,10 @@ SCALE_UP_COOLDOWN_SECS = 10  # Seconds to wait after a scale-up before allowing 
 POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
+HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
 DEFAULT_CAPACITY = 50  # Fallback when SDK metrics not yet available (matches max_concurrent_activities)
+MEMORY_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_SCALE_UP_THRESHOLD_PERCENT", "80"))
+MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT", "90"))
 
 FLY_MACHINES_API = "https://api.machines.dev/v1"
 
@@ -264,6 +270,59 @@ async def _get_observed_capacity(http: httpx.AsyncClient) -> int | None:
         return None
 
 
+def _get_machine_memory_used_percent() -> float:
+    """Return memory usage percentage visible from inside this Fly Machine."""
+    try:
+        return float(psutil.virtual_memory().percent)
+    except Exception as e:
+        logger.warning("Failed to read machine memory percent", error=str(e))
+        return 0.0
+
+
+def _extract_metric_value(metrics_text: str, metric_name: str) -> float | None:
+    """Extract a numeric Prometheus gauge value from a metrics payload."""
+    for line in metrics_text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == metric_name:
+            try:
+                return float(parts[1])
+            except ValueError:
+                return None
+    return None
+
+
+async def _get_fleet_memory_used_percent(http: httpx.AsyncClient, local_memory_used_percent: float) -> float:
+    """Return max machine memory percent across the Fly worker fleet.
+
+    Only the elected leader can start machines, so the leader must consider
+    memory pressure on non-leader peers too. If peer scraping fails, fall back
+    to the local sample so autoscaling still works in local/dev environments.
+    """
+    fly_app = os.getenv("FLY_APP_NAME")
+    if not fly_app:
+        return local_memory_used_percent
+
+    peers = _get_peer_ips(fly_app)
+    if not peers:
+        return local_memory_used_percent
+
+    memory_samples = [local_memory_used_percent]
+    for ip in peers:
+        try:
+            resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+            if resp.status_code != 200:
+                continue
+            value = _extract_metric_value(resp.text, "machine_memory_used_percent")
+            if value is not None:
+                memory_samples.append(value)
+        except Exception as e:
+            logger.debug("Failed to scrape peer memory metric", peer_ip=ip, error=str(e))
+
+    return max(memory_samples)
+
+
 async def _scale_fleet(desired: int, http: httpx.AsyncClient):
     """Start/stop Fly machines to reach desired count. Called by leader only.
 
@@ -332,12 +391,18 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
       When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
       machines once the threshold is crossed (0.2→+1, 1.2→+2).
+      Memory pressure is an independent signal: when any peer machine is above
+      MEMORY_SCALE_UP_THRESHOLD_PERCENT and workflows are running, add 1 machine
+      (2 if above MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT). Backlog can be 0
+      while activities are already in-flight and consuming memory, so backlog
+      alone is not a sufficient saturation signal.
 
     Scale-down (adaptive):
       When backlog stays at 0 for 60 consecutive seconds:
       - If no workflows running → go straight to MIN_MACHINES (fast drain)
       - If workflows still running → remove 1 machine and probe again after 60s
       If removing a machine causes backlog, we detect it within 1s and scale back up.
+      Memory pressure blocks scale-down.
 
     No separate autoscaler machine needed — the navi-whisper-lux-autoscaler app
     can be decommissioned.
@@ -377,21 +442,31 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                 if observed_capacity is None:
                     observed_capacity = DEFAULT_CAPACITY  # SDK metrics not ready yet, use fallback
 
+                memory_used_percent = _get_machine_memory_used_percent()
+                fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent)
+                memory_pressure = fleet_memory_used_percent >= MEMORY_SCALE_UP_THRESHOLD_PERCENT
+                critical_memory_pressure = fleet_memory_used_percent >= MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT
                 current_machines = _count_fly_peers()
                 is_leader = _am_i_leader()
 
                 # ── Adaptive scaling decision ─────────────────────────────
                 now = time.monotonic()
+                in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
                 if backlog > 0:
                     _backlog_zero_since = None
                     additional = backlog / observed_capacity
                     # Cooldown: after a scale-up, wait for DNS to propagate
                     # before allowing another (prevents overshoot)
-                    in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
                     if additional >= SCALE_UP_THRESHOLD and not in_cooldown:
                         _desired_machines = current_machines + math.ceil(additional)
                     else:
                         _desired_machines = current_machines  # Transient blip or in cooldown
+                elif memory_pressure and workflow_count > 0:
+                    _backlog_zero_since = None
+                    if in_cooldown:
+                        _desired_machines = current_machines
+                    else:
+                        _desired_machines = current_machines + (2 if critical_memory_pressure else 1)
                 else:
                     # Backlog is 0 — scale down after cooldown
                     if _backlog_zero_since is None:
@@ -407,7 +482,15 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                 _desired_machines = max(MIN_MACHINES, min(MAX_MACHINES, _desired_machines))
 
                 set_queue_metrics(
-                    backlog, workflow_count, _desired_machines, current_machines, is_leader, observed_capacity
+                    backlog,
+                    workflow_count,
+                    _desired_machines,
+                    current_machines,
+                    is_leader,
+                    observed_capacity,
+                    memory_used_percent,
+                    MEMORY_SCALE_UP_THRESHOLD_PERCENT,
+                    fleet_memory_used_percent,
                 )
 
                 # ── Leader actuates ───────────────────────────────────────
@@ -426,6 +509,9 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                         current_machines=current_machines,
                         desired_machines=_desired_machines,
                         observed_capacity=observed_capacity,
+                        memory_used_percent=memory_used_percent,
+                        fleet_memory_used_percent=fleet_memory_used_percent,
+                        memory_scale_up_threshold_percent=MEMORY_SCALE_UP_THRESHOLD_PERCENT,
                         is_leader=is_leader,
                     )
                     _last_log_time = now_mono

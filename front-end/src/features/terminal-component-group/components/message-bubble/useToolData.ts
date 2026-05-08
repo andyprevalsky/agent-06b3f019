@@ -1,7 +1,8 @@
 /**
  * Hook that flattens the Message metadata shape into the `ToolMessageData` a
  * generic tool card expects. Streaming messages and ASSISTANT text messages
- * (no file_pointer) are also modeled as synthetic "Thought" tool cards.
+ * (no file_pointer) with content are also modeled as synthetic "Thought" tool
+ * cards.
  */
 import { useMemo } from 'react';
 import type { Message } from '../../hooks';
@@ -28,6 +29,8 @@ export function useToolData({
 
     // ASSISTANT messages without an attachment render as synthetic "Thought" cards.
     if (isAssistant && !message.file_pointer) {
+      if (message.text.trim().length === 0) return null;
+
       const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
       return {
         toolCallId: message.message_id,

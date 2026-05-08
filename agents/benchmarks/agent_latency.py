@@ -1425,7 +1425,7 @@ async def _fetch_fly_logs_bulk(all_ids: Set[str], fly_stream_seconds: int = 0) -
             return []
         await asyncio.sleep(fly_stream_seconds)
         for aid in all_ids:
-            agent_lines = collector.get_logs_for_agent(aid, limit=2000)
+            agent_lines = collector.get_logs_for_agent(aid)
             for l in agent_lines:
                 if not l.startswith("[fly.io]"):
                     lines.append(l)

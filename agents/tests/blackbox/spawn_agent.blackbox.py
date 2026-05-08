@@ -271,6 +271,27 @@ def test_coerce_for_each_items_csv_with_header():
     assert first.get("name") == "Alice"
 
 
+def test_coerce_for_each_items_common_header_when_sniffer_misses():
+    """Common CSV headers are not emitted as work rows when Sniffer is inconclusive."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import coerce_for_each_items
+
+    csv_text = (
+        "name,city,contact,email\n"
+        "Alice Example,Chicago,Alice,alice@example.com\n"
+        "Bob Example,Austin,Bob,bob@example.com\n"
+    )
+
+    with patch("csv.Sniffer.has_header", return_value=False):
+        result = coerce_for_each_items({"items_csv": csv_text})
+
+    assert result == [
+        {"name": "Alice Example", "city": "Chicago", "contact": "Alice", "email": "alice@example.com"},
+        {"name": "Bob Example", "city": "Austin", "contact": "Bob", "email": "bob@example.com"},
+    ]
+
+
 def test_coerce_for_each_items_multicol_no_header():
     """Multi-column CSV without header produces dict rows with values list."""
     from domains.spawn_agent.service import coerce_for_each_items
@@ -795,7 +816,7 @@ async def test_handler_for_each_no_items_raises():
 
 
 async def test_handler_for_each_happy_path_all_succeed():
-    """for_each with items spawns sub_agent for each, yields no error events on success."""
+    """for_each spawns per-child agents and yields an aggregate parent result."""
     from tools.base import EventType, MessageStatus, ToolEvent
     import domains.spawn_agent.handler as h
 
@@ -827,6 +848,12 @@ async def test_handler_for_each_happy_path_all_succeed():
 
     # No ERROR events yielded when all children succeed
     assert not any(e.status == MessageStatus.ERROR for e in events)
+    aggregate = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert aggregate, "for_each must yield a terminal parent tool result"
+    assert aggregate[-1].metadata["toolName"] == "spawn_sub_agent_for_each"
+    assert len(aggregate[-1].metadata["structured_response"]["items"]) == 2
+    assert "Child outputs:" in aggregate[-1].message
+    assert "- item 0:" in aggregate[-1].message
     # But child events were handled through workflow_instance._handle_tool_event
     assert len(wf.handled_events) >= 2  # at least 2 per-child
 
@@ -1580,6 +1607,7 @@ async def run_all_tests():
     r.record("coerce_items_empty", test_coerce_for_each_items_empty)
     r.record("coerce_items_single_col", test_coerce_for_each_items_single_col_csv)
     r.record("coerce_items_with_header", test_coerce_for_each_items_csv_with_header)
+    r.record("coerce_items_common_header", test_coerce_for_each_items_common_header_when_sniffer_misses)
     r.record("coerce_items_multicol", test_coerce_for_each_items_multicol_no_header)
     # build_for_each_goal
     r.record("build_goal_string", test_build_for_each_goal_string_item)

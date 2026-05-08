@@ -131,6 +131,7 @@ class MessagePersonManager(ToolManager):
         user_name = extract_user_name(workflow_instance.system_name, user_context)
 
         gen_result = await self._generate_message(
+            workflow_instance,
             model,
             user_name,
             conversation_context,
@@ -349,6 +350,7 @@ class MessagePersonManager(ToolManager):
 
     @staticmethod
     async def _generate_message(
+        workflow_instance: Any,
         model: str,
         user_name: str,
         conversation_context: str,
@@ -362,6 +364,53 @@ class MessagePersonManager(ToolManager):
         agent_id: str | None = None,
     ) -> dict[str, Any] | ToolEvent:
         try:
+            user_id = getattr(workflow_instance, "user_id", None)
+            if user_id and hasattr(workflow_instance, "_refresh_compute_token"):
+                await workflow_instance._refresh_compute_token(user_id)
+
+            active_claude_token = getattr(workflow_instance, "_active_claude_token", None)
+            claude_token = (
+                active_claude_token()
+                if callable(active_claude_token)
+                else getattr(workflow_instance, "claude_max_token", None)
+            )
+            active_claude_source = getattr(workflow_instance, "_active_claude_source", None)
+            claude_token_source = (
+                active_claude_source()
+                if callable(active_claude_source)
+                else getattr(workflow_instance, "claude_max_token_source", None)
+            )
+            active_claude_pool_id = getattr(workflow_instance, "_active_claude_pool_id", None)
+            claude_token_pool_id = (
+                active_claude_pool_id()
+                if callable(active_claude_pool_id)
+                else getattr(workflow_instance, "claude_max_token_pool_id", None)
+            )
+            active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
+            gpt_token = (
+                active_gpt_token()
+                if callable(active_gpt_token)
+                else getattr(workflow_instance, "gpt_code_token", None)
+            )
+            active_gpt_account_id = getattr(workflow_instance, "_active_gpt_account_id", None)
+            gpt_account_id = (
+                active_gpt_account_id()
+                if callable(active_gpt_account_id)
+                else getattr(workflow_instance, "gpt_code_account_id", None)
+            )
+            active_gpt_source = getattr(workflow_instance, "_active_gpt_source", None)
+            gpt_token_source = (
+                active_gpt_source()
+                if callable(active_gpt_source)
+                else getattr(workflow_instance, "gpt_code_token_source", None)
+            )
+            active_gpt_pool_id = getattr(workflow_instance, "_active_gpt_pool_id", None)
+            gpt_token_pool_id = (
+                active_gpt_pool_id()
+                if callable(active_gpt_pool_id)
+                else getattr(workflow_instance, "gpt_code_token_pool_id", None)
+            )
+
             return await workflow.execute_activity(
                 generate_message_activity,
                 args=[
@@ -376,6 +425,15 @@ class MessagePersonManager(ToolManager):
                     person_email,
                     general_messages_context,
                     agent_id,
+                    claude_token,
+                    claude_token_source,
+                    claude_token_pool_id,
+                    user_id,
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    user_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(

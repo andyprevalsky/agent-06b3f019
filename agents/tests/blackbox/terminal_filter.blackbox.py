@@ -28,10 +28,12 @@ def test_reset():
     tf = TerminalFilter(cols=80, rows=24)
     tf.feed("Some content\n")
     assert "Some content" in tf.get_display()
+    assert "Some content" in tf.get_raw_output()
 
     tf.reset()
 
     assert tf.get_display() == ""
+    assert tf.get_raw_output() == ""
 
 
 def test_ansi_filtering():
@@ -48,6 +50,18 @@ def test_ansi_filtering():
     assert "and normal" in display
     # The ANSI escape codes should be processed by pyte, not appear as raw text
     assert "\033[31m" not in display
+
+
+def test_raw_output_preserves_unwrapped_lines():
+    """raw output keeps machine-readable lines that the terminal display wraps."""
+    from utils.terminal_filter import TerminalFilter
+
+    tf = TerminalFilter(cols=20, rows=24)
+    long_json = '[Codex] {"rows":[{"name":"Long Company Name"}],"row_count":1}\n'
+    tf.feed(long_json)
+
+    assert "Long Company N\name" in tf.get_display()
+    assert long_json.strip() in tf.get_raw_output()
 
 
 def test_multiple_feeds():
@@ -93,6 +107,7 @@ async def run_all_tests():
     r.record("feed_and_display", test_feed_and_display)
     r.record("reset", test_reset)
     r.record("ansi_filtering", test_ansi_filtering)
+    r.record("raw_output_preserves_unwrapped_lines", test_raw_output_preserves_unwrapped_lines)
     r.record("multiple_feeds", test_multiple_feeds)
     r.record("get_line_count", test_get_line_count)
     r.record("cursor_position", test_cursor_position)
