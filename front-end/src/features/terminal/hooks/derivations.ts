@@ -104,11 +104,20 @@ export function sortAgents(agents: Agent[]): Agent[] {
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
   const panels: BrowserPanelData[] = [];
   const browserTaskIds = new Set<string>();
+  const pausedBrowserToolCallIds = new Set<string>();
 
   messages.forEach((m) => {
     const taskId = m.metadata?.task_id;
     if (taskId && m.metadata?.toolName === 'spawn_browser_agent') {
       browserTaskIds.add(taskId);
+    }
+    const toolCallId = m.metadata?.toolCallId;
+    if (
+      toolCallId &&
+      m.metadata?.toolName === 'spawn_browser_agent' &&
+      m.metadata?.action_type === 'session_paused'
+    ) {
+      pausedBrowserToolCallIds.add(toolCallId);
     }
   });
 
@@ -118,10 +127,12 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
       (m) => m.metadata?.action_type === 'browser' || m.metadata?.action_type === 'system',
     );
     const lastMessage = taskMessages[taskMessages.length - 1];
+    const initToolCallId = initMessage?.metadata?.toolCallId;
 
     const isComplete =
       lastMessage?.metadata?.action_type === 'task_complete' ||
-      lastMessage?.metadata?.action_type === 'session_paused';
+      lastMessage?.metadata?.action_type === 'session_paused' ||
+      (typeof initToolCallId === 'string' && pausedBrowserToolCallIds.has(initToolCallId));
 
     if (!isComplete && initMessage) {
       panels.push({

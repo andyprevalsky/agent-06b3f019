@@ -218,9 +218,6 @@ class SpawnSubAgentManager(ToolManager):
         structured_response = child_result.get("structured_response", {})
         output_schema = sub_agent.get("output_schema", {})
         file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
-        if file_pointers:
-            for fp in file_pointers:
-                yield AssistantEvent(message="", file_pointer=fp)
 
         child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
         workflow_instance.child_results.pop(child_agent_id, None)
@@ -237,6 +234,9 @@ class SpawnSubAgentManager(ToolManager):
                 "structured_response": structured_response,
             },
         )
+        if file_pointers:
+            for fp in file_pointers:
+                yield AssistantEvent(message="", file_pointer=fp)
 
     @staticmethod
     def _build_failure_events(

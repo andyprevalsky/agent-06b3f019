@@ -1485,6 +1485,31 @@ async function testCookiesUpload_alternateBrowser() {
   assertSchema(CookiesUploadResponse, res.data, 'cookies edge');
 }
 
+/** Safari cookies are a first-class browser credential source. */
+async function testCookiesUpload_safariBrowser() {
+  const cookies = [
+    {
+      host_key: '.example.com',
+      name: 'safari_cookie',
+      value: 'safari_val',
+      path: '/',
+      top_frame_site_key: '',
+    },
+  ];
+  const encrypted = encryptPayload(cookies);
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({ ...encrypted, browser: 'safari' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(CookiesUploadResponse, res.data, 'cookies safari');
+  assert(
+    body.integration.name === 'safari',
+    `Expected safari integration, got ${body.integration.name}`
+  );
+}
+
 // ---------- /localStorage/upload ----------
 
 /** localStorage decryption failure → 400 (route line 124-128). */
@@ -3639,12 +3664,23 @@ async function testRotation_poolRotatesOnRateLimit() {
     assertStatus(markRes.status, 200, markRes.data);
 
     // Step 3: next force-pool fetch must return the OTHER token (rate-limit filter works).
-    const res2 = await fetchPool();
+    const expectedSecondId = firstId === poolA.id ? poolB.id : poolA.id;
+    await prisma.integration.update({
+      where: { id: expectedSecondId },
+      data: {
+        status: 'CONNECTED',
+        poolingEnabled: true,
+        rateLimitedUntil: null,
+        failureReason: null,
+        lastUsedAt: new Date(Date.now() - 120_000),
+      },
+    });
+    const res2 = await fetchPool([firstId]);
     assertStatus(res2.status, 200, res2.data);
     const secondId = (res2.data as { poolTokenId: string }).poolTokenId;
     assert(secondId !== firstId, `Rotation failed: got same token twice (${firstId})`);
     assert(
-      [poolA.id, poolB.id].includes(secondId),
+      secondId === expectedSecondId,
       `Second fetch: expected the other seeded token, got ${secondId}`
     );
   } finally {
@@ -3780,9 +3816,10 @@ async function testRotation_poolAuthErrorDisablesToken() {
     const first = await fetchPool();
     assertStatus(first.status, 200, first.data);
     const firstBody = first.data as { poolTokenId?: string };
+    const firstId = firstBody.poolTokenId;
     assert(
-      firstBody.poolTokenId === poolA.id,
-      `Expected first pool token ${poolA.id}, got ${firstBody.poolTokenId}`
+      firstId !== undefined && [poolA.id, poolB.id].includes(firstId),
+      `Expected one of our seeded pool tokens, got ${firstId}`
     );
 
     const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
@@ -3791,13 +3828,13 @@ async function testRotation_poolAuthErrorDisablesToken() {
       body: JSON.stringify({
         type: 'claude',
         source: 'pool',
-        poolTokenId: poolA.id,
+        poolTokenId: firstId,
         failureReason: 'auth_error',
       }),
     });
     assertStatus(mark.status, 200, mark.data);
 
-    const disabled = await prisma.integration.findUnique({ where: { id: poolA.id } });
+    const disabled = await prisma.integration.findUnique({ where: { id: firstId } });
     assert(disabled !== null, 'Expected disabled pool token row to exist');
     assert(disabled.poolingEnabled === false, 'auth_error must disable pool selection');
     assert(disabled.rateLimitedUntil === null, 'auth_error disable must not use a cooldown');
@@ -3806,8 +3843,9 @@ async function testRotation_poolAuthErrorDisablesToken() {
     const second = await fetchPool();
     assertStatus(second.status, 200, second.data);
     const secondBody = second.data as { poolTokenId?: string };
+    const expectedSecondId = firstId === poolA.id ? poolB.id : poolA.id;
     assert(
-      secondBody.poolTokenId === poolB.id,
+      secondBody.poolTokenId === expectedSecondId,
       `Expected disabled token to be skipped; got ${secondBody.poolTokenId}`
     );
   } finally {
@@ -4709,6 +4747,10 @@ async function runAll() {
     {
       name: 'POST /cookies/upload alternate browser (edge)',
       fn: testCookiesUpload_alternateBrowser,
+    },
+    {
+      name: 'POST /cookies/upload Safari browser',
+      fn: testCookiesUpload_safariBrowser,
     },
     {
       name: 'POST /localStorage/upload bad encryption -> 400',

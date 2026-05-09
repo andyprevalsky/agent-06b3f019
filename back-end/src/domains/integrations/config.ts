@@ -1,9 +1,21 @@
 import { type EmailProviderConfig, type EmailProviderSlug, EmailProvider } from './types';
 
-export const BACKEND_BASE_URL = (process.env.BACKEND_URL ?? 'http://localhost:3001').replace(
-  /\/$/,
-  ''
-);
+function resolveBackendBaseUrl(): string {
+  const configuredUrl = process.env.BACKEND_URL ?? process.env.RENDER_EXTERNAL_URL;
+  if (configuredUrl !== undefined && configuredUrl.trim() !== '') {
+    return configuredUrl.trim().replace(/\/$/, '');
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'BACKEND_URL or RENDER_EXTERNAL_URL env var is required in production for email OAuth callbacks'
+    );
+  }
+
+  return 'http://localhost:3001';
+}
+
+export const BACKEND_BASE_URL = resolveBackendBaseUrl();
 
 export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfig> = {
   gmail: {
@@ -47,6 +59,7 @@ export const VALID_BROWSERS = [
   'vivaldi',
   'chromium',
   'atlas',
+  'safari',
 ];
 
 // Auth cookie name patterns that indicate a logged-in session

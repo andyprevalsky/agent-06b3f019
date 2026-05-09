@@ -185,17 +185,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             }
                         )
 
-            # Post output files as separate ASSISTANT messages
             output_files = result.get("output_files", [])
-            if output_files:
-                logger.info(
-                    "[ClaudeCode] Posting output files as ASSISTANT messages",
-                    agent_id=agent_id,
-                    file_count=len(output_files),
-                )
-                for fp in output_files:
-                    yield AssistantEvent(message="", file_pointer=fp)
-
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="✓ Task Completed" if result.get("success") else "Task Incomplete",
@@ -209,6 +199,19 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 },
                 data={"usage": tool_usage},
             )
+
+            # Post output files only after the parent tool call has a terminal
+            # TOOL result. Realtime consumers require assistant messages to
+            # follow resolved tool calls, not appear between IN_PROGRESS and
+            # FINISHED states for the same tool_call_id.
+            if output_files:
+                logger.info(
+                    "[ClaudeCode] Posting output files as ASSISTANT messages",
+                    agent_id=agent_id,
+                    file_count=len(output_files),
+                )
+                for fp in output_files:
+                    yield AssistantEvent(message="", file_pointer=fp)
 
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):

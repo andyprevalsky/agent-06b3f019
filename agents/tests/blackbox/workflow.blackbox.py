@@ -2718,6 +2718,38 @@ async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
         _restore_workflow(original)
 
 
+async def test_workflow_execute_tool_plan_phase_preserves_exact_spawn_agent_budget():
+    """PLAN phase cannot spend a user-specified exact spawn_agent call budget."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.current_phase = "PLAN"
+    wf.context = [
+        {
+            "role": "USER",
+            "text": "Use the spawn_agent tool exactly twice, once per city.",
+        }
+    ]
+    handle_calls = []
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handle_calls.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        result = await wf._execute_tool("spawn_agent", {"type": "explore", "goal": "Research Tokyo"}, "call-1")
+        assert result.get("error") is True
+        assert "Do not spend that budget during PLAN" in result.get("message", "")
+        assert len(handle_calls) == 1
+        event, tcid, tname = handle_calls[0]
+        assert tcid == "call-1"
+        assert tname == "spawn_agent"
+        assert getattr(event, "status", None).name == "ERROR"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event():
     """Tools with Pydantic validators: invalid params returns error AND posts TOOL event.
 
@@ -3179,6 +3211,10 @@ async def run_all_tests():
     await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
     await r.record_async(
         "wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn
+    )
+    await r.record_async(
+        "wf_execute_tool_plan_preserves_exact_spawn_budget",
+        test_workflow_execute_tool_plan_phase_preserves_exact_spawn_agent_budget,
     )
     await r.record_async(
         "wf_execute_tool_invalid_params_posts_event",

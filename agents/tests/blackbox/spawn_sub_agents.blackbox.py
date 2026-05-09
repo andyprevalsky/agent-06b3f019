@@ -638,9 +638,9 @@ async def test_execute_tool_failed_child_yields_failure_events():
 
 
 async def test_execute_tool_posts_assistant_events_for_file_pointers():
-    """Structured response with file_pointer field yields AssistantEvent per pointer."""
+    """Structured response file pointers are posted after the FINISHED tool result."""
     from domains.spawn_sub_agents.handler import SpawnSubAgentManager
-    from tools.base import AssistantEvent
+    from tools.base import AssistantEvent, MessageStatus
 
     fake = _FakeWorkflowModule(
         activity_result={
@@ -679,6 +679,9 @@ async def test_execute_tool_posts_assistant_events_for_file_pointers():
     assistant = [e for e in events if isinstance(e, AssistantEvent)]
     assert len(assistant) == 1
     assert assistant[0].file_pointer["id"] == "fp-1"
+    finished_index = next(i for i, e in enumerate(events) if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assistant_index = next(i for i, e in enumerate(events) if isinstance(e, AssistantEvent))
+    assert finished_index < assistant_index
 
 
 # ── pre-fetched parent_attachments bypass ─────────────────────────────

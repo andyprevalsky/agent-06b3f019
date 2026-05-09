@@ -3291,6 +3291,100 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
             raise AssertionError("expected missing resumed cdp_url to raise")
 
 
+async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.base import EventType, MessageStatus
+
+    class _FakeActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return {
+                    "status": "cancelled",
+                    "task_id": "task-1",
+                    "browser_url": "https://steel.example/debug",
+                    "session_id": "session-1",
+                }
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    manager = SpawnBrowserAgentManagerV3()
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", return_value=_FakeActivityHandle()),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+    ):
+        events = []
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
+            events.append(event)
+
+    pause_event = events[-1]
+    assert pause_event.type == EventType.POST_MESSAGE
+    assert pause_event.status == MessageStatus.ERROR
+    assert pause_event.metadata == {
+        "toolName": "spawn_browser_agent",
+        "action_type": "session_paused",
+        "task_id": "task-1",
+        "browser_url": "https://steel.example/debug",
+        "session_id": "session-1",
+    }
+
+
+async def test_manager_posts_output_files_after_finished_tool_event():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.base import AssistantEvent, MessageStatus
+
+    class _FakeActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return {
+                    "success": True,
+                    "message": "done",
+                    "output_files": [{"id": "fp-browser"}],
+                }
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    manager = SpawnBrowserAgentManagerV3()
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", return_value=_FakeActivityHandle()),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+    ):
+        events = []
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
+            events.append(event)
+
+    finished_index = next(i for i, e in enumerate(events) if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assistant_index = next(i for i, e in enumerate(events) if isinstance(e, AssistantEvent))
+    assert finished_index < assistant_index
+
+
 # ========================================
 # Runner
 # ========================================
@@ -3553,6 +3647,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_resume_no_cdp", test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
     )
+    await r.record_async(
+        "manager_cancelled_pause_metadata", test_manager_cancelled_browser_pause_event_includes_task_metadata
+    )
+    await r.record_async("manager_output_files_after_finished", test_manager_posts_output_files_after_finished_tool_event)
 
     teardown_mock()
     return r.all_passed

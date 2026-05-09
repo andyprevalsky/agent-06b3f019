@@ -366,6 +366,34 @@ def test_attempt_completion_result_read_is_skip_verification_scoped():
     assert final_verifier_gate != -1, "expected final verifier gate after result handling"
 
 
+def test_final_visible_message_routes_to_attempt_completion():
+    """Final user-visible messages must hand off to attempt_completion, not wait_for."""
+    prompt = (PROMPTS_DIR / "send_message_to_user_execute_phase.py").read_text()
+    system_prompt = (AGENTS_ROOT / "utils" / "prompts.py").read_text()
+
+    assert "call attempt_completion next" in prompt
+    assert "call attempt_completion next" in system_prompt
+    assert "do not call wait_for" in prompt.lower()
+    assert "Use wait_for only when the user goal requires waiting" in system_prompt
+
+
+def test_repeated_visible_message_guard_points_to_attempt_completion():
+    """Repetition recovery should not steer final-answer messages into wait_for sleeps."""
+    text = (AGENTS_ROOT / "loop" / "run_agent.py").read_text()
+
+    assert 'set(tool_names) == {"send_message_to_user_execute_phase"}' in text
+    assert "call attempt_completion now" in text
+    assert "Do not call wait_for unless the original" in text
+
+
+def test_research_phase_preserves_exact_tool_budgets_for_execute():
+    """Research prompt must not spend user-specified exact tool budgets."""
+    text = (AGENTS_ROOT / "utils" / "prompts.py").read_text()
+
+    assert "exact budget for a tool" in text
+    assert "do not spend that budget during RESEARCH" in text
+
+
 # ============================================================================
 # 4. Verifier output schema field order
 # ----------------------------------------------------------------------------
@@ -1795,6 +1823,18 @@ async def run_all_tests():
     r.record(
         "attempt_completion_result_read_skip_verification_scoped",
         test_attempt_completion_result_read_is_skip_verification_scoped,
+    )
+    r.record(
+        "final_visible_message_routes_to_attempt_completion",
+        test_final_visible_message_routes_to_attempt_completion,
+    )
+    r.record(
+        "repeated_visible_message_guard_points_to_attempt_completion",
+        test_repeated_visible_message_guard_points_to_attempt_completion,
+    )
+    r.record(
+        "research_phase_preserves_exact_tool_budgets_for_execute",
+        test_research_phase_preserves_exact_tool_budgets_for_execute,
     )
 
     # 4. Verifier schema field order

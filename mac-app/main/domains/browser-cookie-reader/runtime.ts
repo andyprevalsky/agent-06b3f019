@@ -27,6 +27,9 @@ export type { BrowserConfig, BrowserInfo, BrowserType, ReadCookiesConfig };
  * Supported Chromium-based browsers (automatic keychain access):
  *   Chrome, Edge, Brave, Arc, Opera, Vivaldi, Chromium
  *
+ * Supported Safari browser credentials:
+ *   Safari Cookies.binarycookies
+ *
  * Browsers requiring a manual keychain password (Data Protection keychain):
  *   Atlas (ChatGPT Desktop)
  */

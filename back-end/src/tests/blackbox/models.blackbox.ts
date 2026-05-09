@@ -433,18 +433,20 @@ async function testDuplication_modelIdsUnique() {
 // ==================== BOUNDARY CAPTURE — OPENROUTER OUTBOUND CALL ====================
 
 async function testBoundary_openRouterCallOnCacheMiss() {
+  const captureToken = `models-cache-miss-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // Snapshot cursor, clear model cache, then hit GET /models.
   // Verify exactly 1 outbound call to OpenRouter with correct URL, method, and headers.
   const probeRes = await request(`${BASE_URL}/api/test/captures`);
   if (probeRes.status !== 200) return; // capture harness not active, skip
-  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
   // Clear model cache to force a real outbound call
   await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
 
-  await request(`${BASE_URL}/api/models`);
+  await request(`${BASE_URL}/api/models`, {
+    headers: { 'X-Capture-Token': captureToken },
+  });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: {
@@ -525,17 +527,19 @@ function filterInfra(captures: { url: string }[]): { url: string }[] {
 }
 
 async function testBoundary_noOutboundCallOnCacheHit() {
+  const captureToken = `models-cache-hit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // Warm the cache first
   await ensureCacheWarm();
 
   // Snapshot cursor, then hit GET /models again (should be cached)
   const probeRes = await request(`${BASE_URL}/api/test/captures`);
   if (probeRes.status !== 200) return; // capture harness not active, skip
-  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
-  await request(`${BASE_URL}/api/models`);
+  await request(`${BASE_URL}/api/models`, {
+    headers: { 'X-Capture-Token': captureToken },
+  });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: { url: string }[] };
   const relevant = filterInfra(body.captures);
@@ -547,14 +551,17 @@ async function testBoundary_noOutboundCallOnCacheHit() {
 }
 
 async function testBoundary_clearCacheNoOutbound() {
+  const captureToken = `models-clear-cache-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // DELETE /cache should not make any outbound calls
   const probeRes = await request(`${BASE_URL}/api/test/captures`);
   if (probeRes.status !== 200) return; // capture harness not active, skip
-  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
 
-  await request(`${BASE_URL}/api/models/cache`, { method: 'DELETE' });
+  await request(`${BASE_URL}/api/models/cache`, {
+    method: 'DELETE',
+    headers: { 'X-Capture-Token': captureToken },
+  });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: { url: string }[] };
   const relevant = filterInfra(body.captures);

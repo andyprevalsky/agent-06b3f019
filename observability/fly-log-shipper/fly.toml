@@ -1,0 +1,23 @@
+app = "rose-fly-log-shipper"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Fly log subjects are logs.<app_name>.<region>.<instance_id>.
+  # Keep this scoped to the production worker app so we retain the logs that
+  # are missing from post-hoc agent stall investigations without ingesting the
+  # entire Fly organization on day one.
+  SUBJECT = "logs.navi-whisper-lux.>"
+  QUEUE = "rose-agent-worker-logs"
+  NETWORK = "fdaa"
+
+[metrics]
+  port = 9598
+  path = "/metrics"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

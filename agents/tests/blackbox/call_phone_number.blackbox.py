@@ -75,6 +75,7 @@ async def test_initiation_boundary():
     assert body["to"] == "+15551234567"
     assert body["system_prompt"] == "You are a helpful assistant"
     assert "properties" in body["output_schema"]
+    assert body["idempotency_key"] == "agent-1:tc-1"
 
     assert result["success"] is True
     assert result["call_id"] == "call-test-123"
@@ -290,6 +291,32 @@ async def test_manager_execute_tool_success():
     assert out == activity_result
 
 
+async def test_manager_execute_tool_uses_idempotent_retry_policy():
+    """Activity retry is allowed only because backend call creation is idempotent."""
+    from domains.call_phone_number.handler import CallPhoneNumberManager
+
+    seen_retry_policy = None
+
+    async def mock_execute_activity(activity_fn, *, args, **kw):
+        nonlocal seen_retry_policy
+        if getattr(activity_fn, "__name__", "") == "call_phone_number_activity":
+            seen_retry_policy = kw["retry_policy"]
+            return {"success": True, "call_id": "c-1", "duration": 60}
+        return None
+
+    manager = CallPhoneNumberManager()
+    await manager.execute_tool(
+        execute_activity=mock_execute_activity,
+        tool_call={"to": "+19729777432", "system_prompt": "Be kind"},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    assert seen_retry_policy is not None
+    assert seen_retry_policy.maximum_attempts == 2
+
+
 async def test_manager_execute_tool_error():
     from domains.call_phone_number.handler import CallPhoneNumberManager
 
@@ -353,6 +380,10 @@ async def run_all_tests():
     r.record("manager_get_approval_question", test_manager_get_approval_question)
     r.record("manager_get_approval_question_defaults", test_manager_get_approval_question_defaults)
     await r.record_async("manager_execute_tool_success", test_manager_execute_tool_success)
+    await r.record_async(
+        "manager_execute_tool_uses_idempotent_retry_policy",
+        test_manager_execute_tool_uses_idempotent_retry_policy,
+    )
     await r.record_async("manager_execute_tool_error", test_manager_execute_tool_error)
     await r.record_async("call_phone_number_entry_point", test_call_phone_number_entry_point)
     teardown_mock()

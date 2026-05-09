@@ -7,8 +7,26 @@ import {
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
 import { createLogger } from '../../providers/logger';
+import {
+  assertSideEffectCanResume,
+  claimToolSideEffect,
+  markToolSideEffectFailed,
+  markToolSideEffectSucceeded,
+  ToolSideEffectAlreadyStartedError,
+  type ToolSideEffectJson,
+} from '../../providers/toolSideEffects';
 
 const log = createLogger('Vapi');
+const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
+
+type PreparedCall = {
+  vapiPrivateKey: string;
+  phoneNumberId: string;
+  fullSystemPrompt: string;
+  normalizedPhone: string;
+  normalizedSchema: Record<string, unknown>;
+  operationKey?: string;
+};
 
 export class VapiNotConfiguredError extends Error {
   constructor() {
@@ -27,6 +45,27 @@ export class VapiApiError extends Error {
     this.statusCode = statusCode;
     this.details = details;
   }
+}
+
+function getIdempotencyOperationKey(idempotencyKey: string): string {
+  return `${VAPI_CALL_OPERATION_TYPE}:${idempotencyKey}`;
+}
+
+function getStoredCallStatus(response: unknown): string {
+  if (typeof response !== 'object' || response === null) {
+    return 'queued';
+  }
+  const status = (response as Record<string, unknown>).status;
+  return typeof status === 'string' && status !== '' ? status : 'queued';
+}
+
+function getVapiPrivateKey(): string {
+  const vapiPrivateKey = VAPI_PRIVATE_KEY;
+  if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
+    log.error('VAPI_PRIVATE_KEY not configured');
+    throw new VapiNotConfiguredError();
+  }
+  return vapiPrivateKey;
 }
 
 /** Fetch wrapper that converts AbortError (timeout) into VapiApiError. */
@@ -112,80 +151,156 @@ function normalizePhoneNumber(number: string): string {
   return '+' + digits;
 }
 
+function prepareCall(body: CreateCallRequest): PreparedCall {
+  const { to, system_prompt, output_schema, idempotency_key } = body;
+  const operationKey =
+    typeof idempotency_key === 'string' && idempotency_key !== ''
+      ? getIdempotencyOperationKey(idempotency_key)
+      : undefined;
+
+  return {
+    vapiPrivateKey: getVapiPrivateKey(),
+    phoneNumberId: getRandomPhoneNumberId(),
+    fullSystemPrompt: BASE_SYSTEM_PROMPT + system_prompt,
+    normalizedPhone: normalizePhoneNumber(to),
+    normalizedSchema: normalizeJsonSchema(output_schema),
+    operationKey,
+  };
+}
+
+async function getExistingIdempotentCall(
+  call: PreparedCall
+): Promise<{ success: true; call_id: string; status: string } | undefined> {
+  if (call.operationKey === undefined) {
+    return undefined;
+  }
+
+  const claim = await claimToolSideEffect({
+    operationKey: call.operationKey,
+    operationType: VAPI_CALL_OPERATION_TYPE,
+    request: {
+      to: call.normalizedPhone,
+      output_schema: call.normalizedSchema,
+    } as ToolSideEffectJson,
+  });
+  if (claim.status !== 'existing') {
+    return undefined;
+  }
+
+  try {
+    const callId = assertSideEffectCanResume(claim.record);
+    return {
+      success: true,
+      call_id: callId,
+      status: getStoredCallStatus(claim.record.response),
+    };
+  } catch (error) {
+    if (error instanceof ToolSideEffectAlreadyStartedError) {
+      throw new VapiApiError(
+        409,
+        'A Vapi call was already attempted for this idempotency key, but no call_id was recorded. Refusing to place a duplicate call.'
+      );
+    }
+    throw error;
+  }
+}
+
+function buildCreateCallBody(call: PreparedCall): string {
+  return JSON.stringify({
+    phoneNumberId: call.phoneNumberId,
+    customer: {
+      number: call.normalizedPhone,
+    },
+    assistant: {
+      model: {
+        provider: 'openai',
+        model: 'gpt-4o',
+        messages: [{ role: 'system', content: call.fullSystemPrompt }],
+      },
+      voice: {
+        provider: '11labs',
+        voiceId: 'paula', // Default voice - can be made configurable later
+      },
+      firstMessage: 'Hello, how are you today?',
+      analysisPlan: {
+        structuredDataPlan: {
+          enabled: true,
+          schema: call.normalizedSchema,
+        },
+      },
+    },
+  });
+}
+
+async function createVapiCall(call: PreparedCall): Promise<Response> {
+  try {
+    return await fetchVapi(
+      `${VAPI_BASE_URL}/call`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${call.vapiPrivateKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: buildCreateCallBody(call),
+      },
+      45_000
+    );
+  } catch (error) {
+    if (call.operationKey !== undefined) {
+      await markToolSideEffectFailed({
+        operationKey: call.operationKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
+}
+
 /**
  * Initiate an outbound phone call via Vapi
  */
 export async function initiateCall(
   body: CreateCallRequest
 ): Promise<{ success: true; call_id: string; status: string }> {
-  const { to, system_prompt, output_schema } = body;
-
-  const vapiPrivateKey = VAPI_PRIVATE_KEY;
-  if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
-    log.error('VAPI_PRIVATE_KEY not configured');
-    throw new VapiNotConfiguredError();
+  const call = prepareCall(body);
+  const existingCall = await getExistingIdempotentCall(call);
+  if (existingCall !== undefined) {
+    return existingCall;
   }
 
-  // Randomly select a phone number from the pool
-  const phoneNumberId = getRandomPhoneNumberId();
-
-  // Combine base prompt with LLM-defined system_prompt
-  const fullSystemPrompt = BASE_SYSTEM_PROMPT + system_prompt;
-
-  // Normalize phone number to E.164 format
-  const normalizedPhone = normalizePhoneNumber(to);
-
-  // Ensure output_schema is a valid JSON Schema with type field
-  const normalizedSchema = normalizeJsonSchema(output_schema);
-
   // Create outbound call via Vapi API
-  const response = await fetchVapi(
-    `${VAPI_BASE_URL}/call`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${vapiPrivateKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        phoneNumberId: phoneNumberId,
-        customer: {
-          number: normalizedPhone,
-        },
-        assistant: {
-          model: {
-            provider: 'openai',
-            model: 'gpt-4o',
-            messages: [{ role: 'system', content: fullSystemPrompt }],
-          },
-          voice: {
-            provider: '11labs',
-            voiceId: 'paula', // Default voice - can be made configurable later
-          },
-          firstMessage: 'Hello, how are you today?',
-          analysisPlan: {
-            structuredDataPlan: {
-              enabled: true,
-              schema: normalizedSchema,
-            },
-          },
-        },
-      }),
-    },
-    30_000
-  );
+  const response = await createVapiCall(call);
 
   if (!response.ok) {
     const errorText = await response.text();
     log.error('Vapi API error', { status: response.status, details: logTruncate(errorText) });
+    if (call.operationKey !== undefined) {
+      await markToolSideEffectFailed({ operationKey: call.operationKey, error: errorText });
+    }
     throw new VapiApiError(response.status, errorText);
   }
 
   const result = (await response.json()) as VapiCallResponse;
+  if (typeof result.id !== 'string' || result.id === '') {
+    const message = 'Vapi response did not include a call id';
+    if (call.operationKey !== undefined) {
+      await markToolSideEffectFailed({ operationKey: call.operationKey, error: message });
+    }
+    throw new VapiApiError(502, message);
+  }
+
+  if (call.operationKey !== undefined) {
+    await markToolSideEffectSucceeded({
+      operationKey: call.operationKey,
+      externalId: result.id,
+      response: result as ToolSideEffectJson,
+    });
+  }
 
   log.info('Vapi call initiated', {
     callId: result.id,
-    to: to.substring(0, 4) + '****',
+    to: body.to.substring(0, 4) + '****',
     status: result.status,
   });
 

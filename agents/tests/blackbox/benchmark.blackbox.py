@@ -28,6 +28,32 @@ def test_extract_worker_pids_from_ps_matches_lowercase_python():
     assert _extract_worker_pids_from_ps(ps_output) == ["444"]
 
 
+def test_extract_worker_pids_from_ps_filters_to_workspace_root():
+    """Local smoke memory sampling ignores workers from other workspaces."""
+    from benchmarks.run_benchmark import _extract_worker_pids_from_ps
+
+    ps_output = """
+      111 /Users/me/workspaces/current/agents/venv/bin/python worker.py
+      222 /Users/me/workspaces/other/agents/venv/bin/python worker.py
+      333 python worker.py
+    """
+
+    assert _extract_worker_pids_from_ps(ps_output, "/Users/me/workspaces/current") == ["111"]
+
+
+def test_process_cwd_is_under_accepts_nested_paths():
+    """Worker memory filtering can match short ps commands via process cwd."""
+    from pathlib import Path
+    from benchmarks.run_benchmark import _process_cwd_is_under
+
+    class Proc:
+        def cwd(self):
+            return "/Users/me/workspaces/current/agents"
+
+    assert _process_cwd_is_under(Proc(), Path("/Users/me/workspaces/current/agents")) is True
+    assert _process_cwd_is_under(Proc(), Path("/Users/me/workspaces/other/agents")) is False
+
+
 def test_ci_should_fail_on_skipped_required_task():
     """CI treats skipped benchmark tasks as blocking failures."""
     from benchmarks.run_benchmark import _ci_should_fail
@@ -439,6 +465,8 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("extract_worker_pids_macos_python", test_extract_worker_pids_from_ps_matches_macos_python_executable)
     r.record("extract_worker_pids_lowercase_python", test_extract_worker_pids_from_ps_matches_lowercase_python)
+    r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)
+    r.record("process_cwd_workspace_filter", test_process_cwd_is_under_accepts_nested_paths)
     r.record("ci_fails_on_skipped", test_ci_should_fail_on_skipped_required_task)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("calendly_passes_on_link_approval", test_calendly_benchmark_passes_on_link_approval_marker)

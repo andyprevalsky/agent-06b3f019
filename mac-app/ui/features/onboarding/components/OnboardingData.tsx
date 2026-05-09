@@ -110,6 +110,23 @@ const BrowserIcon = ({
       );
     case 'atlas':
       return <img src={chatgptIcon} alt="ChatGPT" className={`${className} rounded`} />;
+    case 'safari':
+      return (
+        <svg className={className} viewBox="0 0 48 48">
+          <defs>
+            <radialGradient id="safariDial" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#4FD8FF" />
+              <stop offset="100%" stopColor="#0A6CFF" />
+            </radialGradient>
+          </defs>
+          <circle cx="24" cy="24" r="21" fill="url(#safariDial)" />
+          <circle cx="24" cy="24" r="17" fill="none" stroke="white" strokeOpacity="0.8" />
+          <path d="M24 8v4M24 36v4M8 24h4M36 24h4" stroke="white" strokeWidth="2" />
+          <path d="M29 19 19 29l-2-2 10-10z" fill="#EF4444" />
+          <path d="M19 29 29 19l2 2-10 10z" fill="white" />
+          <circle cx="24" cy="24" r="2.5" fill="white" />
+        </svg>
+      );
     default:
       return (
         <svg className={className} viewBox="0 0 48 48">
@@ -703,8 +720,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
               <div className="border-t border-border">
                 {installedBrowsers.length === 0 ? (
                   <div className="px-4 py-3 text-xs text-muted-foreground">
-                    No supported browsers detected. Install Chrome, Edge, Brave, Arc, or another
-                    Chromium-based browser.
+                    No supported browsers detected. Install Safari, Chrome, Edge, Brave, Arc, or
+                    another supported browser.
                   </div>
                 ) : (
                   installedBrowsers.map((browser, index) => {

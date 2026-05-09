@@ -438,6 +438,32 @@ async def test_handler_condition_gates_off_skip_fetch():
     assert any(e.status == MessageStatus.ERROR for e in events)
 
 
+async def test_handler_condition_rejects_historical_transcript_waits():
+    """Conditions about past transcript state fail immediately instead of polling."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    events = await _collect(
+        WaitForManager().execute_tool(
+            workflow_instance=_WFInstance(),
+            tool_call={
+                "condition": (
+                    "The harness or execution transcript resolves duplicated spawn_agent entries "
+                    "so there are exactly two total calls."
+                ),
+                "check_interval_seconds": 60,
+                "max_checks": 5,
+            },
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert events[0].metadata["nonRetriable"] is True
+    assert "cannot become true by waiting" in events[0].message
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -463,6 +489,7 @@ async def run_all_tests():
     await r.record_async("handler_cond_paused", test_handler_condition_paused_yields_error)
     await r.record_async("handler_cond_fetch_fail", test_handler_condition_network_fetch_failure_tolerated)
     await r.record_async("handler_cond_gates_off", test_handler_condition_gates_off_skip_fetch)
+    await r.record_async("handler_cond_rejects_historical", test_handler_condition_rejects_historical_transcript_waits)
     teardown_mock()
     return r.all_passed
 

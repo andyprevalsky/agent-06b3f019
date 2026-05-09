@@ -209,7 +209,7 @@ No fixed line budget — the table has as many rows as there are resources. Comp
 | Frontend logs | `front-end/frontend-logs.log` |
 | Research logs | `research/research-logs.log` |
 | ... (every log file from discovery) | ... |
-| Prod logs (Render/Fly/Supabase) | `docs/internal/prod-logs.md` |
+| Prod logs (Render/ClickHouse/Fly/Supabase) | `docs/internal/prod-logs.md` |
 | DB schema | `back-end/prisma/schema.prisma` |
 | DB queries | `npx tsx back-end/scripts/query-db.ts` |
 | ... (every script/config from discovery) | ... |

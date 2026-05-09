@@ -302,8 +302,8 @@ export function installFetchCapture(): Router {
   // GET / — return captures (respects soft-clear baseline or explicit cursor)
   // Optional ?token= filters to only captures tagged with that token (for domain isolation).
   router.get('/', (req: Request, res: Response) => {
-    const afterId = req.query.after ? Number(req.query.after) : clearedAfterId;
     const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+    const afterId = req.query.after ? Number(req.query.after) : token ? 0 : clearedAfterId;
     let filtered = afterId > 0 ? captures.filter((c) => c.id > afterId) : captures;
     if (token) {
       filtered = filtered.filter((c) => c.captureToken === token);

@@ -5,6 +5,7 @@ PROMPT = """Use this tool to pause execution until a specific timestamp is reach
 Usage:
 - Pass exactly one of until_timestamp (ISO 8601) or condition (natural language); they are mutually exclusive.
 - Returns the final check result (condition mode) or resumes after the wait (timestamp mode).
+- Only use this for a real future time or an external condition that can change without your own next action. Do not use wait_for for already-recorded transcript/tool history, verifier objections, or conditions about whether past tool calls were duplicated; those cannot become true by waiting.
 
 # Examples
 Timestamp mode:

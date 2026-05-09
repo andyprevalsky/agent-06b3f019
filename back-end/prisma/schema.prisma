@@ -171,6 +171,23 @@ model ToolUsage {
   @@index([toolName])
 }
 
+model ToolSideEffect {
+  id            String   @id @default(uuid())
+  operationKey  String   @unique
+  operationType String
+  status        String   @default("STARTED")
+  externalId    String?
+  request       Json?
+  response      Json?
+  error         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([operationType])
+  @@index([status])
+  @@index([externalId])
+}
+
 model User {
   id                          String        @id @default(uuid())
   userId                      String        @unique
@@ -232,7 +249,7 @@ model Subscription {
 model BrowserContext {
   id        String           @id @default(uuid())
   userId    String           @unique
-  contextId String           @unique
+  contextId String?          @unique
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
   sessions  BrowserSession[]
