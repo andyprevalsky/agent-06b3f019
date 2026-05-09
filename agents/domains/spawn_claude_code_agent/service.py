@@ -400,6 +400,7 @@ async def _run_agentic_loop(  # noqa: C901
                             status=MessageStatus.ERROR,
                             action_type="system",
                             tool_call_id=tool_call_id,
+                            code_provider=code_provider,
                         )
                         raise ApplicationError(
                             fatal_error,
@@ -486,6 +487,7 @@ async def _run_agentic_loop(  # noqa: C901
                             status=MessageStatus.FINISHED,
                             action_type="agent_response",
                             tool_call_id=tool_call_id,
+                            code_provider=code_provider,
                         )
 
             if safe_time() - last_status_update >= 30:
@@ -498,6 +500,7 @@ async def _run_agentic_loop(  # noqa: C901
                     status=MessageStatus.FINISHED,
                     action_type="agent_observation",
                     tool_call_id=tool_call_id,
+                    code_provider=code_provider,
                 )
                 action_summary.append(f"Status update at {elapsed_int}s")
                 last_status_update = safe_time()
@@ -808,6 +811,7 @@ async def _run_verifier(
             status=MessageStatus.IN_PROGRESS,
             action_type="system",
             tool_call_id=verifier_call_id,
+            code_provider=code_provider,
         )
 
         final_output = terminal.get_display()
@@ -834,6 +838,7 @@ async def _run_verifier(
                     status=MessageStatus.FINISHED,
                     action_type="system",
                     tool_call_id=verifier_call_id,
+                    code_provider=code_provider,
                 )
                 return 1.0, v_reasoning, structured_response, input_tokens, output_tokens
 
@@ -952,6 +957,7 @@ async def _run_verifier(
             status=MessageStatus.FINISHED,
             action_type="system",
             tool_call_id=verifier_call_id,
+            code_provider=code_provider,
         )
 
         logger.info(
@@ -989,6 +995,7 @@ async def _run_verifier(
                     status=MessageStatus.FINISHED,
                     action_type="system",
                     tool_call_id=verifier_call_id,
+                    code_provider=code_provider,
                 )
                 return 1.0, v_reasoning, structured_response, input_tokens, output_tokens
 
@@ -1001,6 +1008,7 @@ async def _run_verifier(
             status=MessageStatus.FINISHED,
             action_type="error",
             tool_call_id=verifier_call_id,
+            code_provider=code_provider,
         )
         return 0.5, "Verification failed - assuming partial completion", None, input_tokens, output_tokens
 
@@ -1218,6 +1226,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             ws_url=ws_url,
             output_schema=output_schema,
             github_repo_url=actual_github_repo_url,
+            code_provider=code_provider,
         )
 
         await save_claude_code_message(
@@ -1228,6 +1237,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             status=MessageStatus.FINISHED,
             action_type="task_started",
             tool_call_id=tool_call_id,
+            code_provider=code_provider,
         )
         action_summary.append(f"Started task: {goal[:100]}")
 
@@ -1410,6 +1420,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                     status=MessageStatus.FINISHED,
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
+                    code_provider=code_provider,
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider)
@@ -1457,6 +1468,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                     status=MessageStatus.ERROR,
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
+                    code_provider=code_provider,
                 )
 
                 await close_e2b_session(task_id=task_id, code_provider=code_provider)

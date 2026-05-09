@@ -34,6 +34,7 @@ async def save_claude_code_message(
     output_schema: Optional[dict] = None,
     structured_response: Optional[dict] = None,
     github_repo_url: Optional[str] = None,
+    code_provider: str = "claude",
 ) -> None:
     """Save Claude Code sub-action message directly to DB via back-end API."""
     config = load_config()
@@ -46,6 +47,7 @@ async def save_claude_code_message(
         "title": title,
         "task_id": task_id,
         "action_type": action_type,
+        "code_provider": code_provider,
     }
 
     if ws_url:

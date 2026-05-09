@@ -1768,22 +1768,25 @@ async def _fail_stale_active_agents():
         print(f"  ⚠ Could not run stale-agent cleanup: {e}")
 
 
-async def _check_claude_code_credentials(base_url: str) -> bool:
-    """Check if Claude Code OAuth credentials are available for the benchmark user.
+async def _check_compute_code_credentials(base_url: str) -> bool:
+    """Check if a provider-typed compute token is available for code-agent benchmarks.
 
-    Returns True if valid credentials exist, False otherwise.
+    The runtime code-agent path uses the workflow's current compute token and
+    routes to Claude Code or Codex based on the token provider. A local smoke
+    preflight must check that same provider-typed endpoint; checking only the
+    legacy Claude Code OAuth endpoint incorrectly skips valid GPT/Codex runs.
     """
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{base_url}/api/integrations/claude-code/credentials/token",
+                f"{base_url}/api/integrations/compute-code/credentials/token",
                 headers=headers,
                 timeout=10.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return bool(data.get("accessToken") or data.get("token"))
+                return data.get("type") in ("claude", "gpt") and bool(data.get("accessToken"))
             return False
     except Exception:
         return False
@@ -1863,14 +1866,14 @@ async def main_async(args):
         await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
 
-    # Pre-flight: check Claude Code credentials for tests that need them
+    # Pre-flight: check provider-typed compute credentials for code-agent tests.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
     if claude_code_tasks:
-        has_claude_creds = await _check_claude_code_credentials(base_url)
-        if not has_claude_creds:
+        has_compute_creds = await _check_compute_code_credentials(base_url)
+        if not has_compute_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
+            print(f"  ⚠ Compute code credentials unavailable — skipping: {', '.join(skipped_names)}")
             skipped_claude_tasks = claude_code_tasks
             tasks = [t for t in tasks if not t.requires_claude_code]
 
@@ -1965,7 +1968,7 @@ async def main_async(args):
                 duration_seconds=0,
                 cost_cents=0,
                 message_count=0,
-                failure_reason="Claude Code credentials unavailable (user needs to re-authenticate)",
+                failure_reason="Compute code credentials unavailable (user needs to re-authenticate)",
             )
         )
 

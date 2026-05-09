@@ -498,6 +498,7 @@ async def _execute_click(  # noqa: C901
 
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_email_send_button,
         is_purchase_button,
         is_social_domain,
         is_submit_button,
@@ -533,6 +534,32 @@ async def _execute_click(  # noqa: C901
             else:
                 logger.info(
                     "Write lock bypassed: existing approval valid", approval_type="social_post", url=current_url
+                )
+
+        if is_email_send_button(element_text):
+            if not is_approval_valid(write_lock_approvals, "email_send", current_url):
+                logger.info(
+                    "Write lock triggered: email send detected",
+                    url=current_url,
+                    element_text=element_text[:50],
+                )
+                return {
+                    "status": "needs_write_approval",
+                    "approval_type": "email_send",
+                    "question": get_write_lock_approval_question(
+                        action_type="email_send",
+                        url=current_url,
+                        element_text=element_text[:100],
+                        system_name=system_name,
+                    ),
+                    "element_text": element_text[:100],
+                    "url": current_url,
+                }
+            else:
+                logger.info(
+                    "Write lock bypassed: existing approval valid",
+                    approval_type="email_send",
+                    url=current_url,
                 )
 
         if is_purchase_button(element_text):
@@ -599,6 +626,7 @@ async def _execute_click(  # noqa: C901
 
             from browser_tools.write_lock import (
                 get_write_lock_approval_question,
+                is_email_send_button,
                 is_purchase_button,
                 is_social_domain,
                 is_submit_button,
@@ -628,6 +656,33 @@ async def _execute_click(  # noqa: C901
                     logger.info(
                         "Write lock bypassed: existing approval valid (coordinate click)",
                         approval_type="social_post",
+                        url=current_url,
+                    )
+
+            if is_email_send_button(coord_element_text):
+                if not is_approval_valid(write_lock_approvals, "email_send", current_url):
+                    logger.info(
+                        "Write lock triggered: email send detected (coordinate click)",
+                        url=current_url,
+                        element_text=coord_element_text[:50],
+                        coords=coords,
+                    )
+                    return {
+                        "status": "needs_write_approval",
+                        "approval_type": "email_send",
+                        "question": get_write_lock_approval_question(
+                            action_type="email_send",
+                            url=current_url,
+                            element_text=coord_element_text[:100],
+                            system_name=system_name,
+                        ),
+                        "element_text": coord_element_text[:100],
+                        "url": current_url,
+                    }
+                else:
+                    logger.info(
+                        "Write lock bypassed: existing approval valid (coordinate click)",
+                        approval_type="email_send",
                         url=current_url,
                     )
 

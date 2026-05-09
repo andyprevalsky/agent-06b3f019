@@ -658,6 +658,7 @@ async def test_repo_save_message_posts_json():
         output_schema={"fields": []},
         structured_response={"result": "ok"},
         github_repo_url="https://github.com/foo/bar",
+        code_provider="codex",
     )
 
     call = assert_captured_call(url_contains="/api/agents/", method="POST")
@@ -670,6 +671,7 @@ async def test_repo_save_message_posts_json():
     assert meta["output_schema"] == {"fields": []}
     assert meta["structured_response"] == {"result": "ok"}
     assert meta["github_repo_url"] == "https://github.com/foo/bar"
+    assert meta["code_provider"] == "codex"
     # Init messages omit subAgentId
     assert "subAgentId" not in meta
 

@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         update_agent_status,
     )
     from helpers.handle_tool_event import handle_tool_event
+    from helpers.context_scope import filter_internal_subagent_messages
     from helpers.llm import (
         check_progress,
         fetch_compute_token_activity,
@@ -643,6 +644,7 @@ class AgentWorkflow:
 
         # Fetch response schema and write_lock_enabled from agent config
         response_schema = None
+        fetched_parent_agent_id = None
         try:
             agent_config = await workflow.execute_activity(
                 fetch_agent_config,
@@ -651,6 +653,7 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             response_schema = agent_config.get("response_schema")
+            fetched_parent_agent_id = agent_config.get("parent_agent_id")
             self.output_schema = response_schema  # Single source of truth for output schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
             workflow.logger.info(
@@ -665,7 +668,8 @@ class AgentWorkflow:
         # mid-run, every LLM call before generation has different context than
         # every call after. Awaiting it here keeps the run stable from the first
         # model call.
-        if response_schema is None and self.goal:
+        is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
+        if response_schema is None and self.goal and not is_sub_agent:
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
@@ -682,6 +686,8 @@ class AgentWorkflow:
                     )
             except Exception as e:
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
+        elif response_schema is None and is_sub_agent:
+            workflow.logger.info("Skipping response_schema generation for sub-agent")
 
         # Resolve model pricing in-process so startup is not blocked by the activity queue.
         pricing = get_in_process_model_pricing(model) or get_default_pricing(model)
@@ -813,6 +819,7 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+            execute_context = filter_internal_subagent_messages(execute_context)
 
         # Try DAG execution if a plan exists (skip after continue_as_new — DAG already ran)
         if skip_dag:
@@ -964,6 +971,7 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+            context = filter_internal_subagent_messages(context)
 
             # Build verifier prompt (schema-driven only).
             prompt_gen = self._make_verifier_prompt_generator()
@@ -1242,6 +1250,7 @@ class AgentWorkflow:
             return {
                 "type": "claude",
                 "accessToken": self.claude_max_token,
+                "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
             }
@@ -1249,6 +1258,7 @@ class AgentWorkflow:
             return {
                 "type": "gpt",
                 "accessToken": self.gpt_code_token,
+                "userId": self.user_id,
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
@@ -1365,9 +1375,11 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Update workflow context for tools that check it
+            # Update workflow context for tools that check it. Return the raw
+            # poll result so run_agent can still advance last_checked past
+            # filtered sub-agent rows and avoid re-polling them forever.
             if messages:
-                for msg in messages:
+                for msg in filter_internal_subagent_messages(messages):
                     if msg not in self.context:
                         self.context.append(msg)
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
@@ -1576,6 +1588,13 @@ class AgentWorkflow:
         Note: Cost tracking is handled separately via _track_usage() for tools that
         return standardized usage dicts, not through events.
         """
+        if isinstance(event, ToolEvent):
+            phase = getattr(self, "current_phase", None)
+            metadata = dict(event.metadata or {})
+            if phase:
+                metadata.setdefault("phase", phase)
+            event.metadata = metadata
+
         # handle_tool_event imported at module level within imports_passed_through
         await handle_tool_event(
             event=event,

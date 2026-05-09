@@ -453,6 +453,25 @@ describe('MessageBubble', () => {
     });
   });
 
+  it('renders Codex code tool message when provider metadata is codex', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-codex',
+        toolName: 'spawn_claude_code_agent',
+        toolStatus: 'IN_PROGRESS',
+        task_id: 'codex-1',
+        code_provider: 'codex',
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => {
+      expect(screen.getByText('Codex Spinning up...')).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText('Codex')).toBeInTheDocument();
+  });
+
   it('renders phone call tool as PhoneCallCard', async () => {
     const msg = baseMessage({
       role: 'TOOL',

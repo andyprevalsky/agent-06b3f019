@@ -6,6 +6,7 @@ No framework types (request/response). Typed args in, typed results out.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from datetime import timedelta
 from typing import Any
@@ -22,6 +23,7 @@ from domains.set_plan.config import (
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
+from helpers.context_scope import is_internal_subagent_message
 from tools.prompts import TOOL_PROMPTS
 from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
 
@@ -147,22 +149,161 @@ def convert_dependencies_list_to_dict(deps_list: list[dict[str, Any]]) -> dict[s
     return {entry.get("task_idx", ""): entry.get("depends_on", []) for entry in deps_list if entry.get("task_idx")}
 
 
-def get_planner_tools_description() -> str:
-    """Get execute-tool descriptions for the planner.
+def _resolve_schema_ref(root: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+        return schema
+    return root.get("$defs", {}).get(ref.removeprefix("#/$defs/"), schema)
 
-    Single source of truth: execute-phase tools and their prompt fragments.
-    Planner-only spawn aliases are documented in the planner prompt itself.
+
+def _compact_schema_type(root: dict[str, Any], schema: dict[str, Any], depth: int = 0) -> str:
+    schema = _resolve_schema_ref(root, schema)
+
+    if "const" in schema:
+        return f"literal[{json.dumps(schema['const'], ensure_ascii=True)}]"
+    if "enum" in schema and isinstance(schema["enum"], list):
+        return "enum[" + ", ".join(json.dumps(value, ensure_ascii=True) for value in schema["enum"]) + "]"
+
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(variants, list):
+        null_allowed = any(item.get("type") == "null" for item in variants if isinstance(item, dict))
+        non_null = [item for item in variants if isinstance(item, dict) and item.get("type") != "null"]
+        rendered = [_compact_schema_type(root, item, depth + 1) for item in non_null]
+        type_text = " | ".join(dict.fromkeys(rendered)) if rendered else "any"
+        return f"{type_text} | null" if null_allowed else type_text
+
+    schema_type = schema.get("type")
+    if schema_type == "array":
+        items = schema.get("items")
+        item_type = _compact_schema_type(root, items, depth + 1) if isinstance(items, dict) else "any"
+        return f"list[{item_type}]"
+    if schema_type == "object":
+        return "object"
+    if isinstance(schema_type, list):
+        return " | ".join(str(item) for item in schema_type)
+    if isinstance(schema_type, str):
+        return schema_type
+    return "any"
+
+
+def _compact_schema_field(
+    root: dict[str, Any],
+    schema: dict[str, Any],
+    *,
+    required: bool,
+    depth: int = 0,
+) -> dict[str, Any]:
+    schema = _resolve_schema_ref(root, schema)
+    field: dict[str, Any] = {
+        "type": _compact_schema_type(root, schema, depth),
+        "required": required,
+    }
+
+    description = schema.get("description")
+    if isinstance(description, str) and description.strip():
+        field["description"] = description.strip()
+
+    if depth >= 2:
+        return field
+
+    variants = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(variants, list):
+        object_variant = next(
+            (
+                _resolve_schema_ref(root, item)
+                for item in variants
+                if isinstance(item, dict)
+                and _resolve_schema_ref(root, item).get("type") == "object"
+                and _resolve_schema_ref(root, item).get("properties")
+            ),
+            None,
+        )
+        if object_variant:
+            schema = object_variant
+
+    if schema.get("type") == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            resolved_items = _resolve_schema_ref(root, items)
+            if resolved_items.get("type") == "object" and resolved_items.get("properties"):
+                item_required = set(resolved_items.get("required", []))
+                field["items"] = {
+                    sub_name: _compact_schema_field(
+                        root,
+                        sub_schema,
+                        required=sub_name in item_required,
+                        depth=depth + 1,
+                    )
+                    for sub_name, sub_schema in resolved_items.get("properties", {}).items()
+                }
+
+    if schema.get("type") == "object" and schema.get("properties"):
+        nested_required = set(schema.get("required", []))
+        field["fields"] = {
+            sub_name: _compact_schema_field(
+                root,
+                sub_schema,
+                required=sub_name in nested_required,
+                depth=depth + 1,
+            )
+            for sub_name, sub_schema in schema.get("properties", {}).items()
+        }
+
+    return field
+
+
+def _render_llm_tool_schema(name: str, description: str, model: Any) -> str:
+    schema = model.model_json_schema()
+    required = set(schema.get("required", []))
+    arguments: dict[str, Any] = {}
+    for field_name, field_schema in schema.get("properties", {}).items():
+        if field_name == "output_schema":
+            resolved = _resolve_schema_ref(schema, field_schema)
+            description_text = resolved.get("description") or field_schema.get("description") or ""
+            arguments[field_name] = {
+                "type": "response_schema",
+                "required": field_name in required,
+                "description": (
+                    description_text.strip()
+                    + " Shape: {fields: [{name, type, required, description, nested_fields?}]}."
+                    if description_text
+                    else "Expected structured response fields. Shape: {fields: [{name, type, required, description, nested_fields?}]}."
+                ),
+            }
+            continue
+        arguments[field_name] = _compact_schema_field(schema, field_schema, required=field_name in required)
+    rendered = {
+        "tool": name,
+        "arguments": arguments,
+    }
+    return (
+        f"Purpose:\n{description}\n\n"
+        "LLM-facing Pydantic arguments:\n"
+        f"```json\n{json.dumps(rendered, indent=2, ensure_ascii=True)}\n```"
+    )
+
+
+def get_planner_tools_description() -> str:
+    """Get compact execute-tool schemas and descriptions for the planner.
+
+    Single source of truth: execute-phase tools, their prompt fragments, and
+    their Pydantic schemas. Planner-only spawn aliases are documented in the
+    planner prompt itself.
     """
     sections = []
     for name in EXECUTE_PHASE_TOOLS:
+        model = TOOL_MODELS.get(name)
         if name in TOOL_PROMPTS:
             description = TOOL_PROMPTS[name].strip()
-        elif name in TOOL_MODELS:
-            model = TOOL_MODELS[name]
+        elif model:
             description = (model.__doc__ or "").strip() or "No description"
         else:
             continue
-        sections.append(f"### {name}\n{description}")
+
+        if model:
+            sections.append(f"### {name}\n{_render_llm_tool_schema(name, description, model)}")
+        else:
+            sections.append(f"### {name}\n{description}")
     return "\n\n".join(sections) if sections else "Standard execution tools available."
 
 
@@ -344,6 +485,9 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     base_messages: list[dict[str, Any]] = []
 
     for msg in context:
+        if is_internal_subagent_message(msg):
+            continue
+
         role = msg.get("role", "").upper()
         text = msg.get("text", "")
         message_id = msg.get("message_id")

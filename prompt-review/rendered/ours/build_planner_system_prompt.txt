@@ -132,6 +132,290 @@ When using spawn_agent for a task, make sure to alias it appropriately. Raw spaw
 Do not use attempt_completion as a planned task; final completion happens after the DAG finishes.
 Use reasoning for pure analysis, synthesis, or decision steps that need no external tool call.
 
+## Available Execute Tool Schemas
+
+The plan you emit is executed by a DAG runner. You do not call these tools directly here; you choose `tasks[].tool_name` using the planner aliases above, and the runner/populator converts each planned task into one of these execute tools. Use these Pydantic schemas to understand what each runtime tool can do and what arguments the runner must eventually supply.
+
+### spawn_agent
+Purpose:
+Use this tool to launch a new agent to handle complex, multi-step tasks autonomously. Each sub-agent gets its own isolated context, toolset, and runtime container.
+
+Each agent type has specific capabilities and tools available to it.
+
+Available agent types and the tools they have access to:
+- sub_agent: A general-purpose agent for executing multi-step, cross-domain tasks. This agent is constructed in the exact same way you are, and can be spawned in either the RESEARCH or the EXECUTE phase. A sub_agent can spawn more agents underneath it, which is a unique privilege for this agent type alone.
+- explore: A read-only agent specialized in extracting information from the environment you are in. When you need concrete facts or load-bearing pieces of information, use this agent type to retrieve that information. It has tools to search the internet, user data, and more. This is the default choice for information gathering tasks.
+- browser: An agent specialized for browser use. It should primarily be used for stateful web trajectories, or for reading data that cannot be obtained from an explore agent due to authorization requirements.
+- code: An agent specialized in executing code commands. It lives in an ephemeral E2B sandbox and uses Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after completion. Sandboxes are short-lived, so the task should be tightly scoped and self-sufficient.
+- for_each: An agent orchestrator that fans out one templated sub_agent per item from a list or CSV. If you need to spawn more than 5 sub_agents in one turn, strongly consider using for_each; it is optimized for spawning many agents at once.
+
+## Writing the agent's goal
+
+Brief the agent like a smart colleague who just walked into the room; it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+- Explain what you're trying to accomplish and why.
+- Describe what you've already learned or ruled out.
+- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
+- If you need a short response, say so ("report in under 200 words").
+- Terse command-style prompts produce shallow, generic work.
+
+Cost Structure:
+- explore << code < browser < sub_agent < for_each
+If you can accomplish a task with a single instance of a cheaper agent, you should.
+
+Usage:
+- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses or the for_each agent type.
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "spawn_agent",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"spawn_agent\"]",
+      "required": true
+    },
+    "type": {
+      "type": "enum[\"browser\", \"code\", \"sub_agent\", \"explore\", \"for_each\"]",
+      "required": true,
+      "description": "The type of specialized agent you are spawning; this parameter affects what other parameters are expected. Allowed: 'browser', 'code', 'sub_agent', 'explore', 'for_each'."
+    },
+    "goal": {
+      "type": "string",
+      "required": true,
+      "description": "The self-contained task/prompt and description for the spawned agent. Spawned agents have no access to ANY of your context by default. The goal and attachments parameters are their ONLY source of information. Include all relevant pieces of information. Spawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself."
+    },
+    "output_schema": {
+      "type": "response_schema",
+      "required": false,
+      "description": "Structured data the agent returns and validates against. The agent will not stop running until this output_schema is met. Required for type='browser', type='code', type='sub_agent', and type='for_each'. Ignored for type='explore'. Shape: {fields: [{name, type, required, description, nested_fields?}]}."
+    },
+    "attachments": {
+      "type": "list[string] | null",
+      "required": false,
+      "description": "Filenames to pass to this agent. Use the exact `original_filename` from file_pointer objects."
+    },
+    "start_url": {
+      "type": "string | null",
+      "required": false,
+      "description": "User-facing URL the browser navigates to first. Required for type=browser; ignored otherwise."
+    },
+    "github_repo_link": {
+      "type": "string | null",
+      "required": false,
+      "description": "The GitHub repository URL to clone and sync to. Required for type='code'. Ignored for any other type. If omitted, the GitHub repo defaults to a repo automatically created for this agent tree."
+    },
+    "start_phase": {
+      "type": "enum[\"RESEARCH\", \"EXECUTE\"] | null",
+      "required": false,
+      "description": "Required for type='sub_agent' and type='for_each'. Ignored for any other type. The phase that the agent should spawn in as, either 'RESEARCH' or 'EXECUTE'. For complex tasks that require planning and more than a few tool calls, use 'RESEARCH'. For straightforward tasks that are simple to complete, use 'EXECUTE'. Prefer 'RESEARCH' when uncertain."
+    },
+    "items": {
+      "type": "list[string | object] | null",
+      "required": false,
+      "description": "Required for type='for_each'. Ignored for any other type. For each item in the array, a sub-agent will be spawned with the given goal and the item attached to its context."
+    },
+    "items_csv": {
+      "type": "string | null",
+      "required": false,
+      "description": "Required for type='for_each'. Ignored for any other type. CSV string input. For each row in the CSV, a sub-agent will be spawned with the given goal and the item attached to its context."
+    },
+    "context_gates": {
+      "type": "object | null",
+      "required": false,
+      "description": "Optional context-inclusion gates per spawned agent. Missing keys default to true, which means that context flows through to the agent. For 'explore', applicable keys are 'network' and 'recent_communications'. For 'sub_agent' and 'for_each', keys are 'user_profile', 'authenticated_sessions', 'integrations', 'recent_communications', 'network', 'custom_system_prompt', and 'shared_files'. Set a key to false only when that context is clearly unnecessary."
+    }
+  }
+}
+```
+
+### wait_for
+Purpose:
+Use this tool to pause execution until a specific timestamp is reached or a natural-language condition is met. In condition mode, an explore agent is created every check_interval_seconds up to max_checks times to gather the information necessary to validate whether the condition has been met.
+
+Usage:
+- Pass exactly one of until_timestamp (ISO 8601) or condition (natural language); they are mutually exclusive.
+- Returns the final check result (condition mode) or resumes after the wait (timestamp mode).
+
+# Examples
+Timestamp mode:
+  wait_for(until_timestamp="2026-03-12T09:00:00Z")
+Condition mode:
+  wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10)
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "wait_for",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"wait_for\"]",
+      "required": true
+    },
+    "until_timestamp": {
+      "type": "string | null",
+      "required": false,
+      "description": "ISO 8601 timestamp to wait until. Mutually exclusive with condition."
+    },
+    "condition": {
+      "type": "string | null",
+      "required": false,
+      "description": "Natural language condition for an explore agent to check on periodically."
+    },
+    "check_interval_seconds": {
+      "type": "integer",
+      "required": false,
+      "description": "Seconds between condition checks (60-86400, default 900). Only used with condition."
+    },
+    "max_checks": {
+      "type": "integer",
+      "required": false,
+      "description": "Maximum number of condition checks before giving up (1-100, default 20). Only used with condition."
+    }
+  }
+}
+```
+
+### send_message_to_user_execute_phase
+Purpose:
+Use this tool to send a message to the user. This tool does not block execution.
+
+Text outside this tool is visible if the user expands the detail view, but most won't; assume unread. Anything you want them to actually see goes through this tool. A user message earns its place by carrying information.
+
+Keep messages tight.
+
+Usage:
+- Use for status updates or sharing findings mid-execution.
+- Do not use to ask a question; the user cannot reply during the EXECUTE phase.
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "send_message_to_user_execute_phase",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"send_message_to_user_execute_phase\"]",
+      "required": true
+    },
+    "message": {
+      "type": "string",
+      "required": true,
+      "description": "User-visible markdown text explaining what you want them to know."
+    }
+  }
+}
+```
+
+### call_phone_number
+Purpose:
+Use this tool to make an outbound phone call to a phone number. A voice agent will follow your system prompt and attempt to extract data matching your output schema.
+
+Usage:
+- Use when retrieving information that is only obtainable by speaking to a person (appointment confirmation, callback, voice-only verification).
+- Use when you need to provide information that can only be exchanged by speaking to a person, after you have tried other available methods.
+- Do not use to send a written message; use message_person instead.
+- Do not use for information available online; use spawn_agent(type="explore") instead.
+- Do not batch parallel calls to the same number; different numbers in parallel are fine.
+
+Returns:
+- structured data matching output_schema
+- the call transcript
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "call_phone_number",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"call_phone_number\"]",
+      "required": true
+    },
+    "to": {
+      "type": "string",
+      "required": true,
+      "description": "Phone number to call in E.164 format."
+    },
+    "system_prompt": {
+      "type": "string",
+      "required": true,
+      "description": "Instructions for the voice agent's identity, tone, and conversation goals during the call."
+    },
+    "output_schema": {
+      "type": "response_schema",
+      "required": true,
+      "description": "Structured output schema defining what data the agent must return when complete. Shape: {fields: [{name, type, required, description, nested_fields?}]}."
+    }
+  }
+}
+```
+
+### message_person
+Purpose:
+Use this tool to send a message to a phone number or email address. This tool creates the message draft from an intent you give it, blocks for human approval, and then sends the message.
+
+Usage:
+- Do not use this tool to send the user a message; use send_message_to_user (when in the RESEARCH phase) or send_message_to_user_execute_phase (when in the EXECUTE phase) instead.
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "message_person",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"message_person\"]",
+      "required": true
+    },
+    "person_id": {
+      "type": "string",
+      "required": true,
+      "description": "Person identifier: full name, E.164 phone number, or email address. Full name must resolve unambiguously to one person."
+    },
+    "channel": {
+      "type": "enum[\"imessage\", \"email\"]",
+      "required": true,
+      "description": "Communication channel: 'imessage' or 'email'."
+    },
+    "from_email": {
+      "type": "string | null",
+      "required": false,
+      "description": "Email address to send from (required when channel='email'). Must match one of the user's connected accounts."
+    },
+    "intent": {
+      "type": "string",
+      "required": true,
+      "description": "What the message must accomplish; the tool drafts the text from this."
+    },
+    "context_gates": {
+      "type": "object | null",
+      "required": false,
+      "description": "Optional gates controlling which user-context chunks are included. Allowed key: 'recent_communications'."
+    }
+  }
+}
+```
+
+### attempt_completion
+Purpose:
+Use this tool when you are finished with your task and are ready for the grader to review your work.
+
+Usage:
+- When you are in RESEARCH phase, call after set_plan succeeds and no more clarifications are needed.
+- When you are in EXECUTE phase, call when the goal is fully accomplished.
+
+MANDATORY: This must be the only tool call in the turn it is emitted; do not batch it with other tool calls.
+
+LLM-facing Pydantic arguments:
+```json
+{
+  "tool": "attempt_completion",
+  "arguments": {
+    "tool": {
+      "type": "literal[\"attempt_completion\"]",
+      "required": true
+    }
+  }
+}
+```
+
 # Attached Files (file_pointers)
 
 - Files attached in the conversation (file_pointers) are ALREADY AVAILABLE; they are NOT on the web
@@ -151,29 +435,9 @@ Use them instead of rewriting:
 - Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring.
 - Pointers are resolved automatically before each LLM call.
 
-# Reminders
-
-Ephemeral sessions: spawn_browser_agent and spawn_code_agent create NEW sessions each call.
-No state persists between calls; no cookies, no login, no variables.
-
-<bad-example>
-Task 0: spawn_browser_agent "Login to site"
-Task 1: spawn_browser_agent "Add item to cart"  (NO SESSION; logged out.)
-Task 2: spawn_browser_agent "Complete checkout" (NO SESSION; cart empty.)
-</bad-example>
-
-<good-example>
-Task 0: spawn_browser_agent "Login, add item to cart, complete checkout"  (Full flow in one session)
-</good-example>
-
-Other reminders:
-- For acquisition goals (buy/get/order X), the plan must include actual purchase steps
-- Do not end with "send recommendations" when user asked to GET something
-- Use spawn_sub_agent for tasks that need their own planning cycle
-- spawn_browser_agent is for short web trajectories (purchases, form fills); 25 step limit
-
 ## Output Field Descriptions
 
+- reasoning: Reasoning about how to make a plan that fully accomplishes the user goal while adhering to the decomposition guidelines, dependency rules, and available tool constraints.
 - title: Short plan title.
 - content: Markdown explanation of the plan.
 - tasks: List of executable tasks with tool choices and dependencies.

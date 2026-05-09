@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic import BaseModel, Field, create_model, field_validator, model_validator
 
 from utils.prompts import (
     PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION,
@@ -13,6 +13,7 @@ from utils.prompts import (
     PLANNER_RESPONSE_CONTENT_DESCRIPTION,
     PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION,
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
+    PLANNER_RESPONSE_REASONING_DESCRIPTION,
     PLANNER_RESPONSE_TASKS_DESCRIPTION,
     PLANNER_RESPONSE_TITLE_DESCRIPTION,
     PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
@@ -120,6 +121,7 @@ class DependencyEntry(BaseModel):
 class PlannerResponse(BaseModel):
     """Structured output from the planner LLM."""
 
+    reasoning: str = Field(description=PLANNER_RESPONSE_REASONING_DESCRIPTION)
     title: str = Field(description=PLANNER_RESPONSE_TITLE_DESCRIPTION)
     content: str = Field(description=PLANNER_RESPONSE_CONTENT_DESCRIPTION)
     tasks: List[PlannerTask] = Field(description=PLANNER_RESPONSE_TASKS_DESCRIPTION)
@@ -174,10 +176,15 @@ class ResponseSchemaFieldConfig(BaseModel):
     )
     required: bool = Field(description="Whether this field is required in the output.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
-    properties: Optional[List[ResponseSchemaNestedFieldConfig]] = Field(
-        default=None,
+    properties: List[ResponseSchemaNestedFieldConfig] = Field(
+        default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
+
+    @field_validator("properties", mode="before")
+    @classmethod
+    def _coerce_null_properties(cls, value: Any) -> Any:
+        return [] if value is None else value
 
     @model_validator(mode="after")
     def _object_fields_require_properties(self):

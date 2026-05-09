@@ -114,10 +114,12 @@ export type WsMessage =
 
 /** Visible lifecycle state for a ClaudeCodeChip. */
 export type ChipState = 'spinning_up' | 'live' | 'verifying' | 'completed' | 'failed';
+export type CodeProvider = 'claude' | 'codex';
 
 export interface ClaudeCodeChipProps {
   taskId: string;
   wsUrl?: string;
+  codeProvider?: CodeProvider;
   /** Always show terminal regardless of state. */
   forceShow?: boolean;
 }

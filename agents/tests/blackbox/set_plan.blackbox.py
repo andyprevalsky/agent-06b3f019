@@ -369,7 +369,7 @@ def test_build_plan_message_dag():
 
 
 def test_get_planner_tools_description_non_empty():
-    """Planner tool description includes at least one planning tool."""
+    """Planner tool description includes compact LLM-facing schemas."""
     from domains.set_plan.service import get_planner_tools_description
 
     desc = get_planner_tools_description()
@@ -378,6 +378,11 @@ def test_get_planner_tools_description_non_empty():
     # Should mention at least one well-known execute-phase tool
     assert "spawn_agent" in desc
     assert "### spawn_agent" in desc
+    assert "Purpose:" in desc
+    assert "LLM-facing Pydantic arguments" in desc
+    assert '"arguments"' in desc
+    assert '"description"' in desc
+    assert '"required"' in desc
     assert '"properties"' not in desc
     assert "$defs" not in desc
 
@@ -431,6 +436,32 @@ def test_build_planner_messages_tool_and_system_roles():
     assert tool_msg["role"] == "user"
     system_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
     assert system_msg["role"] == "user"
+
+
+def test_build_planner_messages_skips_subagent_work_messages():
+    """Planner context excludes spawned-agent intermediate work rows."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Goal"},
+        {
+            "role": "TOOL",
+            "text": "Child internal web_search result",
+            "metadata": {"toolName": "web_search", "subAgentId": "child-1"},
+        },
+        {
+            "role": "TOOL",
+            "text": "Child final summary",
+            "metadata": {"toolName": "spawn_sub_agent", "subAgentIds": ["child-1"]},
+        },
+    ]
+
+    base_messages, user_messages = build_planner_messages(context)
+    serialized = "\n".join(m["content"] for m in base_messages)
+
+    assert user_messages == ["Goal"]
+    assert "Child internal web_search result" not in serialized
+    assert "Child final summary" in serialized
 
 
 def test_build_planner_messages_compacts_long_tool_context():
@@ -767,6 +798,10 @@ async def run_all_tests():
     r.record("build_planner_messages_basic", test_build_planner_messages_basic)
     r.record("build_planner_messages_empty", test_build_planner_messages_empty_context)
     r.record("build_planner_messages_tool_system", test_build_planner_messages_tool_and_system_roles)
+    r.record(
+        "build_planner_messages_skips_subagent_work",
+        test_build_planner_messages_skips_subagent_work_messages,
+    )
     r.record(
         "build_planner_messages_compacts_long_tool_context", test_build_planner_messages_compacts_long_tool_context
     )

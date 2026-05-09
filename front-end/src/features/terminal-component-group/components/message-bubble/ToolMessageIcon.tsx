@@ -4,8 +4,9 @@
  *   - the x402 / Claude Code lockup icons for their tool families,
  *   - or a generic lucide icon resolved from `toolIcons`.
  */
-import { Wrench } from 'lucide-react';
+import { Code, Wrench } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { CodeProvider } from '../../types';
 import {
   getToolIcon,
   isX402Tool,
@@ -21,6 +22,7 @@ interface ToolMessageIconProps {
   toolName?: string;
   actionType?: string;
   error?: boolean;
+  codeProvider?: CodeProvider;
 }
 
 export function ToolMessageIcon({
@@ -29,6 +31,7 @@ export function ToolMessageIcon({
   toolName,
   actionType,
   error,
+  codeProvider,
 }: ToolMessageIconProps) {
   if (isThought) {
     return status === 'IN_PROGRESS' ? (
@@ -55,6 +58,9 @@ export function ToolMessageIcon({
   }
 
   if (toolName && isClaudeCodeTool(toolName)) {
+    if (codeProvider === 'codex') {
+      return <Code aria-label="Codex" className="h-4 w-4 flex-shrink-0 text-muted-foreground" />;
+    }
     return <img src={claudeCodeIconSrc} alt="Claude Code" className="h-4 w-4 flex-shrink-0" />;
   }
 

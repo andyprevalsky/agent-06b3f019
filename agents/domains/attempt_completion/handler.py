@@ -65,6 +65,7 @@ class AttemptCompletionManager(ToolManager):
                 title=event_title,
                 message=event_message,
                 status=event_status,
+                metadata={"phase": phase} if isinstance(phase, str) and phase else None,
             ),
             agent_id=agent_id,
             tool_call_id=tool_call_id,

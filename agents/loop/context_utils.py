@@ -5,6 +5,7 @@ from typing import Awaitable, Callable, Dict, List
 
 import structlog
 
+from helpers.context_scope import filter_internal_subagent_messages
 from helpers.context_pointers import annotate_with_pointer
 
 logger = structlog.get_logger()
@@ -29,11 +30,6 @@ async def poll_and_update_context(
 
     if new_msgs:
         for msg in new_msgs:
-            if msg not in context:
-                annotate_with_pointer(msg)
-                context.append(msg)
-        context.sort(key=lambda x: x.get("timestamp", ""))
-        for msg in context:
             ts_str = msg.get("timestamp", "")
             if ts_str:
                 try:
@@ -42,5 +38,12 @@ async def poll_and_update_context(
                         last_checked = msg_ts
                 except Exception:
                     pass
+
+        new_msgs = filter_internal_subagent_messages(new_msgs)
+        for msg in new_msgs:
+            if msg not in context:
+                annotate_with_pointer(msg)
+                context.append(msg)
+        context.sort(key=lambda x: x.get("timestamp", ""))
 
     return last_checked

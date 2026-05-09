@@ -77,6 +77,10 @@ CRITICAL_CONSTRAINTS_RULE = """
 - Causal deps: emit A alone, wait, then emit B (don't batch dependent calls).
 """
 
+PLANNER_RESPONSE_REASONING_DESCRIPTION = (
+    "Reasoning about how to make a plan that fully accomplishes the user goal while adhering to the "
+    "decomposition guidelines, dependency rules, and available tool constraints."
+)
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
 PLANNER_RESPONSE_CONTENT_DESCRIPTION = "Markdown explanation of the plan."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
@@ -124,6 +128,7 @@ Use reasoning for pure analysis, synthesis, or decision steps that need no exter
 """.strip()
 
 PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
+- reasoning: {PLANNER_RESPONSE_REASONING_DESCRIPTION}
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
 - content: {PLANNER_RESPONSE_CONTENT_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
@@ -470,11 +475,16 @@ def build_planner_system_prompt(
     an execution plan with tasks and dependencies.
 
     Args:
-        available_tools_description: Deprecated; planner tool behavior is carried by structured schemas.
+        available_tools_description: Execute tool descriptions and Pydantic schemas.
         user_context: Optional user context for personalization
         response_schema: Optional structured output schema the agent should return
     """
     user_context_block = user_context.strip() if user_context.strip() else "No additional user context."
+    available_tools_block = (
+        available_tools_description.strip()
+        if available_tools_description and available_tools_description.strip()
+        else "No execute tool schemas were provided."
+    )
 
     decomposition_phase_prompt = f"""You are in the DECOMPOSITION phase. Your entire job is, in one turn, to create a plan which describes a decomposition of a task into context-independent, parallelizable, mutually exclusive, comprehensively exhaustive tasks with a precise, acyclic dependency graph. You can think of any task like a square. Your goal is to divide this square into a set of sub-squares (sub-tasks) such that each square is roughly equivalently sized (equal amount of work per task), all squares when fit together represent the exact same square as the parent task (no extra work, no work left out), and no squares overlap (no work is duplicated in each task). Prefer 4-8 sub-tasks.
 
@@ -523,6 +533,12 @@ MANDATORY DECOMPOSITION INVARIANTS:
 
 {PLANNER_SPAWN_AGENT_ALIAS_TABLE}
 
+## Available Execute Tool Schemas
+
+The plan you emit is executed by a DAG runner. You do not call these tools directly here; you choose `tasks[].tool_name` using the planner aliases above, and the runner/populator converts each planned task into one of these execute tools. Use these Pydantic schemas to understand what each runtime tool can do and what arguments the runner must eventually supply.
+
+{available_tools_block}
+
 # Attached Files (file_pointers)
 
 - Files attached in the conversation (file_pointers) are ALREADY AVAILABLE; they are NOT on the web
@@ -536,27 +552,6 @@ MANDATORY DECOMPOSITION INVARIANTS:
 When decomposing tasks, embed @ref:message: pointers in sub-task goals rather than
 summarizing the referenced data. This prevents information degradation across the agent network.
 {CONTEXT_POINTERS_RULE.strip()}
-
-# Reminders
-
-Ephemeral sessions: spawn_browser_agent and spawn_code_agent create NEW sessions each call.
-No state persists between calls; no cookies, no login, no variables.
-
-<bad-example>
-Task 0: spawn_browser_agent "Login to site"
-Task 1: spawn_browser_agent "Add item to cart"  (NO SESSION; logged out.)
-Task 2: spawn_browser_agent "Complete checkout" (NO SESSION; cart empty.)
-</bad-example>
-
-<good-example>
-Task 0: spawn_browser_agent "Login, add item to cart, complete checkout"  (Full flow in one session)
-</good-example>
-
-Other reminders:
-- For acquisition goals (buy/get/order X), the plan must include actual purchase steps
-- Do not end with "send recommendations" when user asked to GET something
-- Use spawn_sub_agent for tasks that need their own planning cycle
-- spawn_browser_agent is for short web trajectories (purchases, form fills); 25 step limit
 
 ## Output Field Descriptions
 

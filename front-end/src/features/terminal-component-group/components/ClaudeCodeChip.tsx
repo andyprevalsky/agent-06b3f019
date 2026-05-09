@@ -32,9 +32,10 @@ import {
 export default function ClaudeCodeChip({
   taskId,
   wsUrl,
+  codeProvider = 'claude',
   forceShow = false,
 }: ClaudeCodeChipProps) {
-  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow);
+  const vm = useClaudeCodeChip(taskId, wsUrl, forceShow, codeProvider);
 
   if (vm.isFullscreen) {
     return (
@@ -42,6 +43,7 @@ export default function ClaudeCodeChip({
         state={vm.chipState}
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
+        codeProvider={vm.codeProvider}
         terminalContainerRef={vm.fullscreenContainerRef}
         onClose={vm.closeFullscreen}
       />
@@ -57,6 +59,7 @@ export default function ClaudeCodeChip({
         structuredResponse={vm.structuredResponse}
         failureMessage={vm.failureMessage}
         githubRepoUrl={vm.githubRepoUrl}
+        codeProvider={vm.codeProvider}
         terminalContainerRef={vm.terminalContainerRef}
         onToggleExpand={vm.toggleExpand}
         onMaximize={vm.openFullscreen}
@@ -70,6 +73,7 @@ export default function ClaudeCodeChip({
         forceShow={forceShow}
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
+        codeProvider={vm.codeProvider}
         terminalContainerRef={vm.terminalContainerRef}
         onMaximize={vm.openFullscreen}
       />
@@ -81,6 +85,7 @@ export default function ClaudeCodeChip({
       state={vm.chipState}
       outputSchema={vm.outputSchema}
       githubRepoUrl={vm.githubRepoUrl}
+      codeProvider={vm.codeProvider}
       terminalContainerRef={vm.terminalContainerRef}
       onMaximize={vm.openFullscreen}
     />

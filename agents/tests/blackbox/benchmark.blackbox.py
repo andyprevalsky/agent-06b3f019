@@ -62,6 +62,87 @@ def test_ci_should_fail_on_skipped_required_task():
     assert _ci_should_fail({"failed": 0}) is False
 
 
+async def test_code_agent_preflight_accepts_gpt_compute_token():
+    """Code-agent benchmarks preflight against the workflow compute-token route."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"type": "gpt", "accessToken": "gpt-token"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+async def test_code_agent_preflight_rejects_missing_compute_token():
+    """Code-agent benchmarks still fail fast when no compute token is available."""
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 404
+
+        def json(self):
+            return {"error": "NO_TOKENS_AVAILABLE"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, *, headers, timeout):
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench._check_compute_code_credentials("http://localhost:55120") is False
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+
 def test_normalize_attention_requests_accepts_backend_contract():
     """Benchmark harness accepts the backend's {requests: [...]} list response."""
     from benchmarks.run_benchmark import _normalize_attention_requests_response
@@ -468,6 +549,8 @@ async def run_all_tests():
     r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)
     r.record("process_cwd_workspace_filter", test_process_cwd_is_under_accepts_nested_paths)
     r.record("ci_fails_on_skipped", test_ci_should_fail_on_skipped_required_task)
+    await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
+    await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("calendly_passes_on_link_approval", test_calendly_benchmark_passes_on_link_approval_marker)
     r.record("count_only_passes_on_approval_count", test_count_only_benchmark_passes_on_expected_approval_count)

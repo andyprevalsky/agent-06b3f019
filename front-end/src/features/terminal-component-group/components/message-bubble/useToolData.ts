@@ -74,6 +74,7 @@ export function useToolData({
         (metadata.simulated as boolean | undefined) ??
         (attentionMeta.simulated as boolean | undefined),
       actionType: metadata.action_type as string | undefined,
+      codeProvider: metadata.code_provider === 'codex' ? 'codex' : 'claude',
     };
   }, [isAssistant, shouldType, isTool, message, isStreaming]);
 }

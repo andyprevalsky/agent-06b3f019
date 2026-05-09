@@ -9,6 +9,7 @@
  * Calls onTypingComplete immediately — ClaudeCodeChip handles its own state.
  */
 import type { Message } from '../../hooks';
+import type { CodeProvider } from '../../types';
 import ClaudeCodeChip from '../ClaudeCodeChip';
 
 interface ClaudeCodeBubbleProps {
@@ -17,14 +18,11 @@ interface ClaudeCodeBubbleProps {
   onTypingComplete?: () => void;
 }
 
-export function ClaudeCodeBubble({
-  message,
-  shouldType,
-  onTypingComplete,
-}: ClaudeCodeBubbleProps) {
+export function ClaudeCodeBubble({ message, shouldType, onTypingComplete }: ClaudeCodeBubbleProps) {
   const metadata = message.metadata;
   const taskId = (metadata?.task_id as string) || 'pending';
   const wsUrl = metadata?.ws_url as string | undefined;
+  const codeProvider = metadata?.code_provider === 'codex' ? 'codex' : ('claude' as CodeProvider);
 
   if (shouldType && onTypingComplete) {
     requestAnimationFrame(() => onTypingComplete());
@@ -33,7 +31,7 @@ export function ClaudeCodeBubble({
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1">
-        <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} />
+        <ClaudeCodeChip taskId={taskId} wsUrl={wsUrl} codeProvider={codeProvider} />
       </div>
     </div>
   );
