@@ -1874,6 +1874,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
             output_files = result.get("output_files", [])
+            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Browser automation complete",
+                message=result.get("message", ""),
+                status=final_status,
+                metadata={"toolName": "spawn_browser_agent"},
+                data={"usage": tool_usage},
+            )
+
             if output_files:
                 logger.info(
                     "[BrowserAgent] Posting output files as ASSISTANT messages",
@@ -1885,16 +1895,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         message="",
                         file_pointer=fp,
                     )
-
-            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Browser automation complete",
-                message=result.get("message", ""),
-                status=final_status,
-                metadata={"toolName": "spawn_browser_agent"},
-                data={"usage": tool_usage},
-            )
 
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):

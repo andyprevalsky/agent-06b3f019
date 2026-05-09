@@ -55,6 +55,12 @@ logger = structlog.get_logger()
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 
 
+class VerifierSessionFilePointer(BaseModel):
+    """Remote-session file pointer extracted before upload to storage."""
+
+    path: str = Field(..., description="Absolute file path in the remote session, starting with /.")
+
+
 def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
     return metadata.get("toolName") == CLOUD_AGENT_TOOL_NAME
 
@@ -3131,9 +3137,9 @@ def _verifier_field_annotation(field_type: Optional[str]) -> Any:
     if field_type == "list[file_pointer]":
         return List[FilePointer]
     if field_type == "session_file_pointer":
-        return Dict[str, str]
+        return VerifierSessionFilePointer
     if field_type == "list[session_file_pointer]":
-        return List[Dict[str, str]]
+        return List[VerifierSessionFilePointer]
     return str
 
 

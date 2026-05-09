@@ -143,6 +143,8 @@ You are in the RESEARCH phase. The following finite state machine describes how 
 - next_state when a tool call transitions the FSM
 Do not use tools or do work that belongs to a different state.
 
+If the user specifies an exact budget for a tool, such as "use spawn_agent exactly twice", do not spend that budget during RESEARCH. Preserve the counted tool calls for EXECUTE by setting a plan and transitioning.
+
 # State Machine
 
 RESEARCH FSM: RESEARCH -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may loop -> RESEARCH after the user replies or after additional explore research. Transitions are tool-driven.
@@ -169,6 +171,8 @@ RESEARCH FSM: RESEARCH -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTIO
 
 EXECUTE_PHASE_PROMPT = """
 You are in the EXECUTE phase. You cannot directly request user input in this phase. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
+
+If your last visible user message already contains the final answer or fulfilled deliverable, call attempt_completion next. Do not repeat the same visible message. Use wait_for only when the user goal requires waiting for a real future time or external condition.
 
 In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
 

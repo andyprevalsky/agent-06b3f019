@@ -1798,9 +1798,9 @@ async def test_cc_execute_tool_incomplete_success_false_title():
 
 
 async def test_cc_execute_tool_emits_assistant_events_for_files():
-    """output_files yield AssistantEvent for each before FINISHED."""
+    """output_files yield AssistantEvent only after FINISHED resolves the tool call."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
-    from tools.base import AssistantEvent
+    from tools.base import AssistantEvent, MessageStatus
 
     handle = _FakeActivityHandle(
         result={
@@ -1826,6 +1826,9 @@ async def test_cc_execute_tool_emits_assistant_events_for_files():
     assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
     assert len(assistant_events) == 2
     assert {e.file_pointer["id"] for e in assistant_events} == {"fp1", "fp2"}
+    finished_index = next(i for i, e in enumerate(events) if getattr(e, "status", None) == MessageStatus.FINISHED)
+    first_assistant_index = next(i for i, e in enumerate(events) if isinstance(e, AssistantEvent))
+    assert finished_index < first_assistant_index
 
 
 async def test_cc_execute_tool_cancelled_status_yields_error():
