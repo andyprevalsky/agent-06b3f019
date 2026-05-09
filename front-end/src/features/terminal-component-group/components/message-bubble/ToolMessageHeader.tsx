@@ -64,6 +64,7 @@ export function ToolMessageHeader({
         toolName={data.toolName}
         actionType={data.actionType}
         error={data.error}
+        codeProvider={data.codeProvider}
       />
       <span className={cn('min-w-0 break-words', titleClassName)}>
         {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}

@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useAgentContext, type ResponseSchemaField } from '../hooks';
-import { type ChipState } from '../types';
+import { type ChipState, type CodeProvider } from '../types';
 import {
   useClaudeCodeWebSocket,
   useSavedOutputFetch,
@@ -24,15 +24,24 @@ export interface ChipDerived {
   structuredResponse: Record<string, unknown> | undefined;
   failureMessage: string | null;
   githubRepoUrl: string | undefined;
+  codeProvider: CodeProvider;
 }
 
 /** Derive chip-visible state from agent messages matching a taskId. */
-export function useClaudeCodeChipState(taskId: string): ChipDerived {
+export function useClaudeCodeChipState(
+  taskId: string,
+  initialCodeProvider: CodeProvider = 'claude',
+): ChipDerived {
   const { messages } = useAgentContext();
 
   return useMemo<ChipDerived>(() => {
     const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
     const lastMessage = taskMessages[taskMessages.length - 1];
+    const provider =
+      taskMessages.find((m) => m.metadata?.code_provider === 'codex')?.metadata?.code_provider ===
+      'codex'
+        ? 'codex'
+        : initialCodeProvider;
 
     const complete = lastMessage?.metadata?.action_type === 'task_complete';
     const success = complete && !!lastMessage?.metadata?.title?.includes('Completed');
@@ -48,9 +57,7 @@ export function useClaudeCodeChipState(taskId: string): ChipDerived {
       | { fields: ResponseSchemaField[] }
       | undefined;
 
-    const completionMsg = taskMessages.find(
-      (m) => m.metadata?.action_type === 'task_complete',
-    );
+    const completionMsg = taskMessages.find((m) => m.metadata?.action_type === 'task_complete');
     const extracted = completionMsg?.metadata?.structured_response as
       | Record<string, unknown>
       | undefined;
@@ -73,8 +80,9 @@ export function useClaudeCodeChipState(taskId: string): ChipDerived {
       structuredResponse: extracted,
       failureMessage: failureText,
       githubRepoUrl: githubUrl,
+      codeProvider: provider,
     };
-  }, [messages, taskId]);
+  }, [initialCodeProvider, messages, taskId]);
 }
 
 export interface ClaudeCodeChipVM extends ChipDerived {
@@ -93,6 +101,7 @@ export function useClaudeCodeChip(
   taskId: string,
   wsUrl: string | undefined,
   forceShow: boolean,
+  initialCodeProvider: CodeProvider = 'claude',
 ): ClaudeCodeChipVM {
   const [chipState, setChipState] = useState<ChipState>('spinning_up');
   const [isExpanded, setIsExpanded] = useState(false);
@@ -103,7 +112,7 @@ export function useClaudeCodeChip(
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
 
   const { terminalRef, outputBufferRef, mount } = useTerminalManager();
-  const derived = useClaudeCodeChipState(taskId);
+  const derived = useClaudeCodeChipState(taskId, initialCodeProvider);
   const { isComplete, isSuccess, isVerifying } = derived;
 
   useEffect(() => {
@@ -115,12 +124,9 @@ export function useClaudeCodeChip(
     }
   }, [isComplete, isSuccess, isVerifying]);
 
-  const shouldShowTerminal =
-    forceShow || chipState === 'live' || isExpanded || isFullscreen;
+  const shouldShowTerminal = forceShow || chipState === 'live' || isExpanded || isFullscreen;
   useEffect(() => {
-    const container = isFullscreen
-      ? fullscreenContainerRef.current
-      : terminalContainerRef.current;
+    const container = isFullscreen ? fullscreenContainerRef.current : terminalContainerRef.current;
     if (!container || !shouldShowTerminal) return;
     return mount(container);
   }, [forceShow, chipState, isExpanded, isFullscreen, mount, shouldShowTerminal]);

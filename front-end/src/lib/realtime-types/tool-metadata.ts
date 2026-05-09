@@ -94,6 +94,8 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
   output_schema?: OutputSchema;
   /** GitHub repo URL for this session */
   github_repo_url?: string;
+  /** Runtime provider selected from the workflow compute token */
+  code_provider?: 'claude' | 'codex';
 }
 
 /**

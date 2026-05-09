@@ -8,7 +8,7 @@
  */
 
 import type { FeedbackData } from '../../types';
-import type { ExploreStep, WaitForCheck } from '../../types';
+import type { CodeProvider, ExploreStep, WaitForCheck } from '../../types';
 import type { Message } from '../../hooks';
 
 export interface MessageBubbleProps {
@@ -55,6 +55,7 @@ export interface ToolMessageData {
   simulated?: boolean; // True if response was auto-generated
   // Browser action type (for icon selection)
   actionType?: string;
+  codeProvider?: CodeProvider;
 }
 
 /** Role-based visual config for the generic bubble fallback. */

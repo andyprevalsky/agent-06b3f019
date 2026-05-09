@@ -89,6 +89,12 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
   });
 
+  it('renders Codex when the code provider is Codex', () => {
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" codeProvider="codex" />);
+    expect(screen.getByText('Codex Spinning up...')).toBeInTheDocument();
+    expect(screen.getByLabelText('Codex')).toBeInTheDocument();
+  });
+
   it('renders spinning_up with forceShow terminal surface', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
@@ -285,10 +291,7 @@ describe('SubAgentTree', () => {
   });
 
   it('renders all-terminal COMPLETED cluster with success message', () => {
-    treeRef.current.set(
-      'a1',
-      makeNode({ agentId: 'a1', goal: 'Done task', status: 'COMPLETED' }),
-    );
+    treeRef.current.set('a1', makeNode({ agentId: 'a1', goal: 'Done task', status: 'COMPLETED' }));
     renderWithProviders(
       <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
     );
@@ -417,13 +420,7 @@ describe('SubAgentTree', () => {
   it('hides header when hideHeader prop is true', () => {
     treeRef.current.set('a1', makeNode({ agentId: 'a1', goal: 'Hello' }));
     renderWithProviders(
-      <SubAgentTree
-        busId="bus-1"
-        subAgentIds={['a1']}
-        title="t"
-        onNavigate={vi.fn()}
-        hideHeader
-      />,
+      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} hideHeader />,
     );
     expect(screen.queryByText('Delegating tasks')).not.toBeInTheDocument();
     expect(screen.getByText('Hello')).toBeInTheDocument();
