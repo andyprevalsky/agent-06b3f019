@@ -547,3 +547,12 @@
 {"task": "claude-code-agent", "duration_seconds": 56.4, "cost_cents": 0.0, "timestamp": "2026-05-08T16:25:36.070870+00:00", "agent_id": "139b2036-85b9-4cee-83f8-8cf1b34c077a"}
 {"task": "spawn-sub-agents", "duration_seconds": 156.9, "cost_cents": 3.0, "timestamp": "2026-05-08T16:25:36.070870+00:00", "agent_id": "18ac00e2-9922-4c5f-a7de-caa988e5bcc4"}
 {"task": "parallel-tool-calls", "duration_seconds": 222.4, "cost_cents": 12.0, "timestamp": "2026-05-08T16:25:36.070870+00:00", "agent_id": "eff6816e-a9bf-495f-a7a7-9b5e0cb0ef83"}
+{"task": "chat-mode", "duration_seconds": 11.0, "cost_cents": 0.0, "timestamp": "2026-05-08T20:13:33.571322+00:00", "agent_id": "88ab4fcc-1df4-4862-be86-d1cd0bdd7bfc"}
+{"task": "chat-mode", "duration_seconds": 5.9, "cost_cents": 0.0, "timestamp": "2026-05-08T20:57:30.729354+00:00", "agent_id": "abf1625f-744b-46fd-85bc-0e64e6d40a08"}
+{"task": "chat-mode", "duration_seconds": 6.1, "cost_cents": 0.0, "timestamp": "2026-05-08T21:28:49.832903+00:00", "agent_id": "dec515ec-528a-4e36-bd1c-1bdb425e4800"}
+{"task": "spawn-sub-agents", "duration_seconds": 146.8, "cost_cents": 2.0, "timestamp": "2026-05-08T21:29:26.179758+00:00", "agent_id": "81437eda-c988-42e8-a305-b44ab90a24de"}
+{"task": "parallel-tool-calls", "duration_seconds": 308.0, "cost_cents": 14.0, "timestamp": "2026-05-08T21:32:28.485705+00:00", "agent_id": "1de939b8-d9bd-4427-80ea-aa0a94fb9999"}
+{"task": "message-person", "duration_seconds": 41.9, "cost_cents": 0.0, "timestamp": "2026-05-08T21:53:49.861505+00:00", "agent_id": "d641a175-d92f-4784-ac93-f144e1b57158"}
+{"task": "claude-code-agent", "duration_seconds": 61.3, "cost_cents": 0.0, "timestamp": "2026-05-08T22:24:59.577937+00:00", "agent_id": "441483af-c45c-4a38-b604-c23c1a4c5233"}
+{"task": "browser-smoke", "duration_seconds": 56.5, "cost_cents": 0.0, "timestamp": "2026-05-08T22:26:56.968438+00:00", "agent_id": "991ac3d3-2018-43d9-b9de-2ab302c43ef2"}
+{"task": "cache-coverage", "duration_seconds": 306.7, "cost_cents": 4.0, "timestamp": "2026-05-08T23:23:35.069421+00:00", "agent_id": "91aa761e-6b02-47d6-ba5d-5744593daef5"}
