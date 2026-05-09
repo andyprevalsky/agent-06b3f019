@@ -1500,9 +1500,9 @@ async def _run_verifier(
     # internally (verifier always forces rose-1-ultra). All other args are
     # passed positionally because Temporal activities only accept `args=`.
     # C14: context is already agent-scoped — `context` here is the calling
-    # agent's own conversation, accumulated from `poll_messages` (filtered
-    # by agent_id) and locally-appended tool results. Sub-agents run in
-    # separate workflows and never share this list.
+    # agent's own visible conversation, accumulated from `poll_messages`
+    # after dropping spawned-agent work rows tagged with singular
+    # metadata.subAgentId, plus locally-appended tool results.
     result = await execute_activity(
         check_progress,
         args=[

@@ -9,13 +9,13 @@ import re
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
 
 import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, model_validator
 from temporalio import activity
 
 from config import load_config
@@ -25,6 +25,7 @@ from helpers.attachments import (
     get_cached_file,
     get_file_from_pointer,
 )
+from helpers.context_scope import is_internal_subagent_message
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
 from helpers.observability import dump_llm_context
@@ -79,6 +80,124 @@ def _safe_time() -> float:
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+_RESPONSE_SCHEMA_SYSTEM_PROMPT = """You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
+
+Your output is consumed by an automated verifier that scores 1.0 IFF every field in the schema can be populated accurately from tool-result evidence. Therefore:
+  - EVERY field you add must be populatable for the goal to count as done.
+  - Adding optional / nice-to-have fields PENALIZES the agent — keep it strict.
+  - Field names must be SPECIFIC to the goal, not generic catch-alls.
+  - You MUST return AT LEAST ONE field. A schema with zero fields is invalid — every goal that warrants a verifier must produce at least one verifiable output.
+
+# CORE PRINCIPLES
+
+1. MUST-HAVE ONLY, AT LEAST ONE. Generate ONLY the fields strictly required to fully answer the user's goal — but ALWAYS at least one field. Skip nice-to-haves. Do NOT add fields like 'reasoning', 'sources', 'confidence', 'notes', or other meta-fields unless the goal explicitly asks for them. The minimum is 1 field; the maximum should still be tight (typically 1-5).
+
+2. SPECIFIC NAMES. Field names must be anchored in the goal. If the goal asks for Tokyo's population, the field is `population` or `tokyo_population` — not `result`. If the goal asks for an email + LinkedIn URL, the fields are `email` and `linkedin_url` — not `output`.
+
+3. SINGLE-VALUE GOALS ARE FINE. If the goal is intrinsically about ONE value, emit EXACTLY ONE field with a precise name. Don't pad the schema, but never drop below one.
+
+4. CONCRETE TYPES. Pick the most precise type the goal allows. `int` beats `str` for a population. `list[object]` beats `str` for a comparison table.
+
+5. EXPLICIT OBJECT PROPERTIES. Never encode object subfields in prose. For `object` and `list[object]`, put every required nested field in `properties`. The verifier enforces those properties as the object shape.
+
+# BANNED FIELD NAMES
+
+Do NOT use these catch-all names: result, output, answer, data, value, response.
+
+Always replace with a goal-anchored name. Examples:
+  - "the answer to the math problem" -> `product`, `sum`, `final_int` (whichever fits)
+  - "the chosen venue" -> `selected_venue_name` + `selected_venue_url`
+  - "the email I should send" -> `final_email_body` + `final_email_subject`
+
+# SUPPORTED TYPES
+
+  - str: String value
+  - int: Integer number
+  - float: Decimal number
+  - bool: True/false
+  - list[str]: List of strings
+  - list[int]: List of integers
+  - object: Nested object — MUST include properties: [{ name, type }]
+  - list[object]: List of objects — MUST include properties describing each item shape
+  - file_pointer: Reference to a file produced by the agent
+  - list[file_pointer]: List of file references
+  - session_file_pointer: Cheap cloud-session file reference; verifier extracts only an absolute path
+  - list[session_file_pointer]: List of cloud-session file references
+
+# WORKED EXAMPLES
+
+Goal: "What is Tokyo's current population?"
+GOOD fields: [{ "name": "population", "type": "int" }]
+BAD fields: [{ "name": "result", "type": "str" }]
+
+Goal: "Find this person's email and LinkedIn URL."
+GOOD fields: [{ "name": "email", "type": "str" }, { "name": "linkedin_url", "type": "str" }]
+BAD fields: [{ "name": "data", "type": "str" }]
+
+Goal: "Multiply Tokyo's population by NYC's population."
+GOOD fields: [{ "name": "tokyo_population", "type": "int" }, { "name": "nyc_population", "type": "int" }, { "name": "product", "type": "int" }]
+
+Goal: "Compare three cities by cost of living and rank them."
+GOOD fields: [{ "name": "cities", "type": "list[object]", "properties": [{ "name": "name", "type": "str" }, { "name": "cost_of_living_index", "type": "float" }, { "name": "rank", "type": "int" }] }]
+
+Goal: "Generate a logo as a PNG."
+GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
+
+# YOUR JOB
+
+Given a goal, return JSON with:
+  - reasoning: 1-3 sentences on what concrete outputs the goal requires.
+  - fields: the minimal MUST-HAVE list, with AT LEAST ONE field. Specific names and concrete types. For object/list[object], include explicit `properties`; never put subfields in prose. A zero-length `fields` array is invalid and will be rejected.
+
+Output JSON only. Do not include prose outside the JSON envelope."""
+
+
+_SchemaFieldType = Literal[
+    "str",
+    "int",
+    "float",
+    "bool",
+    "list[str]",
+    "list[int]",
+    "object",
+    "list[object]",
+    "file_pointer",
+    "list[file_pointer]",
+    "session_file_pointer",
+    "list[session_file_pointer]",
+]
+
+_SchemaNestedFieldType = Literal["str", "int", "float", "bool", "list[str]", "list[int]"]
+
+
+class _GeneratedResponseSchemaNestedField(BaseModel):
+    name: str = Field(description="Nested field name in snake_case.")
+    type: _SchemaNestedFieldType = Field(description="Nested field type.")
+
+
+class _GeneratedResponseSchemaField(BaseModel):
+    name: str = Field(description="Field name in snake_case.")
+    type: _SchemaFieldType = Field(description="Field type.")
+    properties: Optional[List[_GeneratedResponseSchemaNestedField]] = Field(
+        default=None,
+        description="Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.",
+    )
+
+    @model_validator(mode="after")
+    def _object_fields_require_properties(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object and list[object] schema fields require explicit properties")
+        return self
+
+
+class _GeneratedResponseSchema(BaseModel):
+    reasoning: str = Field(description="Analysis of what concrete outputs the goal requires.")
+    fields: List[_GeneratedResponseSchemaField] = Field(
+        min_length=1,
+        description="List of MUST-HAVE output fields. At least one field is required.",
+    )
 
 
 def _build_claude_auth_context(
@@ -206,6 +325,115 @@ def _build_compute_auth_context(
         pool_token_id=result.get("poolTokenId"),
         max_rotations=max_rotations,
     )
+
+
+def _build_compute_auth_context_from_payload(
+    compute_auth: Optional[Dict[str, Any]],
+) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
+    if not isinstance(compute_auth, dict):
+        return None, None
+
+    token_type = compute_auth.get("type")
+    access_token = compute_auth.get("accessToken")
+    if token_type not in ("claude", "gpt") or not isinstance(access_token, str) or not access_token:
+        return None, None
+
+    user_id = compute_auth.get("userId")
+    if isinstance(user_id, str) and user_id:
+        ctx = _build_compute_auth_context(compute_auth, user_id)
+        if isinstance(ctx, ClaudeAuthContext):
+            return ctx, None
+        if isinstance(ctx, GptAuthContext):
+            return None, ctx
+
+    if token_type == "claude":
+        return claude_auth_from_token(access_token), None
+    return None, gpt_auth_from_token(access_token, compute_auth.get("accountId"))
+
+
+def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[str, Any]:
+    fields: List[Dict[str, Any]] = []
+    for field in generated.fields:
+        item: Dict[str, Any] = {
+            "name": field.name,
+            "type": field.type,
+            "required": True,
+        }
+        if field.properties:
+            item["properties"] = [prop.model_dump() for prop in field.properties]
+        fields.append(item)
+    return {"fields": fields}
+
+
+async def _generate_response_schema_with_rose(
+    goal: str,
+    *,
+    agent_id: str,
+    compute_auth: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    claude_auth_context, gpt_auth_context = _build_compute_auth_context_from_payload(compute_auth)
+    messages = [
+        {"role": "system", "content": _RESPONSE_SCHEMA_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Goal: {goal}"},
+    ]
+    client = RoseClient()
+    max_generation_attempts = 3
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_generation_attempts + 1):
+        for max_tokens in (2000, 4000):
+            try:
+                response = await client.collect(
+                    pool="rose-1-lite",
+                    messages=messages,
+                    response_model=_GeneratedResponseSchema,
+                    temperature=0.3,
+                    max_tokens=max_tokens,
+                    skip_cache_write=True,
+                    claude_auth=claude_auth_context,
+                    gpt_auth=gpt_auth_context,
+                    agent_id=agent_id,
+                    request_id=current_request_id() or str(uuid.uuid4())[:8],
+                    call_site="response_schema",
+                    deadline_s=90.0,
+                )
+                usage = response.usage or {}
+                if usage.get("finish_reason") == "length" and max_tokens < 4000:
+                    logger.warning(
+                        "Response schema generation hit max_tokens; escalating",
+                        agent_id=agent_id,
+                        max_tokens=max_tokens,
+                    )
+                    continue
+
+                content = (
+                    _content_from_structured_rose_response(response.tool_calls, _GeneratedResponseSchema)
+                    or response.content
+                )
+                if not content:
+                    raise ValueError("LLM returned no response schema content")
+                generated = _GeneratedResponseSchema.model_validate_json(content)
+                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+                return _schema_from_generated_model(generated), {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+                }
+            except RoseError as exc:
+                last_error = exc
+                break
+            except Exception as exc:
+                last_error = exc
+                if max_tokens < 4000 and "finish_reason=length" in str(exc):
+                    continue
+                break
+
+        if attempt < max_generation_attempts:
+            await asyncio.sleep(0.2 * (2 ** (attempt - 1)))
+
+    raise last_error or ValueError("Unknown error generating response schema")
 
 
 def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
@@ -363,7 +591,7 @@ def build_verifier_context_messages(  # noqa: C901
         text = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}
 
-        if metadata.get("subAgentId"):
+        if is_internal_subagent_message(msg):
             continue
         if role in ("SYSTEM", "ASSISTANT"):
             continue
@@ -436,6 +664,60 @@ def build_verifier_context_messages(  # noqa: C901
     _flush_batch()
 
     return messages
+
+
+def _message_phase(msg: Dict[str, Any]) -> Optional[str]:
+    metadata = msg.get("metadata", {}) or {}
+    phase = metadata.get("phase") or metadata.get("_phase")
+    if isinstance(phase, str) and phase.strip():
+        return phase.strip().upper()
+    return None
+
+
+def _is_execute_boundary_message(msg: Dict[str, Any]) -> bool:
+    metadata = msg.get("metadata", {}) or {}
+    tool_name = metadata.get("toolName")
+    title = metadata.get("title")
+    status = metadata.get("toolStatus")
+    if tool_name == "set_plan" and status == "FINISHED":
+        return True
+    if tool_name == "attempt_completion" and title == "Beginning Execute Phase":
+        return True
+    return False
+
+
+def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return only execute-phase context for final-task verification.
+
+    The main workflow can have an earlier PLAN/RESEARCH phase with explore
+    calls, set_plan, and planning verifier feedback. Execute verifiers must
+    judge only evidence produced after the execute boundary. If no boundary or
+    phase metadata is present, keep the context unchanged; execute-only agents
+    and local browser/code verifier contexts have no planning phase to remove.
+    """
+    sorted_context = sorted(context, key=lambda m: m.get("timestamp", "1970-01-01"))
+
+    first_execute_idx: Optional[int] = None
+    for idx, msg in enumerate(sorted_context):
+        if _message_phase(msg) == "EXECUTE":
+            first_execute_idx = idx
+            break
+
+    if first_execute_idx is None:
+        boundary_idx: Optional[int] = None
+        for idx, msg in enumerate(sorted_context):
+            if _is_execute_boundary_message(msg):
+                boundary_idx = idx
+        if boundary_idx is None:
+            return context
+        first_execute_idx = boundary_idx + 1
+
+    execute_context: List[Dict[str, Any]] = []
+    for msg in sorted_context[first_execute_idx:]:
+        if _message_phase(msg) in ("PLAN", "RESEARCH"):
+            continue
+        execute_context.append(msg)
+    return execute_context
 
 
 def convert_context_to_messages(  # noqa: C901
@@ -528,7 +810,7 @@ def convert_context_to_messages(  # noqa: C901
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
 
         # Skip ALL sub-agent internal messages regardless of role
-        if metadata.get("subAgentId"):
+        if is_internal_subagent_message(msg):
             continue
 
         if role == "SYSTEM":
@@ -710,7 +992,7 @@ async def build_llm_messages(  # noqa: C901
         metadata = msg.get("metadata", {}) or {}
 
         # Skip ALL sub-agent internal messages regardless of role
-        if metadata.get("subAgentId"):
+        if is_internal_subagent_message(msg):
             continue
 
         if role == "TOOL":
@@ -3264,14 +3546,14 @@ async def check_progress(  # noqa: C901
     ``rose-labs/rose-1-ultra``. ``claude_token`` is passed through verbatim
     (the workflow owns rotation; rotation is not done here).
 
-    Context scoping (C14): the verifier judges only the calling agent's own
-    context. There is no in-function filter because scoping is enforced at
-    every call site by the message-fetch boundary, not here:
+    Context scoping: the verifier judges only the calling agent's own visible
+    context. For main-loop execute and post-DAG verification, PLAN/RESEARCH
+    messages are also removed before judging final task completion.
 
-    - Main loop / post-DAG / sub-agent verifier: ``poll_new_messages`` queries
-      the backend by ``agent_id``, so ``context`` only contains rows the DB
-      already filtered to this agent. Sub-agents run in a separate workflow
-      with their own ``agent_id``, so a parent's messages can never appear.
+    - Main loop / post-DAG / sub-agent verifier: callers pass a context that
+      has already removed spawned-agent work rows tagged with singular
+      ``metadata.subAgentId``. Parent-visible spawn summaries use
+      ``metadata.subAgentIds`` and remain available as tool results.
     - Browser sub-agent verifier: ``verifier_context`` is built locally from
       the browser session's action history, DOM, and final-state screenshot —
       nothing from the parent reaches it.
@@ -3281,8 +3563,8 @@ async def check_progress(  # noqa: C901
     - Explore sub-agent: runs with ``skip_verification=True`` — no verifier
       executes at all.
 
-    Do NOT add a "drop messages whose agent_id != this agent" filter here —
-    that would mask a real leak rather than fix it. If a leak shows up, fix
+    Do NOT add a broad "drop messages whose agent_id != this agent" filter here
+    — that would mask a real leak rather than fix it. If a leak shows up, fix
     the upstream call site so it builds an agent-scoped context, and add an
     invariant test instead.
 
@@ -3346,9 +3628,17 @@ async def check_progress(  # noqa: C901
                 elif not isinstance(m, dict):
                     logger.error(f"❌ context[{i}] is {type(m).__name__}, not dict: {str(m)[:200]}")
 
-        # C14: scoping is enforced at the message-fetch boundary by every
-        # caller (poll_new_messages by agent_id, or locally-built browser /
-        # claude-code verifier_context). No filtering here — see docstring.
+        original_context_len = len(context) if context else 0
+        if call_site in ("verifier_execute", "verifier_post_dag"):
+            context = _filter_context_for_execute_verifier(context)
+            if len(context) != original_context_len:
+                logger.info(
+                    "Filtered verifier context to execute phase",
+                    call_site=call_site,
+                    before=original_context_len,
+                    after=len(context),
+                )
+
         _safe_heartbeat("Checking progress with LLM judge")
 
         if call_site == "verifier_execute" and schema_for_call:
@@ -3832,39 +4122,26 @@ async def set_response_schema_activity(
         logger.error("No user messages provided for schema generation", agent_id=agent_id)
         return None
 
-    _safe_heartbeat("Generating response schema via backend API")
+    _safe_heartbeat("Generating response schema via Rose")
     logger.info(f"[TIMING] Starting response schema generation for agent {agent_id}")
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
-            # 1. Generate schema using Rose Ultra
-            api_start = time.perf_counter()
-            schema_headers = backend_api_headers(api_key)
-            token_type = compute_auth.get("type") if isinstance(compute_auth, dict) else None
-            access_token = compute_auth.get("accessToken") if isinstance(compute_auth, dict) else None
-            if token_type in ("claude", "gpt") and isinstance(access_token, str) and access_token:
-                schema_headers["X-Compute-Token-Type"] = token_type
-                schema_headers["X-Compute-Access-Token"] = access_token
-                account_id = compute_auth.get("accountId")
-                if token_type == "gpt" and isinstance(account_id, str) and account_id:
-                    schema_headers["X-Gpt-Account-Id"] = account_id
-            schema_response = await client.post(
-                f"{backend_url}/api/agents/generate-response-schema",
-                headers=schema_headers,
-                json={"goal": goal},
+            # 1. Generate schema in-process so the stable agents-side Rose
+            # routing owns claudeAuth/gptAuth selection, waterfall, and token rotation.
+            generate_start = time.perf_counter()
+            schema, usage = await _generate_response_schema_with_rose(
+                goal,
+                agent_id=agent_id,
+                compute_auth=compute_auth,
             )
-            schema_response.raise_for_status()
-            schema_data = schema_response.json()
-            api_elapsed = time.perf_counter() - api_start
-            logger.info(f"[TIMING] Schema generation API call: {api_elapsed * 1000:.1f}ms ({api_elapsed:.2f}s)")
+            generate_elapsed = time.perf_counter() - generate_start
+            logger.info(
+                f"[TIMING] Schema generation Rose call: {generate_elapsed * 1000:.1f}ms ({generate_elapsed:.2f}s)"
+            )
 
-            schema = schema_data.get("schema")
-            tokens_in = schema_data.get("tokensIn", 0)
-            tokens_out = schema_data.get("tokensOut", 0)
-
-            if not schema:
-                logger.error("No schema returned from generation", agent_id=agent_id)
-                return None
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
 
             logger.info(
                 "Generated response schema",
@@ -3900,13 +4177,13 @@ async def set_response_schema_activity(
                 "usage": {
                     "prompt_tokens": tokens_in,
                     "completion_tokens": tokens_out,
-                    "total_tokens": tokens_in + tokens_out,
+                    "total_tokens": usage.get("total_tokens", tokens_in + tokens_out),
                 },
             }
 
     except httpx.HTTPStatusError as e:
         logger.error(
-            "Backend API error generating response schema",
+            "Backend API error saving response schema",
             agent_id=agent_id,
             status_code=e.response.status_code,
             response_text=e.response.text[:500],

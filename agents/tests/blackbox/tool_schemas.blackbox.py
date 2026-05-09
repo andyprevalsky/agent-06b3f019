@@ -381,6 +381,56 @@ def test_response_schema_passthrough_canonical():
     assert cfg.fields[0].name == "x"
 
 
+def test_response_schema_coerces_null_properties_for_primitive_fields():
+    """Primitive fields may omit properties, but must not serialize JSON null
+    because the backend response_schema contract accepts arrays only."""
+    from utils.tool_schemas import SpawnAgentTool
+
+    t = SpawnAgentTool(
+        tool="spawn_agent",
+        type="sub_agent",
+        goal=LONG_GOAL,
+        start_phase="EXECUTE",
+        output_schema={
+            "fields": [
+                {
+                    "name": "random_org_number",
+                    "type": "int",
+                    "required": True,
+                    "properties": None,
+                    "description": "The integer shown on the page.",
+                }
+            ]
+        },
+    )
+
+    dumped = t.model_dump()
+    field = dumped["output_schema"]["fields"][0]
+    assert field["properties"] == []
+
+
+def test_response_schema_rejects_null_properties_for_object_fields():
+    """Object fields still require explicit nested properties."""
+    from pydantic import ValidationError
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    raw = {
+        "fields": [
+            {
+                "name": "result",
+                "type": "object",
+                "required": True,
+                "properties": None,
+            }
+        ]
+    }
+    try:
+        ResponseSchemaConfig.model_validate(raw)
+        raise AssertionError("expected ValidationError")
+    except ValidationError:
+        pass
+
+
 def test_spawn_agent_browser_with_string_output_schema():
     """SpawnAgentTool accepts JSON-stringified output_schema (the exact failure
     mode that broke spawn-sub-agents smoke runs — see agent
@@ -594,6 +644,14 @@ async def run_all_tests():
     r.record("response_schema_coerces_bare_list", test_response_schema_coerces_bare_list)
     r.record("response_schema_coerces_flat_dict", test_response_schema_coerces_flat_dict)
     r.record("response_schema_passthrough_canonical", test_response_schema_passthrough_canonical)
+    r.record(
+        "response_schema_null_properties_primitive",
+        test_response_schema_coerces_null_properties_for_primitive_fields,
+    )
+    r.record(
+        "response_schema_null_properties_object",
+        test_response_schema_rejects_null_properties_for_object_fields,
+    )
     r.record("spawn_agent_string_output_schema", test_spawn_agent_browser_with_string_output_schema)
     # render_tool_list
     r.record("render_tool_list_empty", test_render_tool_list_empty_registry)

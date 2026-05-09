@@ -258,6 +258,31 @@ def test_build_spawn_payload_execute_phase():
     assert payload["context_gates"] == {"network": False}
 
 
+def test_build_spawn_payload_does_not_forward_parent_context():
+    """LLM-spawned sub-agents start from their own goal, not parent transcript."""
+    from domains.spawn_sub_agents.service import build_spawn_payload
+
+    payload = build_spawn_payload(
+        user_id="u-1",
+        agent_cfg={
+            "goal": "Child goal",
+            "context": [{"role": "USER", "text": "Parent transcript"}],
+            "messages": [{"role": "USER", "text": "Parent transcript"}],
+        },
+        parent_agent_id="p-1",
+        parent_workflow_id="wf-1",
+        depth=1,
+        parent_is_paused=False,
+        parent_model="rose-labs/rose-1-lite",
+        bus_id="bus-1",
+        parent_source="WEB",
+        resolved_attachments=[],
+    )
+
+    assert "context" not in payload
+    assert "messages" not in payload
+
+
 # ── handler._build_failure_events ──────────────────────────────────────
 
 
@@ -956,6 +981,7 @@ async def run_all_tests():
     r.record("build_payload_defaults", test_build_spawn_payload_defaults)
     r.record("build_payload_bad_phase", test_build_spawn_payload_bad_start_phase_defaults_to_plan)
     r.record("build_payload_execute", test_build_spawn_payload_execute_phase)
+    r.record("build_payload_no_parent_context", test_build_spawn_payload_does_not_forward_parent_context)
     # handler failure events
     r.record("failure_events_basic", test_build_failure_events_basic)
     r.record("failure_events_rich", test_build_failure_events_rich_context)

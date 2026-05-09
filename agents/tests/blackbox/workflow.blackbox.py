@@ -232,6 +232,33 @@ async def test_poll_and_update_context():
     assert updated_last_checked > last_checked, "last_checked should advance"
 
 
+async def test_poll_and_update_context_filters_subagent_work_and_advances_cursor():
+    """Sub-agent work rows stay out of context but still advance last_checked."""
+    visible_msg = {
+        "role": "TOOL",
+        "text": "Parent-visible result",
+        "timestamp": "2024-01-01T00:00:02+00:00",
+        "metadata": {"toolName": "spawn_sub_agent", "subAgentIds": ["child-1"]},
+    }
+    internal_msg = {
+        "role": "TOOL",
+        "text": "Child web search trace",
+        "timestamp": "2024-01-01T00:00:03+00:00",
+        "metadata": {"toolName": "web_search", "subAgentId": "child-1"},
+    }
+
+    context: List[Dict] = []
+    last_checked = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    async def mock_poll(since: datetime) -> List[Dict]:
+        return [visible_msg, internal_msg]
+
+    updated_last_checked = await poll_and_update_context(mock_poll, context, last_checked)
+
+    assert context == [visible_msg], f"Expected only parent-visible message, got {context}"
+    assert updated_last_checked.isoformat() == "2024-01-01T00:00:03+00:00"
+
+
 # ===========================================================================
 # 3. AgentWorkflow signal/query tests (Temporal WorkflowEnvironment)
 # ===========================================================================
@@ -2371,6 +2398,15 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         activity_names = [c[0] for c in fake.activity_calls]
         assert "notify_sms_event_activity" in activity_names
         assert "set_response_schema_activity" in activity_names
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert schema_calls[0][1][2] == {
+            "type": "gpt",
+            "accessToken": "gpt-token",
+            "userId": "user-run-1",
+            "accountId": "acct-1",
+            "source": "pool",
+            "poolTokenId": "pool-1",
+        }
         assert "mark_finished" in activity_names
         init_posts = [
             c
@@ -2382,6 +2418,76 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         assert init_posts[0][1][3]["toolStatus"] == "IN_PROGRESS"
         assert init_posts[1][1][3]["toolCallId"] == "tc-agent-init"
         assert init_posts[1][1][3]["toolStatus"] == "FINISHED"
+    finally:
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_run_skips_response_schema_generation_for_subagent():
+    """Sub-agents reuse parent/task schemas and do not generate their own startup schema."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": None,
+                "parent_agent_id": "parent-agent-1",
+                "write_lock_enabled": True,
+            },
+            "query_parent_state_activity": {"is_paused": False, "is_cost_limit_reached": False},
+            "generate_completion_summary": {
+                "summary": "Finished cleanly.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "done", "metadata": None}],
+            "structured_response": None,
+            "token_count": 1,
+            "context_size": 10,
+        }
+
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "child-agent-1",
+            "user-run-1",
+            "Complete the child task",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            "parent-workflow-1",
+            "parent-agent-1",
+            1,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+
+        assert result == {"status": "completed", "goal": "Complete the child task"}
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "fetch_agent_config" in activity_names
+        assert "set_response_schema_activity" not in activity_names
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)
@@ -3103,6 +3209,10 @@ async def run_all_tests():
 
     # Async tests
     await r.record_async("poll_and_update_context", test_poll_and_update_context)
+    await r.record_async(
+        "poll_and_update_context_filters_subagent_work",
+        test_poll_and_update_context_filters_subagent_work_and_advances_cursor,
+    )
 
     # Signal-handler + cost-tracking tests (fake workflow module)
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
@@ -3162,6 +3272,10 @@ async def run_all_tests():
     await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
     await r.record_async("wf_missing_cloud_agent_tool", test_workflow_caches_missing_cloud_agent_tool)
     await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
+    await r.record_async(
+        "wf_run_skips_response_schema_for_subagent",
+        test_workflow_run_skips_response_schema_generation_for_subagent,
+    )
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)

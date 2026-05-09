@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import (
@@ -773,22 +774,29 @@ async def test_set_response_schema_activity_success():
     """set_response_schema_activity generates and saves schema."""
     setup_mock(
         {
-            "/api/agents/generate-response-schema": {
-                "status": 200,
-                "json": {
-                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
-                    "tokensIn": 100,
-                    "tokensOut": 50,
-                },
-            },
             "/api/agents/": {  # PATCH .../agents/{id}
                 "status": 200,
                 "json": {"ok": True},
             },
         }
     )
+    rose_calls = []
 
-    with patch("temporalio.activity.heartbeat"):
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            rose_calls.append(kwargs)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity("agent-abc", ["goal 1", "goal 2"])
@@ -799,68 +807,89 @@ async def test_set_response_schema_activity_success():
     assert result["usage"]["completion_tokens"] == 50
     assert result["usage"]["total_tokens"] == 150
 
-    # Verify it hit both endpoints
+    assert rose_calls
+    assert rose_calls[0]["pool"] == "rose-1-lite"
+    assert rose_calls[0]["call_site"] == "response_schema"
+
+    # Verify it saved through the backend, without using backend schema generation.
     captures = get_captured_requests()
     urls = [c["url"] for c in captures]
-    assert any("generate-response-schema" in u for u in urls)
+    assert not any("generate-response-schema" in u for u in urls)
     assert any("/api/agents/agent-abc" in u for u in urls)
 
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
-    """set_response_schema_activity defaults to internal auth only."""
+    """set_response_schema_activity defaults to no direct compute auth."""
     setup_mock(
         {
-            "/api/agents/generate-response-schema": {
-                "status": 200,
-                "json": {
-                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
-                    "tokensIn": 10,
-                    "tokensOut": 5,
-                },
-            },
             "/api/agents/": {
                 "status": 200,
                 "json": {"ok": True},
             },
         }
     )
+    rose_calls = []
 
-    with patch("temporalio.activity.heartbeat"):
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            rose_calls.append(kwargs)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity("agent-abc", ["goal"])
 
     assert result is not None
+    assert rose_calls[0]["claude_auth"] is None
+    assert rose_calls[0]["gpt_auth"] is None
     captures = get_captured_requests()
-    schema_requests = [c for c in captures if "generate-response-schema" in c["url"]]
-    assert schema_requests
-    headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
+    assert not any("generate-response-schema" in c["url"] for c in captures)
+    save_requests = [c for c in captures if "/api/agents/agent-abc" in c["url"]]
+    assert save_requests
+    headers = {k.lower(): v for k, v in save_requests[0]["requestHeaders"].items()}
     assert "x-api-key" in headers
     assert "x-user-id" not in headers
     assert "x-compute-token-type" not in headers
     assert "x-compute-access-token" not in headers
 
 
-async def test_set_response_schema_activity_forwards_compute_auth_headers():
-    """set_response_schema_activity can forward the workflow's selected compute token."""
+async def test_set_response_schema_activity_passes_workflow_compute_auth_to_rose():
+    """set_response_schema_activity passes the workflow's selected compute token to RoseClient."""
     setup_mock(
         {
-            "/api/agents/generate-response-schema": {
-                "status": 200,
-                "json": {
-                    "schema": {"fields": [{"name": "summary", "type": "str"}]},
-                    "tokensIn": 10,
-                    "tokensOut": 5,
-                },
-            },
             "/api/agents/": {
                 "status": 200,
                 "json": {"ok": True},
             },
         }
     )
+    rose_calls = []
 
-    with patch("temporalio.activity.heartbeat"):
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            rose_calls.append(kwargs)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity(
@@ -870,18 +899,23 @@ async def test_set_response_schema_activity_forwards_compute_auth_headers():
                 "type": "gpt",
                 "accessToken": "gpt-token",
                 "accountId": "acct-123",
+                "userId": "user-1",
+                "source": "pool",
+                "poolTokenId": "pool-1",
             },
         )
 
     assert result is not None
+    assert rose_calls
+    assert rose_calls[0]["claude_auth"] is None
+    gpt_auth = rose_calls[0]["gpt_auth"]
+    assert gpt_auth is not None
+    assert gpt_auth.token == "gpt-token"
+    assert gpt_auth.account_id == "acct-123"
+    assert gpt_auth.user_id == "user-1"
+    assert gpt_auth.pool_token_id == "pool-1"
     captures = get_captured_requests()
-    schema_requests = [c for c in captures if "generate-response-schema" in c["url"]]
-    assert schema_requests
-    headers = {k.lower(): v for k, v in schema_requests[0]["requestHeaders"].items()}
-    assert "x-api-key" in headers
-    assert headers["x-compute-token-type"] == "gpt"
-    assert headers["x-compute-access-token"] == "gpt-token"
-    assert headers["x-gpt-account-id"] == "acct-123"
+    assert not any("generate-response-schema" in c["url"] for c in captures)
 
 
 async def test_codex_responses_body_has_input_for_system_only_context():
@@ -911,17 +945,12 @@ async def test_set_response_schema_activity_empty_goal():
 
 
 async def test_set_response_schema_activity_no_schema_returned():
-    """Returns None when backend returns no schema field."""
-    setup_mock(
-        {
-            "/api/agents/generate-response-schema": {
-                "status": 200,
-                "json": {"tokensIn": 0, "tokensOut": 0},  # no schema
-            },
-        }
-    )
+    """Returns None when Rose returns no schema content."""
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            return SimpleNamespace(content="", tool_calls=[], usage={})
 
-    with patch("temporalio.activity.heartbeat"):
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity("agent-b", ["goal"])
@@ -930,17 +959,12 @@ async def test_set_response_schema_activity_no_schema_returned():
 
 
 async def test_set_response_schema_activity_http_error():
-    """Returns None on HTTP error."""
-    setup_mock(
-        {
-            "/api/agents/generate-response-schema": {
-                "status": 500,
-                "json": {"error": "boom"},
-            },
-        }
-    )
+    """Returns None on schema generation error."""
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            raise RuntimeError("boom")
 
-    with patch("temporalio.activity.heartbeat"):
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity("agent-c", ["goal"])
@@ -1935,6 +1959,102 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["structured_response"] == {"summary": "x"}
 
 
+def test_filter_context_for_execute_verifier_uses_execute_boundary():
+    """Execute verifier context excludes plan/research rows before the execute boundary."""
+    from helpers.llm import _filter_context_for_execute_verifier
+
+    context = [
+        {"role": "USER", "text": "original research goal", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Tokyo plan-phase explore result",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "plan created",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolName": "set_plan", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "Beginning execute",
+            "timestamp": "2024-01-01T00:00:03Z",
+            "metadata": {"toolName": "attempt_completion", "title": "Beginning Execute Phase"},
+        },
+        {
+            "role": "TOOL",
+            "text": "execute spawn result",
+            "timestamp": "2024-01-01T00:00:04Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "late plan row should still be excluded",
+            "timestamp": "2024-01-01T00:00:05Z",
+            "metadata": {"toolName": "attempt_completion", "phase": "PLAN"},
+        },
+    ]
+
+    filtered = _filter_context_for_execute_verifier(context)
+    text = "\n".join(m.get("text", "") for m in filtered)
+    assert "original research goal" not in text
+    assert "Tokyo plan-phase explore result" not in text
+    assert "plan created" not in text
+    assert "Beginning execute" not in text
+    assert "late plan row" not in text
+    assert "execute spawn result" in text
+
+
+async def test_check_progress_execute_filters_plan_context_before_llm():
+    """check_progress sends only execute-phase context to the verifier LLM."""
+    from helpers.llm import check_progress
+
+    captured_messages = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        captured_messages.extend(messages)
+        return {"score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    context = [
+        {"role": "USER", "text": "original goal", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "plan explore result",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "plan",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolName": "set_plan", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "execute result",
+            "timestamp": "2024-01-01T00:00:03Z",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            model="rose",
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 0.5
+    rendered = json.dumps(captured_messages)
+    assert "execute result" in rendered
+    assert "original goal" not in rendered
+    assert "plan explore result" not in rendered
+    assert "set_plan" not in rendered
+
+
 async def test_check_progress_accepts_completed_code_task_structured_response():
     """Parent execute verifier accepts a finished code child structured response without an LLM call."""
     from helpers.llm import check_progress
@@ -2106,6 +2226,7 @@ async def test_call_planner_llm_activity_happy_path():
     # Build a valid PlannerResponse JSON the verifier can parse
     plan_json = json.dumps(
         {
+            "reasoning": "The plan uses one focused explore task to gather the required evidence.",
             "title": "Test Plan",
             "content": "Do the thing",
             "tasks": [{"task_idx": "0", "goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}],
@@ -4241,8 +4362,8 @@ async def run_all_tests():
         test_set_response_schema_activity_uses_internal_auth_only,
     )
     await r.record_async(
-        "set_response_schema_activity_forwards_compute_auth_headers",
-        test_set_response_schema_activity_forwards_compute_auth_headers,
+        "set_response_schema_activity_passes_workflow_compute_auth_to_rose",
+        test_set_response_schema_activity_passes_workflow_compute_auth_to_rose,
     )
     await r.record_async(
         "codex_responses_body_has_input_for_system_only_context",
@@ -4253,6 +4374,11 @@ async def run_all_tests():
         "set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned
     )
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
+    r.record("filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary)
+    await r.record_async(
+        "check_progress_execute_filters_plan_context",
+        test_check_progress_execute_filters_plan_context_before_llm,
+    )
     await r.record_async("call_llm_rose_path", test_call_llm_rose_path)
     await r.record_async(
         "call_llm_rose_with_claude_token_and_skip_cache_write",

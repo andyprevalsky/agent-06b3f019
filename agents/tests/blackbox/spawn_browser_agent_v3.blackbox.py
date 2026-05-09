@@ -2586,6 +2586,41 @@ async def test_execute_click_write_lock_social_triggers_approval():
     assert out["approval_type"] == "social_post"
 
 
+async def test_execute_click_write_lock_email_send_triggers_approval():
+    """Clicking Send is a write-locked outbound message without a domain allowlist."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.get_all_children_text = MagicMock(return_value="Send")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    with (
+        patch("browser_tools.write_lock.is_email_send_button", return_value=True),
+        patch("browser_tools.write_lock.is_social_domain", return_value=False),
+        patch("browser_tools.write_lock.is_submit_button", return_value=False),
+        patch("browser_tools.write_lock.is_purchase_button", return_value=False),
+        patch("browser_tools.write_lock.get_write_lock_approval_question", return_value="approve email?"),
+    ):
+        out = await service_actions._execute_click(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=1,
+            coords=None,
+            thinking=None,
+            humanizer=None,
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            current_url="https://crm.example.com/outreach/compose",
+            system_name="Rose",
+        )
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "email_send"
+
+
 async def test_execute_click_coord_write_lock_purchase():
     """Coord-based click to a purchase button triggers approval."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -2617,6 +2652,26 @@ async def test_execute_click_coord_write_lock_purchase():
         )
     assert out["status"] == "needs_write_approval"
     assert out["approval_type"] == "purchase"
+
+
+async def test_execute_press_key_send_shortcut_does_not_trigger_email_approval():
+    """Keyboard shortcuts are too ambiguous to classify as email sends."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "press_key", "params": {"key": "Control+Enter"}},
+        current_url="https://mail.google.com/mail/u/0/#inbox?compose=new",
+        write_lock_enabled=True,
+    )
+    assert out == {"success": True, "message": ""}
+    dom.session.event_bus.dispatch.assert_called()
 
 
 # ── _execute_input_text ──────────────────────────────────────────────
@@ -3500,7 +3555,12 @@ async def run_all_tests():
     await r.record_async("execute_click_no_target", test_execute_click_no_element_no_coords)
     await r.record_async("execute_click_write_lock_purchase", test_execute_click_write_lock_purchase_triggers_approval)
     await r.record_async("execute_click_write_lock_social", test_execute_click_write_lock_social_triggers_approval)
+    await r.record_async("execute_click_write_lock_email", test_execute_click_write_lock_email_send_triggers_approval)
     await r.record_async("execute_click_coord_write_lock", test_execute_click_coord_write_lock_purchase)
+    await r.record_async(
+        "execute_press_key_send_shortcut_no_email_approval",
+        test_execute_press_key_send_shortcut_does_not_trigger_email_approval,
+    )
 
     await r.record_async("execute_input_text_el_humanizer", test_execute_input_text_element_with_humanizer)
     await r.record_async("execute_input_text_secret_redacts", test_execute_input_text_secret_redacts)

@@ -4,6 +4,7 @@ This module provides functions to detect high-risk browser actions:
 1. Payment field detection - before entering card details
 2. Social posting detection - before clicking submit on social media
 3. Purchase button detection - before clicking checkout/order buttons
+4. Email sending detection - before clicking send buttons
 
 When write lock is enabled and a high-risk action is detected,
 the agent must request user approval before proceeding.
@@ -108,6 +109,13 @@ SUBMIT_BUTTON_PATTERNS = [
     "submit",
 ]
 
+EMAIL_SEND_BUTTON_PATTERNS = [
+    "send",
+    "send message",
+    "send email",
+    "send mail",
+]
+
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
 PURCHASE_BUTTON_PHRASES = [
@@ -185,6 +193,15 @@ def is_submit_button(element_text: str) -> bool:
             return True
 
     return False
+
+
+def is_email_send_button(element_text: str) -> bool:
+    """Check if element text indicates an outbound send action."""
+    if not element_text:
+        return False
+
+    text_lower = re.sub(r"\s+", " ", element_text.lower()).strip()
+    return any(pattern == text_lower or pattern in text_lower for pattern in EMAIL_SEND_BUTTON_PATTERNS)
 
 
 def is_purchase_button(element_text: str) -> bool:
@@ -306,7 +323,7 @@ def get_write_lock_approval_question(
     """Generate an approval question for a write lock violation.
 
     Args:
-        action_type: "payment", "purchase", or "social_post"
+        action_type: "payment", "purchase", "social_post", or "email_send"
         url: Current page URL
         element_text: Text of the element being interacted with
         field_description: Description of the field (for payment)
@@ -336,6 +353,14 @@ def get_write_lock_approval_question(
             f"**Social Media Post Detected**\n\n"
             f"{system_name} wants to post content to **{domain}**.\n\n"
             f"**Button:** {element_text or 'Submit'}\n"
+            f"**Page:** {url}"
+        )
+    elif action_type == "email_send":
+        domain = urlparse(url).netloc if url else "unknown"
+        return (
+            f"**Email Send Detected**\n\n"
+            f"{system_name} wants to send an email from **{domain}**.\n\n"
+            f"**Button:** {element_text or 'Send'}\n"
             f"**Page:** {url}"
         )
     else:

@@ -35,4 +35,4 @@ IMPORTANT RULES:
 4. Verify actions worked with screenshot or ariaTree
 5. When done, call attempt_completion - a verifier will confirm
 
-Today's date is May 06, 2026. You're currently on: <CURRENT_URL>
+Today's date is May 08, 2026. You're currently on: <CURRENT_URL>
