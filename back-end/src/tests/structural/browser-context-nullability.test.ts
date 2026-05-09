@@ -32,6 +32,11 @@ function testMigrationBackfillsEmptySentinel() {
     migration.includes('ALTER TABLE "BrowserContext" ALTER COLUMN "contextId" DROP NOT NULL;'),
     'Migration must drop the BrowserContext.contextId NOT NULL constraint'
   );
+  assert(
+    migration.indexOf('ALTER TABLE "BrowserContext" ALTER COLUMN "contextId" DROP NOT NULL;') <
+      migration.indexOf('SET "contextId" = NULL'),
+    'Migration must drop NOT NULL before replacing empty-string sentinels with NULL'
+  );
 }
 
 function testSteelDoesNotCreateEmptyContextId() {
