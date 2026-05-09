@@ -3,4 +3,4 @@
 PROMPT = """Use this tool to send a message to a phone number or email address. This tool creates the message draft from an intent you give it, blocks for human approval, and then sends the message.
 
 Usage:
-- Do not use this tool to send the user a message; use send_message_to_user (when in the RESEARCH phase) or send_message_to_user_execute_phase (when in the EXECUTE phase) instead."""
+- Do not use this tool to send the user a message; use send_message_to_user (when in the PLAN phase) or send_message_to_user_execute_phase (when in the EXECUTE phase) instead."""

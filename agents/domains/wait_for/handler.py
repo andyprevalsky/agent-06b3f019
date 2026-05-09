@@ -29,19 +29,6 @@ from domains.wait_for.config import (
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
-_HISTORICAL_CONDITION_TERMS = (
-    "already-recorded",
-    "current transcript",
-    "execution transcript",
-    "conversation transcript",
-    "tool transcript",
-    "message history",
-    "tool history",
-    "harness",
-    "duplicated spawn_agent",
-    "duplicate spawn_agent",
-)
-
 # =============================================================================
 # WAIT_FOR MANAGER
 # =============================================================================
@@ -65,24 +52,6 @@ class WaitForManager(ToolManager):
         elif condition:
             check_interval = tool_call.get("check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS)
             max_checks = tool_call.get("max_checks", DEFAULT_MAX_CHECKS)
-            if _is_historical_self_observation_condition(condition):
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="wait_for failed",
-                    message=(
-                        "wait_for can only wait for real future times or external conditions. "
-                        "This condition is about already-recorded transcript/tool history and cannot become true by "
-                        "waiting. Continue with concrete corrective work or call attempt_completion with the current "
-                        "result; do not call wait_for for this condition."
-                    ),
-                    status=MessageStatus.ERROR,
-                    metadata={
-                        "waitForMode": "condition",
-                        "condition": condition,
-                        "nonRetriable": True,
-                    },
-                )
-                return
             context_gates = getattr(workflow_instance, "context_gates", None) or {}
             async for event in self._condition_mode(
                 workflow_instance, condition, check_interval, max_checks, tool_call_id, context_gates
@@ -429,12 +398,6 @@ class WaitForManager(ToolManager):
 # =============================================================================
 
 _manager: WaitForManager | None = None
-
-
-def _is_historical_self_observation_condition(condition: str) -> bool:
-    """Return True for wait conditions that ask whether past transcript state changed."""
-    normalized = " ".join(condition.lower().split())
-    return any(term in normalized for term in _HISTORICAL_CONDITION_TERMS)
 
 
 def get_manager() -> WaitForManager:

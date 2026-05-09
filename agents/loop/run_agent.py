@@ -967,18 +967,6 @@ async def run_agent(  # noqa: C901
                     f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
                     f"{tool_names}"
                 )
-                if set(tool_names) == {"send_message_to_user_execute_phase"}:
-                    recovery_instruction = (
-                        "The visible message has already been sent. If it contains the final answer or "
-                        "fulfilled deliverable, call attempt_completion now. If more evidence is missing, "
-                        "use a different evidence-gathering tool. Do not call wait_for unless the original "
-                        "user goal explicitly requires waiting for a real future time or external condition."
-                    )
-                else:
-                    recovery_instruction = (
-                        "use different arguments, a different tool, or decompose the problem differently. "
-                        "Do not repeat the same call again."
-                    )
                 context.append(
                     {
                         "role": "SYSTEM",
@@ -986,7 +974,8 @@ async def run_agent(  # noqa: C901
                             f"WARNING: You have called the same tool(s) with identical arguments "
                             f"{same_call_streak + 2} times in a row without making progress. "
                             "The previous approach is not working. You MUST try a fundamentally different strategy: "
-                            f"{recovery_instruction}"
+                            "use different arguments, a different tool, or decompose the problem differently. "
+                            "Do not repeat the same call again."
                         ),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
