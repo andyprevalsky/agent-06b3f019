@@ -48,7 +48,7 @@ They should be treated as information pointers so that you don't have to rewrite
 
 Use them in 'goal' strings you pass to creating a sub_agent of any type instead of rewriting or summarizing information. Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring. These pointers will be automatically resolved to the information they point to before each LLM call.
 
-Your harness splits up your work into 3 phases, a RESEARCH phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either RESEARCH or EXECUTE and aren't guaranteed to have been through a RESEARCH phase before you spawn into the EXECUTE phase. The RESEARCH phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
+Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
 
 # User Context
 

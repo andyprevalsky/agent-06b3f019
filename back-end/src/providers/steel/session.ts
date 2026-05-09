@@ -25,6 +25,12 @@ const SESSION_VALIDATION_TIMEOUT = 10000; // 10 seconds
 const WS_CONNECTION_RETRIES = 3;
 const WS_BACKOFF_DELAYS = [100, 400, 800]; // ms
 
+interface SteelSessionResult {
+  id: string;
+  debugUrl: string;
+  profileId?: string | null;
+}
+
 /**
  * Sleep helper for backoff delays
  */
@@ -123,7 +129,7 @@ export async function getOrCreateContext(userId: string): Promise<string> {
 
   if (existing) {
     log.info(
-      `✓ Using existing context for user ${userId}: ${existing.contextId || '(no profile yet)'}`
+      `✓ Using existing context for user ${userId}: ${existing.contextId ?? '(no profile yet)'}`
     );
     return existing.id; // Return database ID (for foreign key)
   }
@@ -133,7 +139,7 @@ export async function getOrCreateContext(userId: string): Promise<string> {
   const dbContext = await prisma.browserContext.create({
     data: {
       userId,
-      contextId: '', // Will be populated after first session releases
+      contextId: null, // Will be populated after Steel creates a profile
     },
   });
 
@@ -164,7 +170,7 @@ export async function createSessionWithContext(
   );
 
   // Look up the Steel profile ID from database
-  const dbContext = await prisma.browserContext.findUnique({
+  let dbContext = await prisma.browserContext.findUnique({
     where: { id: dbContextId },
   });
 
@@ -192,8 +198,8 @@ export async function createSessionWithContext(
       // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
       // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
       // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
-      const session = await steel.sessions.create({
-        profileId: dbContext.contextId || undefined, // Use existing profile if available
+      const session = (await steel.sessions.create({
+        profileId: dbContext.contextId ?? undefined, // Use existing profile if available
         persistProfile: true, // Auto-persist browser state to profile on session close
         userAgent: userAgent || undefined, // Use user's real User-Agent from fingerprint
         useProxy: {
@@ -214,7 +220,7 @@ export async function createSessionWithContext(
           width: 1288, // 1280 + 8 for borders → 1280 viewport
           height: 891, // 800 + 91 for browser chrome → 800 viewport
         },
-      });
+      })) as SteelSessionResult;
 
       log.info(`Steel Session: ${logJson(session)}`);
 
@@ -242,13 +248,44 @@ export async function createSessionWithContext(
         continue; // Retry
       }
 
-      // If this was the first session (no profileId existed), Steel created one - save it
-      if (session.profileId && session.profileId !== dbContext.contextId) {
-        log.info(`  📝 Saving new Steel profileId: ${session.profileId}`);
+      // If this was the first session for the user, claim the provider profile
+      // atomically. Concurrent first sessions can each get a new Steel profile;
+      // only one should become the persistent profile for future sessions.
+      if (session.profileId && dbContext.contextId === null) {
+        log.info(`  📝 Claiming new Steel profileId: ${session.profileId}`);
+        const claim = await prisma.browserContext.updateMany({
+          where: { id: dbContextId, contextId: null },
+          data: { contextId: session.profileId },
+        });
+        if (claim.count === 0) {
+          const winningContext = await prisma.browserContext.findUnique({
+            where: { id: dbContextId },
+          });
+          if (winningContext?.contextId && winningContext.contextId !== session.profileId) {
+            log.info(
+              `  ⚠️ Concurrent profile init detected; releasing ${session.id} and retrying with ${winningContext.contextId}`
+            );
+            try {
+              await steel.sessions.release(session.id);
+            } catch (releaseErr) {
+              log.info(`  ⚠️ Failed to release superseded session: ${releaseErr}`);
+            }
+            dbContext = winningContext;
+            lastError = new Error(
+              'Concurrent Steel profile initialization; retrying with persisted profile'
+            );
+            continue;
+          }
+        } else {
+          dbContext = { ...dbContext, contextId: session.profileId };
+        }
+      } else if (session.profileId && session.profileId !== dbContext.contextId) {
+        log.info(`  📝 Saving updated Steel profileId: ${session.profileId}`);
         await prisma.browserContext.update({
           where: { id: dbContextId },
           data: { contextId: session.profileId },
         });
+        dbContext = { ...dbContext, contextId: session.profileId };
       }
 
       // Save to DB
@@ -401,7 +438,7 @@ export async function resumeSession(
       // Create NEW Steel session with same profile
       // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
       const session = await steel.sessions.create({
-        profileId: oldSession.context.contextId,
+        profileId: oldSession.context.contextId ?? undefined,
         userAgent: userAgent || undefined, // Use user's real User-Agent from fingerprint
         useProxy: {
           geolocation: {

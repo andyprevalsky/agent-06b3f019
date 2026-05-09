@@ -556,3 +556,14 @@
 {"task": "claude-code-agent", "duration_seconds": 61.3, "cost_cents": 0.0, "timestamp": "2026-05-08T22:24:59.577937+00:00", "agent_id": "441483af-c45c-4a38-b604-c23c1a4c5233"}
 {"task": "browser-smoke", "duration_seconds": 56.5, "cost_cents": 0.0, "timestamp": "2026-05-08T22:26:56.968438+00:00", "agent_id": "991ac3d3-2018-43d9-b9de-2ab302c43ef2"}
 {"task": "cache-coverage", "duration_seconds": 306.7, "cost_cents": 4.0, "timestamp": "2026-05-08T23:23:35.069421+00:00", "agent_id": "91aa761e-6b02-47d6-ba5d-5744593daef5"}
+{"task": "spawn-sub-agents", "duration_seconds": 106.9, "cost_cents": 2.0, "timestamp": "2026-05-09T00:10:36.955898+00:00", "agent_id": "3ffbeb0b-8a7c-4a8e-9942-b2c818c8cb50"}
+{"task": "chat-mode", "duration_seconds": 10.8, "cost_cents": 0.0, "timestamp": "2026-05-09T00:15:19.200158+00:00", "agent_id": "08ed785e-2131-455d-81bf-eeb9c571025f"}
+{"task": "browser-smoke", "duration_seconds": 51.0, "cost_cents": 0.0, "timestamp": "2026-05-09T00:15:19.200158+00:00", "agent_id": "eacdae5e-3fa7-4d75-b520-271b582dd940"}
+{"task": "claude-code-agent", "duration_seconds": 71.1, "cost_cents": 0.0, "timestamp": "2026-05-09T00:15:19.200158+00:00", "agent_id": "f86a3b74-5165-4a36-b6a0-a199c81be67e"}
+{"task": "spawn-sub-agents", "duration_seconds": 246.8, "cost_cents": 4.0, "timestamp": "2026-05-09T00:15:19.200158+00:00", "agent_id": "0c9ee724-a8ab-4969-a2aa-8252e936a099"}
+{"task": "parallel-tool-calls", "duration_seconds": 388.6, "cost_cents": 20.0, "timestamp": "2026-05-09T00:15:19.200158+00:00", "agent_id": "7af32e79-d387-494d-897d-1609d40858df"}
+{"task": "chat-mode", "duration_seconds": 5.8, "cost_cents": 0.0, "timestamp": "2026-05-09T01:56:34.193096+00:00", "agent_id": "a3c31606-9201-4d80-bbfd-963b32b34226"}
+{"task": "browser-smoke", "duration_seconds": 66.2, "cost_cents": 0.0, "timestamp": "2026-05-09T01:56:34.193096+00:00", "agent_id": "1395d55d-75a6-41dc-9432-d7c3899f2053"}
+{"task": "claude-code-agent", "duration_seconds": 71.2, "cost_cents": 0.0, "timestamp": "2026-05-09T01:56:34.193096+00:00", "agent_id": "63700957-b958-4e86-af7a-3d5c021fb8d6"}
+{"task": "spawn-sub-agents", "duration_seconds": 146.6, "cost_cents": 3.0, "timestamp": "2026-05-09T01:56:34.193096+00:00", "agent_id": "d48bed69-98c4-479c-8413-097c1f3e6488"}
+{"task": "parallel-tool-calls", "duration_seconds": 247.2, "cost_cents": 11.0, "timestamp": "2026-05-09T01:56:34.193096+00:00", "agent_id": "eb8f23ff-3c42-4546-9d3a-5064da87bdd3"}

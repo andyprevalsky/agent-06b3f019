@@ -3,4 +3,4 @@ You are in the EXECUTE phase. You cannot directly request user input in this pha
 
 In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
 
-The beginning of your context might have information generated from the RESEARCH phase, do not confuse those actions as being part of your current directive.
+The beginning of your context might have information generated from the PLAN phase, do not confuse those actions as being part of your current directive.

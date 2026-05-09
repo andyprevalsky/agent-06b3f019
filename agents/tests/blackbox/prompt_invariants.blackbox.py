@@ -1796,7 +1796,6 @@ async def run_all_tests():
         "attempt_completion_result_read_skip_verification_scoped",
         test_attempt_completion_result_read_is_skip_verification_scoped,
     )
-
     # 4. Verifier schema field order
     r.record(
         "verifier_schema_no_response_schema_field_order",

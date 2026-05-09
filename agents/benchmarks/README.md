@@ -93,6 +93,9 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 |----------|---------|-------------|
 | `BENCHMARK_BASE_URL` | `https://navi-j9a9.onrender.com` | API base URL |
 | `BACKEND_API_KEY` | **(required)** | API key for authentication |
+| `CLICKHOUSE_ENDPOINT` | — | ClickHouse Cloud endpoint for retained Fly.io worker logs (`agents/.env`) |
+| `CLICKHOUSE_USER` | — | ClickHouse user for retained Fly.io worker logs (`agents/.env`) |
+| `CLICKHOUSE_PASSWORD` | — | ClickHouse password for retained Fly.io worker logs (`agents/.env`) |
 | `FLY_API_TOKEN` | — | Fly.io deploy token for worker log streaming (`agents/.env`) |
 | `RENDER_API_KEY` | — | Render API key for backend log fetching (`back-end/.env`) |
 | `SUPABASE_ACCESS_TOKEN` | — | Supabase management token for edge function logs (`agents/.env`) |
@@ -103,14 +106,15 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 
 ## Reviewing Benchmark Logs
 
-Each benchmark run collects production logs from three sources and stores them in the result JSON under `tasks[].logs`. This is the primary way to debug failing benchmark agents.
+Each benchmark run collects production logs from retained ClickHouse rows and live production sources, then stores them in the result JSON under `tasks[].logs`. This is the primary way to debug failing benchmark agents.
 
 ### Log Sources
 
 | Source | Key in JSON | What it captures | Filtered by |
 |--------|-------------|------------------|-------------|
 | **Render** (backend) | `backend_logs` | HTTP requests to/from the API (agent create, status updates, messages) | `agent_id` in URL/body |
-| **Fly.io** (worker) | `worker_logs` | Agent execution logs (workflow start, LLM calls, tool execution, errors) | `agent_id` in structlog context |
+| **ClickHouse** (retained Fly.io worker) | `worker_logs` | Agent execution logs retained for 7 days | `agent_id` in structlog context or raw JSON |
+| **Fly.io** (live worker stream) | `worker_logs` | Live agent execution logs during benchmark runs | `agent_id` in structlog context |
 | **Supabase** (research) | `research_logs` | Rose API gateway logs (completions calls, API key validation) | Time window (no agent_id in edge function logs) |
 | **Messages** | `messages` | Full agent conversation transcript (USER/ASSISTANT/TOOL messages) | Always available |
 
@@ -147,10 +151,25 @@ for msg in data['tasks'][0]['logs'].get('messages', []):
     print(f\"[{msg['role']}] {msg['message'][:100]}\")"
 ```
 
+### Query Retained Worker Logs Directly
+
+```bash
+cd agents && source .env
+
+# Logs for one agent
+curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT" \
+  --data-urlencode "query=SELECT timestamp, raw FROM observability.fly_logs WHERE raw LIKE '%<agent_id>%' ORDER BY ingested_at ASC LIMIT 200 FORMAT JSONEachRow"
+
+# Recent worker errors
+curl -sS -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT" \
+  --data-urlencode "query=SELECT timestamp, level, event, message, raw FROM observability.fly_logs WHERE parseDateTimeBestEffortOrNull(timestamp) > now() - INTERVAL 1 HOUR AND (level IN ('error','exception') OR raw ILIKE '%error%' OR raw ILIKE '%traceback%') ORDER BY ingested_at DESC LIMIT 100 FORMAT JSONEachRow"
+```
+
 ### How Log Collection Works
 
 - **Render**: REST API call to `api.render.com/v1/logs` with time window, filtered by agent_id
-- **Fly.io**: `flyctl logs` streams as a background process for the entire benchmark run, capturing all worker output in real-time, then filtered by agent_id after each task completes
+- **ClickHouse**: retained Fly.io worker logs are queried from `observability.fly_logs`, filtered by agent_id, and merged into `worker_logs`
+- **Fly.io**: `flyctl logs` streams as a background process for the entire benchmark run, capturing live worker output, then filtered by agent_id after each task completes
 - **Supabase**: REST API call to `api.supabase.com/v1/projects/.../analytics/endpoints/logs.all` with time window, filtered for completions-related requests
 - **Messages**: Extracted from the agent GET response (always available, no external API needed)
 
@@ -160,6 +179,9 @@ for msg in data['tasks'][0]['logs'].get('messages', []):
 # Fly.io (worker logs) — generate a deploy token
 flyctl tokens create deploy -a navi-whisper-lux
 # Add to agents/.env: FLY_API_TOKEN="<token>"
+
+# ClickHouse (retained worker logs) — values come from ClickHouse Cloud
+# Add to agents/.env: CLICKHOUSE_ENDPOINT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD
 
 # Supabase (research logs) — generate at dashboard
 # https://supabase.com/dashboard/account/tokens

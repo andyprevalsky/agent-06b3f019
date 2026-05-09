@@ -4,11 +4,11 @@
  * Like the browser agent panel but inline as a chip.
  *
  * HEADER (always visible, clickable to expand/collapse):
- *   [ThinkingSvg|Sparkles] Exploring - {goal, truncated 100 chars}    {N steps}  [chevron]
+ *   [thinking.svg|Sparkles] Exploring - {goal, truncated 100 chars}    {N steps}  [chevron]
  *                          {subtitle: current IN_PROGRESS tool title}
  *
  * Status drives the icon:
- *   IN_PROGRESS → ThinkingSvg (animated)
+ *   IN_PROGRESS → thinking.svg
  *   FINISHED    → green Sparkles
  *   ERROR       → red Sparkles
  *
@@ -29,7 +29,7 @@
 import { ChevronRight, Lightbulb, Sparkles, Globe } from 'lucide-react';
 import { memo, useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import ThinkingAnimation from '@/components/ThinkingAnimation';
+import thinkingIcon from '@/assets/thinking.svg';
 import { MarkdownText } from './MarkdownText';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 import type { ExploreStep } from '../types';
@@ -83,9 +83,13 @@ function Header({ status, goal, subtitle, stepCount, isExpanded, onToggle }: Hea
       onClick={onToggle}
     >
       {isInProgress ? (
-        <div className="h-4 w-4 flex-shrink-0">
-          <ThinkingAnimation autoplay loop playbackSpeed={1} style={{ width: 16, height: 16 }} />
-        </div>
+        <img
+          src={thinkingIcon}
+          alt=""
+          aria-hidden="true"
+          data-testid="explore-thinking-icon"
+          className="h-4 w-4 flex-shrink-0"
+        />
       ) : (
         <Sparkles
           className={cn(

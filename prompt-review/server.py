@@ -66,8 +66,8 @@ def migrate_phase_prompt_state(reviewed: dict) -> dict:
     if "# Tool Guidance" in phase_text:
         phase_text = phase_text.split("# Tool Guidance", 1)[0]
     phase_text = phase_text.strip()
-    if phase_text.startswith("PLAN -") and not reviewed.get("RESEARCH_PHASE_PROMPT"):
-        reviewed["RESEARCH_PHASE_PROMPT"] = {"edited_text": phase_text}
+    if phase_text.startswith("PLAN -") and not reviewed.get("PLAN_PHASE_PROMPT"):
+        reviewed["PLAN_PHASE_PROMPT"] = {"edited_text": phase_text}
     elif phase_text.startswith("EXECUTE -") and not reviewed.get("EXECUTE_PHASE_PROMPT"):
         reviewed["EXECUTE_PHASE_PROMPT"] = {"edited_text": phase_text}
     return reviewed

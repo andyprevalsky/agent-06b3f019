@@ -126,10 +126,10 @@
     },
     {
       "path": "agents/utils/prompts.py",
-      "anchor": "RESEARCH_PHASE_PROMPT = ",
-      "id": "RESEARCH_PHASE_PROMPT",
+      "anchor": "PLAN_PHASE_PROMPT = ",
+      "id": "PLAN_PHASE_PROMPT",
       "category": "system_prompt",
-      "summary": "RESEARCH phase prompt \u2014 research, set_plan, ask-question, and exit state machine.",
+      "summary": "PLAN phase prompt \u2014 research, set_plan, ask-question, and exit state machine.",
       "keywords": [
         "plan",
         "phase",

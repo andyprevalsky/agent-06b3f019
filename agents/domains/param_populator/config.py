@@ -62,10 +62,10 @@ SPAWN TYPE: sub_agent
 - Set type="sub_agent"
 - Required: goal (str), output_schema (object with field names -> types)
 - output_schema is required, define the structured data you expect back
-- Required by policy: start_phase ("RESEARCH" or "EXECUTE")
+- Required by policy: start_phase ("PLAN" or "EXECUTE")
   - "EXECUTE" for clear direct tasks expected to need 1-2 tool calls
-  - "RESEARCH" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
-  - when in doubt, prefer "RESEARCH"
+  - "PLAN" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "PLAN"
 - Optional: attachments (list of filenames), context_gates (object)
 - Example output_schema: {{"summary": "str", "findings": "list[str]"}}
 
@@ -98,10 +98,10 @@ SPAWN TYPE: for_each
   - items_csv (string)
 - The goal is shared across all rows/items; for_each applies it once per row/item downstream
 - Downstream behavior: one spawn_sub_agent child is started per row/item goal
-- Required by policy: start_phase ("RESEARCH" or "EXECUTE")
+- Required by policy: start_phase ("PLAN" or "EXECUTE")
   - "EXECUTE" for clear direct tasks expected to need 1-2 tool calls
-  - "RESEARCH" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
-  - when in doubt, prefer "RESEARCH"
+  - "PLAN" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer "PLAN"
 - Optional: attachments (list of filenames), context_gates (object)
 - Keep for_each lightweight: same high-level goal + one child per item/row
 

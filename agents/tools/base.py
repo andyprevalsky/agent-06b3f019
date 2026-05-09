@@ -494,7 +494,7 @@ class ToolManager(ABC):
     # Set to True in subclass if tool requires user approval before execution
     requires_approval: bool = False
 
-    # Set to True in subclass for read-only tools (used in RESEARCH phase)
+    # Set to True in subclass for read-only tools (used in PLAN phase)
     read_only: bool = False
 
     @property

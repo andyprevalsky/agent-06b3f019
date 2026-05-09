@@ -33,7 +33,14 @@ import {
   WRONG_PASSWORD_SUCCESS_RATIO,
   getBrowserConfigs,
 } from './config';
-import { deriveAesKey, fetchKeychainPassword, openCookiesDbCopy, resolveCookiePath } from './repo';
+import {
+  deriveAesKey,
+  fetchKeychainPassword,
+  openCookiesDbCopy,
+  readSafariCookieFile,
+  resolveCookiePath,
+} from './repo';
+import { parseSafariBinaryCookies } from './safariCookies';
 import type {
   BrowserConfig,
   BrowserInfo,
@@ -247,6 +254,14 @@ export async function readBrowserCookies(
   if (cookiePath === null) {
     console.log(`${BROWSER_COOKIE_READER_LOG_PREFIX} ${browser.name} cookies file not found`);
     return [];
+  }
+
+  if (browser.cookieStore === 'safariBinary') {
+    const cookies = parseSafariBinaryCookies(readSafariCookieFile(cookiePath));
+    console.log(
+      `${BROWSER_COOKIE_READER_LOG_PREFIX} Read ${cookies.length} ${browser.name} cookies`
+    );
+    return cookies;
   }
 
   const handle = openCookiesDbCopy(cookiePath, browserType);

@@ -292,6 +292,27 @@ describe('derivations.ts', () => {
       ] as any;
       expect(computeActiveBrowserPanels(msgs)).toEqual([]);
     });
+    it('excludes tasks when parent browser tool pauses before task-scoped cleanup arrives', () => {
+      const msgs = [
+        {
+          metadata: {
+            task_id: 't1',
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+          },
+        },
+        {
+          metadata: {
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'session_paused',
+          },
+        },
+      ] as any;
+      expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
     it('returns empty when no browser messages', () => {
       expect(computeActiveBrowserPanels([])).toEqual([]);
     });

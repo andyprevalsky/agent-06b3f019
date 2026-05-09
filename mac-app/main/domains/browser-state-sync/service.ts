@@ -2,7 +2,10 @@ import { AuthService } from '../../services/auth';
 import { AtlasCredentialStore } from '../../services/atlasCredentialStore';
 import { BatchUploader } from '../../services/batchUploader';
 import { BrowserCookieReader, type BrowserType } from '../../services/browserCookieReader';
-import { BrowserPasswordReader } from '../../services/browserPasswordReader';
+import {
+  BrowserPasswordReader,
+  type BrowserType as PasswordBrowserType,
+} from '../../services/browserPasswordReader';
 import { CacheStorageReader } from '../../services/cacheStorageReader';
 import { getErrorMessage } from '../../../shared/utils/error';
 import { FingerprintReader } from '../../services/fingerprintReader';
@@ -18,7 +21,7 @@ import type { IndexedDBOriginData, SyncBrowserOptions, UploadResult } from './ty
 
 type UploadPromise = Promise<UploadResult>;
 
-function isPasswordSyncSupported(browserType: string): boolean {
+function isPasswordSyncSupported(browserType: string): browserType is PasswordBrowserType {
   return (SUPPORTED_PASSWORD_BROWSERS as readonly string[]).includes(browserType);
 }
 
@@ -304,7 +307,7 @@ export async function syncBrowserPasswordsOnly(
     });
 
     const passwords = await BrowserPasswordReader.readAndEncryptPasswords(
-      browserType as BrowserType,
+      browserType,
       readerConfig
     );
     console.log(`[BrowserStateSync] Read ${passwords.length} passwords from ${browserType}`);

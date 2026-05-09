@@ -51,8 +51,8 @@ function migratePhasePromptState(reviewed) {
 
   let phaseText = after.split("# Current Phase", 2)[1] || "";
   phaseText = phaseText.split("# Tool Guidance", 1)[0].trim();
-  if (phaseText.startsWith("PLAN -") && !reviewed.RESEARCH_PHASE_PROMPT) {
-    reviewed.RESEARCH_PHASE_PROMPT = { edited_text: phaseText };
+  if (phaseText.startsWith("PLAN -") && !reviewed.PLAN_PHASE_PROMPT) {
+    reviewed.PLAN_PHASE_PROMPT = { edited_text: phaseText };
   } else if (phaseText.startsWith("EXECUTE -") && !reviewed.EXECUTE_PHASE_PROMPT) {
     reviewed.EXECUTE_PHASE_PROMPT = { edited_text: phaseText };
   }

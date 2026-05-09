@@ -24,21 +24,21 @@ USAGE — LOCAL (full span depth: worker + backend + research)
 
   Reads: navi-worker-log.txt, backend-logs.log, research-logs.log
 
-USAGE — PROD (backend spans only, unless --fly-stream is used)
+USAGE — PROD (full depth when retained ClickHouse worker logs are available)
 
-  # Post-hoc (backend-only — Fly.io buffer expired):
+  # Post-hoc (uses ClickHouse retained worker logs when CLICKHOUSE_* is set):
   python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com
 
-  # Live (full depth — stream worker logs during benchmark):
+  # Live fallback/additional stream during benchmark:
   python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com --fly-stream 300
 
-  Fetches: Render API (backend), Fly.io flyctl (worker via --fly-stream)
-  Requires: RENDER_API_KEY in back-end/.env, FLY_API_TOKEN in agents/.env
+  Fetches: Render API (backend), ClickHouse (retained worker), Fly.io flyctl (live stream)
+  Requires: RENDER_API_KEY in back-end/.env, CLICKHOUSE_* and/or FLY_API_TOKEN in agents/.env
 
 SPAN DEPTH COMPARISON
 
   Local:  worker(run_agent → execute_iteration → call_llm_activity) → backend(http.request → db.query)
-  Prod:   backend(http.request → db.query)  [worker spans missing without --fly-stream]
+  Prod:   worker + backend when ClickHouse retained logs or --fly-stream are available
 
 Flags:
   -v, --verbose          Expand every span (sub-agents, DB, broadcasts, HTTP internals).
@@ -46,7 +46,7 @@ Flags:
   --stall-threshold N    Seconds of idle time to annotate (default 5).
   --slow-threshold N     Milliseconds above which a span is counted as "bad" (default 300).
   --no-color             Disable ANSI colors.
-  --url URL              Prod mode: fetch logs from Render/Fly.io APIs.
+  --url URL              Prod mode: fetch logs from Render, ClickHouse, and Fly.io.
   --fly-stream SECONDS   Stream Fly.io worker logs for N seconds (use during live benchmarks).
 """
 
@@ -72,6 +72,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from benchmarks.logs import (
     FlyLogCollector,
+    fetch_clickhouse_worker_logs,
     fetch_flyio_logs_snapshot,
     fetch_render_logs,
     load_env_var,
@@ -1402,48 +1403,68 @@ async def _fetch_render_logs_bulk(
     return all_events
 
 
-async def _fetch_fly_logs_bulk(all_ids: Set[str], fly_stream_seconds: int = 0) -> List[_RawEvent]:
-    """Fetch worker logs from Fly.io.
+async def _fetch_fly_logs_bulk(
+    all_ids: Set[str],
+    fly_stream_seconds: int = 0,
+    start_time: Optional[datetime] = None,
+) -> List[_RawEvent]:
+    """Fetch worker logs from retained ClickHouse plus Fly.io live/snapshot logs.
 
     If fly_stream_seconds > 0, start a real-time streaming collector and collect
-    for that many seconds. Otherwise, fall back to the --no-tail snapshot (only
-    holds ~30s of recent buffer).
+    for that many seconds. Otherwise, fall back to ClickHouse retained logs and
+    the --no-tail snapshot (Fly only holds ~30s of recent buffer).
     """
-    from benchmarks.logs import FLY_API_TOKEN
-    if not FLY_API_TOKEN:
-        print("  [fly.io] FLY_API_TOKEN not set — worker logs unavailable")
-        return []
-
     lines: List[str] = []
+    from benchmarks.logs import FLY_API_TOKEN
 
     if fly_stream_seconds > 0:
-        print(f"  [fly.io] Starting real-time stream for {fly_stream_seconds}s...")
-        collector = FlyLogCollector()
-        status = await collector.start()
-        print(f"  [fly.io] {status}")
-        if "error" in status.lower() or "not found" in status.lower():
-            return []
-        await asyncio.sleep(fly_stream_seconds)
-        for aid in all_ids:
-            agent_lines = collector.get_logs_for_agent(aid)
-            for l in agent_lines:
-                if not l.startswith("[fly.io]"):
-                    lines.append(l)
-        await collector.stop()
-        print(f"  [fly.io] Collected {len(lines)} lines from stream ({collector.total_lines} total streamed)")
+        if not FLY_API_TOKEN:
+            print("  [fly.io] FLY_API_TOKEN not set — skipping live worker stream")
+        else:
+            print(f"  [fly.io] Starting real-time stream for {fly_stream_seconds}s...")
+            collector = FlyLogCollector()
+            status = await collector.start()
+            print(f"  [fly.io] {status}")
+            if "error" not in status.lower() and "not found" not in status.lower():
+                await asyncio.sleep(fly_stream_seconds)
+                for aid in all_ids:
+                    agent_lines = collector.get_logs_for_agent(aid)
+                    for l in agent_lines:
+                        if not l.startswith("[fly.io]"):
+                            lines.append(l)
+                await collector.stop()
+                print(f"  [fly.io] Collected {len(lines)} lines from stream ({collector.total_lines} total streamed)")
     else:
-        from benchmarks.logs import _find_flyctl
-        env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                _find_flyctl(), "logs", "-a", "navi-whisper-lux", "--no-tail",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-            lines = stdout.decode().strip().splitlines()
-        except Exception as e:
-            print(f"  [fly.io] Error fetching snapshot: {e}")
-            return []
+        if FLY_API_TOKEN:
+            from benchmarks.logs import _find_flyctl
+            env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    _find_flyctl(), "logs", "-a", "navi-whisper-lux", "--no-tail",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                lines = stdout.decode().strip().splitlines()
+            except Exception as e:
+                print(f"  [fly.io] Error fetching snapshot: {e}")
+        else:
+            print("  [fly.io] FLY_API_TOKEN not set — skipping short buffer snapshot")
+
+    clickhouse_count = 0
+    if start_time:
+        clickhouse_results = await asyncio.gather(
+            *(fetch_clickhouse_worker_logs(aid, start_time) for aid in all_ids)
+        )
+        clickhouse_lines = [
+            line
+            for result in clickhouse_results
+            for line in result
+            if not line.startswith("[clickhouse]")
+        ]
+        clickhouse_count = len(clickhouse_lines)
+        seen_lines = set(lines)
+        lines.extend(line for line in clickhouse_lines if line not in seen_lines)
+        print(f"  [clickhouse] Collected {clickhouse_count} retained worker log lines")
 
     events: List[_RawEvent] = []
     for line in lines:
@@ -1456,6 +1477,8 @@ async def _fetch_fly_logs_bulk(all_ids: Set[str], fly_stream_seconds: int = 0) -
     if not events and lines:
         print(f"  [fly.io] 0 matching events from {len(lines)} lines"
               + (" (buffer only holds ~30s)" if fly_stream_seconds == 0 else ""))
+    if not events and not lines and start_time:
+        print("  [worker] 0 worker log lines from ClickHouse/Fly.io")
     return events
 
 
@@ -1524,7 +1547,7 @@ async def _build_trace_prod(
     else:
         print(f"Fetching prod logs for {len(all_ids)} agents ({len(sub_ids)} sub-agents)...")
         worker_raw, backend_raw = await asyncio.gather(
-            _fetch_fly_logs_bulk(all_ids, fly_stream_seconds),
+            _fetch_fly_logs_bulk(all_ids, fly_stream_seconds, start_time),
             _fetch_render_logs_bulk(all_ids, start_time),
         )
     research_raw: List[_RawEvent] = []
@@ -1608,10 +1631,10 @@ def main() -> int:
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--url", default=None,
                     help="Base URL for prod mode (e.g. https://navi-j9a9.onrender.com). "
-                         "Fetches logs from Render/Fly.io APIs instead of local files.")
+                         "Fetches logs from Render, ClickHouse, and Fly.io instead of local files.")
     ap.add_argument("--fly-stream", type=int, default=0, metavar="SECONDS",
                     help="Stream Fly.io worker logs for N seconds before analysis. "
-                         "Use during a live benchmark to capture LLM call spans. "
+                         "Use during a live benchmark as a supplement to retained ClickHouse logs. "
                          "Requires --url and FLY_API_TOKEN in agents/.env.")
     ap.add_argument("--worker-log", default=None, metavar="FILE",
                     help="Path to a saved worker log file (JSONL from Fly.io). "

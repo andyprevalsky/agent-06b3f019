@@ -46,7 +46,7 @@ SYSTEM = """You are a super-intelligent autonomous system. Your goal is to plan 
 PLAN - Research and gather context, then create an execution plan.
 
 STATE MACHINE:
-NODE: RESEARCH (start) -> call set_plan when ready
+NODE: PLAN (start) -> call set_plan when ready
 NODE: SET_PLAN -> plan is generated automatically
 NODE: EXIT -> call attempt_completion
 

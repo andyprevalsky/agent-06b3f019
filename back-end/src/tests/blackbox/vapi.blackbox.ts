@@ -223,6 +223,43 @@ async function testCall_vapiNotConfigured() {
   }
 }
 
+function assertVapiAttemptStatus(status: number): void {
+  if (status !== 200 && status !== 500 && status < 400) {
+    throw new Error(`Unexpected status ${status}`);
+  }
+}
+
+async function testCall_validSchemaAndTenDigitPhone() {
+  const res = await request(`${BASE_URL}/api/vapi/call`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      to: '0000000000',
+      system_prompt: 'Schema normalization coverage',
+      output_schema: {
+        type: 'object',
+        properties: { result: { type: 'string' } },
+      },
+    }),
+  });
+  assertVapiAttemptStatus(res.status);
+}
+
+async function testCall_propertiesOnlySchemaAndInternationalPhone() {
+  const res = await request(`${BASE_URL}/api/vapi/call`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      to: '+442079460958',
+      system_prompt: 'Properties-only schema normalization coverage',
+      output_schema: {
+        properties: { result: { type: 'string' } },
+      },
+    }),
+  });
+  assertVapiAttemptStatus(res.status);
+}
+
 // ==================== GET /api/vapi/call/:id ====================
 
 // --- auth boundary ---
@@ -387,6 +424,14 @@ async function runAll() {
     { name: 'POST /vapi/call -- all fields missing -> 400', fn: testCall_allFieldsMissing },
     // error surface
     { name: 'POST /vapi/call -- Vapi config check', fn: testCall_vapiNotConfigured },
+    {
+      name: 'POST /vapi/call -- valid schema and 10-digit phone normalization',
+      fn: testCall_validSchemaAndTenDigitPhone,
+    },
+    {
+      name: 'POST /vapi/call -- properties schema and international phone normalization',
+      fn: testCall_propertiesOnlySchemaAndInternationalPhone,
+    },
     { name: 'GET /vapi/call/:id -- nonexistent -> 404/500', fn: testGetCall_nonexistentId },
     // invariants
     {

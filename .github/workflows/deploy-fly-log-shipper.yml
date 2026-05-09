@@ -1,0 +1,32 @@
+name: Deploy Fly Log Shipper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'observability/fly-log-shipper/**'
+      - 'scripts/deploy-fly-log-shipper.sh'
+      - '.github/workflows/deploy-fly-log-shipper.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Fly log shipper to ClickHouse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy log shipper
+        run: bash scripts/deploy-fly-log-shipper.sh
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_LOG_SHIPPER_DEPLOY_TOKEN }}
+          FLY_LOG_SHIPPER_ACCESS_TOKEN: ${{ secrets.FLY_LOG_SHIPPER_ACCESS_TOKEN }}
+          FLY_LOG_SHIPPER_ORG: ${{ secrets.FLY_LOG_SHIPPER_ORG }}
+          FLY_LOG_SHIPPER_APP: ${{ vars.FLY_LOG_SHIPPER_APP || 'rose-fly-log-shipper' }}
+          CLICKHOUSE_ENDPOINT: ${{ secrets.CLICKHOUSE_ENDPOINT }}
+          CLICKHOUSE_DATABASE: ${{ vars.CLICKHOUSE_DATABASE || 'observability' }}
+          CLICKHOUSE_TABLE: ${{ vars.CLICKHOUSE_TABLE || 'fly_logs' }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}

@@ -74,6 +74,9 @@ export async function createSessionWithContext(
   if (!dbContext) {
     throw new Error(`Browser context not found: ${dbContextId}`);
   }
+  if (!dbContext.contextId) {
+    throw new Error(`Browserbase context has no provider context ID: ${dbContextId}`);
+  }
 
   // Create session in Steel using the Steel context ID
   // Create Steel session with context, proxies, and NYC geolocation
@@ -206,6 +209,9 @@ export async function resumeSession(
 
   if (!oldSession) {
     throw new Error(`Browser task not found: ${taskId}`);
+  }
+  if (!oldSession.context.contextId) {
+    throw new Error(`Browserbase context has no provider context ID: ${oldSession.context.id}`);
   }
 
   log.info('Found old session', { currentUrl: oldSession.currentUrl || 'NONE' });

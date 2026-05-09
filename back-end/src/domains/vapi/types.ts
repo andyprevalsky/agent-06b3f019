@@ -2,6 +2,7 @@ export interface CreateCallRequest {
   to: string;
   system_prompt: string;
   output_schema: Record<string, unknown>;
+  idempotency_key?: string;
 }
 
 export interface VapiCallResponse {

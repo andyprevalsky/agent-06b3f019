@@ -36,6 +36,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -1483,9 +1484,10 @@ def _verify_worker_queue_alignment():
     print(f"  ⚠ Worker running but could not verify queue alignment (expected {expected_queue})")
 
 
-def _extract_worker_pids_from_ps(ps_output: str) -> list[str]:
+def _extract_worker_pids_from_ps(ps_output: str, workspace_root: str | None = None) -> list[str]:
     """Extract Python worker PIDs from portable ps output."""
     pids = []
+    normalized_root = workspace_root.rstrip("/") if workspace_root else None
     for line in ps_output.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -1495,9 +1497,18 @@ def _extract_worker_pids_from_ps(ps_output: str) -> list[str]:
             continue
         pid, command = parts
         command_lower = command.lower()
+        if normalized_root and normalized_root not in command:
+            continue
         if "worker.py" in command_lower and "python" in command_lower:
             pids.append(pid)
     return pids
+
+
+def _process_cwd_is_under(proc, expected_root: Path) -> bool:
+    """Return whether a process cwd is inside the expected workspace root."""
+    cwd = Path(proc.cwd()).resolve()
+    expected = expected_root.resolve()
+    return cwd == expected or expected in cwd.parents
 
 
 def _memory_mb(byte_count: int) -> float:
@@ -1514,12 +1525,15 @@ def _sample_local_worker_memory() -> dict:
         return {"available": False, "reason": f"psutil unavailable: {e}"}
 
     result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    workspace_root = Path(__file__).resolve().parents[2]
+    agents_root = workspace_root / "agents"
     root_pids = _extract_worker_pids_from_ps(result.stdout)
     if not root_pids:
         return {"available": False, "reason": "no local python worker.py process found"}
 
     seen: set[int] = set()
     processes: list[dict] = []
+    sampled_root_pids: list[str] = []
     total_rss_bytes = 0
     playwright_driver_count = 0
     playwright_driver_rss_bytes = 0
@@ -1527,10 +1541,13 @@ def _sample_local_worker_memory() -> dict:
     for root_pid in root_pids:
         try:
             root = psutil.Process(int(root_pid))
+            if not _process_cwd_is_under(root, agents_root):
+                continue
             tree = [root] + root.children(recursive=True)
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             continue
 
+        sampled_root_pids.append(root_pid)
         for proc in tree:
             if proc.pid in seen:
                 continue
@@ -1555,9 +1572,12 @@ def _sample_local_worker_memory() -> dict:
                 }
             )
 
+    if not sampled_root_pids:
+        return {"available": False, "reason": f"no local python worker.py process found under {agents_root}"}
+
     return {
         "available": True,
-        "root_pids": root_pids,
+        "root_pids": sampled_root_pids,
         "process_count": len(processes),
         "total_rss_mb": _memory_mb(total_rss_bytes),
         "playwright_driver_count": playwright_driver_count,

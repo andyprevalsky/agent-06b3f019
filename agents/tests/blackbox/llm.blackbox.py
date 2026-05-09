@@ -431,6 +431,33 @@ def test_build_verifier_json_schema_all_types():
     assert result["json_schema"]["strict"] is True
 
 
+def test_verifier_response_model_uses_closed_session_file_pointer_schema():
+    """Remote file outputs must produce OpenAI-strict object properties."""
+    from helpers.file_resolution import transform_schema_for_remote_session
+    from helpers.llm import _build_verifier_response_model
+    from providers.rose.schema import build_openai_response_format
+
+    response_schema = {
+        "fields": [
+            {"name": "source_file", "type": "file_pointer"},
+            {"name": "program_output", "type": "str"},
+            {"name": "steps", "type": "int"},
+        ]
+    }
+
+    remote_schema = transform_schema_for_remote_session(response_schema)
+    response_model = _build_verifier_response_model(remote_schema)
+    schema = build_openai_response_format(response_model)["json_schema"]["schema"]
+
+    output = schema["properties"]["output"]
+    source_file = output["properties"]["source_file"]
+    assert output["required"] == ["source_file", "program_output", "steps"]
+    assert source_file["type"] == "object"
+    assert source_file["required"] == ["path"]
+    assert source_file["properties"]["path"]["type"] == "string"
+    assert source_file["additionalProperties"] is False
+
+
 def test_build_verifier_json_schema_object_type():
     """`object` fields with explicit properties emit closed nested schema."""
     from helpers.llm import _build_verifier_json_schema
@@ -4325,6 +4352,10 @@ async def run_all_tests():
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
+    r.record(
+        "verifier_response_model_closed_session_file_pointer",
+        test_verifier_response_model_uses_closed_session_file_pointer_schema,
+    )
     r.record("build_verifier_json_schema_object_type", test_build_verifier_json_schema_object_type)
     r.record("build_verifier_json_schema_list_object_type", test_build_verifier_json_schema_list_object_type)
     r.record(

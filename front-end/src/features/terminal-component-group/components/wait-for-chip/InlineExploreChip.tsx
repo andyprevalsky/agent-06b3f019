@@ -1,7 +1,22 @@
+/**
+ * STATE MACHINE: InlineExploreChip
+ *
+ * EMBEDDED EXPLORE CONTEXT:
+ * wait_for check -> explore metadata -> InlineExploreChip header + step list.
+ *
+ * HEADER ICON:
+ * IN_PROGRESS uses thinking.svg while actively exploring.
+ * FINISHED uses green Sparkles.
+ * ERROR uses red Sparkles.
+ *
+ * EXPANSION:
+ * [COLLAPSED] --click--> [EXPANDED goal + steps] --click--> [COLLAPSED]
+ */
+
 import { ChevronRight, Lightbulb, Sparkles } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { cn } from '@/lib/utils';
-import ThinkingAnimation from '@/components/ThinkingAnimation';
+import thinkingIcon from '@/assets/thinking.svg';
 import type { ExploreStep, WaitForCheck } from '../../types';
 import { getExploreStepIcon, isThinkingStep } from './helpers';
 
@@ -34,9 +49,13 @@ function ExploreChipHeader({
       onClick={onToggle}
     >
       {isInProgress ? (
-        <div className="h-3.5 w-3.5 flex-shrink-0">
-          <ThinkingAnimation autoplay loop playbackSpeed={1} style={{ width: 14, height: 14 }} />
-        </div>
+        <img
+          src={thinkingIcon}
+          alt=""
+          aria-hidden="true"
+          data-testid="explore-thinking-icon"
+          className="h-3.5 w-3.5 flex-shrink-0"
+        />
       ) : (
         <Sparkles
           className={cn(

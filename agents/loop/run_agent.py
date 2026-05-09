@@ -962,9 +962,10 @@ async def run_agent(  # noqa: C901
             recent_call_hashes.append(call_sig)
             if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
                 same_call_streak += 1
+                tool_names = [t for t, _, _ in processed_tools]
                 logger.warning(
                     f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
-                    f"{[t for t, _, _ in processed_tools]}"
+                    f"{tool_names}"
                 )
                 context.append(
                     {
