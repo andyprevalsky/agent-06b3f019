@@ -8,7 +8,4 @@ Keep messages tight.
 
 Usage:
 - Use for status updates or sharing findings mid-execution.
-- Do not use to ask a question; the user cannot reply during the EXECUTE phase.
-- This is not a completion signal. If the message contains the final answer or
-  fulfilled deliverable, call attempt_completion next. Do not send the same
-  final message again, and do not call wait_for just to avoid completing."""
+- Do not use to ask a question; the user cannot reply during the EXECUTE phase."""

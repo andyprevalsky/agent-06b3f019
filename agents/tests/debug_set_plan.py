@@ -78,7 +78,7 @@ def main():
 PLAN - Research and gather context, then create an execution plan.
 
 STATE MACHINE:
-NODE: RESEARCH (start)
+NODE: PLAN (start)
 ENABLED TOOLS: web_search, web_fetch, send_message_to_user
 To progress: call set_plan to move to SET_PLAN, or attempt_completion to EXIT.
 
@@ -89,7 +89,7 @@ NODE: EXIT
 Call attempt_completion when done.
 
 TWO-AXIS PLANNING:
-- If uncertainty > decomposability -> stay in RESEARCH
+- If uncertainty > decomposability -> stay in PLAN
 - If decomposability >= uncertainty -> proceed to SET_PLAN
 
 # Output Format

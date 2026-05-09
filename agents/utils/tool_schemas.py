@@ -349,7 +349,7 @@ class GrepTool(BaseModel):
 
 
 class SendMessageToUserTool(BaseModel):
-    """Message the user during RESEARCH phase; optionally block for a reply."""
+    """Message the user during PLAN phase; optionally block for a reply."""
 
     tool: Literal["send_message_to_user"]
     message: str = Field(description="User-visible markdown text explaining the question, blocker, or FYI.")
@@ -454,14 +454,14 @@ class SpawnAgentTool(BaseModel):
             "automatically created for this agent tree."
         ),
     )
-    start_phase: Optional[Literal["RESEARCH", "EXECUTE"]] = Field(
+    start_phase: Optional[Literal["PLAN", "EXECUTE"]] = Field(
         default=None,
         description=(
             "Required for type='sub_agent' and type='for_each'. Ignored for any other type. "
-            "The phase that the agent should spawn in as, either 'RESEARCH' or 'EXECUTE'. "
-            "For complex tasks that require planning and more than a few tool calls, use 'RESEARCH'. "
+            "The phase that the agent should spawn in as, either 'PLAN' or 'EXECUTE'. "
+            "For complex tasks that require planning and more than a few tool calls, use 'PLAN'. "
             "For straightforward tasks that are simple to complete, use 'EXECUTE'. "
-            "Prefer 'RESEARCH' when uncertain."
+            "Prefer 'PLAN' when uncertain."
         ),
     )
     items: Optional[List[ForEachItem]] = Field(

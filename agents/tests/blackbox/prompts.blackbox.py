@@ -21,7 +21,7 @@ def test_build_system_prompt_plan():
     assert isinstance(result, str)
     assert len(result) > 100
     assert "You are a Rose Labs Agent" in result
-    assert "RESEARCH phase" in result
+    assert "PLAN phase" in result
 
 
 def test_build_system_prompt_execute():
@@ -38,7 +38,7 @@ def test_build_system_prompt_execute():
     assert "EXECUTE phase" in result
     assert "attempt_completion" in result
     assert (
-        "The beginning of your context might have information generated from the RESEARCH phase"
+        "The beginning of your context might have information generated from the PLAN phase"
         in result
     )
     assert "real-world, long-horizon task execution" in result

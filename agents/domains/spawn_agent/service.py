@@ -87,9 +87,9 @@ def validate_spawn_params(tool_call: dict) -> None:
 
     if agent_type in ("sub_agent", "for_each"):
         start_phase = tool_call.get("start_phase")
-        if start_phase is not None and str(start_phase).strip().upper() not in ("RESEARCH", "EXECUTE"):
+        if start_phase is not None and str(start_phase).strip().upper() not in ("PLAN", "EXECUTE"):
             raise ValueError(
-                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'RESEARCH' or 'EXECUTE'."
+                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'PLAN' or 'EXECUTE'."
             )
 
     if agent_type == "for_each":
@@ -108,7 +108,7 @@ def validate_spawn_params(tool_call: dict) -> None:
 
 def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
     """Resolve public start_phase names to internal phase names."""
-    phase = str(tool_call.get("start_phase", "RESEARCH")).strip().upper()
+    phase = str(tool_call.get("start_phase", "PLAN")).strip().upper()
     return "execute" if phase == "EXECUTE" else "plan"
 
 

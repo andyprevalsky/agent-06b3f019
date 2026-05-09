@@ -83,17 +83,21 @@ bash scripts/check-prompt-human-approval.sh
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
 
-If it fails, stop and ask the human to review the listed prompt modifications. Do not infer approval from silence, prior discussion, or the fact that the branch exists. After the human explicitly approves the prompt changes, rerun the guard with the mandatory flag:
+If it fails, stop and ask the human to review the listed prompt modifications. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
+
+Human approval is scoped only to the prompt diff that exists when approval is requested. If any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing.
+
+After the human explicitly approves the current prompt changes, rerun the guard with the mandatory flag:
 
 ```bash
 bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 ```
 
-Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`.
+1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)

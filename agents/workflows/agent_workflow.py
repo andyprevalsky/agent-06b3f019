@@ -1376,20 +1376,6 @@ class AgentWorkflow:
         except Exception:
             return []
 
-    def _user_goal_reserves_exact_spawn_agent_budget(self) -> bool:
-        """Return whether PLAN-phase spawn_agent calls would spend a user-specified exact budget."""
-        texts: list[str] = []
-        if self.goal:
-            texts.append(str(self.goal))
-        for message in self.context:
-            if str(message.get("role", "")).upper() == "USER":
-                text = message.get("text") or message.get("content")
-                if text:
-                    texts.append(str(text))
-
-        normalized = " ".join(texts).lower()
-        return "spawn_agent" in normalized and "exactly" in normalized
-
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:  # noqa: C901
         """Execute a tool - supports both new and legacy signatures during migration.
 
@@ -1406,28 +1392,6 @@ class AgentWorkflow:
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title=f"❌ {tool_name.replace('_', ' ').title()} failed",
-                    message=error_msg,
-                    status=MessageStatus.ERROR,
-                ),
-                tool_call_id,
-                tool_name,
-            )
-            return {"error": True, "message": error_msg}
-
-        if (
-            tool_name == "spawn_agent"
-            and self.current_phase == "PLAN"
-            and self._user_goal_reserves_exact_spawn_agent_budget()
-        ):
-            error_msg = (
-                "The user specified an exact spawn_agent tool budget. Do not spend that budget during PLAN. "
-                "Call set_plan and attempt_completion to transition to EXECUTE, then use the counted spawn_agent "
-                "calls there."
-            )
-            await self._handle_tool_event(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="❌ Spawn Agent failed",
                     message=error_msg,
                     status=MessageStatus.ERROR,
                 ),

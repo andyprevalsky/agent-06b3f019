@@ -137,20 +137,18 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 - join: {PLANNER_RESPONSE_JOIN_DESCRIPTION}
 """.strip()
 
-RESEARCH_PHASE_PROMPT = """
-You are in the RESEARCH phase. The following finite state machine describes how you should call tools to progress to the EXECUTE phase and thus complete the user task. Do not attempt to complete the task in this phase. If the task is extremely clear then simply call set_plan then attempt_completion. If you are asked to complete a research task, only use spawn_agent to clarify the user's request, not to actually do the research. Stay within the Purpose of your current state. In your private thinking, name:
+PLAN_PHASE_PROMPT = """
+You are in the PLAN phase. The following finite state machine describes how you should call tools to progress to the EXECUTE phase and thus complete the user task. Do not attempt to complete the task in this phase. If the task is extremely clear then simply call set_plan then attempt_completion. If you are asked to complete a research task, only use spawn_agent to clarify the user's request, not to actually do the research. Stay within the Purpose of your current state. In your private thinking, name:
 - current_state before choosing a tool
 - next_state when a tool call transitions the FSM
-Do not use tools or do work that belongs to a different state.
-
-If the user specifies an exact budget for a tool, such as "use spawn_agent exactly twice", do not spend that budget during RESEARCH. Preserve the counted tool calls for EXECUTE by setting a plan and transitioning.
+Do not use tools or do work that belongs to a different state, and do not attempt to complete the goal in this phase. Deliverable work must be done in EXECUTE. PLAN is strictly for clarifying the user's goal if needed and creating a plan of action.
 
 # State Machine
 
-RESEARCH FSM: RESEARCH -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may loop -> RESEARCH after the user replies or after additional explore research. Transitions are tool-driven.
+PLAN FSM: PLAN -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may loop -> PLAN after the user replies or after additional explore research. Transitions are tool-driven.
 
-## RESEARCH (entry)
-- Purpose: clarify the goal; if already clear, call set_plan
+## PLAN (entry)
+- Purpose: clarify the user's goal; if already clear, call set_plan.
 - Enabled tools: send_message_to_user, spawn_agent(type="explore"), set_plan
 - Transition: calling set_plan enters the SET_PLAN state
 
@@ -163,7 +161,7 @@ RESEARCH FSM: RESEARCH -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTIO
 ## ASK_QUESTION
 - Purpose: Ask any questions needed before entering the EXECUTE phase
 - Enabled: send_message_to_user, attempt_completion, spawn_agent(type="explore")
-- Transition: call attempt_completion to EXIT, or spawn_agent to loop back to RESEARCH
+- Transition: call attempt_completion to EXIT, or spawn_agent to loop back to PLAN
 
 ## EXIT (terminal)
 - The orchestrator handles the transition into EXECUTE
@@ -172,11 +170,9 @@ RESEARCH FSM: RESEARCH -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTIO
 EXECUTE_PHASE_PROMPT = """
 You are in the EXECUTE phase. You cannot directly request user input in this phase. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
 
-If your last visible user message already contains the final answer or fulfilled deliverable, call attempt_completion next. Do not repeat the same visible message. Use wait_for only when the user goal requires waiting for a real future time or external condition.
-
 In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
 
-The beginning of your context might have information generated from the RESEARCH phase, do not confuse those actions as being part of your current directive.
+The beginning of your context might have information generated from the PLAN phase, do not confuse those actions as being part of your current directive.
 """
 
 MAIN_SYSTEM_PROMPT = """
@@ -230,7 +226,7 @@ They should be treated as information pointers so that you don't have to rewrite
 
 Use them in 'goal' strings you pass to creating a sub_agent of any type instead of rewriting or summarizing information. Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring. These pointers will be automatically resolved to the information they point to before each LLM call.
 
-Your harness splits up your work into 3 phases, a RESEARCH phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either RESEARCH or EXECUTE and aren't guaranteed to have been through a RESEARCH phase before you spawn into the EXECUTE phase. The RESEARCH phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
+Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
 """
 
 
@@ -258,7 +254,7 @@ def build_system_prompt(  # noqa: C901
     prompt += "\n\n# Current Phase\n\n"
 
     if phase == "PLAN":
-        prompt += RESEARCH_PHASE_PROMPT.strip()
+        prompt += PLAN_PHASE_PROMPT.strip()
     else:
         prompt += EXECUTE_PHASE_PROMPT.strip()
 
@@ -684,7 +680,7 @@ __all__ = [
     "CONTEXT_POINTERS_RULE",
     "FILE_HANDLING_RULE",
     "CRITICAL_CONSTRAINTS_RULE",
-    "RESEARCH_PHASE_PROMPT",
+    "PLAN_PHASE_PROMPT",
     "EXECUTE_PHASE_PROMPT",
     "SYSTEM_PROMPT_DYNAMIC_BOUNDARY",
 ]

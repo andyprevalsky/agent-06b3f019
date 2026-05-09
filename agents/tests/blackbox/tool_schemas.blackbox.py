@@ -263,7 +263,7 @@ def test_spawn_agent_for_each_items_and_csv_raises():
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
-            start_phase="RESEARCH",
+            start_phase="PLAN",
             items=["a"],
             items_csv="x,y",
         ),
@@ -288,7 +288,7 @@ def test_spawn_agent_for_each_no_items_raises():
             type="for_each",
             goal=LONG_GOAL,
             output_schema=schema,
-            start_phase="RESEARCH",
+            start_phase="PLAN",
         ),
         "items",
     )
@@ -418,7 +418,7 @@ def test_spawn_agent_short_goal_allowed():
         type="sub_agent",
         goal="short",
         output_schema=schema,
-        start_phase="RESEARCH",
+        start_phase="PLAN",
     )
     assert t.goal == "short"
 
