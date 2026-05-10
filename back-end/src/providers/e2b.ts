@@ -45,7 +45,11 @@ function workDirForGithubRepo(githubRepoUrl?: string): string {
   if (!githubRepoUrl) return '/home/user';
   try {
     const parsed = new URL(githubRepoUrl);
-    const repoName = parsed.pathname.split('/').filter(Boolean).pop()?.replace(/\.git$/, '');
+    const repoName = parsed.pathname
+      .split('/')
+      .filter(Boolean)
+      .pop()
+      ?.replace(/\.git$/, '');
     return repoName ? `/home/user/${repoName}` : '/home/user';
   } catch {
     return '/home/user';

@@ -147,10 +147,8 @@ async function waitForCodexOutput(
 }
 
 async function testPromptBuilder_sharedContractMentionsOutputRules() {
-  const {
-    buildCodeAgentSystemPrompt,
-    CODE_AGENT_INSTRUCTIONS_VERSION,
-  } = await import('../../providers/codeAgentPrompt');
+  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
+    await import('../../providers/codeAgentPrompt');
 
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/acme/widgets.git',

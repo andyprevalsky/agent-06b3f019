@@ -966,7 +966,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       ws.close();
       reject(
         new Error(
-            `Timed out after 240s waiting for Claude Code smoke output. ` +
+          `Timed out after 240s waiting for Claude Code smoke output. ` +
             `Output so far (${wsOutput.length} chars): ${wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '').slice(-500)}`
         )
       );
