@@ -230,9 +230,9 @@ def test_for_each_aggregate_parent_result_pairs_declared_tool_use():
         _tool_result(f"{parent_id}:1", "child 1", ts="2024-01-01T00:00:03.000Z"),
         _tool_result(parent_id, "Completed for_each delegation.", ts="2024-01-01T00:00:04.000Z"),
     ]
-    messages[2]["metadata"]["toolName"] = "spawn_sub_agent"
-    messages[3]["metadata"]["toolName"] = "spawn_sub_agent"
-    messages[4]["metadata"]["toolName"] = "spawn_sub_agent_for_each"
+    messages[2]["metadata"]["toolName"] = "spawn_general_purpose_agent"
+    messages[3]["metadata"]["toolName"] = "spawn_general_purpose_agent"
+    messages[4]["metadata"]["toolName"] = "spawn_general_purpose_agent_for_each"
 
     violations = validate_context(messages)
     pairing_errors = [

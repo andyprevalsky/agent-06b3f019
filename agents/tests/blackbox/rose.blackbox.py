@@ -55,6 +55,7 @@ from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
 )
+from providers.rose.client import _cache_input_accounting
 from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
@@ -1270,6 +1271,21 @@ class _FakeStream:
         return None
 
 
+class _DelayedFakeStream(_FakeStream):
+    def __init__(self, lines, first_delay: float):
+        super().__init__(lines)
+        self._first_delay = first_delay
+
+    def aiter_lines(self):
+        async def gen():
+            for idx, line in enumerate(self._lines):
+                if idx == 0:
+                    await asyncio.sleep(self._first_delay)
+                yield line
+
+        return gen()
+
+
 def _ev(event: str, data: dict):
     return [f"event: {event}", f"data: {json.dumps(data)}", ""]
 
@@ -1664,6 +1680,29 @@ async def test_parse_responses_sse_content_and_usage():
     assert usage["cache_read_input_tokens"] == 2
 
 
+async def test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line():
+    lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"Hello"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}',
+        "",
+        "data: [DONE]",
+    ]
+    chunks = [
+        c
+        async for c in parse_responses_sse(
+            _DelayedFakeStream(lines, first_delay=0.05),
+            actual_model="gpt-5.4-gpt",
+            pool_name="gpt-token",
+            request_id="r-delayed-first-line",
+            idle_timeout_s=0.01,
+        )
+    ]
+    assert "".join(c.data.get("text", "") for c in chunks if c.kind == "content") == "Hello"
+
+
 async def test_parse_responses_sse_function_call_item():
     lines = [
         "event: response.output_item.done",
@@ -1837,6 +1876,7 @@ def test_build_codex_responses_body_contract():
         request_id="no-system",
     )
     assert no_system_body["instructions"] == "You are a helpful assistant."
+    assert "reasoning" not in no_system_body
     max_effort_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -2251,6 +2291,49 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
         chunks.append(chunk)
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data.get("claude_token_error") == "auth_error"
+
+
+async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
+    """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
+
+    async def stalled_direct_auth(**kwargs):
+        await asyncio.sleep(0.05)
+        yield StreamChunk(kind="content", data={"text": "too late"})
+
+    async def waterfall_ok(**kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-lite"})
+        yield StreamChunk(kind="content", data={"text": "fallback ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "fallback-model",
+                "pool_name": "rose-1-lite",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    with (
+        patch("providers.rose.client._try_claude_auth", stalled_direct_auth),
+        patch("providers.rose.client.waterfall_complete", waterfall_ok),
+    ):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=claude_auth_from_token("ct"),
+                call_site="test-direct-ttft-fallthrough",
+                ttft_timeout_s=0.01,
+                idle_timeout_s=0.1,
+            )
+        )
+
+    assert any(c.kind == "content" and c.data.get("text") == "fallback ok" for c in chunks)
+    metadata = next(c for c in chunks if c.kind == "metadata")
+    assert metadata.data["claude_token_error"] == "stall"
 
 
 async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
@@ -2678,9 +2761,101 @@ async def test_client_deadline_enforced():
     assert raised
 
 
+async def test_client_ttft_timeout_waits_for_first_productive_chunk():
+    """Metadata alone does not satisfy TTFT; first content/tool/reasoning must arrive."""
+
+    async def slow_first_productive_chunk(**kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "test-model"})
+        await asyncio.sleep(0.05)
+        yield StreamChunk(kind="content", data={"text": "late"})
+
+    client = RoseClient(openrouter_key="ork-x")
+    raised = False
+    with patch("providers.rose.client.waterfall_complete", slow_first_productive_chunk):
+        try:
+            async for _ in client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                call_site="test-ttft",
+                ttft_timeout_s=0.01,
+                idle_timeout_s=0.1,
+            ):
+                pass
+        except RoseStallError as exc:
+            raised = "TTFT" in str(exc)
+    assert raised
+
+
+async def test_client_allows_idle_gap_after_first_productive_chunk():
+    """After content starts, only the overall deadline guards later chunks."""
+
+    async def slow_second_chunk(**kwargs):
+        yield StreamChunk(kind="content", data={"text": "first"})
+        await asyncio.sleep(0.05)
+        yield StreamChunk(kind="content", data={"text": "late"})
+
+    client = RoseClient(openrouter_key="ork-x")
+    chunks = []
+    with patch("providers.rose.client.waterfall_complete", slow_second_chunk):
+        async for chunk in client.complete(
+            pool="rose-1-lite",
+            messages=[{"role": "user", "content": "hi"}],
+            call_site="test-idle",
+            ttft_timeout_s=0.1,
+            idle_timeout_s=0.01,
+        ):
+            chunks.append(chunk)
+    assert [c.data.get("text") for c in chunks if c.kind == "content"] == ["first", "late"]
+
+
 # =====================================================================
 # Cache hit rate smoke tests
 # =====================================================================
+
+
+def test_cache_input_accounting_claude_auth_uses_exclusive_anthropic_counters():
+    """Anthropic input_tokens excludes cache read/write tokens."""
+    stats = _cache_input_accounting(
+        actual_model="claude-sonnet-4-6-claude",
+        prompt_tokens=500,
+        cache_read=4500,
+        cache_write=100,
+    )
+
+    assert stats["cache_accounting"] == "exclusive"
+    assert stats["total_input"] == 5100
+    assert stats["uncached_input"] == 500
+    assert stats["cache_hit_pct"] == 88
+
+
+def test_cache_input_accounting_gpt_uses_inclusive_openai_counters():
+    """OpenAI/OpenRouter cached_tokens are part of prompt_tokens."""
+    stats = _cache_input_accounting(
+        actual_model="gpt-5.5-gpt",
+        prompt_tokens=9859,
+        cache_read=9472,
+        cache_write=0,
+    )
+
+    assert stats["cache_accounting"] == "inclusive"
+    assert stats["total_input"] == 9859
+    assert stats["uncached_input"] == 387
+    assert stats["cache_hit_pct"] == 96
+
+
+def test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details():
+    """OpenRouter exposes prompt_tokens_details as OpenAI-compatible usage."""
+    stats = _cache_input_accounting(
+        actual_model="openai/gpt-4.1",
+        prompt_tokens=2048,
+        cache_read=1920,
+        cache_write=0,
+    )
+
+    assert stats["cache_accounting"] == "inclusive"
+    assert stats["total_input"] == 2048
+    assert stats["uncached_input"] == 128
+    assert stats["cache_hit_pct"] == 94
 
 
 async def test_claude_auth_stream_reports_cache_hit_rate():
@@ -2948,6 +3123,10 @@ async def run_all_tests():
     await r.record_async("openai_sse_reasoning_alias", test_parse_openai_sse_reasoning_content_alias)
     await r.record_async("openai_sse_empty_stalls", test_parse_openai_sse_empty_stream_raises_stall)
     await r.record_async("responses_sse_content_usage", test_parse_responses_sse_content_and_usage)
+    await r.record_async(
+        "responses_sse_ignores_idle_before_first_line",
+        test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line,
+    )
     await r.record_async("responses_sse_function_call_item", test_parse_responses_sse_function_call_item)
     await r.record_async("responses_sse_reasoning_delta_events", test_parse_responses_sse_reasoning_delta_events)
     await r.record_async(
@@ -2987,6 +3166,10 @@ async def run_all_tests():
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "client_direct_auth_ttft_fallthrough",
+        test_client_direct_auth_ttft_falls_through_before_first_chunk,
+    )
     await r.record_async("client_no_supplied_gpt_fallback", test_client_does_not_use_supplied_gpt_auth_as_fallback)
     await r.record_async(
         "client_compute_rotates_across_providers",
@@ -3003,7 +3186,18 @@ async def run_all_tests():
         "client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format
     )
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
+    await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
+    await r.record_async("client_allows_idle_after_first_token", test_client_allows_idle_gap_after_first_productive_chunk)
 
+    r.record(
+        "cache_accounting_claude_exclusive",
+        test_cache_input_accounting_claude_auth_uses_exclusive_anthropic_counters,
+    )
+    r.record("cache_accounting_gpt_inclusive", test_cache_input_accounting_gpt_uses_inclusive_openai_counters)
+    r.record(
+        "cache_accounting_openrouter_inclusive",
+        test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details,
+    )
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)
     r.record("cache_structure_real_prompt", test_build_anthropic_body_cache_structure_from_real_prompt)
 

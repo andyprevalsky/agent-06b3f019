@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 import structlog
 
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
-from domains.spawn_browser_agent_v3.repo import call_extract_llm
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -355,13 +354,10 @@ async def execute_action(  # noqa: C901
             return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
 
         elif action_name == "extract":
-            return await _execute_extract(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                params=params,
-                thinking=thinking,
-            )
+            return {
+                "success": False,
+                "error": "extract is disabled. Use evaluate to read DOM/page content directly.",
+            }
 
         elif action_name == "done":
             text = params.get("text", "")
@@ -951,33 +947,11 @@ async def _execute_extract(
     params: Dict,
     thinking: Any,
 ) -> Dict[str, Any]:
-    """Execute an extract action using browser-use markdown extraction + LLM."""
-    from browser_use.dom.markdown_extractor import extract_clean_markdown
-
-    instruction = params.get("instruction", "")
-    extract_links = params.get("extract_links", False)
-
-    try:
-        content, content_stats = await extract_clean_markdown(browser_session=session, extract_links=extract_links)
-        current_url = await session.get_current_page_url()
-
-        extracted_content = await call_extract_llm(
-            instruction=instruction,
-            page_content=content,
-            current_url=current_url,
-        )
-
-        await action_history.record_action(
-            dom_service=dom_service,
-            action="extract",
-            thinking=thinking,
-            params={"instruction": instruction},
-            result={"success": True, "content": extracted_content},
-        )
-        return {"success": True, "message": extracted_content, "content": extracted_content}
-    except Exception as e:
-        logger.error(f"Extract failed: {e}")
-        return {"success": False, "error": str(e)}
+    """Disabled legacy LLM-backed extraction action."""
+    return {
+        "success": False,
+        "error": "extract is disabled. Use evaluate to read DOM/page content directly.",
+    }
 
 
 async def _execute_upload_file(

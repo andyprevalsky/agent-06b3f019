@@ -50,6 +50,7 @@ from benchmarks.benchmark_tasks import (
     get_smoke_cap,
     get_task_by_name,
     get_tasks_by_tag,
+    get_timeout_floor,
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
@@ -136,6 +137,15 @@ def _normalize_attention_requests_response(data) -> list:
 def _ci_should_fail(summary: dict) -> bool:
     """CI must fail on both failed and skipped benchmark tasks."""
     return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+
+
+def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = None) -> int:
+    """Return the configured timeout used when dynamic history is unavailable."""
+    timeout = task.timeout_seconds
+    if max_seconds is not None:
+        timeout = min(timeout, max_seconds)
+    floor = get_timeout_floor(task.name)
+    return max(timeout, floor) if floor else timeout
 
 
 # ============================================================
@@ -1443,8 +1453,8 @@ def _verify_worker_queue_alignment():
     """Verify a local worker process is running on the expected task queue.
 
     Derives the expected queue from CONDUCTOR_WORKSPACE_NAME (matching run.sh's
-    derivation), then checks /proc/<pid>/environ for each `python worker.py`
-    process to confirm it matches.
+    derivation), then checks each `python worker.py` process in this workspace
+    to confirm it matches.
     """
     import subprocess
 
@@ -1455,33 +1465,31 @@ def _verify_worker_queue_alignment():
     expected_queue = f"navi-agent-tasks-{workspace}"
 
     result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
-    pids = _extract_worker_pids_from_ps(result.stdout)
+    workspace_root = Path(__file__).resolve().parents[2]
+    pids = _worker_pids_for_workspace(result.stdout, workspace_root)
     if not pids:
         print(f"  ❌ No worker process found (expected on queue {expected_queue})")
         print(f"     Start it: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
         sys.exit(1)
 
+    unreadable_pids: list[str] = []
     for pid in pids:
-        try:
-            with open(f"/proc/{pid}/environ", "rb") as f:
-                env_bytes = f.read()
-            env_pairs = env_bytes.split(b"\0")
-            worker_queue = None
-            for pair in env_pairs:
-                if pair.startswith(b"TEMPORAL_TASK_QUEUE="):
-                    worker_queue = pair.split(b"=", 1)[1].decode()
-                    break
-            if worker_queue and worker_queue != expected_queue:
-                print(f"  ❌ Worker (pid {pid}) on queue '{worker_queue}' but benchmark expects '{expected_queue}'")
-                print(f"     Kill it and restart: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
-                sys.exit(1)
-            if worker_queue == expected_queue:
-                print(f"  ✅ Worker aligned on queue {expected_queue}")
-                return
-        except (FileNotFoundError, PermissionError):
-            pass
+        worker_queue = _read_process_env_var(pid, "TEMPORAL_TASK_QUEUE")
+        if worker_queue is None:
+            unreadable_pids.append(pid)
+            continue
+        if worker_queue != expected_queue:
+            print(f"  ❌ Worker (pid {pid}) on queue '{worker_queue}' but benchmark expects '{expected_queue}'")
+            print(f"     Kill it and restart: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
+            sys.exit(1)
+        print(f"  ✅ Worker aligned on queue {expected_queue}")
+        return
 
-    print(f"  ⚠ Worker running but could not verify queue alignment (expected {expected_queue})")
+    print(
+        f"  ❌ Worker process(es) {', '.join(unreadable_pids)} found for this workspace, "
+        f"but TEMPORAL_TASK_QUEUE could not be verified"
+    )
+    sys.exit(1)
 
 
 def _extract_worker_pids_from_ps(ps_output: str, workspace_root: str | None = None) -> list[str]:
@@ -1502,6 +1510,61 @@ def _extract_worker_pids_from_ps(ps_output: str, workspace_root: str | None = No
         if "worker.py" in command_lower and "python" in command_lower:
             pids.append(pid)
     return pids
+
+
+def _worker_pids_for_workspace(ps_output: str, workspace_root: Path, process_factory=None) -> list[str]:
+    """Return worker PIDs whose cwd is inside this workspace.
+
+    macOS `ps` output often contains only `python worker.py`, so command-string
+    filtering is not enough to distinguish concurrent Conductor workspaces.
+    """
+    root_pids = _extract_worker_pids_from_ps(ps_output)
+    agents_root = workspace_root / "agents"
+    if process_factory is None:
+        try:
+            import psutil
+
+            process_factory = psutil.Process
+        except Exception:
+            return _extract_worker_pids_from_ps(ps_output, str(workspace_root))
+
+    matched: list[str] = []
+    for pid in root_pids:
+        try:
+            proc = process_factory(int(pid))
+            if _process_cwd_is_under(proc, agents_root):
+                matched.append(pid)
+        except Exception:
+            continue
+    return matched
+
+
+def _read_process_env_var(pid: str, key: str, process_factory=None) -> str | None:
+    """Read an environment variable from a process on macOS/Linux."""
+    if process_factory is None:
+        try:
+            import psutil
+
+            process_factory = psutil.Process
+        except Exception:
+            process_factory = None
+
+    if process_factory is not None:
+        try:
+            return process_factory(int(pid)).environ().get(key)
+        except Exception:
+            pass
+
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            env_bytes = f.read()
+        prefix = f"{key}=".encode()
+        for pair in env_bytes.split(b"\0"):
+            if pair.startswith(prefix):
+                return pair.split(b"=", 1)[1].decode()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return None
 
 
 def _process_cwd_is_under(proc, expected_root: Path) -> bool:
@@ -1882,8 +1945,8 @@ async def main_async(args):
     # recorded this run seed/extend the corpus for future dynamic caps. This lets
     # bootstrap widen the cap when infra slowdown has pushed real durations past the
     # existing p95 (otherwise the tight dynamic cap kills every run before it can pass).
-    # In non-bootstrap mode, any task lacking history is a hard error.
-    missing_history: List[str] = []
+    # In non-bootstrap mode, incomplete history falls back to the configured task
+    # timeout so new or low-sample tasks can still run and accumulate pass data.
     for t in tasks:
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
@@ -1895,28 +1958,23 @@ async def main_async(args):
             continue
         cap = get_smoke_cap(t.name)
         try:
-            t._resolved_timeout_seconds = _history_get_timeout(t.name, max_seconds=cap)
+            history_timeout = _history_get_timeout(t.name, max_seconds=cap)
         except InsufficientHistoryError as e:
-            missing_history.append(f"{t.name} ({e.have}/{e.need})")
-        else:
-            s = _history_summary(t.name, max_seconds=cap)
-            cap_note = f", cap={cap}s" if cap else ""
+            t._resolved_timeout_seconds = _default_timeout_for_task(t, cap)
             print(
                 f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note})"
+                f"(default; history n={e.have}/{e.need})"
             )
-    if missing_history:
-        print("\n  ❌ Timeout history is insufficient for the following tasks:")
-        for m in missing_history:
-            print(f"      - {m}")
-        print("\n  Bootstrap the corpus by running smoke with --bootstrap until")
-        print("  every task has ≥5 passed runs, e.g.:")
-        print("    cd agents && for i in 1 2 3 4 5; do \\")
-        print(f"      python benchmarks/run_benchmark.py --suite {suite_name_for_error(args)} \\")
-        print("          --port $CONDUCTOR_PORT --ci --parallel --bootstrap; \\")
-        print("    done")
-        print("  Then commit agents/benchmarks/history/task_durations.jsonl.")
-        sys.exit(1)
+        else:
+            floor = get_timeout_floor(t.name)
+            t._resolved_timeout_seconds = max(history_timeout, floor) if floor else history_timeout
+            s = _history_summary(t.name, max_seconds=cap)
+            cap_note = f", cap={cap}s" if cap else ""
+            floor_note = f", floor={floor}s" if floor else ""
+            print(
+                f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
+                f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note}{floor_note})"
+            )
 
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()

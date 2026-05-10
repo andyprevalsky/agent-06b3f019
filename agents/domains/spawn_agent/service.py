@@ -65,7 +65,7 @@ def validate_spawn_params(tool_call: dict) -> None:
 
     if not agent_type:
         raise ValueError(
-            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore', 'for_each'."
+            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'general_purpose', 'explore', 'for_each'."
         )
 
     if agent_type not in VALID_AGENT_TYPES:
@@ -79,17 +79,17 @@ def validate_spawn_params(tool_call: dict) -> None:
     if agent_type == "browser" and not tool_call.get("start_url"):
         raise ValueError("spawn_agent(type='browser') requires 'start_url'. Provide the URL to navigate to.")
 
-    if agent_type in ("browser", "code", "sub_agent", "for_each") and not tool_call.get("output_schema"):
+    if agent_type in ("browser", "code", "general_purpose", "for_each") and not tool_call.get("output_schema"):
         raise ValueError(
             f"spawn_agent(type='{agent_type}') requires 'output_schema'. "
             "Define the expected response structure with fields."
         )
 
-    if agent_type in ("sub_agent", "for_each"):
+    if agent_type in ("general_purpose", "for_each"):
         start_phase = tool_call.get("start_phase")
         if start_phase is not None and str(start_phase).strip().upper() not in ("PLAN", "EXECUTE"):
             raise ValueError(
-                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'PLAN' or 'EXECUTE'."
+                "spawn_agent(type='general_purpose'|'for_each') start_phase must be either 'PLAN' or 'EXECUTE'."
             )
 
     if agent_type == "for_each":

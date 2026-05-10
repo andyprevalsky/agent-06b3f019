@@ -54,12 +54,78 @@ def test_process_cwd_is_under_accepts_nested_paths():
     assert _process_cwd_is_under(Proc(), Path("/Users/me/workspaces/other/agents")) is False
 
 
+def test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd():
+    """Queue preflight ignores same-name workers from other Conductor workspaces."""
+    from pathlib import Path
+    from benchmarks.run_benchmark import _worker_pids_for_workspace
+
+    ps_output = """
+      111 python worker.py
+      222 python worker.py
+    """
+
+    class Proc:
+        def __init__(self, pid: int):
+            self.pid = pid
+
+        def cwd(self):
+            return {
+                111: "/Users/me/workspaces/current/agents",
+                222: "/Users/me/workspaces/other/agents",
+            }[self.pid]
+
+    assert _worker_pids_for_workspace(ps_output, Path("/Users/me/workspaces/current"), Proc) == ["111"]
+
+
+def test_read_process_env_var_uses_portable_process_environ():
+    """Queue preflight can verify env vars on macOS where /proc is unavailable."""
+    from benchmarks.run_benchmark import _read_process_env_var
+
+    class Proc:
+        def __init__(self, _pid: int):
+            pass
+
+        def environ(self):
+            return {"TEMPORAL_TASK_QUEUE": "navi-agent-tasks-quebec"}
+
+    assert _read_process_env_var("111", "TEMPORAL_TASK_QUEUE", Proc) == "navi-agent-tasks-quebec"
+
+
 def test_ci_should_fail_on_skipped_required_task():
     """CI treats skipped benchmark tasks as blocking failures."""
     from benchmarks.run_benchmark import _ci_should_fail
 
     assert _ci_should_fail({"failed": 0, "skipped": 1}) is True
     assert _ci_should_fail({"failed": 0}) is False
+
+
+def test_outreach_batch_has_timeout_floor():
+    """Outreach batch keeps enough time for root research before row fanout."""
+    from benchmarks.benchmark_tasks import get_timeout_floor
+
+    assert get_timeout_floor("outreach-batch") == 480
+    assert get_timeout_floor("chat-mode") is None
+
+
+def test_timeout_default_uses_task_config_when_history_is_missing():
+    """Tasks without enough history still get a runnable configured timeout."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _default_timeout_for_task
+
+    task = get_task_by_name("load-test-sias")
+
+    assert task.timeout_seconds == 300
+    assert _default_timeout_for_task(task) == 300
+
+
+def test_timeout_default_respects_explicit_floor():
+    """Configured fallback timeouts still honor task-specific minimum floors."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _default_timeout_for_task
+
+    task = get_task_by_name("outreach-batch")
+
+    assert _default_timeout_for_task(task, max_seconds=120) == 480
 
 
 async def test_code_agent_preflight_accepts_gpt_compute_token():
@@ -222,6 +288,77 @@ def test_local_plan_runs_load_tests_separately():
     ]
 
 
+async def test_tree_log_collection_fetches_supabase_once():
+    """Tree diagnostics reuse time-windowed Supabase gateway logs."""
+    from datetime import datetime, timezone
+
+    import benchmarks.logs as logs
+
+    fetch_calls = []
+    collect_calls = []
+
+    async def fake_fetch_supabase_logs(agent_id, start_time, end_time=None, limit=200):
+        fetch_calls.append((agent_id, start_time, end_time, limit))
+        return ["root research log"]
+
+    async def fake_collect_logs(agent_id, agent_data, start_time, research_logs=None):
+        collect_calls.append((agent_id, research_logs))
+        return {
+            "messages": [],
+            "backend_logs": [],
+            "worker_logs": [],
+            "research_logs": list(research_logs or []),
+            "realtime_logs": [],
+        }
+
+    original_fetch = logs.fetch_supabase_logs
+    original_collect = logs.collect_logs
+    try:
+        logs.fetch_supabase_logs = fake_fetch_supabase_logs
+        logs.collect_logs = fake_collect_logs
+
+        start_time = datetime(2026, 5, 9, tzinfo=timezone.utc)
+
+        async def fake_get_agent(_aid):
+            return {"agent": {}}
+
+        result = await logs.collect_tree_logs(
+            "root-agent-id",
+            [
+                {
+                    "agent_id": "root-agent-id",
+                    "parent_agent_id": None,
+                    "goal": "root",
+                    "status": "ACTIVE",
+                },
+                {
+                    "agent_id": "child-agent-id",
+                    "parent_agent_id": "root-agent-id",
+                    "goal": "child",
+                    "status": "ACTIVE",
+                },
+            ],
+            start_time,
+            get_agent_fn=fake_get_agent,
+        )
+    finally:
+        logs.fetch_supabase_logs = original_fetch
+        logs.collect_logs = original_collect
+
+    assert [call[0] for call in fetch_calls] == ["root-agent-id"]
+    assert collect_calls == [
+        ("root-agent-id", ["root research log"]),
+        (
+            "child-agent-id",
+            ["[supabase] Gateway logs are tree-scoped; see root agent root-agent-i research logs"],
+        ),
+    ]
+    assert result["root-agent-id"]["logs"]["research_logs"] == ["root research log"]
+    assert result["child-agent-id"]["logs"]["research_logs"] == [
+        "[supabase] Gateway logs are tree-scoped; see root agent root-agent-i research logs"
+    ]
+
+
 def test_local_benchmark_args_for_multi_task_exclude_complement():
     """Multi-task local runs use one run_benchmark invocation with explicit exclusions."""
     from benchmarks.local import build_benchmark_args
@@ -322,11 +459,38 @@ def test_local_extract_results_path_and_diagnostic_commands():
     output = "hello\n  Results saved: /tmp/bench.json\nbye\n"
     assert str(extract_results_path(output)) == "/tmp/bench.json"
 
-    commands = diagnostic_commands("agent-123", port=55120)
+    commands = diagnostic_commands("agent-123", task_name="browser-agent", port=55120)
     joined = [" ".join(command) for command in commands]
     assert any("agent_latency.py agent-123" in command for command in joined)
     assert any("agent_logs.py agent-123 --tree --diagnostics --url http://localhost:55120" in command for command in joined)
     assert any("agent_cache.py agent-123" in command for command in joined)
+
+
+def test_agent_cache_stats_respects_provider_accounting():
+    """agent_cache reinterprets old llm.cache rows with provider-specific denominators."""
+    from benchmarks.agent_cache import _cache_stats
+
+    claude = _cache_stats(
+        {
+            "actual_model": "claude-sonnet-4-6-claude",
+            "prompt_tokens": 500,
+            "cache_read": 4500,
+            "cache_write": 100,
+        }
+    )
+    assert claude["cache_accounting"] == "exclusive"
+    assert claude["cache_hit_pct"] == 88
+
+    gpt = _cache_stats(
+        {
+            "actual_model": "gpt-5.5-gpt",
+            "prompt_tokens": 9859,
+            "cache_read": 9472,
+            "cache_write": 0,
+        }
+    )
+    assert gpt["cache_accounting"] == "inclusive"
+    assert gpt["cache_hit_pct"] == 96
 
 
 def test_local_parse_args_rejects_ambiguous_selection():
@@ -371,7 +535,8 @@ def test_local_diagnostics_timeout_is_recorded():
 
     original = local.diagnostic_commands
 
-    def slow_command(_agent_id, *, port):
+    def slow_command(_agent_id, *, task_name, port):
+        assert task_name == "browser-agent"
         assert port == 55120
         return [[sys.executable, "-c", "import time; time.sleep(5)"]]
 
@@ -463,7 +628,7 @@ def test_logical_tool_counts_ignore_progress_messages():
         },
         {
             "metadata": {
-                "toolName": "spawn_sub_agent",
+                "toolName": "spawn_general_purpose_agent",
                 "toolStatus": "FINISHED",
                 "toolCallId": "sub-1",
                 "subAgentId": "agent-1",
@@ -471,7 +636,7 @@ def test_logical_tool_counts_ignore_progress_messages():
         },
         {
             "metadata": {
-                "toolName": "spawn_sub_agent",
+                "toolName": "spawn_general_purpose_agent",
                 "toolStatus": "FINISHED",
                 "toolCallId": "sub-1",
             }
@@ -534,7 +699,7 @@ def test_logical_tool_counts_ignore_progress_messages():
 
     assert _count_logical_tool_calls_from_messages(messages) == {
         "spawn_agent": 1,
-        "spawn_sub_agent": 1,
+        "spawn_general_purpose_agent": 1,
         "spawn_browser_agent": 1,
         "spawn_claude_code_agent": 1,
         "message_person": 1,
@@ -548,7 +713,12 @@ async def run_all_tests():
     r.record("extract_worker_pids_lowercase_python", test_extract_worker_pids_from_ps_matches_lowercase_python)
     r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)
     r.record("process_cwd_workspace_filter", test_process_cwd_is_under_accepts_nested_paths)
+    r.record("worker_pids_workspace_cwd_filter", test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd)
+    r.record("read_process_env_var_portable", test_read_process_env_var_uses_portable_process_environ)
     r.record("ci_fails_on_skipped", test_ci_should_fail_on_skipped_required_task)
+    r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
+    r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
+    r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
@@ -558,11 +728,13 @@ async def run_all_tests():
     r.record("count_only_releases_by_denial", test_count_only_releases_observed_approvals_by_denial)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
+    await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
     r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
     r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
+    r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)
     r.record("local_parse_args_rejects_invalid_concurrency", test_local_parse_args_rejects_invalid_concurrency)
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)

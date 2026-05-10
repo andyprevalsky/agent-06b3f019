@@ -1,5 +1,5 @@
 /**
- * spawn_sub_agent routing logic.
+ * General-purpose agent spawn routing logic.
  *
  * Branches:
  *   (a) pre-spawn error (status ERROR, no subAgentIds, no subAgentId)
@@ -7,11 +7,11 @@
  *   (b) summary with subAgentIds + busId
  *       → SubAgentTree (tree view with live bus updates)
  *   (c) initial spawning message (IN_PROGRESS, no subAgentId)
- *       → "└─ ○ Spawning sub-agents..." placeholder
+ *       → "└─ ○ Spawning general-purpose agents..." placeholder
  *   (d) individual progress update (has subAgentId)
  *       → SubAgentToolBubble
  *
- * Returns null when the message is not a sub-agent tool event.
+ * Returns null when the message is not a general-purpose agent tool event.
  */
 import type { Message } from '../../hooks';
 import SubAgentTree from '../SubAgentTree';
@@ -36,8 +36,8 @@ export function SubAgentBubble({
 
   // Pre-spawn error
   if (rawToolStatus === 'ERROR' && !subAgentIds && !metadata.subAgentId) {
-    const errorTitle = (metadata.title as string) || 'Sub-agent';
-    const errorMsg = message.text || 'Failed to spawn sub-agent';
+    const errorTitle = (metadata.title as string) || 'General-purpose agent';
+    const errorMsg = message.text || 'Failed to spawn general-purpose agent';
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <div className="flex items-center gap-1 font-mono text-sm text-red-500">
@@ -79,7 +79,9 @@ export function SubAgentBubble({
         <div className="flex items-center gap-1 font-mono text-sm">
           <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">└─</span>
           <span className="w-4 text-center select-none animate-pulse">○</span>
-          <span className="text-gray-700 dark:text-gray-300">Spawning sub-agents...</span>
+          <span className="text-gray-700 dark:text-gray-300">
+            Spawning general-purpose agents...
+          </span>
         </div>
       </div>
     );
@@ -90,7 +92,7 @@ export function SubAgentBubble({
       <div className="flex-1">
         <SubAgentToolBubble
           toolCallId={(metadata.toolCallId as string | undefined) || ''}
-          title={(metadata.title as string | undefined) || 'Sub-agent'}
+          title={(metadata.title as string | undefined) || 'General-purpose agent'}
           message={message.text}
           status={toolStatus}
           progress={(metadata.progress as number | undefined) || 0}

@@ -116,7 +116,7 @@ def classify_claude_token_error(exc: RoseError) -> str:
     Values match the strings the TS edge function emitted:
       - "auth_error"      -> 401/403, or rotation exhausted
       - "rate_limit"      -> 429 after retries
-      - "stall"           -> TTFT/idle timeout (RoseStallError)
+      - "stall"           -> TTFT miss (RoseStallError)
       - "invalid_request" -> 400 (does NOT trigger rotation upstream)
       - "server_error"    -> 5xx after retries
     """

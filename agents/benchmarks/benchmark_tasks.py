@@ -50,9 +50,22 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
 }
 
 
+TASK_TIMEOUT_FLOORS: dict[str, int] = {
+    # This batch intentionally does upfront outreach research before spawning
+    # 40 row agents. Historical local passes are from older, narrower task
+    # shapes, so do not let the dynamic cap collapse below this floor.
+    "outreach-batch": 480,
+}
+
+
 def get_smoke_cap(name: str) -> int | None:
     """Return the hard timeout cap for a smoke task, or None if not a smoke task."""
     return SMOKE_TIMEOUT_CAPS.get(name)
+
+
+def get_timeout_floor(name: str) -> int | None:
+    """Return the minimum dynamic timeout for a task, if it needs one."""
+    return TASK_TIMEOUT_FLOORS.get(name)
 
 
 def _load_tasks() -> List[BenchmarkTask]:

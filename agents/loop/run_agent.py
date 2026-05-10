@@ -821,6 +821,8 @@ async def run_agent(  # noqa: C901
                         agent_id=agent_id,
                         tool_name=tool_name,
                         tool_call_id=tool_call_id,
+                        span_source="agents.loop.run_agent.run_agent.execute_single_tool",
+                        span_key="agents.loop.run_agent.run_agent.execute_single_tool",
                     ):
                         result = await execute_tool(tool_name, tool_args, tool_call_id)
                     return {"tool_name": tool_name, "tool_call_id": tool_call_id, "result": result, "error": None}
@@ -1023,6 +1025,8 @@ async def run_agent(  # noqa: C901
                             agent_id=agent_id,
                             tool_name=tool_name,
                             tool_call_id=tool_call_id,
+                            span_source="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
+                            span_key="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
                         ):
                             await execute_tool(tool_name, execution_tool_args, tool_call_id)
                     except Exception as e:

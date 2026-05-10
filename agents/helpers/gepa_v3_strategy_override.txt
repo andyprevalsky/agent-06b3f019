@@ -14,9 +14,9 @@ Tool selection guidance:
 - web_search: only for discovering the right official pages and recent updates; not for final factual extraction.
 - web_fetch: for extracting and quoting/structuring content from a single URL (one URL per task). If you need multiple URLs, either:
   (a) make separate web_fetch tasks (within the 3–8 limit), or
-  (b) use spawn_sub_agent to handle multi-URL extraction inside one delegated task.
+  (b) use spawn_general_purpose_agent to handle multi-URL extraction inside one delegated task.
 - spawn_browser_agent: for dynamic/interactive sites (e.g., Google Flights/Skyscanner) and when you must capture live “options” (times, airlines, prices) that web_fetch/web_search snippets won’t reliably provide. Remember: stateful flows must be ONE browser task.
-- spawn_sub_agent: use when the deliverable requires multi-step research + extraction + normalization that won’t fit in a single fetch/search (e.g., “compile flight options table”, “compile visa checklist from multiple official pages”, “scan EDD handbook + announcements for policy changes”).
+- spawn_general_purpose_agent: use when the deliverable requires multi-step research + extraction + normalization that won’t fit in a single fetch/search (e.g., “compile flight options table”, “compile visa checklist from multiple official pages”, “scan EDD handbook + announcements for policy changes”).
 
 Domain-specific requirements to preserve (use these as anchors when planning):
 A) California EDD Unemployment (focus: 2026, first-time filers, Los Angeles)
@@ -25,22 +25,21 @@ A) California EDD Unemployment (focus: 2026, first-time filers, Los Angeles)
 - Include LA-specific/local resources only if they are official (e.g., EDD office locator, AJCC/Workforce services pages). Plan an explicit step to find LA-specific contacts if needed.
 
 B) “Visa Application Kit” (BLR→CDG, May 10–22; Visiting Friend; Schengen)
-- Flight options must be concrete (example output expectation: 3–6 options with airline(s), stops, layover duration, depart/arrive times, fare range, baggage notes, booking/ref links). This generally requires spawn_browser_agent (Google Flights/Skyscanner/airlines) or a sub-agent that uses browser tooling.
+- Flight options must be concrete (example output expectation: 3–6 options with airline(s), stops, layover duration, depart/arrive times, fare range, baggage notes, booking/ref links). This generally requires spawn_browser_agent (Google Flights/Skyscanner/airlines) or a general-purpose agent that uses browser tooling.
 - Insurance must be Schengen-compliant: minimum medical coverage €30,000, valid throughout Schengen, includes repatriation/medical evacuation; verify wording from official insurer pages or official visa requirement pages (France-Visas / EU guidance).
 - Cover letter must be tailored to “private visit / visiting friend” for France Schengen: purpose, dates (May 10–22), itinerary summary, accommodation with host, host contact/address, funding/means of subsistence, ties to India and return intent; align with official France-Visas guidance.
 - Document checklist must be comprehensive and aligned with official France-Visas + the applicable application channel (often VFS for India; verify). Include: application form, photos, passport validity rules, travel medical insurance, flight reservation, accommodation/host invitation (commonly “attestation d’accueil” for France private visit—verify requirement), proof of funds (bank statements), employment/leave letter, tax returns/ITR, sponsor/host documents if applicable, civil status docs, etc.
 
 Quality bar for tasks (make each task deterministic):
 - Each task goal must specify exactly what artifact it will produce (e.g., “extract eligibility bullets + disqualifiers + citations”, “produce flights comparison table with X columns”, “compile checklist with section headers + source citations”).
-- Avoid vague tasks like “research flights” via web_search only; prefer browser extraction or delegated sub-agent compilation.
-- Avoid mixing multiple URLs in a single web_fetch task. If multiple sources are required and tasks would exceed the limit, delegate via spawn_sub_agent.
+- Avoid vague tasks like “research flights” via web_search only; prefer browser extraction or delegated general-purpose compilation.
+- Avoid mixing multiple URLs in a single web_fetch task. If multiple sources are required and tasks would exceed the limit, delegate via spawn_general_purpose_agent.
 
 Plan structure expectation:
 - Use a fan-in synthesis: parallel source extraction/compilation tasks → final reasoning task to assemble the deliverable.
 - The final synthesis task should depend on all research tasks and explicitly state the final output sections.
 
 Output contract compliance (must be perfect):
-- Return ONLY valid JSON with: title, content (markdown plan explanation), tasks (goal/tool/depends_on), dependencies_graph (mirror), join.
-- Use 0-based indices as STRINGS in dependencies_graph.
-- dependencies_graph must exactly mirror tasks[i].depends_on.
+- Return ONLY valid JSON with: title, tasks (goal/tool/depends_on), join.
+- Use 0-based indices as STRINGS in tasks[].task_idx and tasks[].depends_on.
 - Acyclic graph only. No extra fields.

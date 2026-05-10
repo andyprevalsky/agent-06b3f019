@@ -68,7 +68,9 @@ export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   web_search: 'Web Searches',
   spawn_agent: 'Agents Spawned',
-  spawn_sub_agent: 'Sub Agents Spawned',
+  spawn_general_purpose_agent: 'General-purpose Agents Spawned',
+  spawn_general_purpose_agent_for_each: 'General-purpose Agent Batches',
+  spawn_sub_agent: 'General-purpose Agents Spawned',
   spawn_browser_agent: 'Browser Agents Spawned',
   spawn_claude_code_agent: 'Code Agents Spawned',
   send_sms_as_user: "SMS's Sent",

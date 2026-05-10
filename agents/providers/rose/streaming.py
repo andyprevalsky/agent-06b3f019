@@ -19,10 +19,8 @@ Behavior is intentionally identical to
   - OpenAI tool_calls stream as deltas keyed by `index`; we accumulate
     arguments per index and flush one `tool_call` chunk per call when the
     stream ends or `finish_reason` arrives.
-  - Idle timeout: if more than `idle_timeout_s` elapses between SSE lines,
-    the response is closed and `RoseStallError` is raised. An empty stream
-    (no content, no tool_call) raises `RoseStallError` for the same reason
-    the TS waterfall counts an empty stream as a failed step.
+  - Empty streams (no content, no tool_call) raise `RoseStallError` for the
+    same reason the TS waterfall counts an empty stream as a failed step.
 
 The functions are Temporal-free: no `temporalio`, no `helpers.llm` imports.
 This keeps them unit-testable in plain `pytest` and avoids circular deps when
@@ -102,7 +100,7 @@ async def parse_anthropic_sse(
     actual_model: str,
     pool_name: str,
     request_id: str,
-    idle_timeout_s: float = 60.0,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Parse Anthropic's native SSE format into normalized StreamChunks.
 
@@ -118,11 +116,11 @@ async def parse_anthropic_sse(
             `claude-sonnet-4-6-claude` for the claudeAuth path)
         pool_name: pool the model was selected from (e.g. `claude-token`)
         request_id: caller-provided correlation id for logging
-        idle_timeout_s: max seconds between SSE lines before stalling
+        idle_timeout_s: deprecated; per-line idle timeouts are disabled.
 
     Raises:
-        RoseStallError: if the stream goes idle past `idle_timeout_s`, or
-            closes without emitting any content / tool_call chunks.
+        RoseStallError: if the stream closes without emitting any content /
+            tool_call chunks.
     """
     yield StreamChunk(
         kind="metadata",
@@ -304,7 +302,7 @@ async def parse_openai_sse(
     actual_model: str = "",
     pool_name: str = "",
     request_id: str,
-    idle_timeout_s: float = 60.0,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Parse OpenAI / OpenRouter SSE format into normalized StreamChunks.
 
@@ -471,7 +469,7 @@ async def parse_responses_sse(
     actual_model: str = "",
     pool_name: str = "",
     request_id: str,
-    idle_timeout_s: float = 60.0,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Parse OpenAI Responses API SSE events into normalized StreamChunks."""
     yield StreamChunk(
@@ -629,36 +627,27 @@ async def parse_responses_sse(
 
 async def _iter_with_idle_timeout(
     response: _LineStream,
-    idle_timeout_s: float,
+    idle_timeout_s: Optional[float],
     request_id: str,
 ) -> AsyncIterator[str]:
-    """Yield SSE lines from `response`, raising `RoseStallError` if more
-    than `idle_timeout_s` elapses between consecutive lines.
+    """Yield SSE lines from `response`.
 
-    Mirrors the per-read `withTimeout` pattern in streaming.ts, where the
-    timer is reset only when the next read returns. We resolve the iterator
-    once, then call `__anext__` per loop so each await can be wrapped in
-    `asyncio.wait_for` independently.
+    `idle_timeout_s` is kept as a deprecated compatibility parameter. When
+    provided, it is intentionally ignored; RoseClient's outer guard owns the
+    time-to-first-contentful-chunk timeout and overall deadline.
     """
     iterator = response.aiter_lines().__aiter__()
     while True:
         try:
-            line = await asyncio.wait_for(iterator.__anext__(), timeout=idle_timeout_s)
+            line = await iterator.__anext__()
         except StopAsyncIteration:
             return
-        except asyncio.TimeoutError as exc:
-            logger.warning(
-                "rose.sse.idle_timeout",
-                request_id=request_id,
-                idle_timeout_s=idle_timeout_s,
-            )
-            raise RoseStallError(f"SSE stream idle for >{idle_timeout_s}s (request_id={request_id})") from exc
         yield line
 
 
 async def _close_quietly(response: _LineStream) -> None:
     """Close the response, swallowing any error. The stream may already be
-    closed (clean EOF) or in a half-broken state (idle timeout); either way
+    closed (clean EOF) or in a half-broken state; either way
     we want the caller to see the original failure, not a close error.
     """
     try:

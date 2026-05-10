@@ -33,7 +33,7 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     name: 'spawn_agent',
     displayName: 'Spawn Agent',
     description:
-      'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or sub-agent (complex delegation). Unified tool for all agent types.',
+      'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or general-purpose agents for complex delegation. Unified tool for all agent types.',
   },
   {
     name: 'x402',

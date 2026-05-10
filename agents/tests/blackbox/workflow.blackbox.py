@@ -233,17 +233,23 @@ async def test_poll_and_update_context():
 
 
 async def test_poll_and_update_context_filters_subagent_work_and_advances_cursor():
-    """Sub-agent work rows stay out of context but still advance last_checked."""
+    """Sub-agent and fanout tree rows stay out of context but still advance last_checked."""
     visible_msg = {
         "role": "TOOL",
-        "text": "Parent-visible result",
+        "text": "Aggregate parent result",
         "timestamp": "2024-01-01T00:00:02+00:00",
-        "metadata": {"toolName": "spawn_sub_agent", "subAgentIds": ["child-1"]},
+        "metadata": {"toolName": "spawn_general_purpose_agent_for_each", "toolCallId": "tc"},
+    }
+    tree_msg = {
+        "role": "TOOL",
+        "text": "Fanout tree row",
+        "timestamp": "2024-01-01T00:00:03+00:00",
+        "metadata": {"toolName": "spawn_general_purpose_agent", "toolCallId": "tc:0", "subAgentIds": ["child-1"]},
     }
     internal_msg = {
         "role": "TOOL",
         "text": "Child web search trace",
-        "timestamp": "2024-01-01T00:00:03+00:00",
+        "timestamp": "2024-01-01T00:00:04+00:00",
         "metadata": {"toolName": "web_search", "subAgentId": "child-1"},
     }
 
@@ -251,12 +257,12 @@ async def test_poll_and_update_context_filters_subagent_work_and_advances_cursor
     last_checked = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
     async def mock_poll(since: datetime) -> List[Dict]:
-        return [visible_msg, internal_msg]
+        return [visible_msg, tree_msg, internal_msg]
 
     updated_last_checked = await poll_and_update_context(mock_poll, context, last_checked)
 
     assert context == [visible_msg], f"Expected only parent-visible message, got {context}"
-    assert updated_last_checked.isoformat() == "2024-01-01T00:00:03+00:00"
+    assert updated_last_checked.isoformat() == "2024-01-01T00:00:04+00:00"
 
 
 # ===========================================================================

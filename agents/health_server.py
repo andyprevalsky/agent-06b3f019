@@ -2,9 +2,11 @@
 
 import threading
 from datetime import datetime
+from typing import Optional
 
 import psutil
 import structlog
+
 from flask import Flask, jsonify
 
 logger = structlog.get_logger()
@@ -28,7 +30,20 @@ _running_workflow_count = 0
 _desired_machine_count = 2  # Adaptive autoscaler output (min=2)
 _current_machine_count = 1  # Observed via Fly DNS
 _is_leader = False  # Whether this instance is the autoscaler leader
-_observed_task_capacity = 0  # Dynamic capacity from SDK resource-based tuner
+_observed_task_capacity: Optional[int] = None  # Dynamic capacity from SDK resource-based tuner
+_activity_slots_used: Optional[int] = None
+_activity_slots_available: Optional[int] = None
+_resource_slots_cpu_usage: Optional[float] = None
+_resource_slots_mem_usage: Optional[float] = None
+_resource_slots_cpu_pid_output: Optional[float] = None
+_resource_slots_mem_pid_output: Optional[float] = None
+_activity_task_pollers: Optional[int] = None
+_workflow_task_pollers: Optional[int] = None
+_sticky_workflow_task_pollers: Optional[int] = None
+_activity_admission_open: Optional[bool] = None
+_activity_admission_memory_percent: Optional[float] = None
+_activity_admission_close_memory_percent: Optional[float] = None
+_activity_admission_open_memory_percent: Optional[float] = None
 _machine_memory_used_percent = 0.0
 _autoscaler_memory_threshold_percent = 80.0
 _autoscaler_memory_signal_percent = 0.0
@@ -52,10 +67,23 @@ def set_queue_metrics(
     desired_machines: int,
     current_machines: int,
     is_leader: bool = False,
-    observed_capacity: int = 0,
+    observed_capacity: Optional[int] = None,
+    activity_slots_used: Optional[int] = None,
+    activity_slots_available: Optional[int] = None,
     machine_memory_used_percent: float = 0.0,
     autoscaler_memory_threshold_percent: float = 80.0,
     autoscaler_memory_signal_percent: float = 0.0,
+    resource_slots_cpu_usage: Optional[float] = None,
+    resource_slots_mem_usage: Optional[float] = None,
+    resource_slots_cpu_pid_output: Optional[float] = None,
+    resource_slots_mem_pid_output: Optional[float] = None,
+    activity_task_pollers: Optional[int] = None,
+    workflow_task_pollers: Optional[int] = None,
+    sticky_workflow_task_pollers: Optional[int] = None,
+    activity_admission_open: Optional[bool] = None,
+    activity_admission_memory_percent: Optional[float] = None,
+    activity_admission_close_memory_percent: Optional[float] = None,
+    activity_admission_open_memory_percent: Optional[float] = None,
 ):
     """Update queue metrics from background poller. Thread-safe via GIL."""
     global \
@@ -65,6 +93,19 @@ def set_queue_metrics(
         _current_machine_count, \
         _is_leader, \
         _observed_task_capacity, \
+        _activity_slots_used, \
+        _activity_slots_available, \
+        _resource_slots_cpu_usage, \
+        _resource_slots_mem_usage, \
+        _resource_slots_cpu_pid_output, \
+        _resource_slots_mem_pid_output, \
+        _activity_task_pollers, \
+        _workflow_task_pollers, \
+        _sticky_workflow_task_pollers, \
+        _activity_admission_open, \
+        _activity_admission_memory_percent, \
+        _activity_admission_close_memory_percent, \
+        _activity_admission_open_memory_percent, \
         _machine_memory_used_percent, \
         _autoscaler_memory_threshold_percent, \
         _autoscaler_memory_signal_percent
@@ -74,9 +115,59 @@ def set_queue_metrics(
     _current_machine_count = current_machines
     _is_leader = is_leader
     _observed_task_capacity = observed_capacity
+    _activity_slots_used = activity_slots_used
+    _activity_slots_available = activity_slots_available
+    _resource_slots_cpu_usage = resource_slots_cpu_usage
+    _resource_slots_mem_usage = resource_slots_mem_usage
+    _resource_slots_cpu_pid_output = resource_slots_cpu_pid_output
+    _resource_slots_mem_pid_output = resource_slots_mem_pid_output
+    _activity_task_pollers = activity_task_pollers
+    _workflow_task_pollers = workflow_task_pollers
+    _sticky_workflow_task_pollers = sticky_workflow_task_pollers
+    _activity_admission_open = activity_admission_open
+    _activity_admission_memory_percent = activity_admission_memory_percent
+    _activity_admission_close_memory_percent = activity_admission_close_memory_percent
+    _activity_admission_open_memory_percent = activity_admission_open_memory_percent
     _machine_memory_used_percent = machine_memory_used_percent
     _autoscaler_memory_threshold_percent = autoscaler_memory_threshold_percent
     _autoscaler_memory_signal_percent = autoscaler_memory_signal_percent
+
+
+def get_queue_metrics_snapshot() -> dict:
+    """Return the latest queue/worker-capacity snapshot for trace metadata."""
+    snapshot = {
+        "task_queue_backlog": _task_queue_backlog,
+        "running_workflow_count": _running_workflow_count,
+        "desired_machine_count": _desired_machine_count,
+        "current_machine_count": _current_machine_count,
+        "autoscaler_is_leader": _is_leader,
+        "observed_task_capacity": _observed_task_capacity,
+        "activity_slots_used": _activity_slots_used,
+        "activity_slots_available": _activity_slots_available,
+        "machine_memory_used_percent": _machine_memory_used_percent,
+        "autoscaler_memory_threshold_percent": _autoscaler_memory_threshold_percent,
+        "autoscaler_memory_signal_percent": _autoscaler_memory_signal_percent,
+        "resource_slots_cpu_usage": _resource_slots_cpu_usage,
+        "resource_slots_mem_usage": _resource_slots_mem_usage,
+        "resource_slots_cpu_pid_output": _resource_slots_cpu_pid_output,
+        "resource_slots_mem_pid_output": _resource_slots_mem_pid_output,
+        "activity_task_pollers": _activity_task_pollers,
+        "workflow_task_pollers": _workflow_task_pollers,
+        "sticky_workflow_task_pollers": _sticky_workflow_task_pollers,
+        "activity_admission_open": _activity_admission_open,
+        "activity_admission_memory_percent": _activity_admission_memory_percent,
+        "activity_admission_close_memory_percent": _activity_admission_close_memory_percent,
+        "activity_admission_open_memory_percent": _activity_admission_open_memory_percent,
+    }
+    return {key: value for key, value in snapshot.items() if value is not None}
+
+
+def _prom_value(value: Optional[float | int]) -> str:
+    return "NaN" if value is None else str(value)
+
+
+def _prom_present(value: object) -> int:
+    return 0 if value is None else 1
 
 
 @app.route("/health")
@@ -157,7 +248,67 @@ autoscaler_is_leader {1 if _is_leader else 0}
 
 # HELP observed_task_capacity Dynamic activity task capacity per machine (from SDK resource-based tuner)
 # TYPE observed_task_capacity gauge
-observed_task_capacity {_observed_task_capacity}
+observed_task_capacity {_prom_value(_observed_task_capacity)}
+
+# HELP observed_task_capacity_present Whether observed_task_capacity was emitted by the SDK scrape
+# TYPE observed_task_capacity_present gauge
+observed_task_capacity_present {_prom_present(_observed_task_capacity)}
+
+# HELP activity_slots_used Current activity task slots in use on this worker
+# TYPE activity_slots_used gauge
+activity_slots_used {_prom_value(_activity_slots_used)}
+
+# HELP activity_slots_available Current activity task slots available on this worker
+# TYPE activity_slots_available gauge
+activity_slots_available {_prom_value(_activity_slots_available)}
+
+# HELP activity_slots_available_present Whether activity_slots_available was emitted by the SDK scrape
+# TYPE activity_slots_available_present gauge
+activity_slots_available_present {_prom_present(_activity_slots_available)}
+
+# HELP resource_slots_cpu_usage Temporal SDK resource slot tuner CPU usage signal
+# TYPE resource_slots_cpu_usage gauge
+resource_slots_cpu_usage {_prom_value(_resource_slots_cpu_usage)}
+
+# HELP resource_slots_mem_usage Temporal SDK resource slot tuner memory usage signal
+# TYPE resource_slots_mem_usage gauge
+resource_slots_mem_usage {_prom_value(_resource_slots_mem_usage)}
+
+# HELP resource_slots_cpu_pid_output Temporal SDK resource slot tuner CPU PID controller output
+# TYPE resource_slots_cpu_pid_output gauge
+resource_slots_cpu_pid_output {_prom_value(_resource_slots_cpu_pid_output)}
+
+# HELP resource_slots_mem_pid_output Temporal SDK resource slot tuner memory PID controller output
+# TYPE resource_slots_mem_pid_output gauge
+resource_slots_mem_pid_output {_prom_value(_resource_slots_mem_pid_output)}
+
+# HELP activity_task_pollers Temporal SDK activity task poller count
+# TYPE activity_task_pollers gauge
+activity_task_pollers {_prom_value(_activity_task_pollers)}
+
+# HELP activity_admission_open Whether this worker is accepting new activity tasks (1=open, 0=closed)
+# TYPE activity_admission_open gauge
+activity_admission_open {_prom_value(None if _activity_admission_open is None else int(_activity_admission_open))}
+
+# HELP activity_admission_memory_percent Memory percent used by the activity admission gate
+# TYPE activity_admission_memory_percent gauge
+activity_admission_memory_percent {_prom_value(_activity_admission_memory_percent)}
+
+# HELP activity_admission_close_memory_percent Memory percent at which activity admission closes
+# TYPE activity_admission_close_memory_percent gauge
+activity_admission_close_memory_percent {_prom_value(_activity_admission_close_memory_percent)}
+
+# HELP activity_admission_open_memory_percent Memory percent at which activity admission reopens
+# TYPE activity_admission_open_memory_percent gauge
+activity_admission_open_memory_percent {_prom_value(_activity_admission_open_memory_percent)}
+
+# HELP workflow_task_pollers Temporal SDK workflow task poller count
+# TYPE workflow_task_pollers gauge
+workflow_task_pollers {_prom_value(_workflow_task_pollers)}
+
+# HELP sticky_workflow_task_pollers Temporal SDK sticky workflow task poller count
+# TYPE sticky_workflow_task_pollers gauge
+sticky_workflow_task_pollers {_prom_value(_sticky_workflow_task_pollers)}
 
 # HELP autoscaler_memory_threshold_percent Machine memory percentage that triggers autoscaler scale-up/hold behavior
 # TYPE autoscaler_memory_threshold_percent gauge

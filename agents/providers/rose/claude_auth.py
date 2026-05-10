@@ -22,12 +22,11 @@ Contract (P1):
     Fall-through (raise typed error, caller goes to waterfall):
         400                -> RoseInvalidRequest  (do NOT rotate; next token
                               would hit the same 400 and chain through pool)
-        stall / TTFT miss  -> RoseStallError
+        TTFT miss          -> RoseStallError
         rotation exhausted -> RoseAuthError
 
-The stream itself (from `streaming.parse_anthropic_sse`) enforces the idle
-timeout; this module only handles pre-stream HTTP error classification and
-orchestration.
+The outer Rose client owns the time-to-first-contentful-token timeout; this
+module only handles pre-stream HTTP error classification and orchestration.
 """
 
 from __future__ import annotations
@@ -67,7 +66,7 @@ logger = structlog.get_logger()
 
 _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
-_DEFAULT_IDLE_TIMEOUT_S = 60.0
+_DEFAULT_TTFT_TIMEOUT_S = 60.0
 _COOLDOWN_SECONDS = 5 * 60
 _USAGE_WINDOW_RESET_THRESHOLD_S = 60.0
 
@@ -278,8 +277,8 @@ async def claude_auth_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
-    ttft_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
-    idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Run a claudeAuth attempt end-to-end, yielding normalized StreamChunks.
 
@@ -373,7 +372,7 @@ async def _attempt_with_token(
     agent_id: Optional[str],
     call_site: Optional[str],
     ttft_timeout_s: float,
-    idle_timeout_s: float,
+    idle_timeout_s: Optional[float],
 ) -> AsyncIterator[StreamChunk]:
     """One full try with a single token — up to 3 in-place retries on 429/5xx."""
     last_error: Optional[Exception] = None

@@ -32,7 +32,7 @@ logger = structlog.get_logger()
 
 _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
-_DEFAULT_IDLE_TIMEOUT_S = 60.0
+_DEFAULT_TTFT_TIMEOUT_S = 60.0
 _DEFAULT_CODEX_INSTRUCTIONS = "You are a helpful assistant."
 
 
@@ -320,7 +320,6 @@ def build_codex_responses_body(
     ChatGPT backend handles limits differently from public API keys.
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
-    reasoning_effort = _normalize_reasoning_effort(effort)
     body: Dict[str, Any] = {
         "model": pool_spec.gpt_auth_model,
         "input": _build_responses_input(messages),
@@ -333,9 +332,10 @@ def build_codex_responses_body(
             instructions=instructions,
             response_format=response_format,
         ),
-        "reasoning": {"effort": reasoning_effort, "summary": "auto"},
         "include": ["reasoning.encrypted_content"],
     }
+    if effort is not None:
+        body["reasoning"] = {"effort": _normalize_reasoning_effort(effort), "summary": "auto"}
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
     if responses_tools:
@@ -366,8 +366,8 @@ async def gpt_auth_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
-    ttft_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
-    idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     body = build_codex_responses_body(
         pool_spec=pool_spec,
@@ -425,7 +425,7 @@ async def _attempt_with_token(
     agent_id: Optional[str],
     call_site: Optional[str],
     ttft_timeout_s: float,
-    idle_timeout_s: float,
+    idle_timeout_s: Optional[float],
 ) -> AsyncIterator[StreamChunk]:
 
     last_error: Optional[Exception] = None

@@ -23,24 +23,26 @@ def test_build_prompt_basic():
     assert "Find AI trends" in result
 
 
-def test_build_prompt_spawn_agent():
-    """_build_agent_system_prompt with spawn_explore_agent alias includes explore instructions."""
+def test_build_prompt_spawn_agent_alias_does_not_redefine_type_schema():
+    """Alias-specific spawn-agent parameter rules live in the canonical tool schema."""
     from activities.param_populator import _build_agent_system_prompt
 
     result = _build_agent_system_prompt("spawn_agent", "Research competitors", alias_hint="spawn_explore_agent")
 
-    assert 'type="explore"' in result
-    assert "explore" in result.lower()
+    assert "spawn_agent" in result
+    assert "SPAWN TYPE" not in result
+    assert 'type="explore"' not in result
 
 
-def test_build_prompt_spawn_sub_agent():
-    """_build_agent_system_prompt with spawn_sub_agent alias includes sub-agent instructions."""
+def test_build_prompt_spawn_general_purpose_agent_no_duplicate_requirements():
+    """Param populator should not duplicate spawn-agent subtype requirements."""
     from activities.param_populator import _build_agent_system_prompt
 
-    result = _build_agent_system_prompt("spawn_agent", "Complete the task", alias_hint="spawn_sub_agent")
+    result = _build_agent_system_prompt("spawn_agent", "Complete the task", alias_hint="spawn_general_purpose_agent")
 
-    assert "verifier" in result.lower() or "output_schema" in result.lower()
-    assert "sub_agent" in result or "sub-agent" in result.lower()
+    assert "Complete the task" in result
+    assert "SPAWN TYPE" not in result
+    assert "Required by policy: start_phase" not in result
 
 
 def test_build_prompt_contains_tool_name():
@@ -382,8 +384,8 @@ async def run_all_tests():
     print("param-populator blackbox tests:")
     r = BlackboxResult()
     r.record("build_prompt_basic", test_build_prompt_basic)
-    r.record("build_prompt_spawn_agent", test_build_prompt_spawn_agent)
-    r.record("build_prompt_spawn_sub_agent", test_build_prompt_spawn_sub_agent)
+    r.record("build_prompt_spawn_agent_alias_no_redefine", test_build_prompt_spawn_agent_alias_does_not_redefine_type_schema)
+    r.record("build_prompt_spawn_general_no_duplicate", test_build_prompt_spawn_general_purpose_agent_no_duplicate_requirements)
     r.record("build_prompt_contains_tool_name", test_build_prompt_contains_tool_name)
     r.record("build_prompt_spawn_suffix_tool_adds_ephemeral_warning", test_build_prompt_spawn_suffix_tool_adds_ephemeral_warning)
     r.record("build_prompt_non_spawn_tool_no_ephemeral_warning", test_build_prompt_non_spawn_tool_no_ephemeral_warning)

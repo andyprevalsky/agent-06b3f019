@@ -12,6 +12,11 @@ import {
   fetchGptCodeCredentialsWithMeta,
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
+import {
+  buildCodeAgentSystemPrompt,
+  CODE_AGENT_ATTACHMENTS_DIR,
+  CODE_AGENT_OUTPUT_DIR,
+} from './codeAgentPrompt';
 
 const log = createLogger('E2B');
 
@@ -33,8 +38,19 @@ const WS_READY_POLL_INTERVAL_MS = 100;
 const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 
 // Directories for file transfer
-const ATTACHMENTS_DIR = '/home/user/attachments';
-const OUTPUT_DIR = '/home/user/output';
+const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
+const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
+
+function workDirForGithubRepo(githubRepoUrl?: string): string {
+  if (!githubRepoUrl) return '/home/user';
+  try {
+    const parsed = new URL(githubRepoUrl);
+    const repoName = parsed.pathname.split('/').filter(Boolean).pop()?.replace(/\.git$/, '');
+    return repoName ? `/home/user/${repoName}` : '/home/user';
+  } catch {
+    return '/home/user';
+  }
+}
 
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
@@ -61,6 +77,10 @@ export async function createClaudeCodeSession(
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: goal,
+    CODE_AGENT_SYSTEM_PROMPT: buildCodeAgentSystemPrompt({
+      githubRepoUrl,
+      workDir: workDirForGithubRepo(githubRepoUrl),
+    }),
   };
 
   // Try user's own credentials first, then rotate through the pool. The agent's
@@ -237,6 +257,10 @@ export async function createCodexCodeSession(
     CODEX_GOAL: goal,
     CODEX_AUTH_JSON: credentialMeta.credentials,
     CODEX_MODEL: process.env.CODEX_CODE_MODEL || 'gpt-5.4',
+    CODE_AGENT_SYSTEM_PROMPT: buildCodeAgentSystemPrompt({
+      githubRepoUrl,
+      workDir: workDirForGithubRepo(githubRepoUrl),
+    }),
   };
 
   if (githubRepoUrl) {

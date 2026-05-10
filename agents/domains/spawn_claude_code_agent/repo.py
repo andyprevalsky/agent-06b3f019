@@ -137,13 +137,19 @@ async def create_e2b_session(
         )
 
         if response.status_code not in (200, 201):
+            response_text = response.text[:500]
             logger.error(
-                "[ClaudeCode] Failed to create session",
+                "[ClaudeCode] Failed to create code session",
                 agent_id=agent_id,
+                code_provider=code_provider,
                 status_code=response.status_code,
-                response_text=response.text[:500],
+                response_text=response_text,
             )
-            raise Exception(f"Failed to create Claude Code session: HTTP {response.status_code}")
+            detail = f": {response_text}" if response_text else ""
+            raise Exception(
+                f"Failed to create code session (provider={code_provider}): "
+                f"HTTP {response.status_code}{detail}"
+            )
 
         return response.json()
 

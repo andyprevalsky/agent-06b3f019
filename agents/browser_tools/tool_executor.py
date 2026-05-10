@@ -10,7 +10,6 @@ from typing import Any, Dict
 from browser_tools.observe import observe_tool
 from browser_tools.aria_tree import aria_tree_tool
 from browser_tools.screenshot import screenshot_tool
-from browser_tools.extract import extract_tool
 
 # Action tools (direct Playwright with selectors)
 from browser_tools.click import click_tool
@@ -55,7 +54,7 @@ async def execute_browser_tool(
         "observe": lambda: observe_tool(stagehand, tool_args, logger, execution_model),
         "ariaTree": lambda: aria_tree_tool(stagehand, tool_args, logger),
         "screenshot": lambda: screenshot_tool(stagehand, tool_args, logger),
-        "extract": lambda: extract_tool(stagehand, tool_args, logger, execution_model),
+        "extract": lambda: {"success": False, "error": "extract is disabled. Use evaluate instead."},
         
         # Action tools (direct Playwright)
         "click": lambda: click_tool(stagehand, tool_args, logger),

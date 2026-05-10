@@ -717,6 +717,7 @@ async def collect_logs(
     agent_id: str,
     agent_data: dict,
     start_time: datetime,
+    research_logs: Optional[List[str]] = None,
 ) -> dict:
     """
     Collect all available logs for a benchmark agent.
@@ -756,11 +757,15 @@ async def collect_logs(
             f"({len(clickhouse_logs)} clickhouse + {stream_total} streamed + {len(snapshot_logs)} snapshot)"
         ]
 
-    # Render and Supabase logs fetched via HTTP
-    backend_logs, research_logs = await asyncio.gather(
-        fetch_render_logs(agent_id, start_time),
-        fetch_supabase_logs(agent_id, start_time),
-    )
+    # Render logs are agent-filtered. Supabase gateway logs are only
+    # time-window scoped, so tree diagnostics may prefetch and reuse them.
+    if research_logs is None:
+        backend_logs, research_logs = await asyncio.gather(
+            fetch_render_logs(agent_id, start_time),
+            fetch_supabase_logs(agent_id, start_time),
+        )
+    else:
+        backend_logs = await fetch_render_logs(agent_id, start_time)
 
     return {
         "messages": messages,
@@ -804,6 +809,10 @@ async def collect_tree_logs(
             ...
         }
     """
+    tree_research_logs = await fetch_supabase_logs(root_agent_id, start_time)
+    child_research_logs = [
+        f"[supabase] Gateway logs are tree-scoped; see root agent {root_agent_id[:12]} research logs"
+    ]
 
     async def _collect_one(agent_info: dict) -> tuple:
         aid = agent_info.get("agent_id", "")
@@ -817,7 +826,12 @@ async def collect_tree_logs(
             except Exception:
                 pass
 
-        logs = await collect_logs(aid, agent_data, start_time)
+        logs = await collect_logs(
+            aid,
+            agent_data,
+            start_time,
+            research_logs=tree_research_logs if aid == root_agent_id else child_research_logs,
+        )
 
         # Extract agent state from the full agent response
         agent_obj = agent_data.get("agent", agent_data) if isinstance(agent_data, dict) else {}

@@ -77,6 +77,8 @@ from benchmarks.logs import (
     fetch_render_logs,
     load_env_var,
 )
+from benchmarks.span_history import make_observation, record_span_observations
+from benchmarks.span_history import summary as span_history_summary
 
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
@@ -325,6 +327,15 @@ def _as_int(v: Any) -> Optional[int]:
         return None
     try:
         return int(str(v).replace("ms", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _as_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace("%", "").strip())
     except (ValueError, TypeError):
         return None
 
@@ -892,6 +903,10 @@ def _fmt_offset(seconds: float) -> str:
     return f"t+{seconds:7.2f}s"
 
 
+def _fmt_mb_from_bytes(value: int | float) -> str:
+    return f"{value / (1024 * 1024):.1f}MB"
+
+
 def _flatten(roots: List[Span]) -> List[Span]:
     out: List[Span] = []
     def walk(s: Span) -> None:
@@ -905,7 +920,45 @@ def _flatten(roots: List[Span]) -> List[Span]:
 
 def _summarize_span(sp: Span) -> str:
     md = sp.metadata or {}
+    runtime = md.get("runtime_context") if isinstance(md.get("runtime_context"), dict) else {}
     parts: List[str] = []
+    queue_ms = _as_int(md.get("temporal_schedule_to_start_ms"))
+    if queue_ms and queue_ms >= 1000:
+        parts.append(f"queue={_fmt_dur(queue_ms).strip()}")
+        slots_used = _as_int(md.get("worker_activity_slots_used_at_activity_start"))
+        slots_available = _as_int(md.get("worker_activity_slots_available_at_activity_start"))
+        capacity = _as_int(md.get("worker_observed_task_capacity_at_activity_start"))
+        backlog = _as_int(md.get("worker_task_queue_backlog_at_activity_start"))
+        workflows = _as_int(md.get("worker_running_workflow_count_at_activity_start"))
+        activity_pollers = _as_int(md.get("worker_activity_task_pollers_at_activity_start"))
+        cpu_usage = _as_float(md.get("worker_resource_slots_cpu_usage_at_activity_start"))
+        mem_usage = _as_float(md.get("worker_resource_slots_mem_usage_at_activity_start"))
+        cpu_pid = _as_float(md.get("worker_resource_slots_cpu_pid_output_at_activity_start"))
+        mem_pid = _as_float(md.get("worker_resource_slots_mem_pid_output_at_activity_start"))
+        slot_bits = []
+        if slots_used is not None:
+            slot_bits.append(f"used={slots_used}")
+        slot_bits.append(f"avail={slots_available if slots_available is not None else '?'}")
+        slot_bits.append(f"capacity={capacity if capacity is not None else '?'}")
+        if slot_bits:
+            parts.append("slots(" + " ".join(slot_bits) + ")")
+        if backlog is not None:
+            parts.append(f"backlog={backlog}")
+        if workflows is not None:
+            parts.append(f"workflows={workflows}")
+        if activity_pollers is not None:
+            parts.append(f"activity_pollers={activity_pollers}")
+        tuner_bits = []
+        if cpu_usage is not None:
+            tuner_bits.append(f"cpu={cpu_usage:.1f}%")
+        if mem_usage is not None:
+            tuner_bits.append(f"mem={mem_usage:.1f}%")
+        if cpu_pid is not None:
+            tuner_bits.append(f"cpu_pid={cpu_pid:.2f}")
+        if mem_pid is not None:
+            tuner_bits.append(f"mem_pid={mem_pid:.2f}")
+        if tuner_bits:
+            parts.append("tuner(" + " ".join(tuner_bits) + ")")
     if sp.name.startswith("llm") or "llm" in sp.name:
         if md.get("actual_model"):
             am = str(md["actual_model"])
@@ -916,10 +969,23 @@ def _summarize_span(sp: Span) -> str:
                 parts.append(am)
         elif md.get("model"):
             parts.append(str(md["model"]))
+        elif runtime.get("model"):
+            parts.append(str(runtime["model"]))
+        if runtime.get("call_site") and not md.get("call_site"):
+            parts.append(f"call_site={runtime['call_site']}")
         if md.get("ttft_ms"):
             parts.append(f"ttft={md['ttft_ms']}ms")
         if md.get("chunks"):
             parts.append(f"{md['chunks']} chunks")
+    if runtime.get("phase"):
+        parts.append(f"phase={runtime['phase']}")
+    if runtime.get("agent_type"):
+        parts.append(f"agent_type={runtime['agent_type']}")
+    if runtime.get("tool_name") and not md.get("tool_name"):
+        parts.append(f"tool={runtime['tool_name']}")
+    mem_peak_delta = _as_int(md.get("memory_tree_rss_peak_delta_bytes"))
+    if mem_peak_delta is not None and abs(mem_peak_delta) >= 1024 * 1024:
+        parts.append(f"mem_peakΔ={_fmt_mb_from_bytes(mem_peak_delta)}")
     if sp.name.startswith("spawn"):
         if md.get("goal"):
             parts.append(f"goal={md['goal'][:100]}")
@@ -946,6 +1012,102 @@ def _summarize_span(sp: Span) -> str:
     return "  ".join(parts)
 
 
+def _span_code_pointer(sp: Span, code_cache: Dict[str, str]) -> str:
+    md = sp.metadata or {}
+    return str(
+        md.get("code_ptr")
+        or md.get("span_source")
+        or md.get("span_key")
+        or _find_code_pointer(sp.name, code_cache)
+    )
+
+
+def _span_history_key(sp: Span) -> str:
+    md = sp.metadata or {}
+    return str(md.get("span_key") or md.get("span_source") or md.get("code_ptr") or sp.name)
+
+
+def _span_runtime(sp: Span) -> Dict[str, Any]:
+    runtime = sp.metadata.get("runtime_context") if isinstance(sp.metadata.get("runtime_context"), dict) else {}
+    return runtime
+
+
+def _span_observations(
+    roots: List[Span],
+    *,
+    agent_id: str,
+    benchmark: str,
+    environment: str,
+    timestamp: str,
+    run_status: str,
+) -> List[Dict[str, Any]]:
+    observations: List[Dict[str, Any]] = []
+    for sp in _flatten(roots):
+        if sp.end is None or sp.duration_ms < 0:
+            continue
+        md = sp.metadata or {}
+        runtime = _span_runtime(sp)
+        observations.append(
+            make_observation(
+                agent_id=sp.agent_id or agent_id,
+                benchmark=benchmark,
+                environment=environment,
+                span_key=_span_history_key(sp),
+                span_name=sp.name,
+                duration_ms=sp.duration_ms,
+                timestamp=timestamp,
+                run_status=run_status,
+                span_source=md.get("span_source"),
+                source=sp.source,
+                status=sp.status,
+                phase=runtime.get("phase"),
+                agent_type=runtime.get("agent_type"),
+                call_site=runtime.get("call_site") or md.get("call_site"),
+                tool_name=runtime.get("tool_name") or md.get("tool_name"),
+                model=runtime.get("model") or md.get("model") or md.get("actual_model"),
+            )
+        )
+    return observations
+
+
+def _span_baseline_map(
+    observations: List[Dict[str, Any]],
+    *,
+    benchmark: str,
+    environment: str,
+    min_samples: int,
+) -> Dict[str, Dict[str, Any]]:
+    baselines: Dict[str, Dict[str, Any]] = {}
+    for observation in observations:
+        span_key = str(observation.get("span_key") or "")
+        if not span_key or span_key in baselines:
+            continue
+        stats = span_history_summary(span_key, benchmark=benchmark, environment=environment)
+        if stats and stats["count"] >= min_samples:
+            baselines[span_key] = stats
+    return baselines
+
+
+def _format_span_baseline(sp: Span, baselines: Dict[str, Dict[str, Any]], color: bool) -> str:
+    stats = baselines.get(_span_history_key(sp))
+    if not stats:
+        return ""
+    is_slow = sp.duration_ms > stats["p95_ms"]
+    marker = f"{_c('SLOW', RED, color)} " if is_slow else ""
+    return _c(
+        "  "
+        + marker
+        + "hist "
+        + f"p50={_fmt_dur(int(stats['p50_ms'])).strip()} "
+        + f"p90={_fmt_dur(int(stats['p90_ms'])).strip()} "
+        + f"p95={_fmt_dur(int(stats['p95_ms'])).strip()} "
+        + f"max={_fmt_dur(int(stats['max_ms'])).strip()} "
+        + f"n={stats['count']}",
+        DIM if not is_slow else "",
+        color,
+    )
+
+
 # Lightweight spans that only appear in verbose mode
 LIGHT_NAMES = {
     "db.query",            # legacy synth if any
@@ -968,6 +1130,7 @@ def _render_span(
     color: bool,
     stall_threshold: float,
     code_cache: Dict[str, str],
+    span_baselines: Dict[str, Dict[str, Any]],
     verbose: bool,
     prev_end_by_depth: Dict[int, datetime],
 ) -> None:
@@ -1000,19 +1163,20 @@ def _render_span(
     elif sp.status == "unclosed":
         status_suffix = _c("  [NO-END]", RED, color)
 
-    code_ptr = sp.metadata.get("code_ptr") or _find_code_pointer(sp.name, code_cache)
+    code_ptr = _span_code_pointer(sp, code_cache)
     ptr_s = _c(f"  @ {code_ptr}", DIM, color) if code_ptr else ""
+    baseline_s = _format_span_baseline(sp, span_baselines, color)
 
     out.append(
         f"{_fmt_offset(offset)}  {dur}  "
-        f"{indent}{branch}{src_c} {name_c}  {summary}{status_suffix}{ptr_s}"
+        f"{indent}{branch}{src_c} {name_c}  {summary}{baseline_s}{status_suffix}{ptr_s}"
     )
 
     prev_end_by_depth[depth] = sp.end or sp.start
     inner = {k: v for k, v in prev_end_by_depth.items() if k <= depth}
     for child in sp.children:
         _render_span(child, depth + 1, t0, out, color, stall_threshold,
-                     code_cache, verbose, inner)
+                     code_cache, span_baselines, verbose, inner)
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1217,41 @@ def _top_bad_paths(
         scored.append((worst, path))
     scored.sort(key=lambda x: -x[0])
     return scored[:n]
+
+
+def _activity_memory_rows(all_spans: List[Span]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Tuple[int, int, int, int]]] = defaultdict(list)
+    for sp in all_spans:
+        md = sp.metadata or {}
+        activity_type = md.get("temporal_activity_type")
+        if not activity_type:
+            continue
+        peak_delta = _as_int(md.get("memory_tree_rss_peak_delta_bytes"))
+        end_delta = _as_int(md.get("memory_tree_rss_delta_bytes"))
+        peak = _as_int(md.get("memory_tree_rss_peak_bytes"))
+        if peak_delta is None or end_delta is None or peak is None:
+            continue
+        grouped[str(activity_type)].append((peak_delta, end_delta, peak, sp.duration_ms))
+
+    rows: List[Dict[str, Any]] = []
+    for activity_type, values in grouped.items():
+        peak_deltas = [v[0] for v in values]
+        end_deltas = [v[1] for v in values]
+        peaks = [v[2] for v in values]
+        durations = [v[3] for v in values]
+        rows.append(
+            {
+                "activity_type": activity_type,
+                "count": len(values),
+                "avg_peak_delta": sum(peak_deltas) / len(peak_deltas),
+                "max_peak_delta": max(peak_deltas),
+                "max_end_delta": max(end_deltas),
+                "max_peak": max(peaks),
+                "avg_duration_ms": sum(durations) / len(durations),
+            }
+        )
+    rows.sort(key=lambda r: (r["max_peak_delta"], r["avg_peak_delta"]), reverse=True)
+    return rows
 
 
 def _render_executive_summary(
@@ -1143,15 +1342,18 @@ def _render_executive_summary(
         path_labels = []
         for i, sp in enumerate(path):
             frag = sp.name
+            runtime = sp.metadata.get("runtime_context") if isinstance(sp.metadata.get("runtime_context"), dict) else {}
             if sp.metadata.get("actual_model"):
                 frag += f"[{str(sp.metadata['actual_model']).split('/')[-1]}]"
             elif sp.metadata.get("call_site") and "[" not in frag:
                 frag += f"[{sp.metadata['call_site']}]"
+            elif runtime.get("call_site") and "[" not in frag:
+                frag += f"[{runtime['call_site']}]"
             if sp.duration_ms >= slow_threshold_ms:
                 frag = _c(frag, YELLOW, color)
             path_labels.append(frag)
         leaf = path[-1]
-        ptr = leaf.metadata.get("code_ptr") or _find_code_pointer(leaf.name, code_cache)
+        ptr = _span_code_pointer(leaf, code_cache)
         ptr_s = f"  @ {ptr}" if ptr else ""
         lines.append(
             f"  {rank:2d}. {_c(_fmt_dur(worst), BOLD, color)}  "
@@ -1159,6 +1361,28 @@ def _render_executive_summary(
             + _c(ptr_s, DIM, color)
         )
     lines.append("")
+
+    memory_rows = _activity_memory_rows(all_spans)
+    if memory_rows:
+        lines.append(_c("ACTIVITY MEMORY FOOTPRINT (worker process-tree RSS)", BOLD, color))
+        lines.append("-" * 100)
+        lines.append("  count  avg_peakΔ  max_peakΔ  max_endΔ   max_peakRSS  avg_dur   activity_type")
+        for row in memory_rows[:20]:
+            lines.append(
+                f"  {row['count']:5d}  "
+                f"{_fmt_mb_from_bytes(row['avg_peak_delta']):>9}  "
+                f"{_fmt_mb_from_bytes(row['max_peak_delta']):>9}  "
+                f"{_fmt_mb_from_bytes(row['max_end_delta']):>8}  "
+                f"{_fmt_mb_from_bytes(row['max_peak']):>11}  "
+                f"{_fmt_dur(int(row['avg_duration_ms'])).strip():>7}   "
+                f"{row['activity_type']}"
+            )
+        lines.append(_c(
+            "  Note: RSS deltas are process-wide; concurrent activities can overlap. "
+            "Use serialized or low-concurrency runs for cleaner per-activity attribution.",
+            DIM, color,
+        ))
+        lines.append("")
 
     if errors:
         lines.append(_c(f"ERRORS ({len(errors)})", BOLD, color))
@@ -1174,6 +1398,7 @@ def _render_tree(
     roots: List[Span],
     t0: datetime,
     code_cache: Dict[str, str],
+    span_baselines: Dict[str, Dict[str, Any]],
     color: bool,
     stall_threshold: float,
     verbose: bool,
@@ -1185,7 +1410,7 @@ def _render_tree(
     prev_end_by_depth: Dict[int, datetime] = {}
     for r in roots:
         _render_span(r, 0, t0, lines, color, stall_threshold, code_cache,
-                     verbose, prev_end_by_depth)
+                     span_baselines, verbose, prev_end_by_depth)
     lines.append("")
     lines.append(
         _c("LEGEND: ", BOLD, color)
@@ -1336,6 +1561,73 @@ def _parse_render_line_to_raw_event(line: str) -> Optional[_RawEvent]:
     for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
         data[km.group(1)] = km.group(2).strip()
     return _RawEvent(ts, "backend", msg, data)
+
+
+def _parse_research_line_to_raw_event(line: str) -> Optional[_RawEvent]:
+    line = ANSI_RE.sub("", line).strip()
+    json_start = line.find("{")
+    if json_start < 0:
+        return None
+    try:
+        d = json.loads(line[json_start:])
+    except json.JSONDecodeError:
+        return None
+    ts_str = d.get("timestamp")
+    if not ts_str:
+        return None
+    return _RawEvent(parse_ts(ts_str), "research", d.get("message", ""), d)
+
+
+def record_span_history_from_logs(
+    *,
+    agent_id: str,
+    logs: Dict[str, Any],
+    benchmark: str,
+    environment: str,
+    timestamp: str,
+    run_status: str = "passed",
+) -> int:
+    """Record span-duration history from logs already embedded in a benchmark result."""
+    try:
+        worker_raw = [
+            event
+            for line in logs.get("worker_logs", []) or []
+            for event in [_parse_fly_line_to_raw_event(str(line))]
+            if event is not None
+        ]
+        backend_raw = [
+            event
+            for line in logs.get("backend_logs", []) or []
+            for event in [_parse_render_line_to_raw_event(str(line))]
+            if event is not None
+        ]
+        research_raw = [
+            event
+            for line in logs.get("research_logs", []) or []
+            for event in [_parse_research_line_to_raw_event(str(line))]
+            if event is not None
+        ]
+        if not (worker_raw or backend_raw or research_raw):
+            return 0
+        ids = {
+            aid
+            for event in [*worker_raw, *backend_raw, *research_raw]
+            for aid in [_event_agent_id(event)]
+            if aid
+        }
+        sub_ids = ids - {agent_id}
+        roots, _t0, _t1, _stats = _build_trace_from_events(worker_raw, backend_raw, research_raw, sub_ids)
+        observations = _span_observations(
+            roots,
+            agent_id=agent_id,
+            benchmark=benchmark,
+            environment=environment,
+            timestamp=timestamp,
+            run_status=run_status,
+        )
+        return record_span_observations(observations)
+    except Exception:
+        return 0
 
 
 async def _fetch_render_logs_bulk(
@@ -1640,6 +1932,17 @@ def main() -> int:
                     help="Path to a saved worker log file (JSONL from Fly.io). "
                          "Generated by benchmark_monitor.py on exit. "
                          "Provides full worker span depth for prod analysis.")
+    ap.add_argument("--benchmark", default="",
+                    help="Benchmark/task name for span-baseline lookup and recording.")
+    ap.add_argument("--environment", choices=["local", "prod"], default=None,
+                    help="Span-baseline environment. Defaults to prod when --url is set, otherwise local.")
+    ap.add_argument("--span-history-status", default="observed",
+                    choices=["observed", "passed", "failed"],
+                    help="Status stored when recording this trace to span history.")
+    ap.add_argument("--span-baseline-min-samples", type=int, default=20,
+                    help="Minimum historical samples required before comparing a span_key.")
+    ap.add_argument("--no-record-span-history", action="store_true",
+                    help="Do not append this analyzed trace to span history.")
     args = ap.parse_args()
 
     roots, t0, t1, stats = build_trace(args.agent_id, url=args.url,
@@ -1656,6 +1959,26 @@ def main() -> int:
 
     color = _use_color(args.no_color)
     code_cache: Dict[str, str] = {}
+    environment = args.environment or ("prod" if args.url else "local")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    observations = _span_observations(
+        roots,
+        agent_id=args.agent_id,
+        benchmark=args.benchmark,
+        environment=environment,
+        timestamp=timestamp,
+        run_status=args.span_history_status,
+    )
+    span_baselines = _span_baseline_map(
+        observations,
+        benchmark=args.benchmark,
+        environment=environment,
+        min_samples=args.span_baseline_min_samples,
+    )
+    if not args.no_record_span_history:
+        written = record_span_observations(observations)
+        if written:
+            print(f"Recorded {written} span observation(s) to historical span baselines.")
 
     summary = _render_executive_summary(
         args.agent_id, roots, t0, t1, stats, code_cache,
@@ -1677,12 +2000,12 @@ def main() -> int:
     if args.verbose:
         print(_c("FULL TREE", BOLD, color))
         print(_c("═" * 100, BOLD, color))
-        print(_render_tree(roots, t0, code_cache, color,
+        print(_render_tree(roots, t0, code_cache, span_baselines, color,
                            args.stall_threshold, verbose=True))
     else:
         print(_c("HOT PATH TREE (re-run with -v for fully expanded tree)", BOLD, color))
         print(_c("═" * 100, BOLD, color))
-        print(_render_tree(roots, t0, code_cache, color,
+        print(_render_tree(roots, t0, code_cache, span_baselines, color,
                            args.stall_threshold, verbose=False))
 
     return 0

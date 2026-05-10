@@ -69,7 +69,10 @@ async def execute_browser_tool(
         elif tool_name == "evaluate":
             return await _execute_evaluate(dom_service, tool_args)
         elif tool_name == "extract":
-            return await _execute_extract(dom_service, tool_args, extract_model)
+            return {
+                "success": False,
+                "error": "extract is disabled. Use evaluate to read DOM/page content directly.",
+            }
         elif tool_name == "goto":
             return await _execute_goto(dom_service, tool_args)
         elif tool_name == "navback":

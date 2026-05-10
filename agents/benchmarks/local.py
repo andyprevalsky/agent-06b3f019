@@ -230,9 +230,9 @@ def resolve_run_path(value: str) -> Path:
     return path
 
 
-def diagnostic_commands(agent_id: str, *, port: int) -> list[list[str]]:
+def diagnostic_commands(agent_id: str, *, task_name: str, port: int) -> list[list[str]]:
     return [
-        [sys.executable, "benchmarks/agent_latency.py", agent_id],
+        [sys.executable, "benchmarks/agent_latency.py", agent_id, "--benchmark", task_name, "--environment", "local"],
         [
             sys.executable,
             "benchmarks/agent_logs.py",
@@ -263,7 +263,7 @@ def run_diagnostics(
         task_dir = diag_root / f"{failure.name}_{failure.agent_id[:12]}"
         task_dir.mkdir(exist_ok=True)
         processes: list[tuple[subprocess.Popen, object]] = []
-        for command in diagnostic_commands(failure.agent_id, port=port):
+        for command in diagnostic_commands(failure.agent_id, task_name=failure.name, port=port):
             label = Path(command[1]).stem
             outfile = open(task_dir / f"{label}.txt", "w")
             outfile.write(f"$ {' '.join(command)}\n\n")

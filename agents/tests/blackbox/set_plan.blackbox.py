@@ -102,12 +102,8 @@ def test_validate_planner_result_valid():
                 {"task_idx": "0", "goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
                 {"task_idx": "1", "goal": "Write", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
-            "dependencies_graph": [
-                {"task_idx": "1", "depends_on": ["0"]},
-            ],
             "join": "all",
             "title": "Test Plan",
-            "content": "A plan",
         }
     )
     assert result is None
@@ -129,7 +125,6 @@ def test_validate_planner_result_invalid_join():
         {
             "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
             "join": "invalid",
-            "dependencies_graph": [],
         }
     )
     assert err is not None and "join" in err.lower()
@@ -142,7 +137,6 @@ def test_validate_planner_result_requires_string_task_idx():
     err = _validate_planner_result(
         {
             "tasks": [{"goal": "A", "tool_name": "reasoning", "depends_on": []}],
-            "dependencies_graph": [],
             "join": "all",
         }
     )
@@ -160,7 +154,6 @@ def test_validate_planner_result_rejects_mismatched_task_idx():
             "tasks": [
                 {"task_idx": "1", "goal": "A", "tool_name": "reasoning", "depends_on": []},
             ],
-            "dependencies_graph": [],
             "join": "all",
         }
     )
@@ -168,8 +161,8 @@ def test_validate_planner_result_rejects_mismatched_task_idx():
     assert "0-based array position" in err
 
 
-def test_validate_planner_result_mismatch_depends_on():
-    """task.depends_on must match dependencies_graph."""
+def test_validate_planner_result_uses_task_depends_on():
+    """task.depends_on is the single source of truth for dependencies."""
     from tools.set_plan import _validate_planner_result
 
     err = _validate_planner_result(
@@ -178,11 +171,10 @@ def test_validate_planner_result_mismatch_depends_on():
                 {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": []},
                 {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
-            "dependencies_graph": [],  # missing entry for task 1
             "join": "all",
         }
     )
-    assert err is not None
+    assert err is None
 
 
 def test_validate_planner_result_propagates_dep_error():
@@ -194,10 +186,6 @@ def test_validate_planner_result_propagates_dep_error():
             "tasks": [
                 {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": ["1"]},
                 {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
-            ],
-            "dependencies_graph": [
-                {"task_idx": "0", "depends_on": ["1"]},
-                {"task_idx": "1", "depends_on": ["0"]},
             ],
             "join": "all",
         }
@@ -252,24 +240,22 @@ def test_build_plan_data_maps_fields():
     plan_data = build_plan_data(
         {
             "tasks": [
-                {"goal": "Research", "tool_name": "spawn_explore_agent"},
-                {"goal": "Synthesize", "tool_name": "reasoning"},
+                {"goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
+                {"goal": "Synthesize", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
-            "dependencies_graph": [{"task_idx": "1", "depends_on": ["0"]}],
             "title": "Plan A",
-            "content": "Detailed plan content",
             "join": "all",
         }
     )
     assert plan_data["type"] == "plan_artifact"
     assert plan_data["title"] == "Plan A"
-    assert plan_data["content"] == "Detailed plan content"
+    assert plan_data["content"] == ""
     assert plan_data["status"] == "planning"
     assert plan_data["join"] == "all"
     assert len(plan_data["tasks"]) == 2
     assert plan_data["tasks"][0]["goal"] == "Research"
     assert plan_data["tasks"][0]["tool_name"] == "spawn_explore_agent"
-    assert plan_data["dependencies"] == {"1": ["0"]}
+    assert plan_data["dependencies"] == {"0": [], "1": ["0"]}
 
 
 def test_build_plan_message_join_any():
@@ -439,7 +425,7 @@ def test_build_planner_messages_tool_and_system_roles():
 
 
 def test_build_planner_messages_skips_subagent_work_messages():
-    """Planner context excludes spawned-agent intermediate work rows."""
+    """Planner context excludes spawned-agent work and fanout tree rows."""
     from domains.set_plan.service import build_planner_messages
 
     context = [
@@ -451,8 +437,13 @@ def test_build_planner_messages_skips_subagent_work_messages():
         },
         {
             "role": "TOOL",
-            "text": "Child final summary",
-            "metadata": {"toolName": "spawn_sub_agent", "subAgentIds": ["child-1"]},
+            "text": "Child fanout tree summary",
+            "metadata": {"toolName": "spawn_general_purpose_agent", "toolCallId": "tc:0", "subAgentIds": ["child-1"]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Aggregate for_each result",
+            "metadata": {"toolName": "spawn_general_purpose_agent_for_each", "toolCallId": "tc"},
         },
     ]
 
@@ -461,7 +452,8 @@ def test_build_planner_messages_skips_subagent_work_messages():
 
     assert user_messages == ["Goal"]
     assert "Child internal web_search result" not in serialized
-    assert "Child final summary" in serialized
+    assert "Child fanout tree summary" not in serialized
+    assert "Aggregate for_each result" in serialized
 
 
 def test_build_planner_messages_compacts_long_tool_context():
@@ -625,11 +617,7 @@ async def test_handler_happy_path_first_try():
             {"task_idx": "0", "goal": "A", "tool_name": "reasoning", "depends_on": []},
             {"task_idx": "1", "goal": "B", "tool_name": "reasoning", "depends_on": ["0"]},
         ],
-        "dependencies_graph": [
-            {"task_idx": "1", "depends_on": ["0"]},
-        ],
         "title": "Test Plan",
-        "content": "Plan content",
         "join": "all",
     }
 
@@ -780,7 +768,7 @@ async def run_all_tests():
     r.record("validate_planner_result_invalid_join", test_validate_planner_result_invalid_join)
     r.record("validate_planner_result_requires_task_idx", test_validate_planner_result_requires_string_task_idx)
     r.record("validate_planner_result_task_idx_mismatch", test_validate_planner_result_rejects_mismatched_task_idx)
-    r.record("validate_planner_result_mismatch", test_validate_planner_result_mismatch_depends_on)
+    r.record("validate_planner_result_task_deps_source", test_validate_planner_result_uses_task_depends_on)
     r.record("validate_planner_result_dep_err", test_validate_planner_result_propagates_dep_error)
     # convert_deps
     r.record("convert_deps_list_to_dict", test_convert_deps_list_to_dict)

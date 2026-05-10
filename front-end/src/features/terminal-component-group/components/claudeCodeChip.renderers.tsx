@@ -11,7 +11,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Code,
   ExternalLink,
   Loader2,
   Maximize2,
@@ -19,6 +18,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import ClaudeIcon from '@/assets/claude-color.svg';
+import CodexIcon from '@/assets/codex-color.svg';
 import { type ResponseSchemaField } from '../hooks';
 import { type ChipState, type CodeProvider } from '../types';
 import { SchemaChip } from './SchemaChip';
@@ -60,7 +60,7 @@ function ProviderIcon({
   className: string;
 }) {
   if (codeProvider === 'codex') {
-    return <Code aria-label="Codex" className={className} />;
+    return <img src={CodexIcon} alt="Codex" className={className} />;
   }
   return <img src={ClaudeIcon} alt="Claude Code" className={className} />;
 }

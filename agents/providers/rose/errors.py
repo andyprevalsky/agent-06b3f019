@@ -50,8 +50,7 @@ class RoseServerError(RoseError):
 
 
 class RoseStallError(RoseError):
-    """Provider opened the stream but produced no content within the TTFT window,
-    or went idle mid-stream past the idle timeout.
+    """Provider opened the stream but produced no content within the TTFT window.
 
     No partial-stream recovery: the reader is closed and the call falls through
     to the next layer (waterfall, or terminal if waterfall is exhausted).

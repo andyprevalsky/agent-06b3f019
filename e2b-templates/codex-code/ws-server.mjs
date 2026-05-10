@@ -22,6 +22,7 @@ const GOAL = process.env.CODEX_GOAL;
 const CODEX_AUTH_JSON = process.env.CODEX_AUTH_JSON;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CODEX_MODEL = process.env.CODEX_MODEL || 'gpt-5.4';
+const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || '';
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
@@ -35,6 +36,7 @@ if (!CODEX_AUTH_JSON && !OPENAI_API_KEY) {
 }
 
 let outputBuffer = '';
+let eventBuffer = [];
 let exitCode = null;
 let processExited = false;
 let stdoutLineBuffer = '';
@@ -51,6 +53,17 @@ function broadcast(type, data) {
 function appendOutput(type, data) {
   outputBuffer += data;
   broadcast(type, data);
+}
+
+function appendEvent(event) {
+  const normalized = {
+    version: 1,
+    provider: 'codex',
+    timestamp: new Date().toISOString(),
+    ...event,
+  };
+  eventBuffer.push(normalized);
+  broadcast('code_agent_event', normalized);
 }
 
 function describeFileChanges(changes = []) {
@@ -72,13 +85,16 @@ function renderCodexJsonLine(line) {
   }
 
   if (event.type === 'thread.started') {
+    appendEvent({ type: 'session', raw_type: event.type, thread_id: event.thread_id || null });
     return `[Codex] Thread started: ${event.thread_id || 'unknown'}\n`;
   }
   if (event.type === 'turn.started') {
+    appendEvent({ type: 'turn', raw_type: event.type, status: 'started' });
     return '[Codex] Turn started\n';
   }
   if (event.type === 'turn.completed') {
     const usage = event.usage || {};
+    appendEvent({ type: 'usage', raw_type: event.type, usage });
     return [
       '[Codex] Turn completed',
       `input_tokens=${usage.input_tokens ?? 0}`,
@@ -92,18 +108,36 @@ function renderCodexJsonLine(line) {
   if (!item) return '';
 
   if (item.type === 'agent_message' && item.text) {
+    appendEvent({ type: 'agent_message', raw_type: event.type, text: item.text });
     return `[Codex] ${item.text}\n`;
   }
 
   if (item.type === 'file_change' && event.type === 'item.completed') {
+    const paths = (item.changes || []).map((change) => change.path).filter(Boolean);
+    appendEvent({
+      type: 'file_change',
+      raw_type: event.type,
+      status: item.status || 'completed',
+      changes: item.changes || [],
+      paths,
+    });
     return `[Codex file_change ${item.status || 'completed'}] ${describeFileChanges(item.changes)}\n`;
   }
 
   if (item.type === 'command_execution') {
     if (event.type === 'item.started') {
+      appendEvent({ type: 'command', raw_type: event.type, status: 'started', command: item.command });
       return `[Codex command started] ${item.command}\n`;
     }
 
+    appendEvent({
+      type: 'command',
+      raw_type: event.type,
+      status: 'completed',
+      command: item.command,
+      output: item.aggregated_output || '',
+      exit_code: item.exit_code ?? null,
+    });
     const output = item.aggregated_output ? `\n${item.aggregated_output.replace(/\n?$/, '\n')}` : '\n';
     return [
       `[Codex command completed] ${item.command}`,
@@ -139,6 +173,7 @@ wss.on('connection', (ws) => {
   clients.add(ws);
 
   if (outputBuffer.length > 0) ws.send(JSON.stringify({ type: 'buffer', data: outputBuffer }));
+  if (eventBuffer.length > 0) ws.send(JSON.stringify({ type: 'code_agent_events', data: eventBuffer }));
   if (processExited) ws.send(JSON.stringify({ type: 'exit', code: exitCode ?? 0 }));
 
   ws.on('message', (data) => {
@@ -216,14 +251,7 @@ if (GITHUB_REPO_URL) {
     execFileSync('git', ['config', 'user.email', 'agent@roselabs.ai'], { cwd: workDir });
     writeFileSync(
       join(workDir, 'AGENTS.md'),
-      [
-        `You are working in a cloned GitHub repository: ${GITHUB_REPO_URL}`,
-        '',
-        'After completing repository changes, push them before finishing.',
-        'User attachments are in /home/user/attachments.',
-        'Place user-facing output files in /home/user/output.',
-        '',
-      ].join('\n')
+      CODE_AGENT_SYSTEM_PROMPT
     );
     log('info', 'Repository cloned', { workDir });
   } catch (err) {
@@ -232,7 +260,22 @@ if (GITHUB_REPO_URL) {
   }
 }
 
-const sanitizedGoal = GOAL.replace(/\0/g, '');
+if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+  writeFileSync(join(workDir, 'AGENTS.md'), CODE_AGENT_SYSTEM_PROMPT);
+}
+
+appendEvent({
+  type: 'session',
+  status: 'starting',
+  cwd: workDir,
+  model: CODEX_MODEL,
+  prompt_version: CODE_AGENT_SYSTEM_PROMPT.match(/Rose Labs code-agent instructions \(([^)]+)\)/)?.[1] || null,
+});
+
+const sanitizedGoal = [
+  CODE_AGENT_SYSTEM_PROMPT ? `System instructions:\n${CODE_AGENT_SYSTEM_PROMPT}` : '',
+  `Task:\n${GOAL.replace(/\0/g, '')}`,
+].filter(Boolean).join('\n\n');
 const args = [
   'exec',
   '--ignore-user-config',
@@ -271,6 +314,7 @@ codex.on('close', (code, signal) => {
   }
   exitCode = code ?? 1;
   processExited = true;
+  appendEvent({ type: 'final', status: exitCode === 0 ? 'completed' : 'failed', exit_code: exitCode, signal });
   log('info', 'Codex exited', { code, signal });
   broadcast('exit', exitCode);
   setTimeout(() => shutdown(exitCode ?? 0), 120000);

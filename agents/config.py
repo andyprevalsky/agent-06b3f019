@@ -33,7 +33,9 @@ class TemporalConfig:
     task_queue: str
 
     # Worker concurrency settings
-    max_concurrent_activities: int = 50  # Reduced to prevent DB connection exhaustion
+    max_concurrent_activities: int = 100
+    activity_admission_close_memory_percent: float = 80.0
+    activity_admission_open_memory_percent: float = 75.0
     max_concurrent_workflows: int = 50  # Max concurrent agents (aligned with activities)
     max_cached_workflows: int = 100  # Reduced to match workflow count
     # Polling concurrency. Was 2/2 — too low when several workflows hit init in
@@ -214,7 +216,9 @@ def load_config() -> AppConfig:
         namespace=os.environ["TEMPORAL_NAMESPACE"],
         address=os.environ["TEMPORAL_ADDRESS"],
         task_queue=os.environ["TEMPORAL_TASK_QUEUE"],
-        max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "50")),
+        max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "100")),
+        activity_admission_close_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_CLOSE_MEMORY_PERCENT", "80")),
+        activity_admission_open_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT", "75")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
         max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),

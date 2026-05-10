@@ -104,6 +104,13 @@ class BenchmarkRun:
         except Exception as e:
             print(f"⚠️  _record_history import failed (non-fatal): {e}")
             return
+        try:
+            from benchmarks.agent_latency import record_span_history_from_logs
+        except Exception as e:
+            record_span_history_from_logs = None
+            print(f"⚠️  span-history import failed (non-fatal): {e}")
+
+        environment = "local" if "localhost" in self.base_url or "127.0.0.1" in self.base_url else "prod"
         for r in self.task_results:
             if not r.passed or r.status == "SKIPPED":
                 continue
@@ -117,6 +124,20 @@ class BenchmarkRun:
                 )
             except Exception as e:
                 print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+            if record_span_history_from_logs and r.logs:
+                try:
+                    count = record_span_history_from_logs(
+                        agent_id=r.agent_id,
+                        logs=r.logs,
+                        benchmark=r.name,
+                        environment=environment,
+                        timestamp=self.timestamp,
+                        run_status="passed",
+                    )
+                    if count:
+                        print(f"    Span history recorded: {count} spans for {r.name}")
+                except Exception as e:
+                    print(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
 
     @staticmethod
     def load(path: str) -> "BenchmarkRun":

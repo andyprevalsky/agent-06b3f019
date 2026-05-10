@@ -69,10 +69,10 @@ Return to me:
     prompt: 'Buy me any black carhartt beanie < 35$ and well-made from amazon\nNo questions asked',
   },
   {
-    title: 'Test Spawn Sub Agents',
-    description: 'Tests recursive sub-agent spawning with depth parameter',
+    title: 'Test Spawn General-Purpose Agents',
+    description: 'Tests recursive general-purpose agent spawning with depth parameter',
     prompt:
-      'Spawn 2 sub-agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a sub-agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each sub agent you spawned.',
+      'Spawn 2 general-purpose agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a general-purpose agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each general-purpose agent you spawned.',
   },
   {
     title: 'Test Web Search',
@@ -88,19 +88,19 @@ Return to me:
     title: 'Test Parallel Tool Calls',
     description: 'Tests parallel execution of multiple tools in one turn',
     prompt:
-      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno sub agents',
+      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in execute mode\nno general-purpose agents',
   },
   {
     title: 'Test Claude Code Agent',
     description: 'Tests Claude Code agent in ephemeral E2B sandbox',
     prompt:
-      'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no sub agents',
+      'Starting from 27, how many steps does it take to reach 1 in the Collatz sequence? List all the numbers. Use Claude Code and no general-purpose agents',
   },
   {
     title: 'Test DAG Executor',
     description: 'Tests DAG executor with plan mode (no web searches during planning)',
     prompt:
-      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno sub agents',
+      'Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno general-purpose agents',
   },
   {
     title: 'Test Image Handling',
@@ -109,16 +109,16 @@ Return to me:
     attachmentUrls: ['/test-assets/rs.jpeg'],
   },
   {
-    title: 'Test Files in Sub Agents',
-    description: 'Tests file_pointer output schema with sub-agents creating color variants',
+    title: 'Test Files in General-Purpose Agents',
+    description: 'Tests file_pointer output schema with general-purpose agents creating color variants',
     prompt:
-      'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_sub_agent for each one, no claude code agents in main agent, instruct each sub agent to use claude code to do the color transformation',
+      'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_general_purpose_agent for each one, no claude code agents in main agent, instruct each general-purpose agent to use claude code to do the color transformation',
     attachmentUrls: ['/test-assets/rs.jpeg'],
   },
   {
     title: 'Test Files in Browser Agent',
     description: 'Tests browser agent file upload with TinyPNG',
-    prompt: 'upload this image to tinypng.com and compress it\n\nno sub agents\nno questions asked',
+    prompt: 'upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked',
     attachmentUrls: ['/test-assets/rs.jpeg'],
   },
   {
@@ -181,8 +181,8 @@ For any services that require a API Key or Credential, mock the service for now 
   },
   {
     title: 'Test Website Mapping',
-    description: 'Tests Claude Code agents rebuilding a website with sub-agents',
-    prompt: `recreate https://dallasmmaboxing.com w a modern stack using claude code agents and sub agents
+    description: 'Tests Claude Code agents rebuilding a website with general-purpose agents',
+    prompt: `recreate https://dallasmmaboxing.com w a modern stack using claude code agents and general-purpose agents
 - first understand the content there comprehensively
 - secondly, add a additional link to signup for memberships that is hidden at /memberships
 - make sure u test your changes as needed`,
@@ -210,11 +210,11 @@ Reach out to 0-10
 
 Each message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
 
-We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent per row.
+We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.
 
 PROCESS GUIDELINES
 ===
-0. Use spawn_sub_agent_for_each when spawning a sub agent per row.
+0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.
 1. At the start, do research for best practices on cold email outreach.
 2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).
 3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.
@@ -269,14 +269,14 @@ LinkedIn:
 
 Each message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer
 
-We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one sub agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.
+We need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.
 
-Since you are limited on the sub-agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.`,
+Since you are limited on the general-purpose agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.`,
     attachmentUrls: ['/test-assets/vcs-and-angels.csv'],
   },
   {
     title: 'Test Agent For Each',
-    description: 'Tests sub-agent for_each processing 12 CSV entities in parallel',
+    description: 'Tests general-purpose-agent for_each processing 12 CSV entities in parallel',
     prompt: 'Get me one interesting fact about each entity on the csv.',
     attachmentUrls: ['/test-assets/entities-12.csv'],
   },

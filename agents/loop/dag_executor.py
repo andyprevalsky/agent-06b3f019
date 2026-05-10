@@ -23,7 +23,6 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.param_populator.config import SPAWN_PARAM_REQUIREMENTS
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
@@ -42,8 +41,8 @@ TOOL_ALIASES = {
     "spawn_explore_agent": "spawn_agent",
     "spawn_browser_agent": "spawn_agent",
     "spawn_code_agent": "spawn_agent",
-    "spawn_sub_agent": "spawn_agent",
-    "spawn_sub_agent_for_each": "spawn_agent",
+    "spawn_general_purpose_agent": "spawn_agent",
+    "spawn_general_purpose_agent_for_each": "spawn_agent",
     "wait_seconds": "wait_for",  # Backward compat for old plans
 }
 
@@ -53,8 +52,8 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_explore_agent": {"type": "explore"},
     "spawn_browser_agent": {"type": "browser"},
     "spawn_code_agent": {"type": "code"},
-    "spawn_sub_agent": {"type": "sub_agent"},
-    "spawn_sub_agent_for_each": {"type": "for_each"},
+    "spawn_general_purpose_agent": {"type": "general_purpose"},
+    "spawn_general_purpose_agent_for_each": {"type": "for_each"},
 }
 
 
@@ -80,10 +79,55 @@ def _build_param_population_message(goal: str, tool_name: str, alias_hint: str =
             "For file outputs in output_schema, use type='file_pointer'."
         )
 
-    if alias_hint in SPAWN_PARAM_REQUIREMENTS:
-        msg += f"\n{SPAWN_PARAM_REQUIREMENTS[alias_hint]}"
-
     return msg
+
+
+def _build_early_tool_event(
+    task: "DAGTask",
+    actual_tool: str,
+    tool_call_id: str,
+) -> tuple[str, ToolEvent]:
+    """Build the pre-param-populator placeholder event for a DAG tool task."""
+    event_tool_name = task.tool_name
+    title = task.tool_name
+    message = task.goal
+    metadata: Dict[str, Any] = {}
+
+    if actual_tool == "wait_for":
+        event_tool_name = "wait_for"
+        title = "Preparing wait"
+    elif actual_tool == "spawn_agent":
+        agent_type = ALIAS_TYPE_OVERRIDES.get(task.tool_name, {}).get("type")
+        if agent_type == "explore":
+            event_tool_name = "spawn_agent"
+            title = "Exploring"
+            metadata = {
+                "agentType": "explore",
+                "taskId": tool_call_id,
+                "fullGoal": task.goal,
+            }
+        elif agent_type == "browser":
+            event_tool_name = "spawn_browser_agent"
+            title = "Starting browser agent"
+        elif agent_type == "code":
+            event_tool_name = "spawn_claude_code_agent"
+            title = "Starting code agent"
+        elif agent_type == "general_purpose":
+            event_tool_name = "spawn_general_purpose_agent"
+            title = "Spawning sub-agent"
+            message = ""
+        elif agent_type == "for_each":
+            event_tool_name = "spawn_general_purpose_agent_for_each"
+            title = "Spawning agent cluster"
+            message = ""
+
+    return event_tool_name, ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title=title,
+        message=message,
+        status=MessageStatus.IN_PROGRESS,
+        metadata=metadata,
+    )
 
 
 def extract_error_message(e: Exception) -> str:
@@ -615,20 +659,10 @@ async def _execute_single_task(
             if actual_tool != task.tool_name:
                 workflow.logger.info(f"[DAG] Resolved alias: {task.tool_name} → {actual_tool}")
 
-            # Legacy event-driven tools manage their own IN_PROGRESS/FINISHED events
-            SELF_MANAGED_TOOLS = {"wait_for", "spawn_agent"}
-            if actual_tool not in SELF_MANAGED_TOOLS:
-                # Tool task - emit IN_PROGRESS, execute, emit FINISHED
-                await handle_tool_event_fn(
-                    ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title=task.tool_name,
-                        message=task.goal,
-                        status=MessageStatus.IN_PROGRESS,
-                    ),
-                    tool_call_id,
-                    task.tool_name,
-                )
+            # Emit a placeholder before param population so the UI reflects the
+            # concrete planned tool while the LLM fills arguments.
+            early_tool_name, early_event = _build_early_tool_event(task, actual_tool, tool_call_id)
+            await handle_tool_event_fn(early_event, tool_call_id, early_tool_name)
 
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.

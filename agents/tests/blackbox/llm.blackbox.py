@@ -178,6 +178,18 @@ def test_convert_context_to_messages_skip_subagent_and_inprogress():
             "timestamp": "2024-01-01T00:00:00Z",
             "metadata": {"subAgentId": "sub-1"},
         },
+        {
+            "role": "TOOL",
+            "text": "hidden fanout tree row",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "metadata": {"subAgentIds": ["sub-1"], "busId": "bus-1", "toolCallId": "tc:0", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "direct child final result",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "metadata": {"subAgentIds": ["sub-2"], "busId": "bus-1", "toolCallId": "tc", "toolStatus": "FINISHED"},
+        },
         {"role": "USER", "text": "top level", "timestamp": "2024-01-01T00:00:01Z"},
         {
             "role": "TOOL",
@@ -201,6 +213,8 @@ def test_convert_context_to_messages_skip_subagent_and_inprogress():
     user_msgs = [m for m in msgs if m["role"] == "user"]
     assert len(user_msgs) == 1
     assert user_msgs[0]["content"] == "top level"
+    assert all("hidden fanout tree row" not in m.get("content", "") for m in msgs)
+    assert any("direct child final result" in m.get("content", "") for m in msgs)
 
 
 def test_extract_completed_tool_calls():
@@ -2253,11 +2267,8 @@ async def test_call_planner_llm_activity_happy_path():
     # Build a valid PlannerResponse JSON the verifier can parse
     plan_json = json.dumps(
         {
-            "reasoning": "The plan uses one focused explore task to gather the required evidence.",
             "title": "Test Plan",
-            "content": "Do the thing",
             "tasks": [{"task_idx": "0", "goal": "task 1 goal", "tool_name": "spawn_explore_agent", "depends_on": []}],
-            "dependencies_graph": [{"task_idx": "0", "depends_on": []}],
             "join": "all",
         }
     )
@@ -2315,6 +2326,7 @@ async def test_call_planner_llm_activity_happy_path():
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
     assert planner_body["model"] == "claude-sonnet-4-6"
     assert planner_body["stream"] is True
+    assert planner_body["output_config"]["effort"] == "max"
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():
@@ -2734,6 +2746,111 @@ def test_build_verifier_context_messages_no_screenshot_stays_text():
     msgs = build_verifier_context_messages(ctx, "system")
     # No multimodal messages
     assert all(isinstance(m["content"], str) for m in msgs)
+    assert 'TOOL_RESULT {"tool_name": "search"' in msgs[-1]["content"]
+
+
+def test_build_verifier_context_messages_formats_tool_result_payload():
+    """Verifier sees explicit TOOL_RESULT payloads, not ambiguous prose labels."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Find one fact"},
+        {
+            "role": "TOOL",
+            "text": "Agent completed goal",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "title": "Spawning sub-agent",
+                "structured_response": {
+                    "entity_name": "Opticality Ventures",
+                    "source_url": "https://example.com",
+                },
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    content = msgs[-1]["content"]
+
+    assert '"tool_name": "spawn_general_purpose_agent"' in content
+    assert '"tool_call_id": "tc-1"' in content
+    assert '"title": "Spawning sub-agent"' in content
+    assert '"result": {"entity_name": "Opticality Ventures", "source_url": "https://example.com"}' in content
+    assert "structured_response" not in content
+    assert "toolStatus" not in content
+    assert "status" not in content
+
+
+def test_build_verifier_context_messages_formats_camelcase_structured_response():
+    """Verifier payload accepts persisted camelCase structured response metadata."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {
+            "role": "TOOL",
+            "text": "fallback text",
+            "metadata": {
+                "toolCallId": "tc-2",
+                "toolName": "spawn_general_purpose_agent",
+                "structuredResponse": {"answer": "from persisted metadata"},
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    content = msgs[-1]["content"]
+
+    assert '"result": {"answer": "from persisted metadata"}' in content
+    assert "structuredResponse" not in content
+    assert "fallback text" not in content
+
+
+def test_build_verifier_context_messages_filters_subagent_tree_rows():
+    """Verifier sees the base aggregate result, not fanout tree UI rows."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Process rows"},
+        {
+            "role": "TOOL",
+            "text": "child UI summary should be hidden",
+            "metadata": {
+                "toolCallId": "tc-1:0",
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "subAgentIds": ["child-1"],
+                "busId": "bus-1",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Completed for_each delegation for 1 items.",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "spawn_general_purpose_agent_for_each",
+                "toolStatus": "FINISHED",
+                "structured_response": {
+                    "items": [
+                        {
+                            "index": 0,
+                            "agent_id": "child-1",
+                            "status": "completed",
+                            "structured_response": {"answer": "done"},
+                        }
+                    ]
+                },
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    content = "\n".join(str(m["content"]) for m in msgs)
+
+    assert "child UI summary should be hidden" not in content
+    assert '"tool_name": "spawn_general_purpose_agent_for_each"' in content
+    assert '"items": [{"index": 0, "agent_id": "child-1", "status": "completed"' in content
 
 
 async def test_extract_response_from_partial_json_raw_json_object():
@@ -4509,6 +4626,12 @@ async def run_all_tests():
     r.record("verifier_ctx_screenshot_multimodal", test_build_verifier_context_messages_screenshot_emits_multimodal)
     r.record("verifier_ctx_screenshot_strips_b64", test_build_verifier_context_messages_screenshot_strips_b64_from_text)
     r.record("verifier_ctx_no_screenshot_text_only", test_build_verifier_context_messages_no_screenshot_stays_text)
+    r.record("verifier_ctx_tool_result_payload", test_build_verifier_context_messages_formats_tool_result_payload)
+    r.record(
+        "verifier_ctx_camelcase_structured_response",
+        test_build_verifier_context_messages_formats_camelcase_structured_response,
+    )
+    r.record("verifier_ctx_filters_subagent_tree_rows", test_build_verifier_context_messages_filters_subagent_tree_rows)
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)

@@ -77,12 +77,7 @@ CRITICAL_CONSTRAINTS_RULE = """
 - Causal deps: emit A alone, wait, then emit B (don't batch dependent calls).
 """
 
-PLANNER_RESPONSE_REASONING_DESCRIPTION = (
-    "Reasoning about how to make a plan that fully accomplishes the user goal while adhering to the "
-    "decomposition guidelines, dependency rules, and available tool constraints."
-)
 PLANNER_RESPONSE_TITLE_DESCRIPTION = "Short plan title."
-PLANNER_RESPONSE_CONTENT_DESCRIPTION = "Markdown explanation of the plan."
 PLANNER_RESPONSE_TASKS_DESCRIPTION = "List of executable tasks with tool choices and dependencies."
 PLANNER_TASK_IDX_DESCRIPTION = (
     "The 0-based array index of this task, encoded as a string. "
@@ -120,25 +115,20 @@ When using spawn_agent for a task, make sure to alias it appropriately. Raw spaw
 | spawn_explore_agent | spawn_agent(type="explore") |
 | spawn_browser_agent | spawn_agent(type="browser") |
 | spawn_code_agent | spawn_agent(type="code") |
-| spawn_sub_agent | spawn_agent(type="sub_agent") |
-| spawn_sub_agent_for_each | spawn_agent(type="for_each") |
+| spawn_general_purpose_agent | spawn_agent(type="general_purpose") |
+| spawn_general_purpose_agent_for_each | spawn_agent(type="for_each") |
 
 Do not use attempt_completion as a planned task; final completion happens after the DAG finishes.
 Use reasoning for pure analysis, synthesis, or decision steps that need no external tool call.
 """.strip()
 
 PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
-- reasoning: {PLANNER_RESPONSE_REASONING_DESCRIPTION}
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
-- content: {PLANNER_RESPONSE_CONTENT_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
 - tasks[].task_idx: {PLANNER_TASK_IDX_DESCRIPTION}
 - tasks[].goal: {PLANNER_TASK_GOAL_DESCRIPTION}
 - tasks[].tool_name: {PLANNER_TASK_TOOL_NAME_DESCRIPTION}
 - tasks[].depends_on: {PLANNER_TASK_DEPENDS_ON_DESCRIPTION}
-- dependencies_graph: {PLANNER_RESPONSE_DEPENDENCIES_GRAPH_DESCRIPTION}
-- dependencies_graph[].task_idx: {PLANNER_DEPENDENCY_TASK_IDX_DESCRIPTION}
-- dependencies_graph[].depends_on: {PLANNER_DEPENDENCY_DEPENDS_ON_DESCRIPTION}
 - join: {PLANNER_RESPONSE_JOIN_DESCRIPTION}
 """.strip()
 
@@ -160,7 +150,7 @@ PLAN FSM: PLAN -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may lo
 ## SET_PLAN
 - Purpose: Route between asking the user a question or starting execution
 - Enabled tools: send_message_to_user, attempt_completion
-- Disabled tools: spawn_agent (do all research before set_plan)
+- Disabled tools: spawn_agent
 - Transition: call send_message_to_user to enter ASK_QUESTION, or attempt_completion to EXIT
 
 ## ASK_QUESTION
@@ -189,11 +179,11 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
 
 # Using your tools
 
- - spawn_agent is low cost and should be used liberally, however, if you can complete the task in a few turns avoid calling spawn_agent. Each agent you spawn of type sub_agent will be an exact replica of you though, so avoid any behavior that would lead to infinite recursion. That means if the task at hand is proximate, then complete it yourself, and if you create a sub_agent make sure that it has meaningfully less task complexity than the task you are given.
+ - spawn_agent is low cost and should be used liberally, however, if you can complete the task in a few turns avoid calling spawn_agent. Each agent you spawn with type general_purpose will be an exact replica of you though, so avoid any behavior that would lead to infinite recursion. That means if the task at hand is proximate, then complete it yourself, and if you create a general-purpose agent make sure that it has meaningfully less task complexity than the task you are given.
  - Use spawn_agent(type="for_each") when you need to complete a complex, multi-step chunk of work for each item in a set of items of size > 3. This is specifically useful when you need to create a large number of agents for optimal execution.
- - MANDATORY: When passing files to sub_agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
+ - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
-- Prefer wait_for(condition=...) over recursive sub-agents for polling tasks
+- Prefer wait_for(condition=...) over recursive general-purpose agents for polling tasks
 
 # How you are Graded
 
@@ -224,12 +214,12 @@ task decomposition.
 
 Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness.
 
-Context is available to you primarily through spawn_agent(type="explore"), this sub agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
+Context is available to you primarily through spawn_agent(type="explore"), this explore agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
 
 User messages and tool results have this suffix attached - "Reference: @ref:message:<id>".
 They should be treated as information pointers so that you don't have to rewrite any information you are referencing (to avoid hallucinations).
 
-Use them in 'goal' strings you pass to creating a sub_agent of any type instead of rewriting or summarizing information. Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring. These pointers will be automatically resolved to the information they point to before each LLM call.
+Use them in 'goal' strings you pass when creating spawned agents instead of rewriting or summarizing information. Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring. These pointers will be automatically resolved to the information they point to before each LLM call.
 
 Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
 """
@@ -301,7 +291,7 @@ _VERIFIER_STATIC_PROMPT = (
         """
 You are an impartial judge that scores an autonomous agent's output against grounded tool evidence. As inputs, you receive:
 - the original user goal
-- the agent's tool-call results
+- the agent's tool-call results, bundled into groups of user message by verification attempt
 - if you are reviewing a browser agent, you will also receive the browser DOM and browser state
 You do not receive:
 - the agent's reasoning.
@@ -318,10 +308,9 @@ yourself when populating `output`; the agent does not need to pre-format.
 
 # Evidence-First Evaluation
 
-Populate `output` BEFORE committing to a score. For each field:
+For each field:
 1. What does the schema require (type + meaning)?
-2. Which tool-result contains the evidence (tool messages with
-   status=IN_PROGRESS do NOT count; only FINISHED states with content)?
+2. Which tool-result contains the evidence?
 3. What concrete value does it yield (most precise number/string; do your
    own rounding/parsing)?
 4. If no tool-result supports a field, mark it unpopulatable. Do NOT
@@ -439,10 +428,10 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         This task has {num_fields} total required `output` field(s):
         {fields_desc}
 
-        Populate `output` FIRST. For each field, find the most precise
-        value in the tool-result evidence and transform it into the
-        required type yourself (round, parse, or extract as needed;
-        the agent doesn't have to format it perfectly).
+        For each field, find the most precise value in the tool-result
+        evidence and transform it into the required type yourself (round,
+        parse, or extract as needed; the agent doesn't have to format it
+        perfectly).
 
         Score using the 3-band rubric:
           - 1.0 if ALL {num_fields} fields can be populated from grounded
@@ -492,8 +481,6 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Each sub-task maps to exactly one tool call
 - tasks[i].task_idx is the 0-based array index encoded as a string and must equal i
 - tasks[i].depends_on lists indices of tasks that must complete first
-- dependencies_graph is a list of objects, each with task_idx and depends_on
-- dependencies_graph must mirror tasks[i].depends_on exactly
 - Use 0-based indices as strings ("0", "1", ...)
 - Graph must be acyclic
 - If one task needs another task's output, state, credentials, artifact, or decision, encode that causal dependency; do not omit dependencies to make work look more parallel.
@@ -512,9 +499,9 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Avoid splitting stateful web flows across multiple spawn_browser_agent calls. Login -> add to cart -> checkout -> confirm = ONE spawn_browser_agent
 - Tasks should not overlap; together they fully cover the goal
 - Ensure each task has a clear, verifiable completion condition
-- Target: 3-8 tasks per plan. Instead of creating more than 8 tasks, bundle complexity into a single sub-agent to meet the 8 sub-tasks cap.
-- Avoid creating a task for spawn_sub_agent with > 50% complexity of the original user task. This can create infinite recursive decompositions and break the entire system. If complexity is meaningfully reduced at each step the issue does not arise.
-- spawn_sub_agent_for_each should be used when applying the same template task to many objects or entities from a list-adjacent piece of information.
+- Target: 3-8 tasks per plan. Instead of creating more than 8 tasks, bundle complexity into a single general-purpose agent to meet the 8 sub-tasks cap.
+- Avoid creating a task for spawn_general_purpose_agent with > 50% complexity of the original user task. This can create infinite recursive decompositions and break the entire system. If complexity is meaningfully reduced at each step the issue does not arise.
+- spawn_general_purpose_agent_for_each should be used when applying the same template task to many objects or entities from a list-adjacent piece of information.
 - spawn_code_agent has a 10 min lifetime. Because of that, keep work as tight as you can, while still being self-sustaining and not inconsequential to the goal. Like checkpoints.
 
 ## Example Structures
@@ -527,7 +514,7 @@ MANDATORY DECOMPOSITION INVARIANTS:
   Example: Research A, B, C -> Synthesize report
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} (fork then join)
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
-- Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> dependencies_graph [{{"task_idx": "1", "depends_on": ["0"]}}, {{"task_idx": "2", "depends_on": ["1"]}}]
+- Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> tasks[1].depends_on=["0"], tasks[2].depends_on=["1"]
 
 ## Planner Spawn Aliases
 
@@ -542,9 +529,9 @@ The plan you emit is executed by a DAG runner. You do not call these tools direc
 # Attached Files (file_pointers)
 
 - Files attached in the conversation (file_pointers) are ALREADY AVAILABLE; they are NOT on the web
-- Sub-agents do NOT automatically inherit files; you must pass them via the `attachments` parameter
+- Spawned agents do NOT automatically inherit files; you must pass them via the `attachments` parameter
 - Use the `original_filename` value from file_pointer objects (e.g., "rs.jpeg"), NOT the `id` field
-- Do NOT plan browser tasks to "download" attached files; just reference them by filename in sub-agent goals
+- Do NOT plan browser tasks to "download" attached files; just reference them by filename in spawned-agent goals
 - Example: If file_pointer has `"original_filename": "rs.jpeg"`, use `attachments: ["rs.jpeg"]`
 
 # Context Pointers
@@ -651,9 +638,9 @@ Use these to find data that other agents in the network have already gathered, a
 {network_metadata}
 {local_data_summary}
 
-# Sub-Agent Verification
+# Spawned Agent Verification
 
-You are a sub-agent; same verification rules as the main agent.
+You are a spawned agent; same verification rules as the main agent.
 You are not graded directly. The parent agent receives
 `attempt_completion.result` as the spawn_agent tool result. Make that result
 self-contained: include the requested values and source URLs so the parent can

@@ -1702,6 +1702,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     tool_call_id=tool_call_id,
                     tool_name="spawn_browser_agent",
                     is_resume=write_lock_resume_state is not None,
+                    span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
+                    span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
                 ):
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,

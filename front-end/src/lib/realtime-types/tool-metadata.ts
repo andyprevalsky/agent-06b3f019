@@ -33,6 +33,8 @@ export type ToolName =
   | 'spawn_agent'
   | 'spawn_browser_agent'
   | 'spawn_claude_code_agent'
+  | 'spawn_general_purpose_agent'
+  | 'spawn_general_purpose_agent_for_each'
   | 'spawn_sub_agent'
   | 'web_search'
   | 'search_x402_bazaar'
@@ -98,11 +100,17 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
   code_provider?: 'claude' | 'codex';
 }
 
+export type GeneralPurposeAgentToolName =
+  | 'spawn_general_purpose_agent'
+  | 'spawn_general_purpose_agent_for_each'
+  | 'spawn_sub_agent';
+
 /**
- * Metadata for spawn_sub_agent tool messages.
+ * Metadata for general-purpose agent spawn tool messages.
+ * `spawn_sub_agent` remains accepted for internal/back-compat plumbing.
  */
 export interface SpawnSubAgentMetadata extends BaseToolMetadata {
-  toolName: 'spawn_sub_agent';
+  toolName: GeneralPurposeAgentToolName;
   subAgentIds?: string[];
   subAgentId?: string;
   busId?: string;
@@ -146,8 +154,8 @@ export interface WaitForMetadata extends BaseToolMetadata {
  */
 export interface SpawnAgentMetadata extends BaseToolMetadata {
   toolName: 'spawn_agent';
-  /** Agent type: explore, browser, code, sub_agent */
-  agentType?: 'explore' | 'browser' | 'code' | 'sub_agent';
+  /** Agent type: explore, browser, code, general_purpose */
+  agentType?: 'explore' | 'browser' | 'code' | 'general_purpose';
   /** Unique task ID for this agent session */
   taskId?: string;
   /** Routes intermediate messages to sub-panel */

@@ -90,18 +90,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Scroll to specific text on the page",
         "params": {"text": {"type": "string", "description": "Text to find and scroll to", "required": True}},
     },
-    "extract": {
-        "description": (
-            "Run an LLM extraction over the current page's rendered markdown to pull out structured CONTENT "
-            "(text, lists, tables, prices, names, links). NOT for running JavaScript or querying live DOM "
-            "state; use `evaluate` for that. Use `extract` when you are on the right page and need to read "
-            "and summarize visible content. NOT interchangeable with `evaluate`."
-        ),
-        "params": {
-            "query": {"type": "string", "description": "What to extract from the page", "required": True},
-            "extract_links": {"type": "boolean", "description": "Set True to extract URLs (default: false)"},
-        },
-    },
     "dropdown_options": {
         "description": "Get all options from a native dropdown or ARIA menu",
         "params": {"index": {"type": "integer", "description": "Element index of the dropdown", "required": True}},

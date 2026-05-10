@@ -50,14 +50,14 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
     ),
     "spawn-sub-agents": TestPrompt(
         name="spawn-sub-agents",
-        title="Test Spawn Sub Agents",
-        description="Tests recursive sub-agent spawning with depth parameter",
+        title="Test Spawn General-Purpose Agents",
+        description="Tests recursive general-purpose agent spawning with depth parameter",
         prompt=(
-            "Spawn 2 sub-agents with the same goal as yourself, this is for debugging "
+            "Spawn 2 general-purpose agents with the same goal as yourself, this is for debugging "
             "of the systems max depth parameter. Current Depth Left == 2, when spawning "
-            "a sub-agent decrease this count by 1. If Depth Left == 0, then output a "
+            "a general-purpose agent decrease this count by 1. If Depth Left == 0, then output a "
             "random integer between 0 - 10. If Depth > 0 then output the multiplication "
-            "of each sub agent you spawned."
+            "of each general-purpose agent you spawned."
         ),
         timeout=300,
         expected_tools=["spawn_sub_agents"],
@@ -82,7 +82,7 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
             "3. cheapest cost of living in NA\n\n"
             "no questions ask\n"
             "start in execute mode\n"
-            "no sub agents"
+            "no general-purpose agents"
         ),
         timeout=180,
         expected_tools=["web_search"],
@@ -93,7 +93,7 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         description="Tests Claude Code agent in ephemeral E2B sandbox",
         prompt=(
             "Starting from 27, how many steps does it take to reach 1 in the Collatz "
-            "sequence? List all the numbers. Use Claude Code and no sub agents"
+            "sequence? List all the numbers. Use Claude Code and no general-purpose agents"
         ),
         timeout=300,
         requires_claude_code=True,
@@ -111,7 +111,7 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
             "no questions ask\n"
             "start in plan mode\n"
             "dont use any websearches in plan mode\n"
-            "no sub agents"
+            "no general-purpose agents"
         ),
         timeout=180,
         expected_tools=["web_search"],
@@ -126,12 +126,12 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
     ),
     "files-in-sub-agents": TestPrompt(
         name="files-in-sub-agents",
-        title="Test Files in Sub Agents",
-        description="Tests file_pointer output schema with sub-agents creating color variants",
+        title="Test Files in General-Purpose Agents",
+        description="Tests file_pointer output schema with general-purpose agents creating color variants",
         prompt=(
             "turn this file into 4 different color variants, yellow, red, blue, green, "
-            "use a spawn_sub_agent for each one, no claude code agents in main agent, "
-            "instruct each sub agent to use claude code to do the color transformation"
+            "use a spawn_general_purpose_agent for each one, no claude code agents in main agent, "
+            "instruct each general-purpose agent to use claude code to do the color transformation"
         ),
         timeout=600,
         attachment_url="/test-assets/rs.jpeg",
@@ -143,7 +143,7 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         description="Tests browser agent file upload with TinyPNG",
         prompt=(
             "upload this image to tinypng.com and compress it\n\n"
-            "no sub agents\n"
+            "no general-purpose agents\n"
             "no questions asked"
         ),
         timeout=600,
@@ -177,7 +177,7 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
     "agent-for-each": TestPrompt(
         name="agent-for-each",
         title="Test Agent For Each",
-        description="Tests sub-agent for_each processing 12 CSV entities in parallel",
+        description="Tests general-purpose-agent for_each processing 12 CSV entities in parallel",
         prompt="Get me one interesting fact about each entity on the csv.",
         timeout=600,
         attachment_url="/test-assets/entities-12.csv",

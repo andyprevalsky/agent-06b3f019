@@ -353,29 +353,31 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(screen.getByText(/Plan Failed/)).toBeInTheDocument());
   });
 
-  it('renders sub-agent spawn IN_PROGRESS as spawning line', async () => {
+  it('renders general-purpose spawn IN_PROGRESS as spawning line', async () => {
     const msg = baseMessage({
       role: 'TOOL',
       text: 'starting',
       metadata: {
         toolCallId: 'tc-10',
-        toolName: 'spawn_sub_agent',
+        toolName: 'spawn_general_purpose_agent',
         toolStatus: 'IN_PROGRESS',
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText(/Spawning sub-agents/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/Spawning general-purpose agents/)).toBeInTheDocument(),
+    );
   });
 
-  it('renders sub-agent pre-spawn ERROR as failed tree-node', async () => {
+  it('renders general-purpose pre-spawn ERROR as failed tree-node', async () => {
     const msg = baseMessage({
       role: 'TOOL',
       text: 'DAG param failed',
       metadata: {
         toolCallId: 'tc-11',
-        toolName: 'spawn_sub_agent',
+        toolName: 'spawn_general_purpose_agent_for_each',
         toolStatus: 'ERROR',
-        title: 'Sub-agent',
+        title: 'General-purpose agent',
       },
     });
     renderBubble(<MessageBubble message={msg} />);
@@ -469,7 +471,7 @@ describe('MessageBubble', () => {
     await waitFor(() => {
       expect(screen.getByText('Codex Spinning up...')).toBeInTheDocument();
     });
-    expect(screen.getByLabelText('Codex')).toBeInTheDocument();
+    expect(screen.getByAltText('Codex')).toBeInTheDocument();
   });
 
   it('renders phone call tool as PhoneCallCard', async () => {
@@ -867,7 +869,7 @@ describe('MessageBubble', () => {
       text: '',
       metadata: {
         toolCallId: 'tc-sat',
-        toolName: 'spawn_sub_agent',
+        toolName: 'spawn_general_purpose_agent_for_each',
         toolStatus: 'FINISHED',
         title: '🚀 Spawning cluster',
         subAgentIds: ['a1', 'a2'],
@@ -879,11 +881,11 @@ describe('MessageBubble', () => {
     // The SubAgentTree branch renders a wrapper <div.flex.gap-3> hosting <SubAgentTree />.
     // SubAgentTree returns null when useAgentTree has no nodes for the bus, so the wrapper
     // may be empty in this harness — but the OTHER branches (SubAgentToolBubble chip /
-    // "Spawning sub-agents..." fallback / ERROR red row) all emit distinctive text.
+    // "Spawning general-purpose agents..." fallback / ERROR red row) all emit distinctive text.
     // Assert none of those alternate branches fired, proving we went through the tree branch.
     expect(screen.queryByText(/Spawning cluster/)).toBeNull(); // SubAgentToolBubble title
-    expect(screen.queryByText(/Spawning sub-agents\.\.\./)).toBeNull(); // isSpawningMessage
-    expect(screen.queryByText(/Failed to spawn sub-agent/)).toBeNull(); // error branch
+    expect(screen.queryByText(/Spawning general-purpose agents\.\.\./)).toBeNull(); // isSpawningMessage
+    expect(screen.queryByText(/Failed to spawn general-purpose agent/)).toBeNull(); // error branch
     // And the tree wrapper is present.
     const wrapper = container.querySelector('div.flex.gap-3') as HTMLElement | null;
     expect(wrapper).not.toBeNull();

@@ -49,7 +49,7 @@ logger = structlog.get_logger()
 
 
 class SpawnAgentManager(ToolManager):
-    """Unified manager that dispatches to browser/code/sub_agent/explore based on type."""
+    """Unified manager that dispatches to browser/code/general_purpose/explore based on type."""
 
     @property
     def tool_name(self) -> str:
@@ -86,7 +86,7 @@ class SpawnAgentManager(ToolManager):
         elif agent_type == "code":
             async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
                 yield event
-        elif agent_type == "sub_agent":
+        elif agent_type == "general_purpose":
             async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
                 yield event
         elif agent_type == "for_each":
@@ -227,6 +227,8 @@ class SpawnAgentManager(ToolManager):
                 tool_call_id=tool_call_id,
                 tool_name="spawn_agent",
                 task_id=task_id,
+                span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
+                span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
                 activity_handle = workflow.start_activity(
                     spawn_explore_agent_activity,
@@ -518,37 +520,85 @@ class SpawnAgentManager(ToolManager):
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:
                         saw_error = True
+                        event_metadata = event.metadata or {}
+                        failure_context = event_metadata.get("failure_context") or {}
+                        failed_item = {
+                            "index": idx,
+                            "agent_id": child_info.get("agent_id"),
+                            "status": "failed",
+                            "summary": event.message or "",
+                            "error_reason": event_metadata.get("error_reason") or event.message or "unknown",
+                        }
+                        partial = failure_context.get("partial_structured_response") or event_metadata.get(
+                            "partial_structured_response"
+                        )
+                        if partial is not None:
+                            failed_item["partial_structured_response"] = partial
+                        if failure_context.get("verifier_reasoning"):
+                            failed_item["verifier_reasoning"] = failure_context["verifier_reasoning"]
+                        if failure_context.get("progress_estimate"):
+                            failed_item["progress_estimate"] = failure_context["progress_estimate"]
+                        child_outputs.append(failed_item)
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.FINISHED:
                         event_metadata = event.metadata or {}
                         child_outputs.append(
                             {
                                 "index": idx,
                                 "agent_id": child_info.get("agent_id"),
+                                "status": "completed",
                                 "summary": event.message or "",
                                 "structured_response": event_metadata.get("structured_response"),
                             }
                         )
             except Exception as exc:
                 saw_error = True
+                child_outputs.append(
+                    {
+                        "index": idx,
+                        "agent_id": child_info.get("agent_id"),
+                        "status": "failed",
+                        "summary": "",
+                        "error_reason": str(exc) or "child finalize failed",
+                    }
+                )
                 logger.warning("for_each child finalize failed", tcid=tcid, error=str(exc))
             if saw_error:
                 failed_count += 1
 
         await asyncio.gather(*(asyncio.create_task(_drain_child(i, child)) for i, child in enumerate(children)))
 
+        child_outputs.sort(key=lambda item: item.get("index", 0))
+
         if failed_count > 0:
+            child_summary_lines = []
+            for item in child_outputs:
+                idx = item.get("index")
+                if item.get("status") == "failed":
+                    child_summary_lines.append(f"- item {idx}: failed: {item.get('error_reason', 'unknown')}")
+                elif item.get("structured_response"):
+                    child_summary_lines.append(
+                        f"- item {idx}: {json.dumps(item['structured_response'], sort_keys=True)}"
+                    )
+                elif item.get("summary"):
+                    child_summary_lines.append(f"- item {idx}: {item['summary']}")
+            message = f"{failed_count}/{len(children)} children failed"
+            if child_summary_lines:
+                message = f"{message}\n\nChild outputs:\n" + "\n".join(child_summary_lines)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="for_each failed",
-                message=f"{failed_count}/{len(children)} children failed",
+                message=message,
                 status=MessageStatus.ERROR,
+                metadata={
+                    "toolName": "spawn_general_purpose_agent_for_each",
+                    "structured_response": {"items": child_outputs},
+                },
             )
             return
 
         # The per-child events use suffixed IDs (`parent:idx`) for UI routing.
         # Also yield one terminal event for the declared parent tool_call_id so
         # the next LLM context has a valid assistant tool_use -> tool_result pair.
-        child_outputs.sort(key=lambda item: item.get("index", 0))
         child_summary_lines = []
         for item in child_outputs:
             idx = item.get("index")
@@ -567,7 +617,7 @@ class SpawnAgentManager(ToolManager):
             message=message,
             status=MessageStatus.FINISHED,
             metadata={
-                "toolName": "spawn_sub_agent_for_each",
+                "toolName": "spawn_general_purpose_agent_for_each",
                 "structured_response": {"items": child_outputs},
             },
         )

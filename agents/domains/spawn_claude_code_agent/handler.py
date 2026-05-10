@@ -64,6 +64,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             metadata={"toolName": "spawn_claude_code_agent"},
         )
 
+        code_provider = "unknown"
         try:
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
             active_claude_token = getattr(workflow_instance, "_active_claude_token", None)
@@ -109,6 +110,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 agent_id=agent_id,
                 tool_call_id=tool_call_id,
                 tool_name="spawn_claude_code_agent",
+                code_provider=code_provider,
+                span_source="agents.domains.spawn_claude_code_agent.handler.SpawnClaudeCodeAgentManager.execute",
+                span_key="agents.domains.spawn_claude_code_agent.handler.SpawnClaudeCodeAgentManager.execute",
             ):
                 activity_handle = workflow.start_activity(
                     spawn_claude_code_activity,
@@ -220,16 +224,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             logger.error(
                 "[ClaudeCode] Tool failed",
                 agent_id=agent_id,
+                code_provider=code_provider,
                 error=extract_error_message(e),
                 error_type=type(e).__name__,
             )
 
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Claude Code failed",
+                title="Code session failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_claude_code_agent"},
+                metadata={"toolName": "spawn_claude_code_agent", "code_provider": code_provider},
             )
 
 

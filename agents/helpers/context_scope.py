@@ -8,10 +8,13 @@ from typing import Any, Dict, Iterable, List
 def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     """Return True for intermediate work messages emitted by a spawned agent.
 
-    Parent-visible spawn lifecycle/result messages use ``subAgentIds``. The
-    singular ``subAgentId`` tag is reserved for messages that belong to the
-    spawned agent's own work stream and should not be replayed to the parent
-    LLM, planner, verifier, or context compactor.
+    ``subAgentId`` rows belong to one child agent's own work stream.
+    For_each child tree rows use plural ``subAgentIds`` plus suffixed
+    ``toolCallId`` values like ``<base>:<idx>``; those UI rows are also hidden
+    because the parent receives one aggregate result under the original
+    toolCallId. Direct ``spawn_general_purpose_agent`` results also use plural
+    ``subAgentIds`` but keep the original, unsuffixed toolCallId, so they remain
+    visible to the parent context.
     """
     if not isinstance(message, dict):
         return False
@@ -20,7 +23,11 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     if not isinstance(metadata, dict):
         return False
 
-    return bool(metadata.get("subAgentId"))
+    if metadata.get("subAgentId"):
+        return True
+
+    tool_call_id = str(metadata.get("toolCallId") or "")
+    return bool(metadata.get("subAgentIds") and ":" in tool_call_id)
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

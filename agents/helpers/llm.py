@@ -621,12 +621,18 @@ def build_verifier_context_messages(  # noqa: C901
                 messages.append({"role": "assistant", "content": verifier_text})
                 continue
 
-            tool_name = metadata.get("toolName", "tool")
-            title = metadata.get("title")
-            prefix = f"[{tool_name}]" + (f" {title}:" if title else ":")
-            tool_text = f"{prefix} {text}"
-            if metadata.get("structured_response"):
-                tool_text += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+            structured_result = metadata.get("structured_response")
+            if structured_result is None:
+                structured_result = metadata.get("structuredResponse")
+
+            tool_payload = {
+                "tool_name": metadata.get("toolName", "tool"),
+                "tool_call_id": metadata.get("toolCallId"),
+                "result": structured_result if structured_result is not None else text,
+            }
+            if metadata.get("title"):
+                tool_payload["title"] = metadata["title"]
+            tool_text = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
 
             screenshot_b64 = metadata.get("screenshot_b64")
             if screenshot_b64:
@@ -3557,9 +3563,10 @@ async def check_progress(  # noqa: C901
     messages are also removed before judging final task completion.
 
     - Main loop / post-DAG / sub-agent verifier: callers pass a context that
-      has already removed spawned-agent work rows tagged with singular
-      ``metadata.subAgentId``. Parent-visible spawn summaries use
-      ``metadata.subAgentIds`` and remain available as tool results.
+      has already removed spawned-agent work rows tagged with
+      ``metadata.subAgentId`` and fanout tree rows tagged with plural
+      ``metadata.subAgentIds`` plus suffixed child toolCallIds. The parent sees
+      the aggregate for_each result under the original toolCallId instead.
     - Browser sub-agent verifier: ``verifier_context`` is built locally from
       the browser session's action history, DOM, and final-state screenshot —
       nothing from the parent reaches it.
@@ -4529,7 +4536,7 @@ async def call_planner_llm_activity(
         tool_call_id: Tool call ID for linking streaming to final plan
 
     Returns:
-        Dict from PlannerResponse.model_dump() with title, content, tasks, dependencies_graph, join
+        Dict from PlannerResponse.model_dump() with title, tasks, and join
     """
     import time
 

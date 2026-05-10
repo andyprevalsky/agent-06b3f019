@@ -218,8 +218,8 @@ _PLANNER_ALIASES = {
     "spawn_explore_agent",
     "spawn_browser_agent",
     "spawn_code_agent",
-    "spawn_sub_agent",
-    "spawn_sub_agent_for_each",
+    "spawn_general_purpose_agent",
+    "spawn_general_purpose_agent_for_each",
     "reasoning",  # "no tool call" sentinel — pure thinking step.
 }
 
@@ -301,6 +301,39 @@ def test_every_tool_model_has_prompt_fragment():
     )
 
 
+def test_spawn_agent_subtype_params_use_required_optional_ignored_taxonomy():
+    """Subtype-scoped spawn_agent fields must distinguish required vs applicable."""
+    from utils.tool_schemas import SpawnAgentTool
+
+    fields = SpawnAgentTool.model_fields
+    descriptions = {
+        name: field.description or ""
+        for name, field in fields.items()
+    }
+    combined = "\n".join(descriptions.values())
+
+    assert "Required for type" not in combined
+    assert "Required when type='browser'" in descriptions["start_url"]
+    assert "Required when type='general_purpose' or type='for_each'" in descriptions["start_phase"]
+    assert "Required when type='browser', type='code', type='general_purpose', or type='for_each'" in descriptions["output_schema"]
+    assert "Optional alternative when type='for_each'" in descriptions["items"]
+    assert "Optional alternative when type='for_each'" in descriptions["items_csv"]
+    assert "Optional when type='code'" in descriptions["github_repo_link"]
+    assert "do not invent placeholder repositories" in descriptions["github_repo_link"]
+    assert "Optional when type='explore', type='general_purpose', or type='for_each'" in descriptions["context_gates"]
+    assert "Optional when the spawned agent needs files" in descriptions["attachments"]
+
+
+def test_spawn_agent_prompt_defines_param_wording_taxonomy():
+    """The canonical spawn_agent prompt must define required/optional/ignored wording."""
+    from tools.prompts.spawn_agent import PROMPT
+
+    assert "Parameter wording:" in PROMPT
+    assert "Required when type='X'" in PROMPT
+    assert "Optional when type='X'" in PROMPT
+    assert "Ignored for type='X'" in PROMPT
+
+
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -309,8 +342,8 @@ def test_planner_spawn_aliases_documented_in_prompt():
         "spawn_explore_agent": 'spawn_agent(type="explore")',
         "spawn_browser_agent": 'spawn_agent(type="browser")',
         "spawn_code_agent": 'spawn_agent(type="code")',
-        "spawn_sub_agent": 'spawn_agent(type="sub_agent")',
-        "spawn_sub_agent_for_each": 'spawn_agent(type="for_each")',
+        "spawn_general_purpose_agent": 'spawn_agent(type="general_purpose")',
+        "spawn_general_purpose_agent_for_each": 'spawn_agent(type="for_each")',
     }
 
     for alias, runtime in expected.items():
@@ -1598,11 +1631,15 @@ def test_planner_depends_on_schema_matches_prompt_contract():
     assert "Empty depends_on means the task can start immediately" in prompt
     assert "Causal handoff: Step 0 gather facts" in prompt
     assert 'Use 0-based indices as strings ("0", "1", ...)' in prompt
+    assert "dependencies_graph" not in prompt
     assert "# Output Field Descriptions" in prompt
     assert PLANNER_OUTPUT_ARG_DESCRIPTIONS in prompt
     assert "Use an empty list only when the task can start immediately" in PLANNER_TASK_DEPENDS_ON_DESCRIPTION
 
     schema = prepare_schema_for_openai(PlannerResponse)
+    assert "reasoning" not in schema["properties"]
+    assert "content" not in schema["properties"]
+    assert "dependencies_graph" not in schema["properties"]
     task_schema = schema["properties"]["tasks"]["items"]
     task_idx = task_schema["properties"]["task_idx"]
     assert "task_idx" in task_schema["required"]
@@ -1682,9 +1719,10 @@ def test_tool_prompts_open_with_declarative_sentence():
 # of agents/tools/prompts/spawn_agent.py). It also embeds the canonical
 # EPHEMERAL_SESSION_RULE (Session Semantics) inline so the model sees the
 # session-isolation contract on every call without a cross-reference. The
-# combined block sits comfortably under 2700 chars.
+# prompt also defines the canonical Required/Optional/Ignored subtype-field
+# wording, so the local cap is intentionally higher than ordinary tool prompts.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
-    "spawn_agent": 2700,
+    "spawn_agent": 3100,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100
@@ -1777,6 +1815,14 @@ async def run_all_tests():
     r.record(
         "every_tool_model_has_prompt_fragment",
         test_every_tool_model_has_prompt_fragment,
+    )
+    r.record(
+        "spawn_agent_subtype_param_taxonomy",
+        test_spawn_agent_subtype_params_use_required_optional_ignored_taxonomy,
+    )
+    r.record(
+        "spawn_agent_prompt_param_wording_taxonomy",
+        test_spawn_agent_prompt_defines_param_wording_taxonomy,
     )
     r.record(
         "planner_spawn_aliases_documented_in_prompt",

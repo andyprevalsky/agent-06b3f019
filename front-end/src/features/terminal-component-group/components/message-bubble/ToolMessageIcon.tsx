@@ -4,7 +4,8 @@
  *   - the x402 / Claude Code lockup icons for their tool families,
  *   - or a generic lucide icon resolved from `toolIcons`.
  */
-import { Code, Wrench } from 'lucide-react';
+import { Wrench } from 'lucide-react';
+import CodexIcon from '@/assets/codex-color.svg';
 import { cn } from '@/lib/utils';
 import type { CodeProvider } from '../../types';
 import {
@@ -59,7 +60,7 @@ export function ToolMessageIcon({
 
   if (toolName && isClaudeCodeTool(toolName)) {
     if (codeProvider === 'codex') {
-      return <Code aria-label="Codex" className="h-4 w-4 flex-shrink-0 text-muted-foreground" />;
+      return <img src={CodexIcon} alt="Codex" className="h-4 w-4 flex-shrink-0" />;
     }
     return <img src={claudeCodeIconSrc} alt="Claude Code" className="h-4 w-4 flex-shrink-0" />;
   }
