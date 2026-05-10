@@ -234,18 +234,24 @@ async function runAll() {
   console.log('Codex Code Session Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  const tests = [
+  const tests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
     { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,
     },
-    {
+  ];
+  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
+    console.log(
+      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
+    );
+  } else {
+    tests.push({
       name: 'smoke -- Codex completes task in real E2B sandbox',
       fn: testSmoke_codexCompletesE2bTask,
-    },
-  ];
+    });
+  }
 
   const results: TestResult[] = [];
   for (const test of tests) {
