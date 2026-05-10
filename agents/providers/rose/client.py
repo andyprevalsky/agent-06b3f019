@@ -65,7 +65,13 @@ logger = structlog.get_logger()
 
 _DEFAULT_DEADLINE_S = 120.0
 _DEFAULT_TTFT_TIMEOUT_S = 20.0
-_DEFAULT_IDLE_TIMEOUT_S = None
+# Per-chunk idle timeout *after* the first productive chunk. The overall
+# deadline (120s) is too coarse to catch mid-stream stalls fast enough — a
+# single hung sub-agent LLM call burns the full deadline before raising, and
+# the retry burns another deadline. 60s allows long thinking pauses while
+# still recovering from peer disconnects / silent half-closes inside the
+# activity budget.
+_DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 60.0
 _HEARTBEAT_INTERVAL_S = 10.0
 
 # Errors from claude_auth that mean "try the waterfall next" — as long as
@@ -270,7 +276,17 @@ class RoseClient:
         last_heartbeat = started
 
         async def _guarded(source: AsyncIterator[StreamChunk]) -> AsyncIterator[StreamChunk]:
-            """Wrap an upstream generator with deadline + TTFT checks."""
+            """Wrap an upstream generator with deadline + TTFT + idle checks.
+
+            - Before the first productive chunk: enforce `ttft_timeout_s` and
+              raise `RoseStallError` so the caller can fall through to the
+              waterfall.
+            - After the first productive chunk: enforce `idle_timeout_s` (if
+              set) so a mid-stream half-closed connection doesn't burn the
+              full deadline before the loop can retry. Hitting the idle
+              window raises `RoseDeadlineError`; the outer deadline still
+              caps total time.
+            """
             nonlocal last_heartbeat
             it = source.__aiter__()
             saw_productive_chunk = False
@@ -279,12 +295,20 @@ class RoseClient:
                 r = remaining()
                 if r <= 0:
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
-                progress_timeout = remaining() if saw_productive_chunk else ttft_timeout_s
+                if saw_productive_chunk:
+                    # Per-chunk idle ceiling once content has started. None
+                    # means "let the deadline handle it" (legacy behavior);
+                    # a finite value catches silent half-closes faster.
+                    progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
+                else:
+                    progress_timeout = ttft_timeout_s
                 try:
                     chunk = await asyncio.wait_for(it.__anext__(), timeout=min(r, progress_timeout))
                 except asyncio.TimeoutError as exc:
                     if saw_productive_chunk:
-                        raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s") from exc
+                        raise RoseDeadlineError(
+                            f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
+                        ) from exc
                     raise RoseStallError(f"rose.complete TTFT exceeded {ttft_timeout_s}s") from exc
                 except StopAsyncIteration:
                     return

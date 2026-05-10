@@ -2786,12 +2786,12 @@ async def test_client_ttft_timeout_waits_for_first_productive_chunk():
     assert raised
 
 
-async def test_client_allows_idle_gap_after_first_productive_chunk():
-    """After content starts, only the overall deadline guards later chunks."""
+async def test_client_allows_idle_gap_within_idle_window_after_first_chunk():
+    """Idle gaps shorter than `idle_timeout_s` are tolerated after first content."""
 
     async def slow_second_chunk(**kwargs):
         yield StreamChunk(kind="content", data={"text": "first"})
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.02)
         yield StreamChunk(kind="content", data={"text": "late"})
 
     client = RoseClient(openrouter_key="ork-x")
@@ -2801,11 +2801,42 @@ async def test_client_allows_idle_gap_after_first_productive_chunk():
             pool="rose-1-lite",
             messages=[{"role": "user", "content": "hi"}],
             call_site="test-idle",
-            ttft_timeout_s=0.1,
-            idle_timeout_s=0.01,
+            ttft_timeout_s=0.5,
+            idle_timeout_s=0.5,
         ):
             chunks.append(chunk)
     assert [c.data.get("text") for c in chunks if c.kind == "content"] == ["first", "late"]
+
+
+async def test_client_enforces_idle_timeout_after_first_productive_chunk():
+    """A mid-stream stall longer than `idle_timeout_s` raises RoseDeadlineError.
+
+    This is the recovery path for silent half-closed connections: without it,
+    the only stop is the overall 120s deadline and the loop retries each
+    stalled call after burning the full budget.
+    """
+
+    async def stall_after_first(**kwargs):
+        yield StreamChunk(kind="content", data={"text": "first"})
+        await asyncio.sleep(1.0)
+        yield StreamChunk(kind="content", data={"text": "never-arrives"})
+
+    client = RoseClient(openrouter_key="ork-x")
+    raised = False
+    with patch("providers.rose.client.waterfall_complete", stall_after_first):
+        try:
+            async for _ in client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                call_site="test-idle-stall",
+                ttft_timeout_s=0.5,
+                idle_timeout_s=0.05,
+                deadline_s=5.0,
+            ):
+                pass
+        except RoseDeadlineError as exc:
+            raised = "idle" in str(exc)
+    assert raised, "expected RoseDeadlineError citing idle window"
 
 
 # =====================================================================
@@ -3187,7 +3218,14 @@ async def run_all_tests():
     )
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
-    await r.record_async("client_allows_idle_after_first_token", test_client_allows_idle_gap_after_first_productive_chunk)
+    await r.record_async(
+        "client_allows_idle_within_window",
+        test_client_allows_idle_gap_within_idle_window_after_first_chunk,
+    )
+    await r.record_async(
+        "client_enforces_idle_timeout_after_first_chunk",
+        test_client_enforces_idle_timeout_after_first_productive_chunk,
+    )
 
     r.record(
         "cache_accounting_claude_exclusive",
