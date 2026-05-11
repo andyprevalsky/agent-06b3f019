@@ -151,15 +151,21 @@ if $COLLISION; then
     echo "✅ Reassigned to port range $CANDIDATE"
 fi
 
+IS_CLOUD=false
+[ -f "$SCRIPT_DIR/../.cloud-env" ] && IS_CLOUD=true
+
+if ! $IS_CLOUD; then
+    export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
+    export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
+fi
+
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 # ── Cloud instance: aggressive port cleanup ──
 # On cloud there's exactly one worktree — no multi-workspace concern.
 # Kill everything on our port range to prevent zombie conflicts from prior
 # run.sh invocations or crashed services. Retry until every port is free.
-IS_CLOUD=false
-[ -f "$SCRIPT_DIR/../.cloud-env" ] && IS_CLOUD=true
 
 if $IS_CLOUD; then
     CLOUD_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT)

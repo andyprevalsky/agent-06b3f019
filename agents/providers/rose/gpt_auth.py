@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
@@ -32,8 +35,21 @@ logger = structlog.get_logger()
 
 _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
-_DEFAULT_IDLE_TIMEOUT_S = 60.0
+_DEFAULT_TTFT_TIMEOUT_S = 60.0
 _DEFAULT_CODEX_INSTRUCTIONS = "You are a helpful assistant."
+
+# Codex 429 bodies look like:
+#   {"error":{"type":"usage_limit_reached","plan_type":"pro",
+#             "resets_at":1778618837,"resets_in_seconds":88465, ...}}
+# When the body says "resets in 24h", we MUST persist that on the pool token
+# so it isn't retried 5 minutes later. Falling back to a flat 5-min cooldown
+# (the old behavior) means we'd burn another rotation every 5 min for a day.
+_RESET_HEADER_NAMES = (
+    "x-ratelimit-reset",
+    "ratelimit-reset",
+    "x-rate-limit-reset",
+)
+_DEFAULT_COOLDOWN_S = 5 * 60
 
 
 def _content_to_text(content: Any) -> str:
@@ -320,7 +336,6 @@ def build_codex_responses_body(
     ChatGPT backend handles limits differently from public API keys.
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
-    reasoning_effort = _normalize_reasoning_effort(effort)
     body: Dict[str, Any] = {
         "model": pool_spec.gpt_auth_model,
         "input": _build_responses_input(messages),
@@ -333,9 +348,10 @@ def build_codex_responses_body(
             instructions=instructions,
             response_format=response_format,
         ),
-        "reasoning": {"effort": reasoning_effort, "summary": "auto"},
         "include": ["reasoning.encrypted_content"],
     }
+    if effort is not None:
+        body["reasoning"] = {"effort": _normalize_reasoning_effort(effort), "summary": "auto"}
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
     if responses_tools:
@@ -366,8 +382,8 @@ async def gpt_auth_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
-    ttft_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
-    idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     body = build_codex_responses_body(
         pool_spec=pool_spec,
@@ -399,7 +415,15 @@ async def gpt_auth_complete(
             return
         except (RoseAuthError, RoseRateLimitError) as exc:
             reason = "auth_error" if isinstance(exc, RoseAuthError) else "rate_limit"
-            await _cool_down(current_auth, reason, request_id, agent_id, call_site)
+            rate_limited_until = getattr(exc, "rate_limited_until", None)
+            await _cool_down(
+                current_auth,
+                reason,
+                request_id,
+                agent_id,
+                call_site,
+                rate_limited_until=rate_limited_until,
+            )
             rotations += 1
             error_cls = RoseRateLimitError if reason == "rate_limit" else RoseAuthError
             if rotations > current_auth.max_rotations:
@@ -425,7 +449,7 @@ async def _attempt_with_token(
     agent_id: Optional[str],
     call_site: Optional[str],
     ttft_timeout_s: float,
-    idle_timeout_s: float,
+    idle_timeout_s: Optional[float],
 ) -> AsyncIterator[StreamChunk]:
 
     last_error: Optional[Exception] = None
@@ -458,7 +482,14 @@ async def _attempt_with_token(
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
-                    raise RoseRateLimitError(f"Codex 429: {error_body[:2000]}", status=status)
+                    rate_limited_until = _extract_rate_limited_until(
+                        response, error_body
+                    )
+                    exc = RoseRateLimitError(
+                        f"Codex 429: {error_body[:2000]}", status=status
+                    )
+                    exc.rate_limited_until = rate_limited_until  # type: ignore[attr-defined]
+                    raise exc
 
                 if status in (401, 403):
                     raise RoseAuthError(f"Codex {status}: {error_body[:2000]}", status=status)
@@ -489,17 +520,115 @@ async def _attempt_with_token(
     raise RoseServerError("Codex: exhausted retries with no error captured")
 
 
+def _format_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _epoch_to_iso(epoch: float) -> Optional[str]:
+    # Codex sends seconds; accept ms too just in case.
+    if epoch > 10_000_000_000:
+        epoch = epoch / 1000.0
+    if epoch < 1_000_000_000:
+        return None
+    return _format_utc(datetime.fromtimestamp(epoch, tz=timezone.utc))
+
+
+def _extract_rate_limited_until(
+    response: Optional[httpx.Response], error_body: str
+) -> Optional[str]:
+    """Pull the upstream reset timestamp out of a Codex 429.
+
+    Codex puts both `resets_at` (epoch seconds) and `resets_in_seconds`
+    (relative) in the JSON body. We prefer the absolute epoch, fall back
+    to the relative value, then to standard `retry-after` / reset headers.
+    Returns an ISO8601 UTC string, or None if nothing usable was found.
+    """
+    body = error_body or ""
+    try:
+        parsed = json.loads(body)
+        err = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(err, dict):
+            resets_at = err.get("resets_at")
+            if isinstance(resets_at, (int, float)):
+                iso = _epoch_to_iso(float(resets_at))
+                if iso:
+                    return iso
+            resets_in = err.get("resets_in_seconds")
+            if isinstance(resets_in, (int, float)) and resets_in >= 0:
+                return _format_utc(
+                    datetime.now(timezone.utc) + timedelta(seconds=float(resets_in))
+                )
+    except (ValueError, TypeError):
+        pass
+
+    if response is None:
+        return None
+
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        stripped = retry_after.strip()
+        try:
+            seconds = max(0.0, float(stripped))
+            return _format_utc(
+                datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            )
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(stripped)
+                if dt is not None:
+                    return _format_utc(dt)
+            except (TypeError, ValueError):
+                pass
+
+    for header_name in _RESET_HEADER_NAMES:
+        raw = response.headers.get(header_name)
+        if not raw:
+            continue
+        stripped = raw.strip().strip('"')
+        try:
+            iso = _epoch_to_iso(float(stripped))
+            if iso:
+                return iso
+        except ValueError:
+            try:
+                dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+                return _format_utc(dt)
+            except ValueError:
+                continue
+
+    return None
+
+
+def _seconds_until(iso_ts: str) -> Optional[int]:
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    delta = (dt - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return None
+    return int(delta)
+
+
 async def _cool_down(
     auth: GptAuthContext,
     reason: str,
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    rate_limited_until: Optional[str] = None,
 ) -> None:
     if auth.mark_rate_limited is None:
         return
+    cooldown_seconds = _seconds_until(rate_limited_until) if rate_limited_until else None
+    if cooldown_seconds is None:
+        cooldown_seconds = _DEFAULT_COOLDOWN_S
     try:
-        await auth.mark_rate_limited(auth, 5 * 60, None, reason)
+        await auth.mark_rate_limited(
+            auth, cooldown_seconds, rate_limited_until, reason
+        )
         logger.info(
             "rose.gpt_auth.cooldown_marked",
             request_id=request_id,

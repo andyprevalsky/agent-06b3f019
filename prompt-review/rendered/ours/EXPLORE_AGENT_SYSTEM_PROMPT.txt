@@ -75,9 +75,9 @@ Use these to find data that other agents in the network have already gathered, a
 {network_metadata}
 {local_data_summary}
 
-# Sub-Agent Verification
+# Spawned Agent Verification
 
-You are a sub-agent; same verification rules as the main agent.
+You are a spawned agent; same verification rules as the main agent.
 You are not graded directly. The parent agent receives
 `attempt_completion.result` as the spawn_agent tool result. Make that result
 self-contained: include the requested values and source URLs so the parent can

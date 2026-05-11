@@ -1,21 +1,11 @@
 #!/usr/bin/env node
 /**
- * WebSocket server that runs Claude Code in a proper PTY and streams output.
- *
- * Uses node-pty for direct PTY management (replaces `script` command):
- * - Characters written via pty.write() go directly to the PTY master
- * - No middleman process between us and Claude Code
- * - Proper raw mode support for stdin injection
- *
- * Architecture:
- * - Accumulates all stdout in a buffer (never flushed)
- * - On client connect: sends full buffer, then streams live
- * - Agent worker sends stdin via WebSocket for follow-up prompts
- * - Logs to /tmp/ws-server.log for debugging
+ * WebSocket server that runs Claude through the Agent SDK and streams both
+ * readable output and normalized JSON events.
  */
 
 import { WebSocketServer } from 'ws';
-import pty from 'node-pty';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { execSync } from 'child_process';
 import { appendFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
@@ -38,6 +28,7 @@ const PORT = 3000;
 const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
+const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || '';
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
@@ -53,6 +44,7 @@ if (!GOAL) {
 
 // Buffer to accumulate all stdout (never flushed)
 let outputBuffer = '';
+let eventBuffer = [];
 
 // Track connected clients
 const clients = new Set();
@@ -70,6 +62,9 @@ wss.on('connection', (ws) => {
   if (outputBuffer.length > 0) {
     ws.send(JSON.stringify({ type: 'buffer', data: outputBuffer }));
   }
+  if (eventBuffer.length > 0) {
+    ws.send(JSON.stringify({ type: 'code_agent_events', data: eventBuffer }));
+  }
 
   // Handle incoming messages (stdin from parent agent)
   ws.on('message', (data) => {
@@ -84,26 +79,7 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        // Write directly to PTY — no middleman process
-        if (claude && !processExited) {
-          // Ensure carriage return at end for prompt submission
-          // In raw PTY mode, \r is the Enter key
-          const input = msg.data.endsWith('\r') ? msg.data : msg.data + '\r';
-
-          try {
-            claude.write(input);
-            log('info', 'stdin write successful', { bytes: input.length });
-            ws.send(JSON.stringify({ type: 'stdin_ack', bytes: input.length }));
-            // Broadcast stdin to all clients so FE can display what was typed
-            broadcast('stdin_echo', input);
-          } catch (err) {
-            log('error', 'stdin write error', { error: err.message });
-            ws.send(JSON.stringify({ type: 'stdin_error', error: err.message }));
-          }
-        } else {
-          log('error', 'Cannot write to stdin - process not ready or exited');
-          ws.send(JSON.stringify({ type: 'stdin_error', error: 'Process not ready or exited' }));
-        }
+        ws.send(JSON.stringify({ type: 'stdin_error', error: 'Claude Agent SDK session is non-interactive' }));
       }
     } catch (e) {
       log('error', 'Failed to parse message', { error: e.message });
@@ -131,6 +107,22 @@ function broadcast(type, data) {
   }
 }
 
+function appendOutput(type, data) {
+  outputBuffer += data;
+  broadcast(type, data);
+}
+
+function appendEvent(event) {
+  const normalized = {
+    version: 1,
+    provider: 'claude',
+    timestamp: new Date().toISOString(),
+    ...event,
+  };
+  eventBuffer.push(normalized);
+  broadcast('code_agent_event', normalized);
+}
+
 
 // Handle shutdown gracefully
 let processExited = false;
@@ -139,6 +131,7 @@ async function shutdown(exitCode = 0) {
   log('info', 'Starting graceful shutdown', { exitCode });
 
   // Notify clients with exit code (sent directly, not wrapped in data)
+  appendEvent({ type: 'final', status: exitCode === 0 ? 'completed' : 'failed', exit_code: exitCode });
   const exitMessage = JSON.stringify({ type: 'exit', code: exitCode });
   for (const client of clients) {
     if (client.readyState === 1) {
@@ -173,6 +166,8 @@ log('info', 'Configuring Claude Code');
 
 const home = homedir();
 mkdirSync(join(home, '.claude'), { recursive: true });
+mkdirSync('/home/user/attachments', { recursive: true });
+mkdirSync('/home/user/output', { recursive: true });
 
 const config = {
   theme: 'dark',
@@ -249,35 +244,7 @@ if (GITHUB_REPO_URL) {
     execSync(`git config user.name "Rose Agent"`, { cwd: workDir });
     execSync(`git config user.email "agent@roselabs.ai"`, { cwd: workDir });
 
-    // Write repo-specific CLAUDE.md with auto-push instructions
-    const claudeMd = `# Rose Labs Agent - ${repoName}
-
-You are working in a cloned GitHub repository: ${GITHUB_REPO_URL}
-
-## CRITICAL: Auto-Push Instructions
-
-After completing your task, you MUST push your changes:
-1. Stage all changes: \`git add -A\`
-2. Commit with a descriptive message: \`git commit -m "feat: [description]"\`
-3. Push to main: \`git push origin main\`
-
-If there are merge conflicts:
-1. Pull latest: \`git pull origin main --rebase\`
-2. Resolve any conflicts
-3. Continue rebase: \`git rebase --continue\`
-4. Push: \`git push origin main\`
-
-IMPORTANT: Always push your changes before the session ends. The sandbox is ephemeral - unpushed changes will be lost!
-
-## Repository Info
-- Repo: ${GITHUB_REPO_URL}
-- Working directory: ${workDir}
-
-## File Locations
-- **User attachments**: \`/home/user/attachments/\` - Files uploaded by the user
-- **Output files**: \`/home/user/output/\` - Place files user needs (auto-extracted)
-`;
-    writeFileSync(join(workDir, 'CLAUDE.md'), claudeMd);
+    writeFileSync(join(workDir, 'CLAUDE.md'), CODE_AGENT_SYSTEM_PROMPT);
 
     // Trust the repo directory for Claude Code (both legacy and modern formats)
     projects[workDir] = { allowedTools: ['*'], hasTrustDialogAccepted: true };
@@ -292,74 +259,148 @@ IMPORTANT: Always push your changes before the session ends. The sandbox is ephe
   }
 }
 
-// Start Claude Code with node-pty for proper PTY management
-log('info', 'Starting Claude Code', { goal: GOAL.slice(0, 100) });
-
-// Strip NUL bytes which would truncate at the C level
-const sanitizedGoal = GOAL.replace(/\0/g, '');
-
-// Spawn Claude Code directly in a PTY — no `script` middleman.
-// node-pty creates a real PTY pair and gives us direct write access
-// to the master side, ensuring stdin delivery is reliable.
-const claude = pty.spawn('bash', [
-  '-l', '-c', 'claude --dangerously-skip-permissions "$CLAUDE_GOAL"'
-], {
-  name: 'xterm-256color',
-  cols: 200,
-  rows: 50,
-  cwd: workDir,
-  env: {
-    ...process.env,
-    TERM: 'xterm-256color',
-    CLAUDE_GOAL: sanitizedGoal,
-  },
-});
-
-log('info', 'Claude Code spawned via node-pty', { pid: claude.pid });
-
-// Auto-dismiss the "trust this folder" dialog if it appears.
-// Newer Claude Code versions ignore the projects.json hasTrustDialogAccepted
-// config, so we detect the dialog in PTY output and press Enter.
-let trustDialogDismissed = false;
-
-// Strip ANSI escape codes so pattern matching works on the visible text,
-// not on raw terminal sequences that can split words unpredictably.
-// Cursor-movement sequences (\x1b[<n>C = cursor forward) are replaced with
-// a space because they represent visual spacing in the rendered terminal.
-function stripAnsi(s) {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[\d*C/g, ' ')
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[\?]?[0-9;]*[hl]/g, '');
+if (!GITHUB_REPO_URL && CODE_AGENT_SYSTEM_PROMPT) {
+  writeFileSync(join(workDir, 'CLAUDE.md'), CODE_AGENT_SYSTEM_PROMPT);
 }
 
-claude.onData((data) => {
-  outputBuffer += data;
-  broadcast('stdout', data);
+function promptVersion() {
+  return CODE_AGENT_SYSTEM_PROMPT.match(/Rose Labs code-agent instructions \(([^)]+)\)/)?.[1] || null;
+}
 
-  // Detect trust dialog and auto-dismiss by pressing Enter.
-  // We strip ANSI codes before matching because the PTY output contains
-  // escape sequences that can fragment the visible text.
-  if (!trustDialogDismissed) {
-    const clean = stripAnsi(outputBuffer);
-    if (clean.includes('trust') && (clean.includes('Esc to cancel') || clean.includes('Yes, I trust'))) {
-      trustDialogDismissed = true;
-      log('info', 'Auto-dismissing trust folder dialog');
-      broadcast('trust_dismissed', true);
-      // Send Enter multiple times with increasing delays — the TUI may not
-      // be interactive on the first attempt if it is still rendering.
-      for (const delay of [300, 800, 1500]) {
-        setTimeout(() => {
-          if (!processExited) {
-            try { claude.write('\r'); } catch (e) { log('error', 'Trust dismiss write failed', { error: e.message }); }
-          }
-        }, delay);
+function textFromContent(content) {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => part && part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+function pathsFromToolInput(input) {
+  if (!input || typeof input !== 'object') return [];
+  return [
+    input.file_path,
+    input.path,
+    input.notebook_path,
+  ].filter((value) => typeof value === 'string' && value.startsWith('/home/user/'));
+}
+
+function emitSdkMessage(message) {
+  if (message.type === 'system' && message.subtype === 'init') {
+    appendEvent({
+      type: 'session',
+      raw_type: 'system.init',
+      session_id: message.session_id,
+      cwd: message.cwd,
+      model: message.model,
+      tools: message.tools || [],
+      permission_mode: message.permissionMode,
+      prompt_version: promptVersion(),
+    });
+    appendOutput('stdout', `[Claude] Session started in ${message.cwd}\n`);
+    return;
+  }
+
+  if (message.type === 'assistant') {
+    const text = textFromContent(message.message?.content);
+    if (text) {
+      appendEvent({ type: 'agent_message', raw_type: 'assistant', text, usage: message.message?.usage || null });
+      appendOutput('stdout', `[Claude] ${text}\n`);
+    }
+    for (const part of message.message?.content || []) {
+      if (part?.type === 'tool_use') {
+        const paths = pathsFromToolInput(part.input);
+        appendEvent({
+          type: 'tool_use',
+          raw_type: 'assistant.tool_use',
+          tool: part.name,
+          tool_use_id: part.id,
+          input: part.input || {},
+          paths,
+        });
+        appendOutput('stdout', `[Claude tool] ${part.name}${paths.length ? ` ${paths.join(', ')}` : ''}\n`);
       }
     }
+    return;
   }
-});
 
-claude.onExit(({ exitCode, signal }) => {
-  processExited = true;
-  log('info', 'Claude Code exited', { exitCode, signal });
-  shutdown(exitCode || 0);
-});
+  if (message.type === 'user' && message.tool_use_result !== undefined) {
+    appendEvent({
+      type: 'tool_result',
+      raw_type: 'user.tool_result',
+      tool_use_result: message.tool_use_result,
+    });
+    return;
+  }
+
+  if (message.type === 'result') {
+    const isSuccess = message.subtype === 'success';
+    appendEvent({
+      type: 'result',
+      raw_type: `result.${message.subtype}`,
+      status: isSuccess ? 'completed' : 'failed',
+      text: isSuccess ? message.result : (message.errors || []).join('\n'),
+      usage: message.usage || null,
+      model_usage: message.modelUsage || null,
+      structured_output: message.structured_output,
+    });
+    if (isSuccess && message.result) {
+      appendOutput('stdout', `[Claude result] ${message.result}\n`);
+    } else if (!isSuccess) {
+      appendOutput('stderr', `[Claude result] ${(message.errors || []).join('\n')}\n`);
+    }
+    return;
+  }
+
+  appendEvent({ type: 'sdk_message', raw_type: message.type, sdk_message: message });
+}
+
+async function runClaudeAgent() {
+  const sanitizedGoal = GOAL.replace(/\0/g, '');
+  const prompt = [
+    CODE_AGENT_SYSTEM_PROMPT ? `System instructions:\n${CODE_AGENT_SYSTEM_PROMPT}` : '',
+    `Task:\n${sanitizedGoal}`,
+  ].filter(Boolean).join('\n\n');
+
+  appendEvent({
+    type: 'session',
+    status: 'starting',
+    cwd: workDir,
+    prompt_version: promptVersion(),
+  });
+  log('info', 'Starting Claude Agent SDK', { workDir, goal: sanitizedGoal.slice(0, 100) });
+
+  try {
+    const messages = query({
+      prompt,
+      options: {
+        cwd: workDir,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        settingSources: ['project'],
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: CODE_AGENT_SYSTEM_PROMPT,
+          excludeDynamicSections: true,
+        },
+        allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'LS', 'TodoWrite'],
+      },
+    });
+
+    for await (const message of messages) {
+      emitSdkMessage(message);
+    }
+
+    processExited = true;
+    log('info', 'Claude Agent SDK completed');
+    await shutdown(0);
+  } catch (err) {
+    processExited = true;
+    appendOutput('stderr', `[Claude] Failed: ${err.message}\n`);
+    appendEvent({ type: 'error', message: err.message, stack: err.stack || null });
+    log('error', 'Claude Agent SDK failed', { error: err.message, stack: err.stack });
+    await shutdown(1);
+  }
+}
+
+runClaudeAgent();

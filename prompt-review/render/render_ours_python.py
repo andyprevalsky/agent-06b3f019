@@ -491,15 +491,4 @@ print("[render] helpers/")
 from helpers.knowledge_base import BLUEPRINT_COMPRESSION_PROMPT  # noqa: E402
 write("BLUEPRINT_COMPRESSION_PROMPT", BLUEPRINT_COMPRESSION_PROMPT)
 
-# helpers/*.txt — these ARE the runtime prompt; just copy.
-for txt_id, rel in [
-    ("GEPA_V3_PLANNING_INSTRUCTION", "agents/helpers/gepa_v3_strategy_override.txt"),
-    ("PLANNER_V3_STRATEGY_OVERRIDE", "agents/helpers/planner_strategy_override_v3.txt"),
-]:
-    p = ROOT / rel
-    if p.exists():
-        write(txt_id, p.read_text())
-    else:
-        write(txt_id, f"[file not found: {rel}]")
-
 print("[render] done.")

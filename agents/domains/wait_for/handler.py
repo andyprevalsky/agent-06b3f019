@@ -146,8 +146,7 @@ class WaitForManager(ToolManager):
         routing explore events as spawn_agent messages so the FE groups them
         correctly. wait_for events reference the explore via exploreTaskId.
         """
-        from tools.grep import fetch_local_data_summary
-        from tools.spawn_agent import SpawnAgentManager, fetch_full_network_metadata
+        from tools.spawn_agent import SpawnAgentManager
 
         # Validate
         check_interval_seconds = max(
@@ -169,34 +168,10 @@ class WaitForManager(ToolManager):
             },
         )
 
-        # Fetch network metadata + local data once before the loop.
+        # Contact + message-thread context is now fetched on-demand by the
+        # explore agent via the grep tool's network / agent_network_* /
+        # messages source modes — no need to prefetch.
         context_gates = context_gates or {}
-
-        if context_gates.get("network", True):
-            try:
-                network_metadata = await workflow.execute_activity(
-                    fetch_full_network_metadata,
-                    args=[workflow_instance.user_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-            except Exception:
-                network_metadata = ""
-        else:
-            network_metadata = ""
-
-        if context_gates.get("recent_communications", True):
-            try:
-                local_data_summary = await workflow.execute_activity(
-                    fetch_local_data_summary,
-                    args=[workflow_instance.user_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-            except Exception:
-                local_data_summary = ""
-        else:
-            local_data_summary = ""
 
         model = getattr(workflow_instance, "model", DEFAULT_MODEL)
         claude_token = None  # wait_for uses cheap lite waterfall, no claudeAuth
@@ -260,8 +235,6 @@ class WaitForManager(ToolManager):
                 {"type": "explore", "goal": explore_goal},
                 explore_tool_call_id,
                 task_id=task_id,
-                network_metadata=network_metadata,
-                local_data_summary=local_data_summary,
                 display_goal=condition,
                 capture_tool_results=explore_tool_call_results,
             ):

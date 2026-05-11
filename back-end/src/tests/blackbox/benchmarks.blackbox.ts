@@ -167,6 +167,7 @@ const KNOWN_TAGS = [
   'load-test',
   'scale',
   'batch',
+  'needs-auth',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

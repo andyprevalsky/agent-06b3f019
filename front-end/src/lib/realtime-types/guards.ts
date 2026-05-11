@@ -61,7 +61,7 @@ export function isSpawnClaudeCodeAgentMessage(
 }
 
 /**
- * Type guard for spawn_agent messages (unified: explore/browser/code/sub_agent).
+ * Type guard for spawn_agent messages (unified: explore/browser/code/general_purpose).
  */
 export function isSpawnAgentMessage(
   msg: InsertMessagePayload,

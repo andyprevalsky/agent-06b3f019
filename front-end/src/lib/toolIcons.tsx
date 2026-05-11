@@ -73,7 +73,7 @@ export function isClaudeCodeTool(toolName: string): boolean {
  */
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
-  spawn_agent: Search, // Unified agent tool (explore/browser/code/sub_agent)
+  spawn_agent: Search, // Unified agent tool (explore/browser/code/general_purpose)
   grep: FileSearch, // Local data search (message threads)
   spawn_browser_agent: Globe,
   send_sms: MessageSquare,
@@ -89,6 +89,8 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   wait_seconds: Clock,
   deep_research: FileSearch,
   people_search: Users,
+  spawn_general_purpose_agent: Users,
+  spawn_general_purpose_agent_for_each: Users,
   spawn_sub_agent: Users,
   search_user_network_for_people: Users,
   find_all: FileSearch,

@@ -149,6 +149,15 @@ def convert_dependencies_list_to_dict(deps_list: list[dict[str, Any]]) -> dict[s
     return {entry.get("task_idx", ""): entry.get("depends_on", []) for entry in deps_list if entry.get("task_idx")}
 
 
+def dependencies_from_tasks(task_objects: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Derive the executable dependency graph from tasks[].depends_on."""
+    deps: dict[str, list[str]] = {}
+    for i, task_obj in enumerate(task_objects):
+        task_deps = task_obj.get("depends_on", [])
+        deps[str(i)] = [str(dep) for dep in task_deps]
+    return deps
+
+
 def _resolve_schema_ref(root: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     ref = schema.get("$ref")
     if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
@@ -311,8 +320,6 @@ def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
     """Validate the planner result. Returns error message if invalid, None if valid."""
     task_objects = planner_result.get("tasks", [])
     tasks = [t.get("goal", "") for t in task_objects]
-    deps_list = planner_result.get("dependencies_graph", [])
-    dependencies = convert_dependencies_list_to_dict(deps_list)
     join = planner_result.get("join", "all")
 
     if not tasks:
@@ -321,12 +328,6 @@ def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
     if join not in ("all", "any"):
         return f"Invalid join value '{join}'. Must be 'all' or 'any'."
 
-    deps = dependencies or {}
-    dep_error = validate_dependencies(tasks, deps)
-    if dep_error:
-        return dep_error
-
-    # Verify tasks[i].depends_on matches dependencies_graph
     for i, task_obj in enumerate(task_objects):
         task_idx = task_obj.get("task_idx")
         if not isinstance(task_idx, str) or not task_idx.isdigit():
@@ -335,14 +336,12 @@ def validate_planner_result(planner_result: dict[str, Any]) -> str | None:
             return f"Task {i} has task_idx={task_idx!r}. It must equal its 0-based array position '{i}'."
 
         task_deps = task_obj.get("depends_on", [])
-        graph_deps = deps.get(str(i), [])
-        task_deps_str = sorted([str(d) for d in task_deps])
-        graph_deps_str = sorted(graph_deps)
-        if task_deps_str != graph_deps_str:
-            return (
-                f"Task {i} has depends_on={task_deps} but dependencies_graph['{i}']={graph_deps}."
-                " They must match exactly."
-            )
+        if not isinstance(task_deps, list):
+            return f"Task {i} has invalid depends_on={task_deps!r}. It must be a list of task indices."
+
+    dep_error = validate_dependencies(tasks, dependencies_from_tasks(task_objects))
+    if dep_error:
+        return dep_error
 
     return None  # Valid
 
@@ -354,9 +353,9 @@ def build_plan_data(planner_result: dict[str, Any]) -> PlanData:
     """
     task_objects = planner_result["tasks"]
     tasks: list[TaskObject] = [TaskObject(goal=t["goal"], tool_name=t["tool_name"]) for t in task_objects]
-    deps = convert_dependencies_list_to_dict(planner_result.get("dependencies_graph", []))
+    deps = dependencies_from_tasks(task_objects)
     title: str = planner_result["title"]
-    content: str = planner_result["content"]
+    content: str = planner_result.get("content") or ""
     join: str = planner_result["join"]
 
     return PlanData(

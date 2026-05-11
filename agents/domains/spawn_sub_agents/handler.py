@@ -24,6 +24,8 @@ from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
+USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
+
 
 class SpawnSubAgentManager(ToolManager):
     """Manager for spawn_sub_agent tool using event-driven architecture."""
@@ -62,7 +64,7 @@ class SpawnSubAgentManager(ToolManager):
                 title="Sub-agent failed",
                 message="No sub-agent specified",
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_sub_agent"},
+                metadata={"toolName": USER_FACING_TOOL_NAME},
             )
             return
 
@@ -143,7 +145,7 @@ class SpawnSubAgentManager(ToolManager):
                 title="Sub-agent failed",
                 message=f"Error spawning sub-agent: {error_msg}",
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_sub_agent"},
+                metadata={"toolName": USER_FACING_TOOL_NAME},
             )
 
     async def finalize_child(
@@ -185,7 +187,7 @@ class SpawnSubAgentManager(ToolManager):
             "TOOL",
             metadata={
                 "toolCallId": child_tool_id,
-                "toolName": "spawn_sub_agent",
+                "toolName": USER_FACING_TOOL_NAME,
                 "toolStatus": "IN_PROGRESS",
                 "title": "Sub-agent starting",
                 "subAgentId": child_agent_id,
@@ -199,7 +201,7 @@ class SpawnSubAgentManager(ToolManager):
             message="",
             status=MessageStatus.IN_PROGRESS,
             metadata={
-                "toolName": "spawn_sub_agent",
+                "toolName": USER_FACING_TOOL_NAME,
                 "subAgentIds": [child_agent_id],
                 "busId": bus_id,
             },
@@ -228,7 +230,7 @@ class SpawnSubAgentManager(ToolManager):
             message=child_summary,
             status=MessageStatus.FINISHED,
             metadata={
-                "toolName": "spawn_sub_agent",
+                "toolName": USER_FACING_TOOL_NAME,
                 "subAgentIds": [child_agent_id],
                 "busId": bus_id,
                 "structured_response": structured_response,
@@ -297,6 +299,7 @@ class SpawnSubAgentManager(ToolManager):
                 message=error_message,
                 status=MessageStatus.ERROR,
                 metadata={
+                    "toolName": USER_FACING_TOOL_NAME,
                     "subAgentIds": [child_agent_id],
                     "busId": bus_id,
                     "error_reason": error_reason,

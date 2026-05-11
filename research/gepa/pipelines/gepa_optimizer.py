@@ -37,8 +37,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 TASKS_DIR = DATA_DIR / 'clarified_tasks'
 
 # Markers for the evolvable strategy section in the planner prompt.
-# The planner prompt may have the original markers or an overridden strategy
-# (via planner_strategy_override_v3.txt). We try each in order.
+# Two marker sets are supported: the original planner section and a legacy
+# overridden strategy header. We try each in order.
 STRATEGY_STARTS = ['TWO-AXIS PLANNING FRAMEWORK', 'PLANNING INSTRUCTION']
 STRATEGY_ENDS = ['SPAWN_SUB_AGENT TOOL', 'SELF-CONTAINED GOALS (CRITICAL)']
 # Legacy aliases for backwards compatibility with tests

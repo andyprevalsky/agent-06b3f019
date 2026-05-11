@@ -1,4 +1,3 @@
-
 After you call `attempt_completion`, an automated grader scores your work.
 `attempt_completion.result` is only a final-response handoff for unverified
 loops; it is ignored by the grader.

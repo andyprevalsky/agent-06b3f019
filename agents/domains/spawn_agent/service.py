@@ -65,7 +65,7 @@ def validate_spawn_params(tool_call: dict) -> None:
 
     if not agent_type:
         raise ValueError(
-            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'sub_agent', 'explore', 'for_each'."
+            "spawn_agent requires 'type'. Must be one of: 'browser', 'code', 'general_purpose', 'explore', 'for_each'."
         )
 
     if agent_type not in VALID_AGENT_TYPES:
@@ -79,17 +79,17 @@ def validate_spawn_params(tool_call: dict) -> None:
     if agent_type == "browser" and not tool_call.get("start_url"):
         raise ValueError("spawn_agent(type='browser') requires 'start_url'. Provide the URL to navigate to.")
 
-    if agent_type in ("browser", "code", "sub_agent", "for_each") and not tool_call.get("output_schema"):
+    if agent_type in ("browser", "code", "general_purpose", "for_each") and not tool_call.get("output_schema"):
         raise ValueError(
             f"spawn_agent(type='{agent_type}') requires 'output_schema'. "
             "Define the expected response structure with fields."
         )
 
-    if agent_type in ("sub_agent", "for_each"):
+    if agent_type in ("general_purpose", "for_each"):
         start_phase = tool_call.get("start_phase")
         if start_phase is not None and str(start_phase).strip().upper() not in ("PLAN", "EXECUTE"):
             raise ValueError(
-                "spawn_agent(type='sub_agent'|'for_each') start_phase must be either 'PLAN' or 'EXECUTE'."
+                "spawn_agent(type='general_purpose'|'for_each') start_phase must be either 'PLAN' or 'EXECUTE'."
             )
 
     if agent_type == "for_each":
@@ -195,8 +195,6 @@ async def spawn_explore_agent_activity(  # noqa: C901
     user_id: str,
     goal: str,
     model: str,
-    network_metadata: str = "",
-    local_data_summary: str = "",
     task_id: str = "",
     init_tool_call_id: str = "",
     claude_token: Optional[str] = None,
@@ -270,16 +268,13 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 metadata["subAgentId"] = task_id
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
 
-    # Build system prompt with network metadata and local data summary.
-    # The system prompt is byte-identical across explore-agent calls — this
-    # is the cache window. Per-call dynamic state (current time) is prepended
-    # to the user goal as a [STATE: ...] line so it does not contaminate the
-    # cacheable prefix. Mirrors the v3 browser-agent pattern (see
-    # domains/spawn_browser_agent_v3/handler.py — build_state_line).
-    system_prompt = EXPLORE_AGENT_SYSTEM_PROMPT.format(
-        network_metadata=f"\nUSER NETWORK:\n{network_metadata}" if network_metadata else "",
-        local_data_summary=f"\n{local_data_summary}" if local_data_summary else "",
-    )
+    # Send the system prompt verbatim. Contact + message-thread context is
+    # fetched on-demand via the grep tool (network / agent_network_* / messages
+    # source modes), not via prefetched system-prompt blocks. The prompt is
+    # byte-identical across explore-agent calls — this is the cache window.
+    # Per-call dynamic state (current time) is prepended to the user goal as
+    # a [STATE: ...] line so it does not contaminate the cacheable prefix.
+    system_prompt = EXPLORE_AGENT_SYSTEM_PROMPT
 
     async def explore_system_prompt():
         return system_prompt

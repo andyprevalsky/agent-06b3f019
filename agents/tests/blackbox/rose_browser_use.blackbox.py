@@ -75,6 +75,7 @@ def test_browser_use_tool_catalog_completeness():
     # Sanity: all the actions referenced by the prompt-builder exist.
     must_have = {"goto", "click", "input_text", "scroll", "screenshot", "attempt_completion"}
     assert must_have.issubset(set(BROWSER_USE_TOOLS.keys()))
+    assert "extract" not in BROWSER_USE_TOOLS
 
 
 def test_build_browser_use_system_prompt_includes_actions():
@@ -83,6 +84,14 @@ def test_build_browser_use_system_prompt_includes_actions():
     assert "- click:" in prompt
     assert "- goto:" in prompt
     assert '"thinking"' in prompt
+
+
+def test_build_browser_use_system_prompt_does_not_advertise_extract():
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+
+    assert "extract" not in AVAILABLE_ACTIONS
+    prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+    assert "- extract:" not in prompt
     assert '"action"' in prompt
 
 
@@ -601,6 +610,7 @@ async def run_all_tests():
     r.record("tool_descriptions_no_param_for_navback", test_generate_tool_descriptions_no_params_for_navback)
     r.record("tool_catalog_completeness", test_browser_use_tool_catalog_completeness)
     r.record("system_prompt_includes_actions", test_build_browser_use_system_prompt_includes_actions)
+    r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)
     r.record("messages_multimodal_with_screenshot", test_build_messages_multimodal_when_screenshot_present)

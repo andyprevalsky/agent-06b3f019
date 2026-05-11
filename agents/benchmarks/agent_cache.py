@@ -190,12 +190,43 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
+def _cache_stats(e: Dict[str, Any]) -> Dict[str, int | str]:
+    """Return provider-correct prompt-cache totals for a logged LLM call."""
+    cached_total = e.get("cache_total_input")
+    if isinstance(cached_total, (int, float)) and cached_total > 0:
+        total_input = int(cached_total)
+        accounting = str(e.get("cache_accounting") or "logged")
+    else:
+        model = str(e.get("actual_model") or "")
+        prompt = int(e.get("prompt_tokens", 0) or 0)
+        read = int(e.get("cache_read", 0) or 0)
+        write = int(e.get("cache_write", 0) or 0)
+        if model.endswith("-claude"):
+            total_input = prompt + read + write
+            accounting = "exclusive"
+        else:
+            total_input = max(prompt, read + write)
+            accounting = "inclusive"
+
+    read = int(e.get("cache_read", 0) or 0)
+    write = int(e.get("cache_write", 0) or 0)
+    pct = round(read / total_input * 100) if total_input > 0 else 0
+    uncached = max(total_input - read - write, 0)
+    return {
+        "total_input": total_input,
+        "uncached_input": uncached,
+        "cache_hit_pct": pct,
+        "cache_accounting": accounting,
+    }
+
+
 def _render_tree(agent_id: str, events: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     total_read = 0
     total_write = 0
     total_prompt = 0
     total_completion = 0
+    total_cache_input = 0
     claude_calls = 0
     waterfall_calls = 0
 
@@ -213,7 +244,8 @@ def _render_tree(agent_id: str, events: List[Dict[str, Any]]) -> str:
         is_claude = e.get("is_claude", False)
         cache_read = e.get("cache_read", 0) or 0
         cache_write = e.get("cache_write", 0) or 0
-        cache_pct = e.get("cache_hit_pct", 0) or 0
+        cache = _cache_stats(e)
+        cache_pct = cache["cache_hit_pct"]
         prompt = e.get("prompt_tokens", 0) or 0
         completion = e.get("completion_tokens", 0) or 0
 
@@ -221,6 +253,7 @@ def _render_tree(agent_id: str, events: List[Dict[str, Any]]) -> str:
         total_write += cache_write
         total_prompt += prompt
         total_completion += completion
+        total_cache_input += int(cache["total_input"])
         if is_claude:
             claude_calls += 1
         else:
@@ -234,8 +267,7 @@ def _render_tree(agent_id: str, events: List[Dict[str, Any]]) -> str:
         cache_str = f"read={_fmt_tokens(cache_read)} write={_fmt_tokens(cache_write)} → {cache_pct}% hit"
         lines.append(f"{prefix}{call_site:<20} {model_short:<28} Cache: {cache_str}")
 
-    total_input = total_prompt + total_read + total_write
-    total_pct = round(total_read / total_input * 100) if total_input > 0 else 0
+    total_pct = round(total_read / total_cache_input * 100) if total_cache_input > 0 else 0
     cost_note = "$0" if waterfall_calls == 0 else f"${(total_prompt * 3 + total_completion * 15) / 1_000_000:.4f}"
 
     lines.append("")
@@ -252,8 +284,7 @@ def _render_json(groups: Dict[str, List[Dict[str, Any]]]) -> str:
     for agent_id, events in groups.items():
         total_read = sum(e.get("cache_read", 0) or 0 for e in events)
         total_write = sum(e.get("cache_write", 0) or 0 for e in events)
-        total_prompt = sum(e.get("prompt_tokens", 0) or 0 for e in events)
-        total_input = total_prompt + total_read + total_write
+        total_input = sum(int(_cache_stats(e)["total_input"]) for e in events)
         out[agent_id] = {
             "calls": [
                 {
@@ -264,7 +295,9 @@ def _render_json(groups: Dict[str, List[Dict[str, Any]]]) -> str:
                     "completion_tokens": e.get("completion_tokens", 0),
                     "cache_read": e.get("cache_read", 0),
                     "cache_write": e.get("cache_write", 0),
-                    "cache_hit_pct": e.get("cache_hit_pct", 0),
+                    "cache_hit_pct": _cache_stats(e)["cache_hit_pct"],
+                    "cache_total_input": _cache_stats(e)["total_input"],
+                    "cache_accounting": _cache_stats(e)["cache_accounting"],
                 }
                 for e in events
             ],
@@ -314,8 +347,7 @@ def main() -> None:
         all_events = [e for evts in groups.values() for e in evts]
         total_read = sum(e.get("cache_read", 0) or 0 for e in all_events)
         total_write = sum(e.get("cache_write", 0) or 0 for e in all_events)
-        total_prompt = sum(e.get("prompt_tokens", 0) or 0 for e in all_events)
-        total_input = total_prompt + total_read + total_write
+        total_input = sum(int(_cache_stats(e)["total_input"]) for e in all_events)
         total_pct = round(total_read / total_input * 100) if total_input > 0 else 0
         print(
             f"  Grand total: read={_fmt_tokens(total_read)} write={_fmt_tokens(total_write)} "

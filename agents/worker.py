@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 
@@ -11,7 +12,14 @@ import structlog
 from dotenv import load_dotenv
 from temporalio.client import Client, TLSConfig
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
-from temporalio.worker import ResourceBasedSlotConfig, Worker, WorkerTuner
+from temporalio.worker import (
+    FixedSizeSlotSupplier,
+    ResourceBasedSlotConfig,
+    ResourceBasedSlotSupplier,
+    ResourceBasedTunerConfig,
+    Worker,
+    WorkerTuner,
+)
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 # Load .env file — override=False ensures env vars inherited from run.sh
@@ -184,13 +192,14 @@ MIN_MACHINES = 2
 MAX_MACHINES = 10
 SCALE_DOWN_COOLDOWN_SECS = 60  # Seconds of zero backlog before probing downward
 SCALE_UP_THRESHOLD = 0.2  # Fraction of machine capacity that triggers scale-up
-SCALE_UP_COOLDOWN_SECS = 10  # Seconds to wait after a scale-up before allowing another
+SCALE_UP_COOLDOWN_SECS = 20  # Seconds to wait after a scale-up before allowing another
+ADMISSION_PRESSURE_SCALE_UP_SECS = 60
 POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
-DEFAULT_CAPACITY = 50  # Fallback when SDK metrics not yet available (matches max_concurrent_activities)
-MEMORY_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_SCALE_UP_THRESHOLD_PERCENT", "80"))
+DEFAULT_CAPACITY = 100  # Fallback when SDK metrics are unavailable (matches default max activity slots)
+MEMORY_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_SCALE_UP_THRESHOLD_PERCENT", "75"))
 MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT", "90"))
 
 FLY_MACHINES_API = "https://api.machines.dev/v1"
@@ -201,6 +210,50 @@ _desired_machines: int = MIN_MACHINES
 _last_log_time: float = 0
 _last_scale_up_time: float = 0
 _prev_desired: int = MIN_MACHINES
+_admission_pressure_since: float | None = None
+
+
+class ActivityAdmissionSnapshot:
+    """Passive memory-admission telemetry for autoscaler decisions.
+
+    Do not implement this as a Temporal CustomSlotSupplier. Temporal invokes
+    custom slot supplier callbacks from Rust runtime threads, and those
+    callbacks must reacquire the Python GIL. Under activity heartbeat traffic,
+    that can deadlock the worker before it polls new workflow tasks.
+    """
+
+    def __init__(
+        self,
+        *,
+        maximum_slots: int,
+        close_memory_percent: float,
+        open_memory_percent: float,
+        poll_interval_s: float = 0.1,
+    ) -> None:
+        if open_memory_percent >= close_memory_percent:
+            raise ValueError("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT must be below close threshold")
+        self.maximum_slots = maximum_slots
+        self.close_memory_percent = close_memory_percent
+        self.open_memory_percent = open_memory_percent
+        self._admission_open = True
+        self._memory_percent = 0.0
+
+    def _refresh_admission(self) -> None:
+        self._memory_percent = float(psutil.virtual_memory().percent)
+        if self._admission_open and self._memory_percent >= self.close_memory_percent:
+            self._admission_open = False
+        elif not self._admission_open and self._memory_percent <= self.open_memory_percent:
+            self._admission_open = True
+
+    def snapshot(self) -> dict[str, int | float | bool]:
+        self._refresh_admission()
+        return {
+            "activity_admission_open": self._admission_open,
+            "activity_admission_memory_percent": self._memory_percent,
+            "activity_admission_close_memory_percent": self.close_memory_percent,
+            "activity_admission_open_memory_percent": self.open_memory_percent,
+            "activity_admission_max_slots": self.maximum_slots,
+        }
 
 
 def _get_peer_ips(app_name: str) -> list[str]:
@@ -240,34 +293,103 @@ def _am_i_leader() -> bool:
     return my_ip == peers[0]
 
 
-async def _get_observed_capacity(http: httpx.AsyncClient) -> int | None:
-    """Read actual activity slot capacity from the SDK's resource-based tuner.
+def _parse_prometheus_sample(line: str) -> tuple[str, dict[str, str], float] | None:
+    """Parse one simple Prometheus text exposition sample."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    sample, value_raw = parts
+    try:
+        value = float(value_raw)
+    except ValueError:
+        return None
+    if "{" not in sample:
+        return sample, {}, value
+    name, rest = sample.split("{", 1)
+    labels_raw = rest.rsplit("}", 1)[0]
+    labels = dict(re.findall(r'([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"', labels_raw))
+    return name, labels, value
 
-    The tuner dynamically adjusts available slots based on CPU/memory pressure.
-    effective_capacity = slots_used + slots_available = what this machine can
-    actually handle right now. No hardcoded magic number needed.
 
-    Returns None if SDK metrics aren't ready yet (e.g., during startup).
-    """
+async def _get_sdk_worker_metrics(http: httpx.AsyncClient) -> dict[str, int | float | None] | None:
+    """Read raw Temporal SDK worker/tuner metrics from the Prometheus endpoint."""
     try:
         resp = await http.get(f"http://localhost:{SDK_METRICS_PORT}/metrics", timeout=2.0)
 
-        slots_used = None
-        slots_available = None
+        slots_used: int | None = None
+        slots_available: int | None = None
+        metrics: dict[str, int | float | None] = {
+            "resource_slots_cpu_usage": None,
+            "resource_slots_mem_usage": None,
+            "resource_slots_cpu_pid_output": None,
+            "resource_slots_mem_pid_output": None,
+            "activity_task_pollers": None,
+            "workflow_task_pollers": None,
+            "sticky_workflow_task_pollers": None,
+        }
         for line in resp.text.splitlines():
-            if line.startswith("#"):
+            sample = _parse_prometheus_sample(line)
+            if sample is None:
                 continue
-            if "task_slots_used" in line and "ActivityTask" in line:
-                slots_used = int(float(line.split()[-1]))
-            elif "task_slots_available" in line and "ActivityTask" in line:
-                slots_available = int(float(line.split()[-1]))
+            name, labels, value = sample
+            if name == "temporal_resource_slots_cpu_usage":
+                metrics["resource_slots_cpu_usage"] = value
+                continue
+            if name == "temporal_resource_slots_mem_usage":
+                metrics["resource_slots_mem_usage"] = value
+                continue
+            if name == "temporal_resource_slots_cpu_pid_output":
+                metrics["resource_slots_cpu_pid_output"] = value
+                continue
+            if name == "temporal_resource_slots_mem_pid_output":
+                metrics["resource_slots_mem_pid_output"] = value
+                continue
+            if name == "temporal_num_pollers":
+                poller_type = labels.get("poller_type")
+                if poller_type == "activity_task":
+                    metrics["activity_task_pollers"] = int(value)
+                elif poller_type == "workflow_task":
+                    metrics["workflow_task_pollers"] = int(value)
+                elif poller_type == "sticky_workflow_task":
+                    metrics["sticky_workflow_task_pollers"] = int(value)
+                continue
 
-        if slots_used is not None and slots_available is not None:
-            return max(slots_used + slots_available, 1)
-        return None
+            has_activity_worker = labels.get("worker_type") == "ActivityWorker"
+            has_activity_task = labels.get("task_type") == "ActivityTask"
+            if not has_activity_worker and not has_activity_task:
+                continue
+            if name in {"temporal_worker_task_slots_used", "worker_task_slots_used", "task_slots_used"}:
+                slots_used = int(value)
+            elif name in {
+                "temporal_worker_task_slots_available",
+                "worker_task_slots_available",
+                "task_slots_available",
+            }:
+                slots_available = int(value)
+
+        metrics["activity_slots_used"] = slots_used
+        metrics["activity_slots_available"] = slots_available
+        return metrics if any(value is not None for value in metrics.values()) else None
     except Exception as e:
         logger.warning("Failed to read SDK metrics", error=str(e))
         return None
+
+
+async def _get_observed_capacity(http: httpx.AsyncClient) -> int | None:
+    """Read effective activity capacity from SDK slot metrics."""
+    metrics = await _get_sdk_worker_metrics(http)
+    if metrics is None:
+        return None
+    slots_used = metrics.get("activity_slots_used")
+    slots_available = metrics.get("activity_slots_available")
+    if slots_available is None:
+        return None
+    if slots_used is None:
+        slots_used = 0
+    return max(int(slots_used) + int(slots_available), 1)
 
 
 def _get_machine_memory_used_percent() -> float:
@@ -321,6 +443,48 @@ async def _get_fleet_memory_used_percent(http: httpx.AsyncClient, local_memory_u
             logger.debug("Failed to scrape peer memory metric", peer_ip=ip, error=str(e))
 
     return max(memory_samples)
+
+
+async def _get_fleet_activity_admission_unavailable_count(
+    http: httpx.AsyncClient,
+    *,
+    local_activity_admission_open: bool,
+    current_machines: int,
+) -> int:
+    """Return count of workers currently closed to new activity work."""
+    fly_app = os.getenv("FLY_APP_NAME")
+    if not fly_app:
+        return 0 if local_activity_admission_open else 1
+
+    peers = _get_peer_ips(fly_app)
+    if not peers:
+        return 0 if local_activity_admission_open else 1
+
+    unavailable = 0
+    samples = 0
+    for ip in peers:
+        try:
+            resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+            if resp.status_code != 200:
+                continue
+            value = _extract_metric_value(resp.text, "activity_admission_open")
+            if value is None:
+                continue
+            samples += 1
+            if value < 0.5:
+                unavailable += 1
+        except Exception as e:
+            logger.debug("Failed to scrape peer activity admission metric", peer_ip=ip, error=str(e))
+
+    if samples == 0:
+        return 0 if local_activity_admission_open else 1
+    return min(unavailable, current_machines)
+
+
+def _activity_admission_scale_threshold(current_machines: int) -> int:
+    if current_machines <= 3:
+        return 1
+    return max(2, math.ceil(current_machines * 0.20))
 
 
 async def _scale_fleet(desired: int, http: httpx.AsyncClient):
@@ -377,7 +541,12 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         logger.warning("Autoscaler: fleet list failed", error=str(e))
 
 
-async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
+async def poll_queue_metrics(
+    client: Client,
+    namespace: str,
+    task_queue: str,
+    activity_admission_snapshot: ActivityAdmissionSnapshot,
+):
     """Adaptive autoscaler: poll Temporal, compute desired machines, actuate via Fly API.
 
     Runs on every worker at 1s intervals. All workers observe and compute
@@ -407,7 +576,13 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
     No separate autoscaler machine needed — the navi-whisper-lux-autoscaler app
     can be decommissioned.
     """
-    global _backlog_zero_since, _desired_machines, _last_log_time, _last_scale_up_time, _prev_desired
+    global \
+        _admission_pressure_since, \
+        _backlog_zero_since, \
+        _desired_machines, \
+        _last_log_time, \
+        _last_scale_up_time, \
+        _prev_desired
 
     from temporalio.api.enums.v1 import TaskQueueType
     from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
@@ -437,10 +612,20 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                     except Exception as e:
                         logger.warning("Failed to describe task queue", error=str(e), task_queue_type=str(task_type))
 
-                # Get real capacity from SDK's resource-based tuner (no magic number)
-                observed_capacity = await _get_observed_capacity(http)
-                if observed_capacity is None:
-                    observed_capacity = DEFAULT_CAPACITY  # SDK metrics not ready yet, use fallback
+                # Get raw capacity/tuner signals from the SDK. Some SDK builds
+                # expose slots_used but not slots_available; keep missing values
+                # as None so diagnostics do not confuse unknown with zero.
+                sdk_metrics = await _get_sdk_worker_metrics(http)
+                if sdk_metrics is None:
+                    sdk_metrics = {}
+                activity_slots_used = sdk_metrics.get("activity_slots_used")
+                activity_slots_available = sdk_metrics.get("activity_slots_available")
+                if activity_slots_available is not None:
+                    observed_capacity = max(int(activity_slots_used or 0) + int(activity_slots_available), 1)
+                    scale_capacity_source = "sdk_slots"
+                else:
+                    observed_capacity = None
+                    scale_capacity_source = "fallback_missing_sdk_available_slots"
 
                 memory_used_percent = _get_machine_memory_used_percent()
                 fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent)
@@ -448,25 +633,50 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                 critical_memory_pressure = fleet_memory_used_percent >= MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT
                 current_machines = _count_fly_peers()
                 is_leader = _am_i_leader()
+                admission_snapshot = activity_admission_snapshot.snapshot()
+                activity_admission_open = bool(admission_snapshot["activity_admission_open"])
+                activity_admission_unavailable_count = await _get_fleet_activity_admission_unavailable_count(
+                    http,
+                    local_activity_admission_open=activity_admission_open,
+                    current_machines=current_machines,
+                )
+                activity_admission_scale_threshold = _activity_admission_scale_threshold(current_machines)
 
                 # ── Adaptive scaling decision ─────────────────────────────
                 now = time.monotonic()
                 in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
+                admission_pressure = (
+                    workflow_count > 0
+                    and activity_admission_unavailable_count >= activity_admission_scale_threshold
+                )
+                if admission_pressure:
+                    if _admission_pressure_since is None:
+                        _admission_pressure_since = now
+                else:
+                    _admission_pressure_since = None
+                admission_pressure_seconds = (
+                    0.0 if _admission_pressure_since is None else now - _admission_pressure_since
+                )
                 if backlog > 0:
                     _backlog_zero_since = None
-                    additional = backlog / observed_capacity
+                    scale_capacity = observed_capacity or DEFAULT_CAPACITY
+                    additional = backlog / scale_capacity
                     # Cooldown: after a scale-up, wait for DNS to propagate
                     # before allowing another (prevents overshoot)
                     if additional >= SCALE_UP_THRESHOLD and not in_cooldown:
                         _desired_machines = current_machines + math.ceil(additional)
                     else:
                         _desired_machines = current_machines  # Transient blip or in cooldown
+                elif (
+                    admission_pressure
+                    and admission_pressure_seconds >= ADMISSION_PRESSURE_SCALE_UP_SECS
+                    and not in_cooldown
+                ):
+                    _backlog_zero_since = None
+                    _desired_machines = current_machines + 1
                 elif memory_pressure and workflow_count > 0:
                     _backlog_zero_since = None
-                    if in_cooldown:
-                        _desired_machines = current_machines
-                    else:
-                        _desired_machines = current_machines + (2 if critical_memory_pressure else 1)
+                    _desired_machines = current_machines
                 else:
                     # Backlog is 0 — scale down after cooldown
                     if _backlog_zero_since is None:
@@ -488,9 +698,28 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                     current_machines,
                     is_leader,
                     observed_capacity,
+                    activity_slots_used,
+                    activity_slots_available,
                     memory_used_percent,
                     MEMORY_SCALE_UP_THRESHOLD_PERCENT,
                     fleet_memory_used_percent,
+                    resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
+                    resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
+                    resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
+                    resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
+                    activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
+                    workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
+                    sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
+                    activity_admission_open=activity_admission_open,
+                    activity_admission_memory_percent=float(
+                        admission_snapshot["activity_admission_memory_percent"]
+                    ),
+                    activity_admission_close_memory_percent=float(
+                        admission_snapshot["activity_admission_close_memory_percent"]
+                    ),
+                    activity_admission_open_memory_percent=float(
+                        admission_snapshot["activity_admission_open_memory_percent"]
+                    ),
                 )
 
                 # ── Leader actuates ───────────────────────────────────────
@@ -509,6 +738,21 @@ async def poll_queue_metrics(client: Client, namespace: str, task_queue: str):
                         current_machines=current_machines,
                         desired_machines=_desired_machines,
                         observed_capacity=observed_capacity,
+                        scale_capacity_source=scale_capacity_source,
+                        activity_slots_used=activity_slots_used,
+                        activity_slots_available=activity_slots_available,
+                        resource_slots_cpu_usage=sdk_metrics.get("resource_slots_cpu_usage"),
+                        resource_slots_mem_usage=sdk_metrics.get("resource_slots_mem_usage"),
+                        resource_slots_cpu_pid_output=sdk_metrics.get("resource_slots_cpu_pid_output"),
+                        resource_slots_mem_pid_output=sdk_metrics.get("resource_slots_mem_pid_output"),
+                        activity_task_pollers=sdk_metrics.get("activity_task_pollers"),
+                        workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
+                        sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
+                        activity_admission_open=activity_admission_open,
+                        activity_admission_memory_percent=admission_snapshot["activity_admission_memory_percent"],
+                        activity_admission_unavailable_count=activity_admission_unavailable_count,
+                        activity_admission_scale_threshold=activity_admission_scale_threshold,
+                        activity_admission_pressure_seconds=round(admission_pressure_seconds, 1),
                         memory_used_percent=memory_used_percent,
                         fleet_memory_used_percent=fleet_memory_used_percent,
                         memory_scale_up_threshold_percent=MEMORY_SCALE_UP_THRESHOLD_PERCENT,
@@ -566,9 +810,6 @@ async def main():
 
     logger.info("Connected to Temporal Cloud")
 
-    # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
-    asyncio.create_task(poll_queue_metrics(client, config.temporal.namespace, config.temporal.task_queue))
-
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
 
@@ -591,18 +832,36 @@ async def main():
         "helpers.attachments",
     )
 
-    # Resource-based tuner: dynamically adjusts slot counts based on actual
-    # CPU/memory pressure. No hardcoded concurrency limits — the tuner determines
-    # how many concurrent activities/workflows this machine can handle in real-time.
-    # The autoscaler reads the resulting slots via SDK Prometheus metrics.
-    tuner = WorkerTuner.create_resource_based(
-        target_memory_usage=0.8,
-        target_cpu_usage=0.8,
-        activity_config=ResourceBasedSlotConfig(
-            maximum_slots=config.temporal.max_concurrent_activities,
+    activity_admission_snapshot = ActivityAdmissionSnapshot(
+        maximum_slots=config.temporal.max_concurrent_activities,
+        close_memory_percent=config.temporal.activity_admission_close_memory_percent,
+        open_memory_percent=config.temporal.activity_admission_open_memory_percent,
+    )
+
+    # Workflow slots still use Temporal's resource tuner. Activity slots use
+    # the SDK-native fixed supplier. Avoid Python CustomSlotSupplier callbacks:
+    # Temporal invokes them from Rust worker threads, and GIL re-entry can
+    # deadlock the worker under activity heartbeat traffic.
+    resource_cfg = ResourceBasedTunerConfig(target_memory_usage=0.8, target_cpu_usage=0.8)
+    tuner = WorkerTuner.create_composite(
+        workflow_supplier=ResourceBasedSlotSupplier(
+            ResourceBasedSlotConfig(
+                maximum_slots=config.temporal.max_concurrent_workflows,
+            ),
+            resource_cfg,
         ),
-        workflow_config=ResourceBasedSlotConfig(
-            maximum_slots=config.temporal.max_concurrent_workflows,
+        activity_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_activities),
+        local_activity_supplier=FixedSizeSlotSupplier(100),
+        nexus_supplier=FixedSizeSlotSupplier(100),
+    )
+
+    # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
+    asyncio.create_task(
+        poll_queue_metrics(
+            client,
+            config.temporal.namespace,
+            config.temporal.task_queue,
+            activity_admission_snapshot,
         ),
     )
 
@@ -683,11 +942,13 @@ async def main():
     )
 
     logger.info(
-        "Worker configured with resource-based tuner",
+        "Worker configured with memory-gated activity slots",
+        activity_admission_close_memory_percent=config.temporal.activity_admission_close_memory_percent,
+        activity_admission_open_memory_percent=config.temporal.activity_admission_open_memory_percent,
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
         target_cpu=0.8,
-        target_memory=0.8,
+        workflow_target_memory=0.8,
     )
 
     # Handle shutdown gracefully using asyncio signal handlers

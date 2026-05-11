@@ -470,6 +470,43 @@ def test_extract_additional_paths_non_dict_value():
     assert extract_additional_paths(structured, schema) == []
 
 
+def test_structured_response_from_output_files_single_pointer():
+    """Extracted /home/user/output files populate file pointer schema paths deterministically."""
+    from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
+
+    schema = {"fields": [{"name": "red_tinted_image", "type": "file_pointer"}]}
+    files = [{"original_filename": "red_tinted.png", "mime_type": "image/png", "size_bytes": 123}]
+
+    assert _structured_response_from_output_files(schema, files) == {
+        "red_tinted_image": {"path": "/home/user/output/red_tinted.png"}
+    }
+
+
+def test_structured_response_from_output_files_rejects_non_file_schema():
+    """The deterministic file path shortcut only handles pure file output schemas."""
+    from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
+
+    schema = {"fields": [{"name": "summary", "type": "string"}]}
+    files = [{"original_filename": "report.txt"}]
+
+    assert _structured_response_from_output_files(schema, files) is None
+
+
+def test_build_code_event_context_uses_json_and_extracted_files():
+    """Verifier evidence is built from normalized SDK events plus extracted files."""
+    from domains.spawn_claude_code_agent.service import _build_code_event_context
+
+    context = _build_code_event_context(
+        code_events=[{"provider": "claude", "type": "tool_use", "paths": ["/home/user/output/a.txt"]}],
+        output_files=[{"original_filename": "a.txt", "mime_type": "text/plain", "size_bytes": 2}],
+        action_summary=["done"],
+    )
+
+    assert '"code_agent_events"' in context
+    assert '"/home/user/output/a.txt"' in context
+    assert '"extracted_output_files"' in context
+
+
 # ── build_usage_items ────────────────────────────────────────────────
 
 
@@ -770,17 +807,22 @@ async def test_repo_create_e2b_session_codex_provider():
 
 
 async def test_repo_create_e2b_session_raises_on_error():
-    """create_e2b_session raises on non-2xx."""
+    """create_e2b_session raises provider-specific errors on non-2xx."""
     setup_mock({
-        "/api/claude-code-session/create": {"status": 500, "text": "boom"},
+        "/api/codex-code-session/create": {"status": 403, "text": '{"code":"GITHUB_ACCESS_DENIED"}'},
     })
     from domains.spawn_claude_code_agent.repo import create_e2b_session
 
     try:
-        await create_e2b_session(agent_id="a", goal="g", user_id="u")
+        await create_e2b_session(agent_id="a", goal="g", user_id="u", code_provider="codex")
         raise AssertionError("Expected exception")
     except Exception as e:
-        assert "500" in str(e)
+        message = str(e)
+        assert "Failed to create code session" in message
+        assert "provider=codex" in message
+        assert "HTTP 403" in message
+        assert "GITHUB_ACCESS_DENIED" in message
+        assert "Claude Code session" not in message
 
 
 async def test_repo_persist_terminal_output_happy():
@@ -1141,8 +1183,8 @@ async def test_run_verifier_exception_fallback():
     assert itok == 0 and otok == 0
 
 
-async def test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded():
-    """Codex can satisfy narrow file/sequence schemas directly from terminal evidence."""
+async def test_run_verifier_uses_code_event_json_for_codex_context():
+    """Codex verification uses normalized event JSON rather than terminal evidence shortcuts."""
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
@@ -1152,8 +1194,16 @@ async def test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded():
         "[Codex command output]\n3\n10\n5\n16\n8\n4\n2\n1\nsteps: 7\n[Codex exit_code] 0\n"
     )
 
-    async def fake_activity(*_args, **_kwargs):
-        raise AssertionError("verifier LLM should not be called")
+    seen_context = {}
+
+    async def fake_activity(fn, *, args, **_kwargs):
+        seen_context["context"] = args[0]
+        return {
+            "score": 1.0,
+            "reasoning": "grounded in sdk json",
+            "structured_response": {"step_count": 7},
+            "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+        }
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     with (
@@ -1177,15 +1227,20 @@ async def test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded():
             claude_token=None,
             code_provider="codex",
             exit_code=0,
+            code_events=[
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "command",
+                    "output": "3\n10\n5\n16\n8\n4\n2\n1\nsteps: 7",
+                }
+            ],
         )
     assert score == 1.0
-    assert "skipping verifier LLM call" in reasoning
-    assert struct == {
-        "program_file": {"path": "/home/user/collatz_3.py"},
-        "collatz_sequence": [3, 10, 5, 16, 8, 4, 2, 1],
-        "step_count": 7,
-    }
-    assert itok == 0 and otok == 0
+    assert reasoning == "grounded in sdk json"
+    assert struct == {"step_count": 7}
+    assert itok == 11 and otok == 5
+    assert "code_agent_events" in seen_context["context"][1]["text"]
 
 
 async def test_run_verifier_truncation_override_promotes_to_pass():
@@ -1362,10 +1417,12 @@ class _FakeWsClient:
         on_exit,
         on_connection_change,
         on_stdin_error,
-        heartbeat_fn,
+        on_event=None,
+        heartbeat_fn=None,
     ):
         self.on_output = on_output
         self.on_exit = on_exit
+        self.on_event = on_event
         self._reconnects_exhausted = False
         self._connected = True
         self._sent = []
@@ -1376,6 +1433,8 @@ class _FakeWsClient:
     async def listen(self):
         # Feed output so silence detection kicks in, then exit immediately.
         await self.on_output("hello from terminal", True)
+        if self.on_event:
+            await self.on_event({"version": 1, "provider": "claude", "type": "session"})
         await self.on_exit(0)
 
     async def send_stdin(self, data):
@@ -1399,7 +1458,7 @@ async def test_run_agentic_loop_exit_zero_completes():
         patch.object(service, "ClaudeCodeWsClient", _FakeWsClient),
         patch("temporalio.activity.heartbeat"),
     ):
-        exit_code, attempt, history, itok, otok = await service._run_agentic_loop(
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
             agent_id="a",
             task_id="t",
             sandbox_id="sb",
@@ -1414,6 +1473,7 @@ async def test_run_agentic_loop_exit_zero_completes():
     assert exit_code == 0
     assert attempt is False
     assert itok == 0 and otok == 0
+    assert events == [{"version": 1, "provider": "claude", "type": "session"}]
 
 
 async def test_run_agentic_loop_connect_fail_raises():
@@ -1494,7 +1554,7 @@ async def test_spawn_activity_happy_path_end_to_end():
         return (1.0, "great", {"out": {"path": "/home/user/output/a.txt"}}, 10, 4)
 
     async def fake_loop(**kwargs):
-        return (0, False, [], 5, 3)
+        return (0, False, [], 5, 3, [{"version": 1, "provider": "claude", "type": "session"}])
 
     async def fake_persist(*a, **kw):
         return None
@@ -1884,7 +1944,7 @@ async def test_cc_execute_tool_cancelled_error_path():
 
 
 async def test_cc_execute_tool_generic_exception_yields_error():
-    """Non-cancellation exception yields Claude Code failed error event."""
+    """Non-cancellation exception yields provider-specific code-session error event."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
@@ -1904,8 +1964,9 @@ async def test_cc_execute_tool_generic_exception_yields_error():
         restore()
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
-    assert "Claude Code failed" in error.title
+    assert "Code session failed" in error.title
     assert "activity failed badly" in error.message
+    assert error.metadata["code_provider"] == "claude"
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
@@ -1975,6 +2036,9 @@ async def run_all_tests():
     r.record("extract_paths_skip_unknown", test_extract_additional_paths_skips_unknown_fields)
     r.record("extract_paths_missing_meta", test_extract_additional_paths_missing_name_or_type)
     r.record("extract_paths_non_dict", test_extract_additional_paths_non_dict_value)
+    r.record("structured_from_output_single", test_structured_response_from_output_files_single_pointer)
+    r.record("structured_from_output_rejects_non_file", test_structured_response_from_output_files_rejects_non_file_schema)
+    r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
     r.record("usage_items_no_tokens", test_build_usage_items_no_tokens)
@@ -2016,8 +2080,8 @@ async def run_all_tests():
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
     await r.record_async(
-        "run_verifier_codex_preflight",
-        test_run_verifier_codex_preflight_skips_llm_when_schema_is_grounded,
+        "run_verifier_codex_event_json",
+        test_run_verifier_uses_code_event_json_for_codex_context,
     )
     await r.record_async(
         "run_verifier_truncation_override", test_run_verifier_truncation_override_promotes_to_pass

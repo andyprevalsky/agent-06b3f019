@@ -34,9 +34,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from benchmarks.logs import (
     collect_logs,
     collect_tree_logs,
-    fetch_flyio_logs_snapshot,
-    fetch_render_logs,
-    fetch_supabase_logs,
     format_tree_diagnostics,
     load_env_var,
 )
@@ -145,14 +142,15 @@ async def run(args):
         tree_agents = await get_agent_tree(base_url, agent_id)
         print(f"Found {len(tree_agents)} agents in tree")
 
+        tree_logs = await collect_tree_logs(
+            agent_id,
+            tree_agents,
+            start_time,
+            get_agent_fn=lambda aid: get_agent(base_url, aid),
+        )
+
         if args.diagnostics:
             # Diagnostics mode: use format_tree_diagnostics
-            tree_logs = await collect_tree_logs(
-                agent_id,
-                tree_agents,
-                start_time,
-                get_agent_fn=lambda aid: get_agent(base_url, aid),
-            )
             print(format_tree_diagnostics(tree_logs, agent_id))
             return
 
@@ -169,8 +167,16 @@ async def run(args):
             print(f"  Goal: {goal}")
             print(f"{'=' * 60}")
 
-            agent_data = await get_agent(base_url, aid)
-            logs = await collect_logs(aid, agent_data, start_time)
+            logs = tree_logs.get(aid, {}).get(
+                "logs",
+                {
+                    "messages": [],
+                    "worker_logs": [],
+                    "backend_logs": [],
+                    "research_logs": [],
+                    "realtime_logs": [],
+                },
+            )
 
             if "messages" in sources:
                 _print_logs("MESSAGES", logs["messages"], aid)

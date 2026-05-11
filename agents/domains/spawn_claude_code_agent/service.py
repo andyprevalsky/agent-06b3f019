@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import time
 import uuid as uuid_module
@@ -258,11 +259,11 @@ async def _run_agentic_loop(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     code_provider: str = "claude",
-) -> tuple[int, bool, list[Dict[str, str]], int, int]:
+) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
     Returns (exit_code, attempt_completion, conversation_history,
-             total_input_tokens, total_output_tokens).
+             total_input_tokens, total_output_tokens, code_events).
     exit_code is -1 if the process has not exited.
     """
     last_output_time = safe_time()
@@ -277,6 +278,7 @@ async def _run_agentic_loop(  # noqa: C901
     interaction_count = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    code_events: list[Dict[str, Any]] = []
 
     async def on_output(data: str, is_buffer: bool) -> None:
         nonlocal last_output_time, pending_output
@@ -314,12 +316,23 @@ async def _run_agentic_loop(  # noqa: C901
         )
         pending_output = True
 
+    async def on_event(event: dict[str, Any]) -> None:
+        code_events.append(event)
+        logger.debug(
+            "[ClaudeCode] Received code-agent event",
+            agent_id=agent_id,
+            task_id=task_id,
+            event_type=event.get("type"),
+            provider=event.get("provider"),
+        )
+
     ws_client = ClaudeCodeWsClient(
         ws_url=ws_url,
         on_output=on_output,
         on_exit=on_exit,
         on_connection_change=on_connection_change,
         on_stdin_error=on_stdin_error,
+        on_event=on_event,
         heartbeat_fn=lambda msg: activity.heartbeat(msg),
     )
 
@@ -408,15 +421,15 @@ async def _run_agentic_loop(  # noqa: C901
                             non_retryable=True,
                         )
 
-                    if code_provider == "codex":
-                        logger.info(
-                            "[ClaudeCode] Codex output observed; skipping parent stdin loop",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            output_len=len(filtered_output),
-                            silence_s=silence_duration,
-                        )
-                        continue
+                    logger.info(
+                        "[ClaudeCode] Code-agent output observed; waiting for SDK completion",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        provider=code_provider,
+                        output_len=len(filtered_output),
+                        silence_s=silence_duration,
+                    )
+                    continue
 
                     logger.info(
                         "[ClaudeCode] Silence detected, calling parent LLM",
@@ -528,6 +541,7 @@ async def _run_agentic_loop(  # noqa: C901
         conversation_history,
         total_input_tokens,
         total_output_tokens,
+        code_events,
     )
 
 
@@ -771,6 +785,62 @@ def _synthesize_codex_structured_response(
     return structured or None
 
 
+def _remote_path_for_output_file(file_pointer: Dict[str, Any]) -> str:
+    filename = str(file_pointer.get("original_filename") or "")
+    return f"/home/user/output/{filename}" if filename else "/home/user/output"
+
+
+def _structured_response_from_output_files(
+    output_schema: Optional[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Populate file-pointer fields from files already extracted from /home/user/output."""
+    if not output_schema or not output_files:
+        return None
+
+    structured: Dict[str, Any] = {}
+    file_index = 0
+    for field in output_schema.get("fields", []):
+        name = field.get("name")
+        field_type = str(field.get("type") or "").lower()
+        if not name:
+            return None
+
+        if field_type == "file_pointer":
+            if file_index >= len(output_files):
+                return None
+            structured[name] = {"path": _remote_path_for_output_file(output_files[file_index])}
+            file_index += 1
+        elif field_type == "list[file_pointer]":
+            structured[name] = [{"path": _remote_path_for_output_file(fp)} for fp in output_files]
+        else:
+            return None
+
+    return structured or None
+
+
+def _build_code_event_context(
+    *,
+    code_events: list[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+    action_summary: list[str],
+) -> str:
+    evidence = {
+        "code_agent_events": code_events[-200:],
+        "extracted_output_files": [
+            {
+                "original_filename": fp.get("original_filename"),
+                "mime_type": fp.get("mime_type"),
+                "size_bytes": fp.get("size_bytes"),
+                "path": _remote_path_for_output_file(fp),
+            }
+            for fp in output_files
+        ],
+        "execution_summary": action_summary[-20:],
+    }
+    return json.dumps(evidence, ensure_ascii=False, indent=2)
+
+
 async def _run_verifier(
     *,
     agent_id: str,
@@ -789,6 +859,8 @@ async def _run_verifier(
     attempt_completion: bool = False,
     exit_code: Optional[int] = None,
     code_provider: str = "claude",
+    code_events: Optional[list[Dict[str, Any]]] = None,
+    output_files: Optional[list[Dict[str, Any]]] = None,
 ) -> tuple[float, str, Optional[Dict[str, Any]], int, int]:
     """Run the verifier to confirm completion.
 
@@ -815,41 +887,32 @@ async def _run_verifier(
         )
 
         final_output = terminal.get_display()
-        raw_output = terminal.get_raw_output()
-        codex_output = raw_output or final_output
-        if code_provider == "codex" and (exit_code is None or exit_code == 0):
-            structured_response = _synthesize_codex_structured_response(codex_output, output_schema)
-            if structured_response:
-                v_reasoning = (
-                    "Codex exited successfully and terminal evidence satisfies the requested schema; "
-                    "skipping verifier LLM call and using explicit Codex command output and file paths."
-                )
-                logger.info(
-                    "[ClaudeCode] Codex verifier preflight succeeded",
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    fields=list(structured_response.keys()),
-                )
-                await save_claude_code_message(
-                    agent_id=agent_id,
-                    title="⚖️ Progress: 100%",
-                    task_id=task_id,
-                    message=v_reasoning,
-                    status=MessageStatus.FINISHED,
-                    action_type="system",
-                    tool_call_id=verifier_call_id,
-                    code_provider=code_provider,
-                )
-                return 1.0, v_reasoning, structured_response, input_tokens, output_tokens
+        normalized_events = code_events or []
+        extracted_output_files = output_files or []
+        output_file_structured = _structured_response_from_output_files(output_schema, extracted_output_files)
+        if output_file_structured and (exit_code is None or exit_code == 0):
+            v_reasoning = (
+                "The code agent completed successfully and the requested file outputs were extracted "
+                "from /home/user/output using normalized SDK event context."
+            )
+            await save_claude_code_message(
+                agent_id=agent_id,
+                title="⚖️ Progress: 100%",
+                task_id=task_id,
+                message=v_reasoning,
+                status=MessageStatus.FINISHED,
+                action_type="system",
+                tool_call_id=verifier_call_id,
+                code_provider=code_provider,
+            )
+            return 1.0, v_reasoning, output_file_structured, input_tokens, output_tokens
 
-        verifier_terminal_output = final_output[-5000:]
-        if code_provider == "codex":
-            verifier_terminal_output = codex_output[-5000:]
-            codex_evidence = _build_codex_evidence_summary(codex_output)
-            if codex_evidence:
-                verifier_terminal_output = (
-                    f"{codex_evidence}\n\nRecent Codex terminal output:\n\n{verifier_terminal_output}"
-                )
+        event_context = _build_code_event_context(
+            code_events=normalized_events,
+            output_files=extracted_output_files,
+            action_summary=action_summary,
+        )
+        verifier_terminal_output = event_context[-12000:]
 
         output_files_info = ""
         if "output" in final_output.lower() or "/home/user/output" in final_output:
@@ -861,8 +924,8 @@ async def _run_verifier(
             {"role": "USER", "text": f"Goal: {goal}"},
             {
                 "role": "TOOL",
-                "text": f"Claude Code Terminal Output:\n\n{verifier_terminal_output}",
-                "metadata": {"toolName": "claude_code_terminal", "toolStatus": "FINISHED"},
+                "text": f"Code-agent SDK event JSON:\n\n{verifier_terminal_output}",
+                "metadata": {"toolName": "code_agent_sdk_events", "toolStatus": "FINISHED"},
             },
             {
                 "role": "TOOL",
@@ -971,34 +1034,6 @@ async def _run_verifier(
         return score, v_reasoning, structured_response, input_tokens, output_tokens
 
     except Exception as verifier_error:
-        if code_provider == "codex" and (exit_code is None or exit_code == 0):
-            final_output = terminal.get_raw_output() or terminal.get_display()
-            structured_response = _synthesize_codex_structured_response(final_output, output_schema)
-            if structured_response:
-                v_reasoning = (
-                    "Codex exited successfully and terminal evidence satisfies the requested schema; "
-                    f"verifier call failed with {str(verifier_error)[:120]}, so the structured response "
-                    "was synthesized from explicit Codex command output and file paths."
-                )
-                logger.warning(
-                    "[ClaudeCode] Codex verifier schema fallback succeeded",
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    error=str(verifier_error)[:200],
-                    fields=list(structured_response.keys()),
-                )
-                await save_claude_code_message(
-                    agent_id=agent_id,
-                    title="⚖️ Progress: 100%",
-                    task_id=task_id,
-                    message=v_reasoning,
-                    status=MessageStatus.FINISHED,
-                    action_type="system",
-                    tool_call_id=verifier_call_id,
-                    code_provider=code_provider,
-                )
-                return 1.0, v_reasoning, structured_response, input_tokens, output_tokens
-
         logger.error("[ClaudeCode] Verifier failed", agent_id=agent_id, task_id=task_id, error=str(verifier_error))
         await save_claude_code_message(
             agent_id=agent_id,
@@ -1252,6 +1287,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             conversation_history,
             loop_input_tokens,
             loop_output_tokens,
+            code_events,
         ) = await _run_agentic_loop(
             agent_id=agent_id,
             task_id=task_id,
@@ -1273,7 +1309,34 @@ async def spawn_claude_code_activity(  # noqa: C901
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
 
-        # 4. Run verifier
+        # 4. Persist terminal output
+        filtered_output = terminal.get_display()
+        await persist_terminal_output(task_id, filtered_output, agent_id, code_provider)
+
+        # 5. Close session and extract output files before verifier so the
+        # verifier sees the SDK event JSON plus the actual extracted artifacts.
+        close_data = await close_e2b_session(
+            task_id=task_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            additional_paths=[],
+            code_provider=code_provider,
+        )
+        output_files = close_data.get("output_files", [])
+        claude_code_usage = close_data.get("usage")
+
+        logger.info(
+            "[ClaudeCode] Session closed",
+            agent_id=agent_id,
+            task_id=task_id,
+            output_files=len(output_files),
+            claude_code_usage=claude_code_usage,
+            code_events=len(code_events),
+        )
+        if output_files:
+            action_summary.append(f"Extracted {len(output_files)} output files")
+
+        # 6. Run verifier over normalized SDK events and extracted files.
         score, v_reasoning, structured_response, v_input, v_output = await _run_verifier(
             agent_id=agent_id,
             task_id=task_id,
@@ -1291,45 +1354,25 @@ async def spawn_claude_code_activity(  # noqa: C901
             attempt_completion=attempt_completion,
             exit_code=exit_code,
             code_provider=code_provider,
+            code_events=code_events,
+            output_files=output_files,
         )
         total_input_tokens += v_input
         total_output_tokens += v_output
 
-        # 5. Persist terminal output
-        filtered_output = terminal.get_display()
-        await persist_terminal_output(task_id, filtered_output, agent_id, code_provider)
-
-        # 6. Close session and extract output files
+        # 7. Add any verifier-selected extra paths to the structured response
+        # contract, but do not use them for sandbox extraction. The canonical
+        # artifact source is /home/user/output extracted before verification.
         additional_paths = extract_additional_paths(structured_response, output_schema)
         if additional_paths:
             logger.info(
-                "[ClaudeCode] Extracted file paths from verifier response",
+                "[ClaudeCode] Verifier returned remote file paths",
                 agent_id=agent_id,
                 task_id=task_id,
                 paths=additional_paths,
             )
 
-        close_data = await close_e2b_session(
-            task_id=task_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            additional_paths=additional_paths,
-            code_provider=code_provider,
-        )
-        output_files = close_data.get("output_files", [])
-        claude_code_usage = close_data.get("usage")
-
-        logger.info(
-            "[ClaudeCode] Session closed",
-            agent_id=agent_id,
-            task_id=task_id,
-            output_files=len(output_files),
-            claude_code_usage=claude_code_usage,
-        )
-        if output_files:
-            action_summary.append(f"Extracted {len(output_files)} output files")
-
-        # 7. Resolve file pointers
+        # 8. Resolve file pointers
         if structured_response and output_files:
             structured_response = resolve_file_pointers_from_extracted(
                 structured_response=structured_response,

@@ -221,12 +221,13 @@ def test_build_param_population_message_basic():
 
 
 def test_build_param_population_message_spawn_adds_context_warning():
-    """Spawn-type alias adds self-contained goal warning and spawn requirements."""
+    """Spawn-type alias adds self-contained goal warning without schema redefinition."""
     from loop.dag_executor import _build_param_population_message
 
     msg = _build_param_population_message("Explore competitors", "spawn_agent", "spawn_explore_agent")
     assert "NO access to your conversation" in msg
-    assert "SPAWN TYPE: explore" in msg
+    assert "SPAWN TYPE" not in msg
+    assert 'type="explore"' not in msg
 
 
 def test_build_param_population_message_non_spawn_no_extra():
@@ -265,6 +266,7 @@ async def _run_execute_dag(
                 "status": event.status.value if event.status else None,
                 "title": event.title,
                 "message": event.message,
+                "metadata": event.metadata or {},
             }
         )
 
@@ -403,6 +405,63 @@ async def test_execute_dag_alias_resolution_spawn_explore():
     assert recorded[0][0] == "spawn_agent"
     # type override applied
     assert recorded[0][1].get("type") == "explore"
+    early = [e for e in events if e["type"] == "tool_event" and e["status"] == "IN_PROGRESS"][0]
+    assert early["tool_name"] == "spawn_agent"
+    assert early["title"] == "Exploring"
+    assert early["metadata"]["agentType"] == "explore"
+    assert early["metadata"]["taskId"] == early["tool_call_id"]
+    assert early["metadata"]["fullGoal"] == "Explore stuff"
+
+
+async def test_execute_dag_wait_for_emits_early_wait_chip():
+    """wait_for emits a pre-param-populator IN_PROGRESS using the final tool_call_id."""
+    plan_data = {
+        "tasks": [{"goal": "Wait until the report is ready", "tool_name": "wait_for"}],
+        "dependencies": {},
+    }
+
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, params, tool_call_id))
+        return {"message": "wait done"}
+
+    result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+
+    assert result["status"] == "completed"
+    assert recorded[0][0] == "wait_for"
+    early = [e for e in events if e["type"] == "tool_event" and e["status"] == "IN_PROGRESS"][0]
+    assert early["tool_name"] == "wait_for"
+    assert early["title"] == "Preparing wait"
+    assert early["message"] == "Wait until the report is ready"
+    assert early["tool_call_id"] == recorded[0][2]
+    assert dag.tasks[0].tool_call_id == recorded[0][2]
+
+
+async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
+    """general-purpose spawn emits the frontend-facing sub-agent placeholder before params."""
+    plan_data = {
+        "tasks": [{"goal": "Delegate the implementation", "tool_name": "spawn_general_purpose_agent"}],
+        "dependencies": {},
+    }
+
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, params, tool_call_id))
+        return {"message": "spawned"}
+
+    result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+
+    assert result["status"] == "completed"
+    assert recorded[0][0] == "spawn_agent"
+    assert recorded[0][1].get("type") == "general_purpose"
+    early = [e for e in events if e["type"] == "tool_event" and e["status"] == "IN_PROGRESS"][0]
+    assert early["tool_name"] == "spawn_general_purpose_agent"
+    assert early["title"] == "Spawning sub-agent"
+    assert early["message"] == ""
+    assert early["tool_call_id"] == recorded[0][2]
+    assert dag.tasks[0].tool_call_id == recorded[0][2]
 
 
 async def test_execute_dag_tool_failure_returns_needs_llm():
@@ -483,6 +542,11 @@ async def run_all_tests():
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
+    await r.record_async("execute_dag_wait_for_emits_early_wait_chip", test_execute_dag_wait_for_emits_early_wait_chip)
+    await r.record_async(
+        "execute_dag_general_purpose_spawn_emits_subagent_placeholder",
+        test_execute_dag_general_purpose_spawn_emits_subagent_placeholder,
+    )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async("execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event)
     await r.record_async("execute_dag_parallel_independent_tasks", test_execute_dag_parallel_independent_tasks)

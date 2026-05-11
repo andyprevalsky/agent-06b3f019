@@ -97,14 +97,11 @@ def test_create_agent_action_model_single_tool():
 
 
 def test_create_agent_action_model_injects_completion_result_only_when_requested():
-    """attempt_completion.result appears only for skip-verification schemas."""
+    """attempt_completion_with_result carries the result field; attempt_completion does not."""
     from utils.tool_schemas import create_agent_action_model
 
     verified_model = create_agent_action_model(["attempt_completion"])
-    unverified_model = create_agent_action_model(
-        ["attempt_completion"],
-        include_attempt_completion_result=True,
-    )
+    unverified_model = create_agent_action_model(["attempt_completion_with_result"])
 
     verified_schema = verified_model.model_json_schema()
     unverified_schema = unverified_model.model_json_schema()
@@ -124,6 +121,18 @@ def test_planner_assignable_tools():
     assert "spawn_browser_agent" in PLANNER_ASSIGNABLE_TOOLS
     assert "spawn_code_agent" in PLANNER_ASSIGNABLE_TOOLS
     assert "reasoning" in PLANNER_ASSIGNABLE_TOOLS
+
+
+def test_planner_response_schema_is_compact():
+    """Planner output schema omits old prose and mirrored dependency fields."""
+    from utils.tool_schemas import PlannerResponse
+
+    fields = set(PlannerResponse.model_fields)
+
+    assert fields == {"title", "tasks", "join"}
+    assert "reasoning" not in fields
+    assert "content" not in fields
+    assert "dependencies_graph" not in fields
 
 
 # ── WaitForTool validation ─────────────────────────────────────────────
@@ -224,8 +233,8 @@ def test_spawn_agent_browser_missing_url_raises():
     )
 
 
-def test_spawn_agent_subagent_missing_phase_raises():
-    """SpawnAgentTool sub_agent without start_phase raises."""
+def test_spawn_agent_general_purpose_missing_phase_raises():
+    """SpawnAgentTool general_purpose without start_phase raises."""
     from utils.tool_schemas import (
         ResponseSchemaConfig,
         ResponseSchemaFieldConfig,
@@ -238,7 +247,7 @@ def test_spawn_agent_subagent_missing_phase_raises():
     _assert_raises(
         lambda: SpawnAgentTool(
             tool="spawn_agent",
-            type="sub_agent",
+            type="general_purpose",
             goal=LONG_GOAL,
             output_schema=schema,
         ),
@@ -295,7 +304,7 @@ def test_spawn_agent_for_each_no_items_raises():
 
 
 def test_spawn_agent_browser_no_schema_raises():
-    """SpawnAgentTool browser/code/sub_agent/for_each requires output_schema."""
+    """SpawnAgentTool browser/code/general_purpose/for_each requires output_schema."""
     from utils.tool_schemas import SpawnAgentTool
 
     _assert_raises(
@@ -388,7 +397,7 @@ def test_response_schema_coerces_null_properties_for_primitive_fields():
 
     t = SpawnAgentTool(
         tool="spawn_agent",
-        type="sub_agent",
+        type="general_purpose",
         goal=LONG_GOAL,
         start_phase="EXECUTE",
         output_schema={
@@ -465,7 +474,7 @@ def test_spawn_agent_short_goal_allowed():
     )
     t = SpawnAgentTool(
         tool="spawn_agent",
-        type="sub_agent",
+        type="general_purpose",
         goal="short",
         output_schema=schema,
         start_phase="PLAN",
@@ -622,6 +631,7 @@ async def run_all_tests():
         test_create_agent_action_model_injects_completion_result_only_when_requested,
     )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
+    r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     # WaitForTool validation
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)
@@ -632,7 +642,7 @@ async def run_all_tests():
     r.record("web_fetch_default", test_web_fetch_tool_default_mode)
     # SpawnAgentTool model_validator
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
-    r.record("spawn_agent_subagent_no_phase", test_spawn_agent_subagent_missing_phase_raises)
+    r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
     r.record("spawn_agent_browser_no_schema", test_spawn_agent_browser_no_schema_raises)

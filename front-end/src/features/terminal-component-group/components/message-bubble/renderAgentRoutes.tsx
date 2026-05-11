@@ -1,6 +1,6 @@
 /**
- * Specialised routes for "agent-origin" tool events: spawn_sub_agent,
- * spawn_agent (explore), wait_for, and request_user_signup.
+ * Specialised routes for "agent-origin" tool events: general-purpose agent
+ * spawns, spawn_agent (explore), wait_for, and request_user_signup.
  */
 import type { ReactElement } from 'react';
 import type { MessageBubbleProps } from './types';

@@ -22,6 +22,7 @@ def _make_client(**overrides):
     exits: list = []
     conn_changes: list = []
     stdin_errors: list = []
+    events: list = []
 
     async def on_output(data, is_buffer):
         outputs.append((data, is_buffer))
@@ -35,12 +36,16 @@ def _make_client(**overrides):
     async def on_stdin_error(err):
         stdin_errors.append(err)
 
+    async def on_event(event):
+        events.append(event)
+
     kwargs = {
         "ws_url": "ws://test:1234",
         "on_output": on_output,
         "on_exit": on_exit,
         "on_connection_change": on_connection_change,
         "on_stdin_error": on_stdin_error,
+        "on_event": on_event,
     }
     kwargs.update(overrides)
     client = ClaudeCodeWsClient(**kwargs)
@@ -48,6 +53,7 @@ def _make_client(**overrides):
     client._test_exits = exits  # type: ignore[attr-defined]
     client._test_conn_changes = conn_changes  # type: ignore[attr-defined]
     client._test_stdin_errors = stdin_errors  # type: ignore[attr-defined]
+    client._test_events = events  # type: ignore[attr-defined]
     return client
 
 
@@ -93,6 +99,25 @@ async def test_handle_message_stdout_and_stderr():
     await client._handle_message(json.dumps({"type": "stderr", "data": "err"}))
     assert ("hello", False) in client._test_outputs
     assert ("err", False) in client._test_outputs
+
+
+async def test_handle_message_code_agent_event_routes_json():
+    """_handle_message routes normalized code-agent JSON events without terminal scraping."""
+    client = _make_client()
+    event = {"version": 1, "provider": "codex", "type": "file_change", "paths": ["/home/user/output/a.png"]}
+    await client._handle_message(json.dumps({"type": "code_agent_event", "data": event}))
+    assert client._test_events == [event]
+
+
+async def test_handle_message_code_agent_events_replays_buffer():
+    """_handle_message routes replayed normalized event buffers in order."""
+    client = _make_client()
+    events = [
+        {"version": 1, "provider": "claude", "type": "session"},
+        {"version": 1, "provider": "claude", "type": "result"},
+    ]
+    await client._handle_message(json.dumps({"type": "code_agent_events", "data": events}))
+    assert client._test_events == events
 
 
 async def test_handle_message_exit_sets_exited():
@@ -441,6 +466,8 @@ async def run_all_tests():
     r.record("no_outbound_http", test_no_outbound_http)
     await r.record_async("handle_message_buffer", test_handle_message_buffer)
     await r.record_async("handle_message_stdout_and_stderr", test_handle_message_stdout_and_stderr)
+    await r.record_async("handle_message_code_agent_event_routes_json", test_handle_message_code_agent_event_routes_json)
+    await r.record_async("handle_message_code_agent_events_replays_buffer", test_handle_message_code_agent_events_replays_buffer)
     await r.record_async("handle_message_exit_sets_exited", test_handle_message_exit_sets_exited)
     await r.record_async("handle_message_error_logs_only", test_handle_message_error_logs_only)
     await r.record_async("handle_message_stdin_ack_sets_result_true", test_handle_message_stdin_ack_sets_result_true)

@@ -57,7 +57,7 @@ function ParallelToggle({ isParallelizable, onToggle }: ParallelToggleProps) {
       className="group relative"
       title={
         isParallelizable
-          ? 'Will spawn parallel sub-agents'
+          ? 'Will spawn parallel general-purpose agents'
           : 'Sequential execution (causally dependent tasks)'
       }
     >
@@ -85,7 +85,7 @@ function ParallelToggle({ isParallelizable, onToggle }: ParallelToggleProps) {
       </div>
       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-800 text-slate-300 text-xs rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
         {isParallelizable
-          ? 'Click to toggle: Parallel sub-agents for independent work'
+          ? 'Click to toggle: Parallel general-purpose agents for independent work'
           : 'Click to toggle: Sequential execution for dependent tasks'}
       </div>
     </button>

@@ -64,6 +64,14 @@ from providers.rose.waterfall import waterfall_complete
 logger = structlog.get_logger()
 
 _DEFAULT_DEADLINE_S = 120.0
+_DEFAULT_TTFT_TIMEOUT_S = 20.0
+# Per-chunk idle timeout *after* the first productive chunk. The overall
+# deadline (120s) is too coarse to catch mid-stream stalls fast enough — a
+# single hung sub-agent LLM call burns the full deadline before raising, and
+# the retry burns another deadline. 60s allows long thinking pauses while
+# still recovering from peer disconnects / silent half-closes inside the
+# activity budget.
+_DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 60.0
 _HEARTBEAT_INTERVAL_S = 10.0
 
 # Errors from claude_auth that mean "try the waterfall next" — as long as
@@ -138,6 +146,40 @@ def _safe_heartbeat(message: str) -> None:
         activity.heartbeat(message)
 
 
+def _cache_input_accounting(
+    *,
+    actual_model: str,
+    prompt_tokens: int,
+    cache_read: int,
+    cache_write: int,
+) -> Dict[str, Any]:
+    """Return provider-correct prompt-cache totals for logging.
+
+    Anthropic direct usage reports `input_tokens` as only the uncached tail;
+    cache read/write tokens are exclusive counters. OpenAI-compatible usage
+    reports `cached_tokens` inside the already-total `prompt_tokens`.
+    """
+    prompt_tokens = max(int(prompt_tokens or 0), 0)
+    cache_read = max(int(cache_read or 0), 0)
+    cache_write = max(int(cache_write or 0), 0)
+
+    if actual_model.endswith("-claude"):
+        total_input = prompt_tokens + cache_read + cache_write
+        accounting = "exclusive"
+    else:
+        total_input = max(prompt_tokens, cache_read + cache_write)
+        accounting = "inclusive"
+
+    cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
+    uncached_input = max(total_input - cache_read - cache_write, 0)
+    return {
+        "total_input": total_input,
+        "uncached_input": uncached_input,
+        "cache_hit_pct": cache_pct,
+        "cache_accounting": accounting,
+    }
+
+
 class RoseClient:
     """Stateless client — one instance can serve many concurrent `complete()`
     calls. Config is read lazily from `load_config()` on first use.
@@ -167,6 +209,8 @@ class RoseClient:
         request_id: Optional[str] = None,
         call_site: str = "unspecified",
         deadline_s: float = _DEFAULT_DEADLINE_S,
+        ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+        idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
@@ -224,31 +268,52 @@ class RoseClient:
             direct_auth_type=direct_auth.token_type if direct_auth is not None else None,
             claude_auth_tool_count=len(claude_auth_tools or []),
             deadline_s=deadline_s,
+            ttft_timeout_s=ttft_timeout_s,
+            idle_timeout_s=idle_timeout_s,
         )
 
         remaining = lambda: deadline_s - (time.monotonic() - started)
         last_heartbeat = started
 
         async def _guarded(source: AsyncIterator[StreamChunk]) -> AsyncIterator[StreamChunk]:
-            """Wrap an upstream generator with deadline + heartbeat checks.
+            """Wrap an upstream generator with deadline + TTFT + idle checks.
 
-            Each `__anext__` is capped at `min(idle_window, remaining)` so
-            a hung provider can't outrun the top-level deadline.
+            - Before the first productive chunk: enforce `ttft_timeout_s` and
+              raise `RoseStallError` so the caller can fall through to the
+              waterfall.
+            - After the first productive chunk: enforce `idle_timeout_s` (if
+              set) so a mid-stream half-closed connection doesn't burn the
+              full deadline before the loop can retry. Hitting the idle
+              window raises `RoseDeadlineError`; the outer deadline still
+              caps total time.
             """
             nonlocal last_heartbeat
             it = source.__aiter__()
+            saw_productive_chunk = False
+            productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
             while True:
                 r = remaining()
                 if r <= 0:
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
-                # Cap the per-chunk wait at the deadline's remaining budget;
-                # the inner layers already enforce their own 60s idle timeout.
+                if saw_productive_chunk:
+                    # Per-chunk idle ceiling once content has started. None
+                    # means "let the deadline handle it" (legacy behavior);
+                    # a finite value catches silent half-closes faster.
+                    progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
+                else:
+                    progress_timeout = ttft_timeout_s
                 try:
-                    chunk = await asyncio.wait_for(it.__anext__(), timeout=r)
+                    chunk = await asyncio.wait_for(it.__anext__(), timeout=min(r, progress_timeout))
                 except asyncio.TimeoutError as exc:
-                    raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s") from exc
+                    if saw_productive_chunk:
+                        raise RoseDeadlineError(
+                            f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
+                        ) from exc
+                    raise RoseStallError(f"rose.complete TTFT exceeded {ttft_timeout_s}s") from exc
                 except StopAsyncIteration:
                     return
+                if chunk.kind in productive_kinds:
+                    saw_productive_chunk = True
                 now = time.monotonic()
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
@@ -279,8 +344,12 @@ class RoseClient:
             cache_write = usage_data.get("cache_creation_input_tokens", 0) or 0
             prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
             completion_tokens = usage_data.get("completion_tokens", 0) or 0
-            total_input = prompt_tokens + cache_read + cache_write
-            cache_pct = round(cache_read / total_input * 100) if total_input > 0 else 0
+            cache_stats = _cache_input_accounting(
+                actual_model=_seen_actual_model,
+                prompt_tokens=prompt_tokens,
+                cache_read=cache_read,
+                cache_write=cache_write,
+            )
             logger.info(
                 "llm.cache",
                 call_site=call_site,
@@ -292,7 +361,10 @@ class RoseClient:
                 completion_tokens=completion_tokens,
                 cache_read=cache_read,
                 cache_write=cache_write,
-                cache_hit_pct=cache_pct,
+                cache_hit_pct=cache_stats["cache_hit_pct"],
+                cache_total_input=cache_stats["total_input"],
+                cache_uncached_input=cache_stats["uncached_input"],
+                cache_accounting=cache_stats["cache_accounting"],
                 finish=usage_data.get("finish_reason", ""),
             )
 
@@ -317,6 +389,8 @@ class RoseClient:
                             call_site=call_site,
                             thinking=thinking,
                             effort=effort,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
                         )
                     else:
                         source = _try_gpt_auth(
@@ -331,25 +405,34 @@ class RoseClient:
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
                         )
 
-                    async for chunk in _guarded(source):
-                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
-                            _seen_actual_model = chunk.data["actual_model"]
-                        elif chunk.kind == "usage":
-                            token_used = _compute_token_payload(direct_auth)
-                            usage_data = {
-                                **chunk.data,
-                                "compute_token_used": token_used,
-                                "compute_token_rotated": direct_rotations > 0,
-                            }
-                            if direct_auth.token_type == "claude":
-                                usage_data["claude_token_rotated"] = direct_rotations > 0
-                            else:
-                                usage_data["gpt_token_rotated"] = direct_rotations > 0
-                            chunk = StreamChunk(kind="usage", data=usage_data)
-                            _emit_llm_cache(chunk.data)
-                        yield chunk
+                    direct_yielded_any = False
+                    try:
+                        async for chunk in _guarded(source):
+                            direct_yielded_any = True
+                            if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
+                            elif chunk.kind == "usage":
+                                token_used = _compute_token_payload(direct_auth)
+                                usage_data = {
+                                    **chunk.data,
+                                    "compute_token_used": token_used,
+                                    "compute_token_rotated": direct_rotations > 0,
+                                }
+                                if direct_auth.token_type == "claude":
+                                    usage_data["claude_token_rotated"] = direct_rotations > 0
+                                else:
+                                    usage_data["gpt_token_rotated"] = direct_rotations > 0
+                                chunk = StreamChunk(kind="usage", data=usage_data)
+                                _emit_llm_cache(chunk.data)
+                            yield chunk
+                    except RoseStallError as exc:
+                        if not direct_yielded_any:
+                            raise _FallThrough() from exc
+                        raise
                     logger.info(
                         "rose.complete.direct_auth.done",
                         request_id=rid,
@@ -428,6 +511,8 @@ class RoseClient:
                     request_id=rid,
                     agent_id=agent_id,
                     call_site=call_site,
+                    per_step_timeout_s=ttft_timeout_s,
+                    idle_timeout_s=idle_timeout_s,
                 )
             ):
                 if claude_token_error is not None and chunk.kind == "metadata":
@@ -621,6 +706,8 @@ async def _try_claude_auth(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from claudeAuth, but buffer the metadata chunk so a pre-content
     failure raises `_FallThrough` without the caller ever seeing a
@@ -642,6 +729,8 @@ async def _try_claude_auth(
         call_site=call_site,
         thinking=thinking,
         effort=effort,
+        ttft_timeout_s=ttft_timeout_s,
+        idle_timeout_s=idle_timeout_s,
     )
     try:
         async for chunk in gen:
@@ -677,6 +766,8 @@ async def _try_gpt_auth(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from gptAuth, buffering metadata for pre-content fall-through."""
     buffered: Optional[StreamChunk] = None
@@ -693,6 +784,8 @@ async def _try_gpt_auth(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        ttft_timeout_s=ttft_timeout_s,
+        idle_timeout_s=idle_timeout_s,
     )
     try:
         async for chunk in gen:

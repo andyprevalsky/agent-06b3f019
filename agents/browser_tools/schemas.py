@@ -264,7 +264,6 @@ class SendMessageToUserBrowserTool(BaseModel):
 BROWSER_TOOL_MODELS = {
     # Observation
     "screenshot": ScreenshotTool,
-    "extract": ExtractTool,
     # Index-based actions
     "click": ClickTool,
     "input_text": InputTextTool,

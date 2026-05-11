@@ -602,7 +602,7 @@ describe('MessageList', () => {
     expect(matches.length).toBe(0);
   });
 
-  it('merges spawn_sub_agent tree messages sharing busId into single render', async () => {
+  it('merges general-purpose agent tree messages sharing busId into single render', async () => {
     const ctx = makeAgentCtx({
       messages: [
         msg('tree1', {
@@ -611,7 +611,7 @@ describe('MessageList', () => {
           timestamp: new Date(Date.now()).toISOString(),
           metadata: {
             toolCallId: 'spawn-a',
-            toolName: 'spawn_sub_agent',
+            toolName: 'spawn_general_purpose_agent',
             toolStatus: 'FINISHED',
             busId: 'bus-1',
             subAgentIds: ['sub-a'],
@@ -624,7 +624,7 @@ describe('MessageList', () => {
           timestamp: new Date(Date.now() + 1000).toISOString(),
           metadata: {
             toolCallId: 'spawn-b',
-            toolName: 'spawn_sub_agent',
+            toolName: 'spawn_general_purpose_agent_for_each',
             toolStatus: 'FINISHED',
             busId: 'bus-1',
             subAgentIds: ['sub-b'],
@@ -647,9 +647,9 @@ describe('MessageList', () => {
     // Individual SubAgentToolBubble rows each emit an `aria-live` or chip title
     // — here we verify only one top-level wrapper class is rendered.
     const treeWrappers = container.querySelectorAll('div.flex.gap-3.animate-in');
-    // Other messages render in their own wrappers, but we expect the spawn_sub_agent
+    // Other messages render in their own wrappers, but we expect the general-purpose
     // messages to produce at most a single tree wrapper (merged), not two.
-    // Count wrappers that originate from the spawn_sub_agent branch specifically:
+    // Count wrappers that originate from the general-purpose branch specifically:
     // this branch puts SubAgentTree as a direct child. A collapsed "Cluster" row
     // would produce two such wrappers if the merge regressed.
     expect(treeWrappers.length).toBeLessThanOrEqual(1);

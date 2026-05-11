@@ -78,44 +78,6 @@ This tool handles shadow DOM traversal automatically. Set iframes=true to also s
                 }
             }
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "extract",
-                "description": """Extract structured data from the current page based on a provided schema.
-
-USAGE GUIDELINES:
-- Keep schemas MINIMAL - only include fields essential for the task
-- Only use this if explicitly asked for structured output
-- For general page understanding, use ariaTree instead
-
-EXAMPLES:
-1. Extract a single value:
-   instruction: "extract the product price"
-   schema: "z.object({ price: z.number()})"
-
-2. Extract multiple fields:
-   instruction: "extract product name and price"
-   schema: "z.object({ name: z.string(), price: z.number() })"
-""",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "instruction": {
-                            "type": "string",
-                            "description": "Clear instruction describing what data to extract"
-                        },
-                        "schema": {
-                            "type": "string",
-                            "description": 'Zod schema as a string (e.g., "z.object({ price: z.number() })")'
-                        }
-                    },
-                    "required": ["instruction", "schema"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        
         # ========== ACTION TOOLS (Direct Playwright with Selectors) ==========
         {
             "type": "function",

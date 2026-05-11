@@ -92,7 +92,7 @@ describe('ClaudeCodeChip', () => {
   it('renders Codex when the code provider is Codex', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" codeProvider="codex" />);
     expect(screen.getByText('Codex Spinning up...')).toBeInTheDocument();
-    expect(screen.getByLabelText('Codex')).toBeInTheDocument();
+    expect(screen.getByAltText('Codex')).toBeInTheDocument();
   });
 
   it('renders spinning_up with forceShow terminal surface', () => {

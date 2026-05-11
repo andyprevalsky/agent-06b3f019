@@ -14,7 +14,6 @@ from domains.param_populator.config import (
     MAX_TOKENS,
     PARAM_POPULATOR_MODEL,
     REASONING_MAX_TOKENS,
-    SPAWN_PARAM_REQUIREMENTS,
     TEMPERATURE,
 )
 from domains.param_populator.repo import fetch_agent_context
@@ -39,7 +38,7 @@ def build_agent_system_prompt(tool_name: str, goal: str, alias_hint: str = "") -
     Args:
         tool_name: Name of the tool to call.
         goal: The task goal.
-        alias_hint: Original alias name (e.g. ``spawn_sub_agent``) for type-specific instructions.
+        alias_hint: Original alias name (e.g. ``spawn_general_purpose_agent``) for type-specific instructions.
 
     Returns:
         System prompt string.
@@ -74,9 +73,6 @@ INSTRUCTIONS:
 3. Explain your reasoning
 4. Call exactly one tool: {tool_name}
 5. Do not skip the tool call even if the goal appears already accomplished in context"""
-
-    if alias_hint in SPAWN_PARAM_REQUIREMENTS:
-        prompt += SPAWN_PARAM_REQUIREMENTS[alias_hint]
 
     prompt += f"""
 

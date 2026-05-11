@@ -1,4 +1,3 @@
-
 Spawned agents have NO access to your conversation, user messages, or context.
 The goal is their ONLY source of information. Include all relevant details:
 user preferences, constraints, addresses, names, budget, deadlines, prior

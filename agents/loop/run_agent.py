@@ -212,10 +212,7 @@ async def run_agent(  # noqa: C901
     AgentAction = (
         response_model
         if response_model
-        else create_agent_action_model(
-            tools,
-            include_attempt_completion_result=skip_verification,
-        )
+        else create_agent_action_model(tools)
     )
 
     def _log_cache_summary(status: str):
@@ -539,7 +536,6 @@ async def run_agent(  # noqa: C901
                         None,
                         None,
                         False,
-                        skip_verification,
                         schema_preamble,
                         current_claude_token_source,
                         current_claude_token_pool_id,
@@ -776,8 +772,10 @@ async def run_agent(  # noqa: C901
             if tool_name == "set_plan":
                 set_plan_called = True
 
-            # Special: attempt_completion - handle separately (should be alone due to llm.py filtering)
-            if tool_name == "attempt_completion":
+            # Special: attempt_completion (verified) and attempt_completion_with_result
+            # (skip_verification) - handle separately. They should be alone in the turn
+            # due to llm.py filtering.
+            if tool_name in ("attempt_completion", "attempt_completion_with_result"):
                 attempt_completion_tool = (tool_name, tool_args, tool_call_id)
                 continue
 
@@ -821,6 +819,8 @@ async def run_agent(  # noqa: C901
                         agent_id=agent_id,
                         tool_name=tool_name,
                         tool_call_id=tool_call_id,
+                        span_source="agents.loop.run_agent.run_agent.execute_single_tool",
+                        span_key="agents.loop.run_agent.run_agent.execute_single_tool",
                     ):
                         result = await execute_tool(tool_name, tool_args, tool_call_id)
                     return {"tool_name": tool_name, "tool_call_id": tool_call_id, "result": result, "error": None}
@@ -1023,6 +1023,8 @@ async def run_agent(  # noqa: C901
                             agent_id=agent_id,
                             tool_name=tool_name,
                             tool_call_id=tool_call_id,
+                            span_source="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
+                            span_key="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
                         ):
                             await execute_tool(tool_name, execution_tool_args, tool_call_id)
                     except Exception as e:

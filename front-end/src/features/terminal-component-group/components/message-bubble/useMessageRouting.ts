@@ -5,6 +5,12 @@
  */
 import type { Message } from '../../hooks';
 
+const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
+  'spawn_general_purpose_agent',
+  'spawn_general_purpose_agent_for_each',
+  'spawn_sub_agent',
+]);
+
 export interface MessageRouting {
   isUser: boolean;
   isTool: boolean;
@@ -36,7 +42,9 @@ export function useMessageRouting(message: Message): MessageRouting {
       (metadata?.requestUserApproval as { toolApproval?: unknown } | undefined)?.toolApproval,
   );
   const isSignupRequest = Boolean(isTool && metadata?.requestUserSignup);
-  const isSubAgentTool = metadata?.toolName === 'spawn_sub_agent';
+  const isSubAgentTool = Boolean(
+    metadata?.toolName && GENERAL_PURPOSE_AGENT_TOOLS.has(metadata.toolName),
+  );
   const isExploreAgent =
     isTool && metadata?.toolName === 'spawn_agent' && metadata?.agentType === 'explore';
   const isWaitFor = isTool && metadata?.toolName === 'wait_for';

@@ -8,7 +8,7 @@ Provides bidirectional communication with the Claude Code sandbox:
 
 import asyncio
 import json
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 import structlog
@@ -35,6 +35,7 @@ class ClaudeCodeWsClient:
         on_exit: Callable[[int], Awaitable[None]],  # (exit_code) -> None
         on_connection_change: Optional[Callable[[bool], Awaitable[None]]] = None,  # (is_connected) -> None
         on_stdin_error: Optional[Callable[[str], Awaitable[None]]] = None,  # (error_msg) -> None
+        on_event: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
         heartbeat_fn: Optional[Callable[[str], None]] = None,
         max_reconnects: int = 5,
         reconnect_delay: float = 1.0,
@@ -49,6 +50,7 @@ class ClaudeCodeWsClient:
             on_exit: Callback when process exits. Called with exit code.
             on_connection_change: Callback when connection state changes. Called with True on connect, False on disconnect.
             on_stdin_error: Callback when server reports stdin delivery failure. Called with error message.
+            on_event: Callback for normalized code-agent JSON events.
             heartbeat_fn: Optional Temporal activity heartbeat function.
             max_reconnects: Maximum reconnection attempts.
             reconnect_delay: Base delay for exponential backoff (seconds).
@@ -58,6 +60,7 @@ class ClaudeCodeWsClient:
         self.on_exit = on_exit
         self.on_connection_change = on_connection_change
         self.on_stdin_error = on_stdin_error
+        self.on_event = on_event
         self.heartbeat_fn = heartbeat_fn
         self.max_reconnects = max_reconnects
         self.reconnect_delay = reconnect_delay
@@ -231,6 +234,18 @@ class ClaudeCodeWsClient:
                 msg_data = msg.get("data", "")
                 logger.debug("[ClaudeCodeWs] Received output", type=msg_type, bytes=len(msg_data))
                 await self.on_output(msg_data, False)
+
+            elif msg_type == "code_agent_event":
+                event = msg.get("data")
+                if isinstance(event, dict) and self.on_event:
+                    await self.on_event(event)
+
+            elif msg_type == "code_agent_events":
+                events = msg.get("data")
+                if isinstance(events, list) and self.on_event:
+                    for event in events:
+                        if isinstance(event, dict):
+                            await self.on_event(event)
 
             elif msg_type == "exit":
                 # Process exited - don't reconnect after this

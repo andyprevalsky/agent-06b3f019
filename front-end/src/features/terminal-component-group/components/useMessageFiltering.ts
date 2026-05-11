@@ -15,6 +15,12 @@ import {
 } from '../hooks';
 import type { ExploreStep, WaitForCheck } from '../types';
 
+const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
+  'spawn_general_purpose_agent',
+  'spawn_general_purpose_agent_for_each',
+  'spawn_sub_agent',
+]);
+
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
 function filterMessagesForSubAgent(messages: Message[], subAgentId: string | undefined): Message[] {
@@ -112,7 +118,8 @@ export function useFilteredStreaming({
 
 function isSpawnTree(m: Message): boolean {
   return (
-    m.metadata?.toolName === 'spawn_sub_agent' &&
+    !!m.metadata?.toolName &&
+    GENERAL_PURPOSE_AGENT_TOOLS.has(m.metadata.toolName) &&
     Array.isArray(m.metadata?.subAgentIds) &&
     (m.metadata.subAgentIds as string[]).length > 0 &&
     !!m.metadata?.busId

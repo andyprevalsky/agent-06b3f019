@@ -128,14 +128,14 @@ def test_validate_spawn_browser_happy():
     )
 
 
-def test_validate_spawn_sub_agent_bad_phase():
-    """sub_agent rejects invalid start_phase."""
+def test_validate_spawn_general_purpose_bad_phase():
+    """general_purpose rejects invalid start_phase."""
     from domains.spawn_agent.service import validate_spawn_params
 
     _assert_raises(
         lambda: validate_spawn_params(
             {
-                "type": "sub_agent",
+                "type": "general_purpose",
                 "goal": "g",
                 "output_schema": {"fields": []},
                 "start_phase": "start",
@@ -751,7 +751,7 @@ async def test_handler_sub_agent_delegates_without_verifier_arg():
             h.SpawnAgentManager().execute_tool(
                 workflow_instance=_FakeWFInstance(),
                 tool_call={
-                    "type": "sub_agent",
+                    "type": "general_purpose",
                     "goal": "do work",
                     "output_schema": {"fields": []},
                     "context_gates": {"network": False},
@@ -850,8 +850,10 @@ async def test_handler_for_each_happy_path_all_succeed():
     assert not any(e.status == MessageStatus.ERROR for e in events)
     aggregate = [e for e in events if e.status == MessageStatus.FINISHED]
     assert aggregate, "for_each must yield a terminal parent tool result"
-    assert aggregate[-1].metadata["toolName"] == "spawn_sub_agent_for_each"
-    assert len(aggregate[-1].metadata["structured_response"]["items"]) == 2
+    assert aggregate[-1].metadata["toolName"] == "spawn_general_purpose_agent_for_each"
+    items = aggregate[-1].metadata["structured_response"]["items"]
+    assert len(items) == 2
+    assert items[0]["status"] == "completed"
     assert "Child outputs:" in aggregate[-1].message
     assert "- item 0:" in aggregate[-1].message
     # But child events were handled through workflow_instance._handle_tool_event
@@ -859,12 +861,27 @@ async def test_handler_for_each_happy_path_all_succeed():
 
 
 async def test_handler_for_each_failed_yields_error():
-    """for_each with child errors yields aggregate ERROR event."""
+    """for_each with child errors yields aggregate ERROR event with child item details."""
     from tools.base import EventType, MessageStatus, ToolEvent
     import domains.spawn_agent.handler as h
 
     fake_mgr = _FakeDelegateManager(
-        [ToolEvent(type=EventType.POST_MESSAGE, title="child err", message="boom", status=MessageStatus.ERROR)]
+        [
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="child err",
+                message="boom",
+                status=MessageStatus.ERROR,
+                metadata={
+                    "error_reason": "verifier_rejected",
+                    "failure_context": {
+                        "partial_structured_response": {"name": "Acme"},
+                        "verifier_reasoning": "missing source",
+                        "progress_estimate": "partial",
+                    },
+                },
+            )
+        ]
     )
 
     fake = _FakeSpawnWF()
@@ -888,7 +905,24 @@ async def test_handler_for_each_failed_yields_error():
         h.get_sub_agent_manager = original_sub
         restore_wf()
 
-    assert any(e.status == MessageStatus.ERROR and "children failed" in e.message for e in events)
+    errors = [e for e in events if e.status == MessageStatus.ERROR and "children failed" in e.message]
+    assert errors
+    aggregate = errors[-1]
+    assert aggregate.metadata["toolName"] == "spawn_general_purpose_agent_for_each"
+    items = aggregate.metadata["structured_response"]["items"]
+    assert items == [
+        {
+            "index": 0,
+            "agent_id": "child-0",
+            "status": "failed",
+            "summary": "boom",
+            "error_reason": "verifier_rejected",
+            "partial_structured_response": {"name": "Acme"},
+            "verifier_reasoning": "missing source",
+            "progress_estimate": "partial",
+        }
+    ]
+    assert "item 0: failed: verifier_rejected" in aggregate.message
 
 
 async def test_spawn_agent_helper_tracks_usage_and_returns():
@@ -1173,8 +1207,6 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
             user_id="u-7",
             goal="research X",
             model="rose-1-lite",
-            network_metadata="net info",
-            local_data_summary="local stuff",
             task_id="task-99",
             init_tool_call_id="init-tc",
             claude_token="ctok",
@@ -1592,7 +1624,7 @@ async def run_all_tests():
     r.record("validate_browser_no_url", test_validate_spawn_browser_missing_start_url)
     r.record("validate_browser_no_schema", test_validate_spawn_browser_missing_schema)
     r.record("validate_browser_happy", test_validate_spawn_browser_happy)
-    r.record("validate_sub_agent_bad_phase", test_validate_spawn_sub_agent_bad_phase)
+    r.record("validate_general_purpose_bad_phase", test_validate_spawn_general_purpose_bad_phase)
     r.record("validate_for_each_needs_items", test_validate_spawn_for_each_requires_items)
     r.record("validate_for_each_items", test_validate_spawn_for_each_with_items)
     r.record("validate_for_each_csv", test_validate_spawn_for_each_with_csv)

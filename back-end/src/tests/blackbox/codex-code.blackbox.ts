@@ -86,13 +86,17 @@ async function testCreate_missingUserId() {
   ErrorResponse.parse(res.data);
 }
 
-async function waitForCodexOutput(wsUrl: string, timeoutMs = 240_000): Promise<string> {
+async function waitForCodexOutput(
+  wsUrl: string,
+  timeoutMs = 240_000
+): Promise<{ output: string; events: unknown[] }> {
   const WebSocket = (await import('ws')).default;
   let output = '';
+  const events: unknown[] = [];
   let connected = false;
   let exitSeen = false;
 
-  return await new Promise<string>((resolve, reject) => {
+  return await new Promise<{ output: string; events: unknown[] }>((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const timeout = setTimeout(() => {
       ws.close();
@@ -113,11 +117,17 @@ async function waitForCodexOutput(wsUrl: string, timeoutMs = 240_000): Promise<s
         if ((msg.type === 'stdout' || msg.type === 'stderr' || msg.type === 'buffer') && msg.data) {
           output += msg.data;
         }
+        if (msg.type === 'code_agent_event' && msg.data) {
+          events.push(msg.data);
+        }
+        if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
+          events.push(...msg.data);
+        }
         if (msg.type === 'exit') {
           exitSeen = true;
           clearTimeout(timeout);
           ws.close();
-          resolve(output);
+          resolve({ output, events });
         }
       } catch {
         output += raw;
@@ -130,10 +140,26 @@ async function waitForCodexOutput(wsUrl: string, timeoutMs = 240_000): Promise<s
     ws.on('close', () => {
       if (!exitSeen && output.includes('CODEX_E2B_DONE')) {
         clearTimeout(timeout);
-        resolve(output);
+        resolve({ output, events });
       }
     });
   });
+}
+
+async function testPromptBuilder_sharedContractMentionsOutputRules() {
+  const { buildCodeAgentSystemPrompt, CODE_AGENT_INSTRUCTIONS_VERSION } =
+    await import('../../providers/codeAgentPrompt');
+
+  const prompt = buildCodeAgentSystemPrompt({
+    githubRepoUrl: 'https://github.com/acme/widgets.git',
+    workDir: '/home/user/widgets',
+  });
+
+  assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
+  assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
+  assert(prompt.includes('/home/user/output'), 'Output directory missing');
+  assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
+  assert(prompt.includes('/home/user/widgets'), 'Repo workDir missing');
 }
 
 async function testSmoke_codexCompletesE2bTask() {
@@ -165,14 +191,27 @@ async function testSmoke_codexCompletesE2bTask() {
     taskId = body.task_id;
     sandboxId = body.sandbox_id;
 
-    const output = await waitForCodexOutput(body.ws_url);
+    const { output, events } = await waitForCodexOutput(body.ws_url);
     assert(
       output.includes('CODEX_E2B_DONE'),
       `Codex output did not include CODEX_E2B_DONE. Tail: ${output.slice(-1200)}`
     );
+    assert(
+      events.some((event) => {
+        const typed = event as { type?: string; provider?: string };
+        return typed.provider === 'codex' && typed.type === 'session';
+      }),
+      `Expected normalized Codex session event, got: ${JSON.stringify(events).slice(0, 500)}`
+    );
 
     const { Sandbox } = await import('e2b');
     const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
+    const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
+    assert(
+      String(promptFile).includes('/home/user/output') &&
+        String(promptFile).includes('Do not return the original attachment path'),
+      `AGENTS.md did not contain shared prompt contract: ${String(promptFile).slice(0, 300)}`
+    );
     const fileContent = await sandbox.files.read('/home/user/output/codex-smoke.txt', {
       format: 'text',
     });
@@ -195,14 +234,24 @@ async function runAll() {
   console.log('Codex Code Session Black-Box Tests\n');
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  const tests = [
+  const tests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
     { name: 'POST /create -- missing user_id -> 500', fn: testCreate_missingUserId },
     {
-      name: 'smoke -- Codex completes task in real E2B sandbox',
-      fn: testSmoke_codexCompletesE2bTask,
+      name: 'prompt -- shared code-agent contract includes output rules',
+      fn: testPromptBuilder_sharedContractMentionsOutputRules,
     },
   ];
+  if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
+    console.log(
+      '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
+    );
+  } else {
+    tests.push({
+      name: 'smoke -- Codex completes task in real E2B sandbox',
+      fn: testSmoke_codexCompletesE2bTask,
+    });
+  }
 
   const results: TestResult[] = [];
   for (const test of tests) {

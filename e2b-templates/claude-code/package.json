@@ -12,9 +12,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.98",
     "@e2b/desktop": "^2.2.2",
     "e2b": "^1.13.2",
-    "node-pty": "^1.0.0",
     "ws": "^8.18.0"
   }
 }

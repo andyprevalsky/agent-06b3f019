@@ -23,7 +23,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/sub_agent/explore
+    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
     from helpers import (
         check_user_usage,
         fetch_agent_config,
@@ -94,7 +94,7 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
-    "spawn_agent": spawn_agent,  # Unified: browser/code/sub_agent/explore
+    "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
     "send_message_to_user": send_message_to_user,
     "send_message_to_user_execute_phase": send_message_to_user,  # Same handler, forces is_question=False
@@ -309,7 +309,7 @@ class AgentWorkflow:
                 "TOOL",
                 metadata={
                     "toolCallId": child_tool_id,
-                    "toolName": "spawn_sub_agent",
+                    "toolName": "spawn_general_purpose_agent",
                     "toolStatus": "IN_PROGRESS",
                     "title": goal[:30] if goal else "Sub-agent",
                     "subAgentId": child_agent_id,
@@ -337,7 +337,7 @@ class AgentWorkflow:
                     "TOOL",
                     metadata={
                         "toolCallId": child_tool_id,
-                        "toolName": "spawn_sub_agent",
+                        "toolName": "spawn_general_purpose_agent",
                         "toolStatus": "ERROR",
                         "title": f"❌ Sub-agent failed: {goal_text[:30]}",
                         "subAgentId": child_agent_id,
@@ -361,7 +361,7 @@ class AgentWorkflow:
                     "TOOL",
                     metadata={
                         "toolCallId": child_tool_id,
-                        "toolName": "spawn_sub_agent",
+                        "toolName": "spawn_general_purpose_agent",
                         "toolStatus": "FINISHED",
                         "title": f"Sub-agent completed: {goal_text[:30]}",
                         "subAgentId": child_agent_id,
@@ -1416,7 +1416,7 @@ class AgentWorkflow:
         if tool_name == "spawn_agent" and self.current_phase == "PLAN" and tool_args.get("type") != "explore":
             error_msg = (
                 "During PLAN phase, spawn_agent only supports type='explore'. "
-                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/sub_agent agents."
+                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/general_purpose agents."
             )
             await self._handle_tool_event(
                 ToolEvent(
@@ -1544,10 +1544,10 @@ class AgentWorkflow:
             else:
                 workflow.logger.error(f"Tool {tool_name} failed: {error_msg}")
 
-            # For spawn_agent (sub_agent type), include sub-agent context so frontend renders
+            # For spawn_agent (general_purpose type), include child-agent context so frontend renders
             # as a proper sub-agent failure (SubAgentTree) instead of a raw chip
             error_metadata = None
-            if tool_name == "spawn_agent" and tool_args.get("type") == "sub_agent":
+            if tool_name == "spawn_agent" and tool_args.get("type") == "general_purpose":
                 meta = {}
                 # Find the child agent spawned by this tool_call_id
                 for child_id, tid in getattr(self, "child_tool_ids", {}).items():

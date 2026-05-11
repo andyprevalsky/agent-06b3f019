@@ -2078,7 +2078,7 @@ async def test_execute_action_scroll_with_humanizer_up():
     hu.scroll.assert_awaited_once_with(-250)
 
 
-async def test_execute_action_extract_delegates():
+async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
@@ -2087,12 +2087,9 @@ async def test_execute_action_extract_delegates():
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
-    async def fake_extract(**kwargs):
-        return {"success": True, "message": "extracted"}
-
-    with patch.object(service_actions, "_execute_extract", side_effect=fake_extract):
-        out = await service_actions.execute_action(dom, ah, {"action": "extract", "params": {"query": "q"}})
-    assert out == {"success": True, "message": "extracted"}
+    out = await service_actions.execute_action(dom, ah, {"action": "extract", "params": {"query": "q"}})
+    assert out["success"] is False
+    assert "extract is disabled" in out["error"]
 
 
 async def test_execute_action_goto_delegates():
@@ -2918,34 +2915,7 @@ async def test_execute_goto_injects_local_storage_swallows_error():
 # ── _execute_extract ─────────────────────────────────────────────────
 
 
-async def test_execute_extract_success():
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    session = MagicMock()
-    session.get_current_page_url = AsyncMock(return_value="https://x.com")
-    dom = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-
-    async def fake_md(browser_session, extract_links=False):
-        return "content", {}
-
-    with (
-        patch("browser_use.dom.markdown_extractor.extract_clean_markdown", side_effect=fake_md),
-        patch.object(service_actions, "call_extract_llm", AsyncMock(return_value="extracted")),
-    ):
-        out = await service_actions._execute_extract(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            params={"instruction": "what?"},
-            thinking=None,
-        )
-    assert out["success"] is True
-    assert out["content"] == "extracted"
-
-
-async def test_execute_extract_exception():
+async def test_execute_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = MagicMock()
@@ -2953,19 +2923,15 @@ async def test_execute_extract_exception():
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
-    async def boom(*a, **kw):
-        raise RuntimeError("extract-crash")
-
-    with patch("browser_use.dom.markdown_extractor.extract_clean_markdown", side_effect=boom):
-        out = await service_actions._execute_extract(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            params={"instruction": "x"},
-            thinking=None,
-        )
+    out = await service_actions._execute_extract(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        params={"instruction": "what?"},
+        thinking=None,
+    )
     assert out["success"] is False
-    assert "extract-crash" in out["error"]
+    assert "extract is disabled" in out["error"]
 
 
 # ── _execute_upload_file ─────────────────────────────────────────────
@@ -3621,7 +3587,7 @@ async def run_all_tests():
     await r.record_async("execute_action_press_key_humanizer", test_execute_action_press_key_with_humanizer)
     await r.record_async("execute_action_scroll_humanizer_down", test_execute_action_scroll_with_humanizer_down)
     await r.record_async("execute_action_scroll_humanizer_up", test_execute_action_scroll_with_humanizer_up)
-    await r.record_async("execute_action_extract_delegates", test_execute_action_extract_delegates)
+    await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
     await r.record_async("execute_action_click_delegates", test_execute_action_click_delegates)
     await r.record_async("execute_action_input_text_delegates", test_execute_action_input_text_delegates)
@@ -3666,8 +3632,7 @@ async def run_all_tests():
     await r.record_async("execute_goto_injects_ls", test_execute_goto_injects_local_storage)
     await r.record_async("execute_goto_injects_ls_error", test_execute_goto_injects_local_storage_swallows_error)
 
-    await r.record_async("execute_extract_success", test_execute_extract_success)
-    await r.record_async("execute_extract_exception", test_execute_extract_exception)
+    await r.record_async("execute_extract_disabled", test_execute_extract_disabled)
 
     await r.record_async("execute_upload_file_success", test_execute_upload_file_success)
     await r.record_async("execute_upload_file_no_element", test_execute_upload_file_missing_element)

@@ -94,7 +94,7 @@ async def waterfall_complete(
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     per_step_timeout_s: float = _PER_STEP_TIMEOUT_S,
-    idle_timeout_s: float = _PER_STEP_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -206,14 +206,14 @@ async def _stream_one_step(
     agent_id: Optional[str],
     call_site: Optional[str],
     per_step_timeout_s: float,
-    idle_timeout_s: float,
+    idle_timeout_s: Optional[float],
 ) -> AsyncIterator[StreamChunk]:
     """One waterfall step — open stream, classify on error, yield on success.
 
     Maps provider responses to typed errors the caller aggregates:
       non-2xx -> RoseError subclass (propagated, waterfall records + continues)
       connect/read exc -> wrapped RoseError
-      stream stall -> RoseStallError from parse_openai_sse
+      empty stream -> RoseStallError from parse_openai_sse
     """
     try:
         async with post_openrouter_stream(

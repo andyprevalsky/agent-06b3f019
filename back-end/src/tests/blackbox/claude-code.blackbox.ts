@@ -933,8 +933,8 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
-      agent_id: FAKE_UUID,
-      goal: 'What is 2+2? Reply with just the number.',
+      agent_id: crypto.randomUUID(),
+      goal: 'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.',
       user_id: DEV_USER_ID,
     }),
   });
@@ -949,6 +949,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
 
   // 2. Connect to WebSocket and wait for Claude Code to answer
   let wsOutput = '';
+  const wsEvents: unknown[] = [];
   let wsConnected = false;
   let wsError: string | null = null;
 
@@ -965,11 +966,11 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       ws.close();
       reject(
         new Error(
-          `Timed out after 90s waiting for Claude Code to answer "2+2". ` +
+          `Timed out after 240s waiting for Claude Code smoke output. ` +
             `Output so far (${wsOutput.length} chars): ${wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '').slice(-500)}`
         )
       );
-    }, 90_000);
+    }, 240_000);
 
     ws.on('open', () => {
       wsConnected = true;
@@ -981,10 +982,21 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         if (msg.type === 'stdout' && msg.data) {
           wsOutput += msg.data;
         }
+        if (msg.type === 'stderr' && msg.data) {
+          wsOutput += msg.data;
+        }
+        if (msg.type === 'code_agent_event' && msg.data) {
+          wsEvents.push(msg.data);
+        }
+        if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
+          wsEvents.push(...msg.data);
+        }
         // Strip ANSI codes to get clean text
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
-        // Check if Claude Code has answered with "4"
-        if (clean.includes('4')) {
+        if (
+          clean.includes('CLAUDE_E2B_DONE') ||
+          clean.includes('Invalid authentication credentials')
+        ) {
           clearTimeout(timeout);
           ws.close();
           resolve(clean);
@@ -1007,9 +1019,37 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
+    if (finalOutput.includes('Invalid authentication credentials')) {
+      console.log(
+        '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
+      );
+      return;
+    }
     assert(
-      finalOutput.includes('4'),
-      `Claude Code output does not contain "4": ${finalOutput.slice(-300)}`
+      finalOutput.includes('CLAUDE_E2B_DONE'),
+      `Claude Code output does not contain CLAUDE_E2B_DONE: ${finalOutput.slice(-300)}`
+    );
+    assert(
+      wsEvents.some((event) => {
+        const typed = event as { provider?: string; type?: string };
+        return typed.provider === 'claude' && typed.type === 'session';
+      }),
+      `Expected normalized Claude session event, got: ${JSON.stringify(wsEvents).slice(0, 500)}`
+    );
+    const { Sandbox } = await import('e2b');
+    const sandbox = await Sandbox.connect(body.sandbox_id, { apiKey: process.env.E2B_API_KEY });
+    const promptFile = await sandbox.files.read('/home/user/CLAUDE.md', { format: 'text' });
+    assert(
+      String(promptFile).includes('/home/user/output') &&
+        String(promptFile).includes('Do not return the original attachment path'),
+      `CLAUDE.md did not contain shared prompt contract: ${String(promptFile).slice(0, 300)}`
+    );
+    const fileContent = await sandbox.files.read('/home/user/output/claude-smoke.txt', {
+      format: 'text',
+    });
+    assert(
+      String(fileContent).trim() === 'CLAUDE_E2B_OK',
+      `Expected Claude output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
   } finally {
     // 3. Clean up: close the session
