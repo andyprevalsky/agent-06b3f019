@@ -181,15 +181,19 @@ describe('WaitForChip — condition mode', () => {
     );
     // Live indicator present
     expect(screen.getByText('live')).toBeInTheDocument();
-    expect(screen.getByText(/Exploring - Checking mailbox/)).toBeInTheDocument();
+    // While exploring, the header shows the most recent non-thinking action
+    // (here: "Search the web") rather than the static goal.
+    expect(screen.getByText(/Exploring - Search the web/)).toBeInTheDocument();
     expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
 
     // Click the inline chip to expand it
-    await u.click(screen.getByText(/Exploring - Checking mailbox/));
-    expect(screen.getByText('Search the web')).toBeInTheDocument();
+    await u.click(screen.getByText(/Exploring - Search the web/));
+    // After expansion the full goal is also visible
+    expect(screen.getByText('Check if inbox has the order confirmation email')).toBeInTheDocument();
 
-    // Click a step with content to expand it
-    await u.click(screen.getByText('Search the web'));
+    // Click a step with content to expand it (target the step row, not header)
+    const stepRows = screen.getAllByText('Search the web');
+    await u.click(stepRows[stepRows.length - 1]);
     expect(screen.getByText('looked it up')).toBeInTheDocument();
   });
 

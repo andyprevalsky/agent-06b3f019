@@ -117,8 +117,7 @@ function compressSetPlans(tools: Message[]): Message[] {
 function buildExploreStep(m: Message): ExploreStep {
   const status = (m.metadata?.toolStatus as string) || 'IN_PROGRESS';
   const title = (m.metadata?.title as string) || '';
-  const isThinking =
-    m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
+  const isThinking = m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
   const message = status === 'IN_PROGRESS' && !isThinking ? '' : m.text || '';
   return {
     title,
@@ -134,6 +133,18 @@ interface ExploreGrouping {
   hidden: Set<string>;
   stepMap: Map<string, ExploreStep[]>;
   dataByTaskId: Map<string, ExploreData>;
+}
+
+/**
+ * Thinking-step messages (`save_explore_message`) are posted with
+ * toolName=spawn_agent and toolStatus=FINISHED for every iteration. They
+ * must not be treated as the overall completion event — the init/final pair
+ * (which carries `metadata.fullGoal`) is the only signal for the whole
+ * explore-agent's status. Pick the representative from non-thinking spawn
+ * messages so the chip's status reflects the run as a whole.
+ */
+function isThinkingSpawnMessage(m: Message): boolean {
+  return m.metadata?.toolName === 'spawn_agent' && m.metadata?.title === 'Explore agent thinking';
 }
 
 function groupExploreMessages(messages: Message[]): ExploreGrouping {
@@ -154,12 +165,14 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
 
   for (const [taskId, msgs] of byTask) {
     msgs.sort(sortByTimestampAsc);
+    const isSpawnInitOrFinal = (m: Message) =>
+      m.metadata?.toolName === 'spawn_agent' && !isThinkingSpawnMessage(m);
     const terminalSpawn = msgs.find(
       (m) =>
-        m.metadata?.toolName === 'spawn_agent' &&
+        isSpawnInitOrFinal(m) &&
         (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR'),
     );
-    const firstSpawn = msgs.find((m) => m.metadata?.toolName === 'spawn_agent');
+    const firstSpawn = msgs.find(isSpawnInitOrFinal);
     const representative = terminalSpawn || firstSpawn || msgs[0];
 
     const steps = msgs
@@ -172,7 +185,7 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
     dataByTaskId.set(taskId, {
       repMessageId: representative.message_id,
       title: (representative.metadata?.title as string) || '',
-      fullGoal: (representative.metadata?.data as { goal?: string } | undefined)?.goal ?? undefined,
+      fullGoal: (representative.metadata?.fullGoal as string) || undefined,
       message: representative.text || '',
       status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as
         | 'IN_PROGRESS'

@@ -4,15 +4,16 @@
  * Like the browser agent panel but inline as a chip.
  *
  * HEADER (always visible, clickable to expand/collapse):
- *   [thinking.svg|Sparkles] Exploring - {goal, truncated 100 chars}    {N steps}  [chevron]
- *                          {subtitle: current IN_PROGRESS tool title}
+ *   [thinking.svg|Sparkles] {prefix} - {actionOrGoal}    {N steps}  [chevron]
  *
- * Status drives the icon:
- *   IN_PROGRESS → thinking.svg
- *   FINISHED    → green Sparkles
- *   ERROR       → red Sparkles
+ * Status drives icon + prefix:
+ *   IN_PROGRESS → thinking.svg + "Exploring"
+ *   FINISHED    → green Sparkles + "Explored"
+ *   ERROR       → red Sparkles + "Explore failed"
  *
- * GOAL: Set once from the init spawn_agent message title. Never changes.
+ * actionOrGoal: while IN_PROGRESS, the title of the most recent non-thinking
+ * step (e.g. "Grep: andy prevalsky"); falls back to the goal text when no
+ * action has run yet. When FINISHED/ERROR, always the goal text.
  *
  * RESULT (always visible when FINISHED/ERROR, fixed max-height):
  *   The concrete result from attempt_completion (plain text, no icon).
@@ -66,14 +67,13 @@ function getStepIcon(step: ExploreStep) {
 
 interface HeaderProps {
   status: ExploreAgentBubbleProps['status'];
-  goal: string;
-  subtitle: string | undefined;
+  headerText: string;
   stepCount: number;
   isExpanded: boolean;
   onToggle: () => void;
 }
 
-function Header({ status, goal, subtitle, stepCount, isExpanded, onToggle }: HeaderProps) {
+function Header({ status, headerText, stepCount, isExpanded, onToggle }: HeaderProps) {
   const isInProgress = status === 'IN_PROGRESS';
   const isComplete = status === 'FINISHED';
   const isError = status === 'ERROR';
@@ -100,12 +100,7 @@ function Header({ status, goal, subtitle, stepCount, isExpanded, onToggle }: Hea
         />
       )}
       <div className="flex-1 min-w-0">
-        <span className="text-xs font-medium text-foreground/80 truncate block">
-          Exploring - {goal}
-        </span>
-        {subtitle && (
-          <span className="text-[11px] text-muted-foreground/50 truncate block">{subtitle}</span>
-        )}
+        <span className="text-xs font-medium text-foreground/80 truncate block">{headerText}</span>
       </div>
       {stepCount > 0 && (
         <span className="text-[10px] text-muted-foreground/50 tabular-nums flex-shrink-0">
@@ -235,9 +230,10 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
   const goal = truncate(fullGoal || title || 'Researching...', 100);
   const steps = stepHistory;
   const hasSteps = steps.length > 0;
-  const subtitle = isInProgress
-    ? [...steps].reverse().find((s) => s.status === 'IN_PROGRESS')?.title
-    : undefined;
+  const mostRecentAction = [...steps].reverse().find((s) => !isThinkingStep(s));
+  const prefix = isInProgress ? 'Exploring' : isError ? 'Explore failed' : 'Explored';
+  const detail = isInProgress && mostRecentAction?.title ? mostRecentAction.title : goal;
+  const headerText = `${prefix} - ${truncate(detail.replace(/\n/g, ' '), 100)}`;
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
@@ -245,8 +241,7 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
         <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2">
           <Header
             status={status}
-            goal={goal}
-            subtitle={subtitle}
+            headerText={headerText}
             stepCount={steps.length}
             isExpanded={isExpanded}
             onToggle={toggleExpanded}
