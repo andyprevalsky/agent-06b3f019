@@ -536,7 +536,6 @@ async def run_agent(  # noqa: C901
                         None,
                         None,
                         False,
-                        skip_verification,
                         schema_preamble,
                         current_claude_token_source,
                         current_claude_token_pool_id,
