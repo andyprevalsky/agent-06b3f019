@@ -59,6 +59,12 @@ while IFS= read -r file; do
     */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*system-prompt*|*system_prompt*|*strategy_override*.txt)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
+    *tool_schemas*.py|*tool_schemas*.ts|*tool_schemas*.tsx|*toolSchemas*.ts|*toolSchemas*.tsx)
+      # Tool schemas ship class docstrings + Field descriptions to the LLM as
+      # tool descriptions — count as prompt content even though they don't
+      # assign to a *_PROMPT symbol.
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
   esac
 done <<< "$CHANGED_FILES"
 

@@ -1016,34 +1016,6 @@
       ]
     },
     {
-      "path": "agents/helpers/gepa_v3_strategy_override.txt",
-      "anchor": null,
-      "id": "GEPA_V3_PLANNING_INSTRUCTION",
-      "category": "instruction_block",
-      "summary": "GEPA V3 planning override \u2014 authoritative-first, MECE.",
-      "keywords": [
-        "gepa",
-        "planning",
-        "v3",
-        "override",
-        "mece"
-      ]
-    },
-    {
-      "path": "agents/helpers/planner_strategy_override_v3.txt",
-      "anchor": null,
-      "id": "PLANNER_V3_STRATEGY_OVERRIDE",
-      "category": "instruction_block",
-      "summary": "Planner V3 override \u2014 authoritative-first, executable, MECE; spawn_sub_agent normalization.",
-      "keywords": [
-        "planner",
-        "v3",
-        "override",
-        "mece",
-        "strategy"
-      ]
-    },
-    {
       "path": "back-end/src/providers/setResponseSchema.ts",
       "anchor": "const SYSTEM_PROMPT = `You are an expert at analyzing agent goals",
       "id": "schema_gen_system_prompt",
