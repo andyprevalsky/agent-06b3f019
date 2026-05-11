@@ -342,12 +342,18 @@ describe('MessageList', () => {
       ],
     });
     renderList(ctx);
-    // Only ONE explore chip should render for taskId=task-X — confirm a single
-    // "Explore thing" title node rather than two separate rows.
-    await waitFor(() => expect(screen.getAllByText(/Explore thing/)).toHaveLength(1));
-    // The internal web_search step must NOT render as its own chip — the grouping
-    // collapses it inside the explore agent bubble.
-    expect(screen.queryByText('Searching')).not.toBeInTheDocument();
+    // Only ONE explore chip should render for taskId=task-X — confirm by the
+    // single thinking-icon header marker.
+    await waitFor(() =>
+      expect(screen.getAllByTestId('explore-thinking-icon')).toHaveLength(1),
+    );
+    // While exploring, the header surfaces the most recent non-thinking action
+    // title ("Searching") instead of the static goal.
+    expect(screen.getByText(/Exploring - Searching/)).toBeInTheDocument();
+    // The web_search step does NOT render as a separate chip — it's collapsed
+    // into the explore bubble (it only appears in the header here, not as its
+    // own row in the message list).
+    expect(screen.queryByTestId('tool-row-explore-step-1')).not.toBeInTheDocument();
   });
 
   it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {

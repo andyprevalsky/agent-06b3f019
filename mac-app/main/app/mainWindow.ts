@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, nativeImage, screen, shell } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedIconBasePath, getPackagedRendererPath } from './packagedPaths';
@@ -58,14 +58,17 @@ export function createMainWindow({
 }: CreateMainWindowOptions): BrowserWindow {
   const { iconPath, macIcnsPath, macPngPath } = getIconPaths();
   const windowState = getWindowState();
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workArea;
+  const width = Math.min(windowState.width, screenWidth);
+  const height = Math.min(windowState.height, screenHeight);
 
   const mainWindow = new BrowserWindow({
     x: windowState.x,
     y: windowState.y,
-    width: windowState.width,
-    height: windowState.height,
-    minWidth: 1500,
-    minHeight: 600,
+    width,
+    height,
+    minWidth: Math.min(900, screenWidth),
+    minHeight: Math.min(600, screenHeight),
     titleBarStyle: 'hiddenInset',
     icon: iconPath,
     backgroundColor: '#00000000',

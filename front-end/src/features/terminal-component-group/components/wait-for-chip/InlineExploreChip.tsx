@@ -41,7 +41,10 @@ function ExploreChipHeader({
   const isInProgress = explore.status === 'IN_PROGRESS';
   const isComplete = explore.status === 'FINISHED';
   const isError = explore.status === 'ERROR';
-  const displayTitle = explore.title || 'Checking condition...';
+  const mostRecentAction = [...explore.steps].reverse().find((s) => !isThinkingStep(s));
+  const goalText = explore.fullGoal || explore.title || 'Checking condition...';
+  const displayTitle = isInProgress && mostRecentAction?.title ? mostRecentAction.title : goalText;
+  const prefix = isInProgress ? 'Exploring' : isError ? 'Explore failed' : 'Explored';
 
   return (
     <div
@@ -67,7 +70,7 @@ function ExploreChipHeader({
       )}
 
       <span className="text-[11px] text-foreground/70 flex-1 truncate">
-        {isInProgress ? 'Exploring' : 'Explored'} - {displayTitle.replace(/\n/g, ' ')}
+        {prefix} - {displayTitle.replace(/\n/g, ' ')}
       </span>
 
       {isLive && isInProgress && (

@@ -22,17 +22,14 @@
 import { useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
-import { IS_DEV_MODE, ADMIN_USER_ID, DEFAULT_RESTART_THRESHOLD } from '../config';
+import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD } from '../config';
 import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
 import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceLimit';
 import { AttachmentList } from './query-input/AttachmentList';
 import { InputContainer } from './query-input/InputContainer';
 import { TopBar } from './query-input/TopBar';
-import {
-  buildDripContainerStyle,
-  buildMarbleBackgroundStyle,
-} from './query-input/dripStyles';
+import { buildDripContainerStyle, buildMarbleBackgroundStyle } from './query-input/dripStyles';
 
 export type { QueryInputProps };
 export type { DripStyles, PendingAttachment } from './query-input/types';
@@ -132,9 +129,9 @@ function QueryInputBody(props: QueryInputBodyProps) {
     handleSubmit,
   } = props;
   const { user: authUser } = useAuth();
-  const showTestPrompts = IS_DEV_MODE || authUser?.id === ADMIN_USER_ID;
-  const agentCompleted =
-    agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
+  const showTestPrompts =
+    IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id));
+  const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
 
   return (
     <>
