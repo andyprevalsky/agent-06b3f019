@@ -7,7 +7,7 @@
 import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
 import { useAuth, useAppData, type AgentDetail } from '../../hooks';
-import { ADMIN_USER_ID, IS_DEV_MODE } from '../../config';
+import { ADMIN_USER_IDS, IS_DEV_MODE } from '../../config';
 import { getModelContextWindow, formatCentsAsDollars } from './helpers';
 import PriceLimitRow from './PriceLimitRow';
 import type { UsePriceLimitEditResult } from './usePriceLimitEdit';
@@ -30,7 +30,7 @@ export default function MetricsSection({ agent, priceLimitEdit }: MetricsSection
   const totalTokensOut = (agent.tokens_out || 0) + (agent.tool_tokens_out || 0);
   const treeCostDisplay = formatCentsAsDollars(agent.tree_cost_cents || 0);
 
-  const showDebug = IS_DEV_MODE || authUser?.id === ADMIN_USER_ID;
+  const showDebug = IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id));
 
   return (
     <div className="space-y-3">

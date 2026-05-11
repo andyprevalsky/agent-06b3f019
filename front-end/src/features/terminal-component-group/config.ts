@@ -34,8 +34,11 @@ export const IS_DEV_MODE: boolean = import.meta.env.DEV === true;
 /** True when running inside Vitest (vitest sets `import.meta.env.VITEST`). */
 export const IS_VITEST: boolean = Boolean(import.meta.env.VITEST);
 
-/** Admin user ID that unlocks dev-only affordances on prod (Andy's account). */
-export const ADMIN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+/** Admin/test user IDs that unlock dev-only affordances on prod. */
+export const ADMIN_USER_IDS: readonly string[] = [
+  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
+  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
+];
 
 /** Upper bound for a single attachment (20MB — canonical client-side cap). */
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
