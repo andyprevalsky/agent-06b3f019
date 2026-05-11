@@ -2176,12 +2176,20 @@ async def main_async(args):
     #   - ratchet 30%, observed 32%   → stay at 30  (under 32.5% trigger)
     #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
     #   - ratchet 30%, observed 37.6% → bump to 35
+    # Cold-vs-warm baseline: short tasks with 1-2 main-loop LLM calls
+    # (browser-smoke, claude-code-agent) have cache hit % dominated by
+    # whether iter-1's writes are still in prod's 5-min Anthropic
+    # ephemeral cache. Deploy gates often run after a quiet period, so
+    # ratchets for those tasks reflect the COLD-CACHE floor — not the
+    # warm-cache ceiling seen when smoke runs back-to-back. Tasks with
+    # >=3 main-loop calls (spawn-sub-agents, parallel-tool-calls) reach
+    # warm cache within the same run, so their ratchets stay higher.
     PER_TASK_CACHE_HIT_RATCHET = {
         "chat-mode": 0.0,  # observed 0.0% (no LLM cache path)
         "spawn-sub-agents": 20.0,  # observed 24.4%
         "parallel-tool-calls": 25.0,  # observed 29.1%
-        "claude-code-agent": 60.0,  # observed 63.9%
-        "browser-smoke": 45.0,  # observed 47.8%
+        "claude-code-agent": 40.0,  # cold-cache floor (observed 44.2% w/ cold prod)
+        "browser-smoke": 35.0,  # cold-cache floor (observed 38.5% w/ cold prod)
     }
 
     cache_failures: list[tuple[str, str, float, float]] = []
