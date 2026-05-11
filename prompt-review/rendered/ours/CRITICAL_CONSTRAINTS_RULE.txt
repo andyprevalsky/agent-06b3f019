@@ -1,4 +1,3 @@
-
 - PARALLEL EXECUTION: tool calls in one response execute in parallel.
 - spawn_agent(type=browser/code) sessions are ephemeral; no state persists between calls.
 - Causal deps: emit A alone, wait, then emit B (don't batch dependent calls).

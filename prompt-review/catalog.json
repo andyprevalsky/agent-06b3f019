@@ -117,12 +117,7 @@
         "network",
         "integrations",
         "system"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/utils/prompts.py",
@@ -882,12 +877,7 @@
         "system",
         "goal",
         "files"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/domains/spawn_claude_code_agent/service.py",
@@ -902,12 +892,7 @@
         "terminal",
         "system",
         "completion"
-      ],
-      "matches": {
-        "claude": "claude_getSystemPrompt",
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/domains/message_person/repo.py",
@@ -922,12 +907,7 @@
         "voice",
         "email",
         "imessage"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/domains/wait_for/service.py",
@@ -941,12 +921,7 @@
         "classifier",
         "evidence",
         "polling"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/domains/spawn_browser_agent_v3/repo.py",
@@ -960,12 +935,7 @@
         "llm",
         "page",
         "content"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/domains/param_populator/service.py",
@@ -1029,12 +999,7 @@
         "summary",
         "learnings",
         "history"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/helpers/summarize.py",
@@ -1048,12 +1013,7 @@
         "agent",
         "outcome",
         "user"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "agents/helpers/gepa_v3_strategy_override.txt",
@@ -1190,12 +1150,7 @@
         "state",
         "dynamic",
         "context"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
@@ -1209,12 +1164,7 @@
         "custom",
         "instructions",
         "system"
-      ],
-      "matches": {
-        "claude": null,
-        "openclaw": null,
-        "hermes": null
-      }
+      ]
     },
     {
       "path": "back-end/src/providers/openrouter.ts",

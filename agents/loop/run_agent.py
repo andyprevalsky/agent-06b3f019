@@ -212,10 +212,7 @@ async def run_agent(  # noqa: C901
     AgentAction = (
         response_model
         if response_model
-        else create_agent_action_model(
-            tools,
-            include_attempt_completion_result=skip_verification,
-        )
+        else create_agent_action_model(tools)
     )
 
     def _log_cache_summary(status: str):
@@ -776,8 +773,10 @@ async def run_agent(  # noqa: C901
             if tool_name == "set_plan":
                 set_plan_called = True
 
-            # Special: attempt_completion - handle separately (should be alone due to llm.py filtering)
-            if tool_name == "attempt_completion":
+            # Special: attempt_completion (verified) and attempt_completion_with_result
+            # (skip_verification) - handle separately. They should be alone in the turn
+            # due to llm.py filtering.
+            if tool_name in ("attempt_completion", "attempt_completion_with_result"):
                 attempt_completion_tool = (tool_name, tool_args, tool_call_id)
                 continue
 

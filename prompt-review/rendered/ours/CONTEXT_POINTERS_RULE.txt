@@ -1,4 +1,3 @@
-
 Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
 Use them instead of rewriting:
 - Prefer @ref:message: pointers in tool arguments and goal strings over rewriting content.

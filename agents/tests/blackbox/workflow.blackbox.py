@@ -463,7 +463,6 @@ async def mock_call_llm_activity(
     extra_user_message: Optional[str] = None,
     required_tool: Optional[str] = None,
     skip_cache_write: bool = False,
-    include_attempt_completion_result: bool = False,
     llm_only_user_preamble: str = "",
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,

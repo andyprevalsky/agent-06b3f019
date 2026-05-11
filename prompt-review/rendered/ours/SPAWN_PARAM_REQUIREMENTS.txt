@@ -1,7 +1,118 @@
 {
-  "spawn_explore_agent": "\nSPAWN TYPE: explore\n- Set type=\"explore\"\n- Required: goal (str)\n- Do NOT provide output_schema, start_url, or github_repo_link\n- Explore agents return free-form research summaries\n\n# Self-Contained Goal\nSpawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself.\n\nCONTEXT GATES (compute optimization):\n- Optional: context_gates (object with boolean values, default all true)\n- For explore agents, two gates apply:\n  - \"network\": false skips injecting 500-contact network metadata into explore prompt\n  - \"recent_communications\": false skips local message thread summary\n- Use for pure web research tasks that don't need the user's contacts or messages\n- Example: context_gates: {\"network\": false, \"recent_communications\": false}",
-  "spawn_browser_agent": "\nSPAWN TYPE: browser\n- Set type=\"browser\"\n- Required: goal (str), start_url (str), output_schema (object with field names -> types)\n- output_schema is required, define the structured data you expect back\n- Example output_schema: {\"order_confirmation\": \"str\", \"total_price\": \"str\"}\n\n# Self-Contained Goal\nSpawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself.",
-  "spawn_code_agent": "\nSPAWN TYPE: code\n- Set type=\"code\"\n- Required: goal (str), output_schema (object with field names -> types)\n- output_schema is required, define the structured data you expect back\n- Optional: github_repo_link (str), attachments (list of filenames)\n- Example output_schema: {\"result\": \"str\", \"generated_file\": \"file_pointer\"}\n\n# Self-Contained Goal\nSpawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself.",
-  "spawn_sub_agent": "\nSPAWN TYPE: sub_agent\n- Set type=\"sub_agent\"\n- Required: goal (str), output_schema (object with field names -> types)\n- output_schema is required, define the structured data you expect back\n- Required by policy: start_phase (\"PLAN\" or \"EXECUTE\")\n  - \"EXECUTE\" for clear direct tasks expected to need 1-2 tool calls\n  - \"PLAN\" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination\n  - when in doubt, prefer \"PLAN\"\n- Optional: attachments (list of filenames), context_gates (object)\n- Example output_schema: {\"summary\": \"str\", \"findings\": \"list[str]\"}\n\n# Self-Contained Goal\nSpawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself.\nBAD: \"Book the boxing class\", sub-agent has no idea which class, where, or for whom\nGOOD: \"Book the 6pm Tuesday boxing class at Dallas MMA (2000 Main St). Name: Andy, phone: 555-1234. Monthly membership, $150/mo.\"\n\nSUB-AGENT TOOLS:\nSub-agents have access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),\nwait_for, call_phone_number, message_person, attempt_completion.\n\nCONTEXT GATES (compute optimization):\n- Optional: context_gates (object with boolean values, default all true)\n- Controls which user context sections the sub-agent receives\n- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files\n- Only set a gate to false when you are certain the sub-agent does NOT need that context to accomplish its goal\n- Default is all true; when in doubt, leave gates open\n- Use your best judgment based on the goal. These examples are non-comprehensive:\n  - A browser purchase task probably doesn't need network or recent_communications\n  - A code/data task probably doesn't need network or recent_communications\n  - A communication task (email/SMS) likely needs everything, especially network + recent_communications\n  - shared_files controls whether file attachments are resolved into the LLM context\n- Example: context_gates: {\"network\": false, \"recent_communications\": false}",
-  "spawn_sub_agent_for_each": "\nSPAWN TYPE: for_each\n- Set type=\"for_each\"\n- Required: goal (str), output_schema (object with field names -> types), and either:\n  - items (list), OR\n  - items_csv (string)\n- The goal is shared across all rows/items; for_each applies it once per row/item downstream\n- Downstream behavior: one spawn_sub_agent child is started per row/item goal\n- Required by policy: start_phase (\"PLAN\" or \"EXECUTE\")\n  - \"EXECUTE\" for clear direct tasks expected to need 1-2 tool calls\n  - \"PLAN\" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination\n  - when in doubt, prefer \"PLAN\"\n- Optional: attachments (list of filenames), context_gates (object)\n- Keep for_each lightweight: same high-level goal + one child per item/row\n\n# Self-Contained Goal\nSpawned agents have NO access to your conversation, user messages, or context.\nThe goal is their ONLY source of information. Include all relevant details:\nuser preferences, constraints, addresses, names, budget, deadlines, prior\nresearch findings. Be specific and explicit, and include all load-bearing\ndetails in the goal itself.\n\nFOR_EACH CHILD TOOLS:\nEach child has access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),\nwait_for, call_phone_number, message_person, attempt_completion.\n\nCONTEXT GATES (compute optimization):\n- Optional: context_gates (object with boolean values, default all true)\n- Only set a gate to false when certain the for_each children do NOT need that context\n- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files\n- Example: context_gates: {\"network\": false, \"recent_communications\": false}"
+  "spawn_explore_agent": "
+SPAWN TYPE: explore
+- Set type=\"explore\"
+- Required: goal (str)
+- Do NOT provide output_schema, start_url, or github_repo_link
+- Explore agents return free-form research summaries
+
+# Self-Contained Goal
+Spawned agents have NO access to your conversation, user messages, or context.
+The goal is their ONLY source of information. Include all relevant details:
+user preferences, constraints, addresses, names, budget, deadlines, prior
+research findings. Be specific and explicit, and include all load-bearing
+details in the goal itself.
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- For explore agents, two gates apply:
+  - \"network\": false skips injecting 500-contact network metadata into explore prompt
+  - \"recent_communications\": false skips local message thread summary
+- Use for pure web research tasks that don't need the user's contacts or messages
+- Example: context_gates: {\"network\": false, \"recent_communications\": false}",
+  "spawn_browser_agent": "
+SPAWN TYPE: browser
+- Set type=\"browser\"
+- Required: goal (str), start_url (str), output_schema (object with field names -> types)
+- output_schema is required, define the structured data you expect back
+- Example output_schema: {\"order_confirmation\": \"str\", \"total_price\": \"str\"}
+
+# Self-Contained Goal
+Spawned agents have NO access to your conversation, user messages, or context.
+The goal is their ONLY source of information. Include all relevant details:
+user preferences, constraints, addresses, names, budget, deadlines, prior
+research findings. Be specific and explicit, and include all load-bearing
+details in the goal itself.",
+  "spawn_code_agent": "
+SPAWN TYPE: code
+- Set type=\"code\"
+- Required: goal (str), output_schema (object with field names -> types)
+- output_schema is required, define the structured data you expect back
+- Optional: github_repo_link (str), attachments (list of filenames)
+- Example output_schema: {\"result\": \"str\", \"generated_file\": \"file_pointer\"}
+
+# Self-Contained Goal
+Spawned agents have NO access to your conversation, user messages, or context.
+The goal is their ONLY source of information. Include all relevant details:
+user preferences, constraints, addresses, names, budget, deadlines, prior
+research findings. Be specific and explicit, and include all load-bearing
+details in the goal itself.",
+  "spawn_sub_agent": "
+SPAWN TYPE: sub_agent
+- Set type=\"sub_agent\"
+- Required: goal (str), output_schema (object with field names -> types)
+- output_schema is required, define the structured data you expect back
+- Required by policy: start_phase (\"PLAN\" or \"EXECUTE\")
+  - \"EXECUTE\" for clear direct tasks expected to need 1-2 tool calls
+  - \"PLAN\" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer \"PLAN\"
+- Optional: attachments (list of filenames), context_gates (object)
+- Example output_schema: {\"summary\": \"str\", \"findings\": \"list[str]\"}
+
+# Self-Contained Goal
+Spawned agents have NO access to your conversation, user messages, or context.
+The goal is their ONLY source of information. Include all relevant details:
+user preferences, constraints, addresses, names, budget, deadlines, prior
+research findings. Be specific and explicit, and include all load-bearing
+details in the goal itself.
+BAD: \"Book the boxing class\", sub-agent has no idea which class, where, or for whom
+GOOD: \"Book the 6pm Tuesday boxing class at Dallas MMA (2000 Main St). Name: Andy, phone: 555-1234. Monthly membership, $150/mo.\"
+
+SUB-AGENT TOOLS:
+Sub-agents have access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),
+wait_for, call_phone_number, message_person, attempt_completion.
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- Controls which user context sections the sub-agent receives
+- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files
+- Only set a gate to false when you are certain the sub-agent does NOT need that context to accomplish its goal
+- Default is all true; when in doubt, leave gates open
+- Use your best judgment based on the goal. These examples are non-comprehensive:
+  - A browser purchase task probably doesn't need network or recent_communications
+  - A code/data task probably doesn't need network or recent_communications
+  - A communication task (email/SMS) likely needs everything, especially network + recent_communications
+  - shared_files controls whether file attachments are resolved into the LLM context
+- Example: context_gates: {\"network\": false, \"recent_communications\": false}",
+  "spawn_sub_agent_for_each": "
+SPAWN TYPE: for_each
+- Set type=\"for_each\"
+- Required: goal (str), output_schema (object with field names -> types), and either:
+  - items (list), OR
+  - items_csv (string)
+- The goal is shared across all rows/items; for_each applies it once per row/item downstream
+- Downstream behavior: one spawn_sub_agent child is started per row/item goal
+- Required by policy: start_phase (\"PLAN\" or \"EXECUTE\")
+  - \"EXECUTE\" for clear direct tasks expected to need 1-2 tool calls
+  - \"PLAN\" for complex tasks expected to need 3+ tool calls, research, comparison, or multi-step coordination
+  - when in doubt, prefer \"PLAN\"
+- Optional: attachments (list of filenames), context_gates (object)
+- Keep for_each lightweight: same high-level goal + one child per item/row
+
+# Self-Contained Goal
+Spawned agents have NO access to your conversation, user messages, or context.
+The goal is their ONLY source of information. Include all relevant details:
+user preferences, constraints, addresses, names, budget, deadlines, prior
+research findings. Be specific and explicit, and include all load-bearing
+details in the goal itself.
+
+FOR_EACH CHILD TOOLS:
+Each child has access to the full EXECUTE phase toolset: spawn_agent (browser, code, sub_agent, explore),
+wait_for, call_phone_number, message_person, attempt_completion.
+
+CONTEXT GATES (compute optimization):
+- Optional: context_gates (object with boolean values, default all true)
+- Only set a gate to false when certain the for_each children do NOT need that context
+- Keys: user_profile, authenticated_sessions, integrations, recent_communications, network, custom_system_prompt, shared_files
+- Example: context_gates: {\"network\": false, \"recent_communications\": false}"
 }

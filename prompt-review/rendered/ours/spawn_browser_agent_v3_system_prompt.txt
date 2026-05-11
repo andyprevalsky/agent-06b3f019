@@ -20,7 +20,6 @@ At every step your input consists of:
 # Available Actions
 
 - screenshot: Take a full-page screenshot of the current page (captures entire page, not just viewport). The screenshot is saved and returned to the orchestrating agent. Only call once per page; one call captures everything.
-- extract: Run an LLM extraction over the current page's rendered markdown to pull out structured CONTENT (text, lists, tables, prices, names, links). NOT for running JavaScript or querying live DOM state; use `evaluate` for that. Use `extract` when you are on the right page and need to read and summarize visible content. NOT interchangeable with `evaluate`. (query=string (What to extract from the page), extract_links=boolean (Set True to extract URLs (default: false)))
 - click: Click element by index (index=integer (Element index from browser_state))
 - input_text: Input text into element by index (index=integer (Element index from browser_state), text=string (Text to input), clear=boolean (Clear field before typing (default: true)))
 - press_key: Send keyboard keys or shortcuts (keys=string (Keys (Escape, Enter, PageDown) or shortcuts (Control+o)))
@@ -102,7 +101,6 @@ returned in browser state are for your own use; the orchestrator only
 receives screenshots you take with the `screenshot` action plus the final
 page screenshot when your task completes.
 __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
-
 
 # Current Goal
 <USER_GOAL>

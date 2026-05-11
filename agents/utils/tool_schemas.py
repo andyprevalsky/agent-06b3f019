@@ -312,6 +312,7 @@ class GrepTool(BaseModel):
             "messages: iMessage/email records. Searches only message body text by case-insensitive substring. "
             "Results are grouped by person/thread and include surrounding messages with channel, from, to, "
             "timestamp, message, and is_match. Supports person_id and since. "
+            "Empty pattern returns the most recent messages within the `since` window (default 365 days). "
             "network: Contact database. Searches firstName, lastName, email, phoneNumber, company, title, "
             "relation, and communicationFrequency by case-insensitive substring. Results include person_id, "
             "first_name, last_name, phone_number, email, company, title, relation, communication_frequency, "
@@ -534,13 +535,34 @@ class AttemptCompletionTool(BaseModel):
 
 
 class AttemptCompletionWithResultTool(BaseModel):
-    """Trigger completion for unverified loops that need a final handoff payload."""
+    """Submit your final findings to the parent agent and end your loop.
 
-    tool: Literal["attempt_completion"]
-    result: Optional[str] = Field(
-        default=None,
+    The `result` string you submit here is the ONLY payload the parent
+    agent receives. There is no future turn after this call returns, so
+    your `result` must be complete and self-contained when you emit it.
+
+    Requirements:
+    - Complete: do not defer the answer. There is no future turn.
+    - Grounded: every claim must be backed by evidence from your prior
+      tool results. If a fact cannot be found, report the gap explicitly
+      ("No results for [X] after searching [keywords]") rather than
+      fabricating it.
+    - Token-efficient, punctual, and information-dense. Strip filler;
+      every sentence should carry signal.
+    - Cite sources inline with [N] tags and end `result` with a
+      `Sources:` block mapping each tag to its URL or source identifier.
+
+    Emit a single `attempt_completion_with_result` tool_use block, do
+    not batch it with other tool calls.
+    """
+
+    tool: Literal["attempt_completion_with_result"]
+    result: str = Field(
         description=(
-            "Optional final response payload for skip_verification=true loops, such as explore-agent handoffs."
+            "The final findings handed to the parent agent. This is the "
+            "ONLY payload the parent receives as the spawn_agent tool "
+            "result. Must be self-contained and grounded in sources from "
+            "prior tool calls."
         ),
     )
 
@@ -584,6 +606,9 @@ TOOL_MODELS: ToolRegistry = {
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
     "attempt_completion": AttemptCompletionTool,
+    # Sub-agent (skip_verification=True) completion tool — carries the
+    # final handoff payload to the parent in `result`.
+    "attempt_completion_with_result": AttemptCompletionWithResultTool,
     # Phone calling tool
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
@@ -591,7 +616,7 @@ TOOL_MODELS: ToolRegistry = {
 }
 
 # Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion"]
+EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion_with_result"]
 
 
 # ============================================================================
@@ -663,7 +688,6 @@ def render_tool_list(
 def create_agent_action_model(
     available_tool_names: List[str],
     tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
-    include_attempt_completion_result: bool = False,
 ) -> Type[BaseModel]:
     """
     Dynamically create an AgentAction Pydantic model based on available tools.
@@ -680,8 +704,6 @@ def create_agent_action_model(
     Args:
         available_tool_names: List of tool names this agent can use
         tool_registry: Optional custom registry (defaults to TOOL_MODELS)
-        include_attempt_completion_result: If true, expose the optional
-            attempt_completion.result handoff payload for unverified loops.
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
@@ -692,14 +714,7 @@ def create_agent_action_model(
     tool_types = []
     for name in available_tool_names:
         if name in registry:
-            model = registry[name]
-            if (
-                include_attempt_completion_result
-                and name == "attempt_completion"
-                and model is AttemptCompletionTool
-            ):
-                model = AttemptCompletionWithResultTool
-            tool_types.append(model)
+            tool_types.append(registry[name])
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 

@@ -31,26 +31,6 @@ INSTRUCTIONS:
 3. Explain your reasoning
 4. Call exactly one tool: spawn_explore_agent
 5. Do not skip the tool call even if the goal appears already accomplished in context
-SPAWN TYPE: explore
-- Set type="explore"
-- Required: goal (str)
-- Do NOT provide output_schema, start_url, or github_repo_link
-- Explore agents return free-form research summaries
-
-# Self-Contained Goal
-Spawned agents have NO access to your conversation, user messages, or context.
-The goal is their ONLY source of information. Include all relevant details:
-user preferences, constraints, addresses, names, budget, deadlines, prior
-research findings. Be specific and explicit, and include all load-bearing
-details in the goal itself.
-
-CONTEXT GATES (compute optimization):
-- Optional: context_gates (object with boolean values, default all true)
-- For explore agents, two gates apply:
-  - "network": false skips injecting 500-contact network metadata into explore prompt
-  - "recent_communications": false skips local message thread summary
-- Use for pure web research tasks that don't need the user's contacts or messages
-- Example: context_gates: {"network": false, "recent_communications": false}
 
 Execute the task now by calling spawn_explore_agent with the correct parameters.
 

@@ -31,7 +31,6 @@ from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
-    fetch_full_network_metadata,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -39,7 +38,6 @@ from domains.spawn_agent.service import (
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.tracing import span
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
-from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
@@ -100,25 +98,27 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
         *,
         task_id: Optional[str] = None,
-        network_metadata: Optional[str] = None,
-        local_data_summary: Optional[str] = None,
         display_goal: Optional[str] = None,
         capture_tool_results: Optional[List[str]] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn explore agent - research sub-agent.
 
-        Optional kwargs allow callers (e.g. wait_for) to provide pre-fetched
-        data and a known task_id, avoiding redundant fetches and enabling
-        cross-referencing between parent tool events and explore messages.
+        Optional kwargs allow callers (e.g. wait_for) to provide a known
+        task_id, enabling cross-referencing between parent tool events and
+        explore messages.
         display_goal overrides the goal shown in the UI (e.g. clean condition text).
         capture_tool_results, if supplied, is extended with the sub-agent's raw
         tool-call outputs. This is out-of-band so the 100+ KB trace never gets
         persisted into message metadata or shipped across activity boundaries.
+
+        Contact discovery + message-thread lookup happen inside the explore
+        agent on demand via the grep tool's network / agent_network_* /
+        messages source modes — we no longer prefetch network_metadata or
+        local_data_summary before spawning.
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
-        context_gates = tool_call.get("context_gates") or {}
 
         # IN_PROGRESS
         yield ToolEvent(
@@ -130,29 +130,6 @@ class SpawnAgentManager(ToolManager):
         )
 
         try:
-            # Fetch network metadata and local data summary if not provided.
-            if network_metadata is None:
-                if context_gates.get("network", True):
-                    network_metadata = await workflow.execute_activity(
-                        fetch_full_network_metadata,
-                        args=[workflow_instance.user_id],
-                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
-                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
-                    )
-                else:
-                    network_metadata = ""
-
-            if local_data_summary is None:
-                if context_gates.get("recent_communications", True):
-                    local_data_summary = await workflow.execute_activity(
-                        fetch_local_data_summary,
-                        args=[workflow_instance.user_id],
-                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
-                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
-                    )
-                else:
-                    local_data_summary = ""
-
             # Resolve requested attachments from workflow context
             attachment_texts: List[str] = []
             requested_attachments = tool_call.get("attachments")
@@ -237,8 +214,6 @@ class SpawnAgentManager(ToolManager):
                         workflow_instance.user_id,
                         goal,
                         model,
-                        network_metadata,
-                        local_data_summary,
                         task_id,
                         tool_call_id,
                         claude_token,

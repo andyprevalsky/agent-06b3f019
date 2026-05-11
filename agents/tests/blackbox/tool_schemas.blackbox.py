@@ -97,14 +97,11 @@ def test_create_agent_action_model_single_tool():
 
 
 def test_create_agent_action_model_injects_completion_result_only_when_requested():
-    """attempt_completion.result appears only for skip-verification schemas."""
+    """attempt_completion_with_result carries the result field; attempt_completion does not."""
     from utils.tool_schemas import create_agent_action_model
 
     verified_model = create_agent_action_model(["attempt_completion"])
-    unverified_model = create_agent_action_model(
-        ["attempt_completion"],
-        include_attempt_completion_result=True,
-    )
+    unverified_model = create_agent_action_model(["attempt_completion_with_result"])
 
     verified_schema = verified_model.model_json_schema()
     unverified_schema = unverified_model.model_json_schema()

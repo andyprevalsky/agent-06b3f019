@@ -118,20 +118,20 @@ def test_build_planner_system_prompt_is_static_across_calls():
 
 
 def test_explore_agent_system_prompt_template_is_constant():
-    """EXPLORE_AGENT_SYSTEM_PROMPT must be a constant string with placeholders.
+    """EXPLORE_AGENT_SYSTEM_PROMPT must be a constant string with NO placeholders.
 
-    The placeholders {network_metadata}/{local_data_summary} are filled in by
-    the spawn_agent service. The TEMPLATE itself must keep those placeholders
-    so a fresh value flows through per-call rather than being baked at import
-    time. We also confirm the module-level constant is string-equal across
-    imports — i.e. it's not generated dynamically.
+    The prompt is sent verbatim. Contact + message-thread context is fetched
+    on-demand inside the explore agent via the grep tool's network /
+    agent_network_* / messages source modes, NOT via prefetched
+    system-prompt blocks. We confirm the module-level constant is
+    string-equal across imports — i.e. it's not generated dynamically.
 
-    NOTE: ``{current_timestamp}`` was REMOVED from this template. A timestamp
-    in the system prompt breaks Anthropic prompt caching for every explore
-    sub-agent call. The current time is now injected as a per-call ``[STATE:
-    now=...]`` line on the user message at ``spawn_agent/service.py``, not
-    via this template. If anyone re-introduces the placeholder, the cache
-    will silently break across all explore agents.
+    NOTE: ``{current_timestamp}`` is also REMOVED. A timestamp in the
+    system prompt breaks Anthropic prompt caching for every explore
+    sub-agent call. The current time is injected as a per-call ``[STATE:
+    now=...]`` line on the user message at ``spawn_agent/service.py``,
+    not via this template. If anyone re-introduces dynamic placeholders,
+    the cache will silently break across all explore agents.
     """
     from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT as a
     from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT as b
@@ -140,32 +140,33 @@ def test_explore_agent_system_prompt_template_is_constant():
     assert "{current_timestamp}" not in a, (
         "EXPLORE_AGENT_SYSTEM_PROMPT must NOT include a {current_timestamp} "
         "placeholder. A timestamp in the static system prompt kills cache "
-        "hits for every explore sub-agent. Inject the time as a [STATE: ...] "
-        "line on the user message in spawn_agent.service instead."
+        "hits for every explore sub-agent."
     )
-    assert "{network_metadata}" in a, (
-        "EXPLORE_AGENT_SYSTEM_PROMPT lost its {network_metadata} placeholder."
+    assert "{network_metadata}" not in a, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT must NOT include {network_metadata}. "
+        "Contact data is fetched on-demand via grep(source='network')."
     )
-    assert "{local_data_summary}" in a, (
-        "EXPLORE_AGENT_SYSTEM_PROMPT lost its {local_data_summary} placeholder."
+    assert "{local_data_summary}" not in a, (
+        "EXPLORE_AGENT_SYSTEM_PROMPT must NOT include {local_data_summary}. "
+        "Message threads are fetched on-demand via grep(source='messages')."
     )
 
 
 def test_explore_agent_system_prompt_is_static_across_calls():
-    """EXPLORE_AGENT_SYSTEM_PROMPT.format() must be byte-identical across calls.
+    """EXPLORE_AGENT_SYSTEM_PROMPT must be byte-identical across reads.
 
     The explore agent system prompt is sent on every iteration of every
     explore sub-agent. A timestamp slipping in here would kill cache hits
-    across all explore steps. This test calls .format() with the same inputs
-    twice and asserts byte-equality, mirroring the v3 browser-agent invariant.
+    across all explore steps. This test imports it twice and asserts
+    byte-equality, mirroring the v3 browser-agent invariant.
     """
     from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 
-    a = EXPLORE_AGENT_SYSTEM_PROMPT.format(network_metadata="", local_data_summary="")
-    b = EXPLORE_AGENT_SYSTEM_PROMPT.format(network_metadata="", local_data_summary="")
+    a = EXPLORE_AGENT_SYSTEM_PROMPT
+    b = EXPLORE_AGENT_SYSTEM_PROMPT
     assert a == b, (
-        "EXPLORE_AGENT_SYSTEM_PROMPT.format() is non-deterministic across "
-        "calls. The explore-agent prompt is cached per-spawn — any "
+        "EXPLORE_AGENT_SYSTEM_PROMPT is non-deterministic across reads. "
+        "The explore-agent prompt is cached per-spawn — any "
         "datetime.now()/time.time() call in the template breaks the cache. "
         "Per-step state must live in a [STATE: ...] line on the user "
         "message, not in this template."
@@ -374,7 +375,7 @@ def test_attempt_completion_base_schema_has_no_result_field():
 
 
 def test_attempt_completion_result_schema_is_skip_verification_variant():
-    """Optional result exists only on the explicit unverified handoff variant."""
+    """Required result exists only on the explicit unverified handoff variant."""
     from utils.tool_schemas import AttemptCompletionWithResultTool
 
     fields = set(AttemptCompletionWithResultTool.model_fields.keys())
@@ -382,7 +383,9 @@ def test_attempt_completion_result_schema_is_skip_verification_variant():
         f"AttemptCompletionWithResultTool.model_fields = {fields}, "
         f"expected {{'tool', 'result'}}."
     )
-    assert AttemptCompletionWithResultTool.model_fields["result"].is_required() is False
+    # The sub-agent handoff payload MUST be required — an empty result means
+    # the parent receives no evidence and either hallucinates or re-spawns.
+    assert AttemptCompletionWithResultTool.model_fields["result"].is_required() is True
 
 
 def test_attempt_completion_result_read_is_skip_verification_scoped():
@@ -1398,9 +1401,7 @@ def test_no_all_caps_underlined_section_labels_in_prompts():
         "main": build_system_prompt("EXECUTE", ["attempt_completion"]),
         "planner": build_planner_system_prompt("desc"),
         "verifier": build_verifier_prompt(),
-        "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
-            network_metadata="", local_data_summary=""
-        ),
+        "explore": EXPLORE_AGENT_SYSTEM_PROMPT,
         "browser_use": build_browser_use_system_prompt(["click"]),
         "browser_v3": get_browser_system_prompt(
             "a" * 60, custom_instructions="", available_files=[]
@@ -1590,9 +1591,7 @@ def test_all_caps_marker_count_under_limit():
         "main_plan": build_system_prompt("PLAN", ["set_plan"]),
         "planner": build_planner_system_prompt("desc"),
         "verifier": build_verifier_prompt(),
-        "explore": EXPLORE_AGENT_SYSTEM_PROMPT.format(
-            network_metadata="", local_data_summary=""
-        ),
+        "explore": EXPLORE_AGENT_SYSTEM_PROMPT,
         "browser_use": build_browser_use_system_prompt(["click"]),
         "browser_v3": get_browser_system_prompt(
             "a" * 60, custom_instructions="", available_files=[]

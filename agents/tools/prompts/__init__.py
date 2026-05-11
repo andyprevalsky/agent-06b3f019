@@ -7,6 +7,9 @@ do NOT restate the schema and complement (not duplicate) the Pydantic descriptio
 """
 
 from tools.prompts.attempt_completion import PROMPT as attempt_completion_prompt
+from tools.prompts.attempt_completion_with_result import (
+    PROMPT as attempt_completion_with_result_prompt,
+)
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
@@ -37,6 +40,7 @@ TOOL_PROMPTS: dict[str, str] = {
     # Workflow
     "set_plan": set_plan_prompt,
     "attempt_completion": attempt_completion_prompt,
+    "attempt_completion_with_result": attempt_completion_with_result_prompt,
     "wait_for": wait_for_prompt,
 }
 

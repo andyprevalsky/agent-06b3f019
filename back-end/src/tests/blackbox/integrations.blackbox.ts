@@ -369,11 +369,22 @@ const AnonymousResponse = z.object({
   session: z.object({ access_token: z.string() }),
 });
 
+const createdAnonUserIds = new Set<string>();
+
 async function createAnonSession(): Promise<{ accessToken: string; userId: string }> {
   const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(AnonymousResponse, res.data, 'anonymous setup');
+  createdAnonUserIds.add(body.user.id);
   return { accessToken: body.session.access_token, userId: body.user.id };
+}
+
+async function teardown(): Promise<void> {
+  if (createdAnonUserIds.size === 0) return;
+  const userIds = Array.from(createdAnonUserIds);
+  const { count } = await prisma.integration.deleteMany({ where: { userId: { in: userIds } } });
+  console.log(`\nTeardown: deleted ${count} Integration rows across ${userIds.length} anon users`);
+  createdAnonUserIds.clear();
 }
 
 /** Generate a unique integration name for test isolation. */
@@ -5184,6 +5195,8 @@ async function runAll() {
   console.log('\n' + '='.repeat(50));
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
 
+  await teardown();
+
   if (failed > 0) {
     console.log('\nFAILURES:');
     allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
@@ -5194,7 +5207,8 @@ async function runAll() {
   process.exit(0);
 }
 
-runAll().catch((error) => {
+runAll().catch(async (error) => {
   console.error('\nBlack-box test suite crashed:', error);
+  await teardown().catch((e) => console.error('Teardown also failed:', e));
   process.exit(1);
 });

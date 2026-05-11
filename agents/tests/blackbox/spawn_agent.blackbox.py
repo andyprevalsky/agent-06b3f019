@@ -1207,8 +1207,6 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
             user_id="u-7",
             goal="research X",
             model="rose-1-lite",
-            network_metadata="net info",
-            local_data_summary="local stuff",
             task_id="task-99",
             init_tool_call_id="init-tc",
             claude_token="ctok",

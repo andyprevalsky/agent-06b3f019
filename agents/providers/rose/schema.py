@@ -11,6 +11,7 @@ shapes are adapter outputs:
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 from types import UnionType
 from typing import Any, Dict, List, Optional, Type, Union, get_args, get_origin
@@ -127,7 +128,15 @@ def build_anthropic_tools_from_response_model(
         schema = _anthropic_input_schema_for_tool_model(tool_model, strict=strict)
         tool: Dict[str, Any] = {
             "name": tool_name,
-            "description": _first_nonempty_line(tool_model.__doc__ or ""),
+            # Send the FULL Pydantic docstring as the tool description. We
+            # used to truncate to the first non-empty line, which silently
+            # dropped multi-line tool docs (usage hints, examples,
+            # when-to-use guidance) before they reached the model. The
+            # Anthropic API has no length limit on tool descriptions.
+            # `inspect.cleandoc` handles Python's standard docstring shape
+            # (first line flush against `"""`, body indented) correctly,
+            # unlike textwrap.dedent which would leave the body indented.
+            "description": inspect.cleandoc(tool_model.__doc__ or ""),
             "input_schema": schema,
         }
         if strict:

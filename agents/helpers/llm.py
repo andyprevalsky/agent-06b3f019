@@ -3816,7 +3816,6 @@ async def call_llm_activity(  # noqa: C901
     extra_user_message: Optional[str] = None,
     required_tool: Optional[str] = None,
     skip_cache_write: bool = False,
-    include_attempt_completion_result: bool = False,
     llm_only_user_preamble: str = "",
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
@@ -3857,8 +3856,6 @@ async def call_llm_activity(  # noqa: C901
         skip_cache_write: If True, skips message-level cache breakpoint (avoids
             writing a cache entry for the unique trailing message) but keeps
             system+tools markers so the shared prefix can still be read from cache.
-        include_attempt_completion_result: Include attempt_completion.result in
-            the tool schema for unverified handoff flows.
 
     Returns:
         Dict with:
@@ -3918,10 +3915,7 @@ async def call_llm_activity(  # noqa: C901
             messages.append({"role": "user", "content": extra_user_message})
 
         # Create dynamic action model
-        AgentActionModel = create_agent_action_model(
-            tool_names,
-            include_attempt_completion_result=include_attempt_completion_result,
-        )
+        AgentActionModel = create_agent_action_model(tool_names)
 
         # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it
