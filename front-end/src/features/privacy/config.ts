@@ -104,7 +104,7 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
         text: 'Search and enrichment: Exa.',
       },
       {
-        text: 'Browser automation and sandboxed execution: Browserbase, Steel, E2B.',
+        text: 'Browser automation and sandboxed execution: Browserbase, E2B.',
       },
       {
         text: 'Payments: Stripe.',

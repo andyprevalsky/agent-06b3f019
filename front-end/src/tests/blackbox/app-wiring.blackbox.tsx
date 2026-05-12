@@ -179,39 +179,53 @@ describe('App wiring', () => {
   // -----------------------------------------------------------------------
 
   describe('route content verification', () => {
-    it('/privacy shows all 7 policy sections', () => {
+    it('/privacy shows all 11 policy sections', () => {
       renderWithProviders(<AppRoutes />, { route: '/privacy' });
       expect(
         screen.getByRole('heading', { name: /1\. information we collect/i }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole('heading', { name: /2\. how our assistant operates/i }),
+        screen.getByRole('heading', { name: /2\. how we use your data/i }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole('heading', { name: /3\. third-party processing/i }),
+        screen.getByRole('heading', { name: /3\. plaid and financial data/i }),
       ).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /4\. security/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /5\. your control/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /6\. policy updates/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /7\. contact/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /4\. third-party processors/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /5\. data retention and deletion/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /6\. security/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /7\. your rights and controls/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /8\. children/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /9\. international users/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /10\. policy updates/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /11\. contact/i })).toBeInTheDocument();
     });
 
     it('/terms shows all 9 terms sections', () => {
       renderWithProviders(<AppRoutes />, { route: '/terms' });
-      expect(screen.getByRole('heading', { name: /1\. use of our website/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /2\. waitlist sign-up/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /1\. use of our service/i })).toBeInTheDocument();
       expect(
-        screen.getByRole('heading', { name: /3\. intellectual property/i }),
+        screen.getByRole('heading', { name: /2\. account registration and eligibility/i }),
       ).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /4\. no warranties/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /3\. connected financial accounts and plaid/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: /4\. ai services disclaimer/i }),
+      ).toBeInTheDocument();
       expect(
         screen.getByRole('heading', { name: /5\. limitation of liability/i }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole('heading', { name: /6\. links to other sites/i }),
+        screen.getByRole('heading', { name: /6\. intellectual property and acceptable use/i }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole('heading', { name: /7\. changes to these terms/i }),
+        screen.getByRole('heading', { name: /7\. changes to these terms and termination/i }),
       ).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /8\. sms\/text messaging/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /9\. contact/i })).toBeInTheDocument();
