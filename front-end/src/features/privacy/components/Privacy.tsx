@@ -25,6 +25,9 @@ const LINK_CLASSES = 'text-primary hover:text-primary/80 underline transition-co
 const BULLET_CLASSES = 'w-1.5 h-1.5 rounded-full mt-2 flex-shrink-0 bg-foreground';
 const DIVIDER_CLASSES = 'w-full h-px bg-gradient-to-r from-transparent via-border to-transparent';
 
+const POLICY_UPDATES_TITLE = 'Policy Updates';
+const CONTACT_TITLE = 'Contact';
+
 function SectionDivider() {
   return <div className={DIVIDER_CLASSES} />;
 }
@@ -54,13 +57,15 @@ function PolicySection({ section }: { readonly section: PrivacySection }) {
   );
 }
 
-function PolicyUpdatesSection() {
+function PolicyUpdatesSection({ section }: { readonly section: PrivacySection }) {
   return (
     <section>
-      <h2 className="text-2xl font-semibold mb-4 text-foreground">6. Policy Updates</h2>
+      <h2 className="text-2xl font-semibold mb-4 text-foreground">
+        {section.number}. {section.title}
+      </h2>
+      {section.paragraph ? <p className="text-muted-foreground mb-2">{section.paragraph}</p> : null}
       <p className="text-muted-foreground">
-        We may amend this Privacy Policy occasionally. The latest version will always be available
-        at{' '}
+        The latest version will always be available at{' '}
         <a href="/" className={LINK_CLASSES}>
           www.roselabs.ai
         </a>{' '}
@@ -70,10 +75,12 @@ function PolicyUpdatesSection() {
   );
 }
 
-function ContactSection() {
+function ContactSection({ section }: { readonly section: PrivacySection }) {
   return (
     <section>
-      <h2 className="text-2xl font-semibold mb-4 text-foreground">7. Contact</h2>
+      <h2 className="text-2xl font-semibold mb-4 text-foreground">
+        {section.number}. {section.title}
+      </h2>
       <p className="text-muted-foreground mb-2">Have questions or concerns? Reach out anytime:</p>
       <p className="text-muted-foreground">
         Email:{' '}
@@ -115,18 +122,21 @@ const Privacy = () => {
                 </p>
               </div>
 
-              {PRIVACY_SECTIONS.slice(0, 5).map((section) => (
-                <Fragment key={section.number}>
-                  <SectionDivider />
-                  <PolicySection section={section} />
-                </Fragment>
-              ))}
-
-              <SectionDivider />
-              <PolicyUpdatesSection />
-
-              <SectionDivider />
-              <ContactSection />
+              {PRIVACY_SECTIONS.map((section) => {
+                let SectionComponent: (props: { readonly section: PrivacySection }) => JSX.Element =
+                  PolicySection;
+                if (section.title === POLICY_UPDATES_TITLE) {
+                  SectionComponent = PolicyUpdatesSection;
+                } else if (section.title === CONTACT_TITLE) {
+                  SectionComponent = ContactSection;
+                }
+                return (
+                  <Fragment key={section.number}>
+                    <SectionDivider />
+                    <SectionComponent section={section} />
+                  </Fragment>
+                );
+              })}
 
               <SectionDivider />
 

@@ -69,8 +69,9 @@ function IntroCard() {
     <div className="bg-card/50 backdrop-blur-sm border border-border/50 rounded-lg p-6">
       <p className="text-lg leading-relaxed">
         Welcome to <SiteLink /> (&quot;Rose Labs&quot;, &quot;we&quot;, &quot;us&quot;, or
-        &quot;our&quot;). By using our website or joining our waitlist, you agree to these Terms of
-        Service. Please read them carefully.
+        &quot;our&quot;). These Terms of Service govern your access to and use of the Rose Labs
+        Service. By creating an account or using the Service, you agree to be bound by these Terms.
+        Please read them carefully.
       </p>
     </div>
   );
