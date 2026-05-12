@@ -59,6 +59,8 @@ coverage.xml
 *.log
 *.sqlite3
 .env
+.env.*
+!.env.example
 .venv
 env/
 **/venv/

@@ -13,21 +13,29 @@ describe('Terms page', () => {
 
   it('renders last updated date', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/last updated: february 1, 2026/i)).toBeInTheDocument();
+    expect(screen.getByText(/last updated: may 12, 2026/i)).toBeInTheDocument();
   });
 
   it('renders all 9 section headings', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByRole('heading', { name: /1\. use of our website/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /2\. waitlist sign-up/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /3\. intellectual property/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /4\. no warranties/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /1\. use of our service/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /2\. account registration and eligibility/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /3\. connected financial accounts and plaid/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /4\. ai services disclaimer/i }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('heading', { name: /5\. limitation of liability/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /6\. links to other sites/i })).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: /7\. changes to these terms/i }),
+      screen.getByRole('heading', { name: /6\. intellectual property and acceptable use/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /7\. changes to these terms and termination/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /8\. sms\/text messaging/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /9\. contact/i })).toBeInTheDocument();
@@ -36,7 +44,7 @@ describe('Terms page', () => {
   it('renders agreement statement at the bottom', () => {
     renderWithProviders(<Terms />);
     expect(
-      screen.getByText(/by using this website, you agree to these terms of service/i),
+      screen.getByText(/by using rose labs, you agree to these terms of service/i),
     ).toBeInTheDocument();
   });
 
@@ -45,51 +53,76 @@ describe('Terms page', () => {
   it('renders welcome/intro content with agreement language', () => {
     renderWithProviders(<Terms />);
     expect(
-      screen.getByText(
-        /by using our website or joining our waitlist, you agree to these terms of service/i,
-      ),
+      screen.getByText(/by creating an account or using the service, you agree to be bound/i),
     ).toBeInTheDocument();
   });
 
-  it('renders section 1 - Use of Our Website content', () => {
+  it('renders section 1 - Use of Our Service content', () => {
     renderWithProviders(<Terms />);
     expect(screen.getByText(/you may use.*only for lawful purposes/i)).toBeInTheDocument();
   });
 
-  it('renders section 2 - Waitlist Sign-Up content', () => {
+  it('renders section 2 - account registration eligibility (13+, OTP before integrations)', () => {
     renderWithProviders(<Terms />);
+    expect(screen.getByText(/at least 13 years old/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/if you join our waitlist, you agree to provide accurate information/i),
+      screen.getByText(
+        /complete sms-based one-time-passcode verification before connecting any third-party integration/i,
+      ),
     ).toBeInTheDocument();
   });
 
-  it('renders section 3 - Intellectual Property content', () => {
+  it('renders section 3 - Plaid passthrough (Plaid as service provider, end-user policy)', () => {
     renderWithProviders(<Terms />);
     expect(
-      screen.getByText(/all content on this site.*is owned by rose labs/i),
+      screen.getByText(/plaid inc\. \("plaid"\), a third-party financial data aggregator/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/plaid['’]s end user privacy policy/i)).toBeInTheDocument();
+  });
+
+  it('renders section 3 - revocation via Plaid disconnect or my.plaid.com', () => {
+    renderWithProviders(<Terms />);
+    expect(
+      screen.getByText(/you may revoke plaid['’]s access to your financial accounts/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/my\.plaid\.com/i)).toBeInTheDocument();
+  });
+
+  it('renders section 3 - not an advisor disclaimer', () => {
+    renderWithProviders(<Terms />);
+    expect(
+      screen.getByText(
+        /not a bank, broker-dealer, registered investment adviser.*certified public accountant/i,
+      ),
     ).toBeInTheDocument();
   });
 
-  it('renders section 4 - No Warranties content', () => {
-    renderWithProviders(<Terms />);
-    expect(screen.getByText(/is provided "as is."/i)).toBeInTheDocument();
-  });
-
-  it('renders section 5 - Limitation of Liability content', () => {
+  it('renders section 4 - AI services disclaimer', () => {
     renderWithProviders(<Terms />);
     expect(
-      screen.getByText(/rose labs is not liable for any damages or losses/i),
+      screen.getByText(/ai output can be inaccurate, incomplete, or out of date/i),
     ).toBeInTheDocument();
   });
 
-  it('renders section 6 - Links to Other Sites content', () => {
+  it('renders section 5 - Limitation of Liability with $100 cap', () => {
     renderWithProviders(<Terms />);
-    expect(screen.getByText(/our website may link to third-party sites/i)).toBeInTheDocument();
+    expect(screen.getByText(/one hundred u\.s\. dollars/i)).toBeInTheDocument();
   });
 
-  it('renders section 7 - Changes to These Terms content', () => {
+  it('renders section 6 - IP + acceptable use', () => {
+    renderWithProviders(<Terms />);
+    expect(
+      screen.getByText(/all content, software, branding, designs, and trademarks/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/circumvent security or authentication controls/i)).toBeInTheDocument();
+  });
+
+  it('renders section 7 - changes + termination (revokes Plaid)', () => {
     renderWithProviders(<Terms />);
     expect(screen.getByText(/we may update these terms from time to time/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/termination revokes all connected-integration tokens \(including plaid\)/i),
+    ).toBeInTheDocument();
   });
 
   it('renders section 8 - SMS/Text Messaging content', () => {
@@ -156,13 +189,13 @@ describe('Terms page', () => {
 
   // --- Contact Email ---
 
-  it('renders email links to andy@roselabs.ai', () => {
+  it('renders email links to security@roselabs.ai', () => {
     renderWithProviders(<Terms />);
-    const emailLinks = screen.getAllByRole('link', { name: /andy@roselabs\.ai/i });
+    const emailLinks = screen.getAllByRole('link', { name: /security@roselabs\.ai/i });
     // Appears in section 8 (SMS help) and section 9 (Contact)
     expect(emailLinks.length).toBe(2);
     emailLinks.forEach((link) => {
-      expect(link).toHaveAttribute('href', 'mailto:andy@roselabs.ai');
+      expect(link).toHaveAttribute('href', 'mailto:security@roselabs.ai');
     });
   });
 

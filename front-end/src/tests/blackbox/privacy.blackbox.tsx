@@ -13,152 +13,210 @@ describe('Privacy page', () => {
 
   it('renders the last updated date', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/last updated: february 1, 2026/i)).toBeInTheDocument();
+    expect(screen.getByText(/last updated: may 12, 2026/i)).toBeInTheDocument();
   });
 
-  it('renders all 7 section headings', () => {
+  it('renders all 11 section headings', () => {
     renderWithProviders(<Privacy />);
     expect(
       screen.getByRole('heading', { name: /1\. information we collect/i }),
     ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /2\. how we use your data/i })).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: /2\. how our assistant operates/i }),
+      screen.getByRole('heading', { name: /3\. plaid and financial data/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: /3\. third-party processing/i }),
+      screen.getByRole('heading', { name: /4\. third-party processors/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /4\. security/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /5\. your control/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /6\. policy updates/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /7\. contact/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /5\. data retention and deletion/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /6\. security/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /7\. your rights and controls/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /8\. children/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /9\. international users/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /10\. policy updates/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /11\. contact/i })).toBeInTheDocument();
   });
 
-  it('renders the intro commitment message and closing commitment message', () => {
+  it('renders the intro disclosure that we collect and store data', () => {
     renderWithProviders(<Privacy />);
-    // Both the intro paragraph and the closing statement contain this phrase
-    const commitmentTexts = screen.getAllByText(/your privacy is our top priority/i);
-    expect(commitmentTexts).toHaveLength(2);
+    expect(screen.getByText(/rose labs operates an ai agent platform/i)).toBeInTheDocument();
   });
 
-  it('renders the closing statement about helping not watching', () => {
+  it('renders the closing statement about user control and deletion', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we're here to help, not to watch/i)).toBeInTheDocument();
+    expect(screen.getByText(/you own your data/i)).toBeInTheDocument();
   });
 
   // --- Section 1: Information We Collect ---
 
-  it('renders section 1 content about not storing data', () => {
+  it('discloses collection of account information (phone, profile)', () => {
     renderWithProviders(<Privacy />);
-    expect(
-      screen.getByText(/we do not store, record, or retain any conversations or personal data/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/account information: phone number/i)).toBeInTheDocument();
   });
 
-  it('renders section 1 content about real-time processing', () => {
-    renderWithProviders(<Privacy />);
-    expect(
-      screen.getByText(/all interactions are processed in real time and discarded immediately/i),
-    ).toBeInTheDocument();
-  });
-
-  it('renders section 1 content about no cookies or tracking', () => {
-    renderWithProviders(<Privacy />);
-    expect(
-      screen.getByText(/we do not use cookies, tracking pixels, or analytics scripts/i),
-    ).toBeInTheDocument();
-  });
-
-  // --- Section 2: How Our Assistant Operates ---
-
-  it('renders section 2 content about pass-through to AI providers', () => {
-    renderWithProviders(<Privacy />);
-    expect(
-      screen.getByText(/our assistant serves as a pass-through to frontier ai model providers/i),
-    ).toBeInTheDocument();
-  });
-
-  it('renders section 2 content about no data remaining after interaction', () => {
-    renderWithProviders(<Privacy />);
-    expect(
-      screen.getByText(/after your interaction ends, no data remains with us/i),
-    ).toBeInTheDocument();
-  });
-
-  it('renders section 2 content about no advertising or profiling', () => {
+  it('discloses storage of conversation data', () => {
     renderWithProviders(<Privacy />);
     expect(
       screen.getByText(
-        /we do not use your interaction data for advertising, marketing, or profiling/i,
+        /conversation data: the messages you send to the agent.*stored in our database/i,
       ),
     ).toBeInTheDocument();
   });
 
-  // --- Section 3: Third-Party Processing ---
-
-  it('renders section 3 content about secure anonymous streaming', () => {
+  it('discloses collection of connected-integration data including Plaid', () => {
     renderWithProviders(<Privacy />);
     expect(
-      screen.getByText(/data is securely and anonymously streamed to leading ai model providers/i),
+      screen.getByText(/connected-integration data.*plaid for bank and financial-account data/i),
     ).toBeInTheDocument();
   });
 
-  it('renders section 3 content about not selling data', () => {
+  it('discloses collection of operational and payment data', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we do not sell, rent, or share any user data/i)).toBeInTheDocument();
+    expect(screen.getByText(/operational data: logs of requests/i)).toBeInTheDocument();
+    expect(screen.getByText(/payment data.*processed by stripe/i)).toBeInTheDocument();
   });
 
-  it('renders section 3 content about AI provider privacy practices', () => {
+  // --- Section 2: How We Use Your Data ---
+
+  it('discloses that messages and context are sent to LLM providers', () => {
     renderWithProviders(<Privacy />);
     expect(
       screen.getByText(
-        /our ai provider partners must adhere to strict privacy and security practices/i,
+        /sent to large language model.*providers as part of normal agent operation/i,
       ),
     ).toBeInTheDocument();
   });
 
-  it('renders section 3 content about text messaging opt-in exclusion', () => {
+  it('discloses that data is not used to train AI, sold, or shared with advertisers', () => {
     renderWithProviders(<Privacy />);
     expect(
-      screen.getByText(/text messaging originator opt-in data and consent/i),
+      screen.getByText(
+        /we do not use your data to train ai models\. we do not sell your data\. we do not share your data with advertisers/i,
+      ),
     ).toBeInTheDocument();
   });
 
-  // --- Section 4: Security ---
+  // --- Section 3: Plaid and Financial Data ---
 
-  it('renders section 4 content about encryption and no voice data storage', () => {
+  it('discloses Plaid integration purpose (PFM, not underwriting)', () => {
     renderWithProviders(<Privacy />);
     expect(
-      screen.getByText(/all data in transit is encrypted using industry-standard protocols/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/no voice data is ever stored on our infrastructure/i),
+      screen.getByText(/we do not underwrite loans, extend credit, make credit decisions/i),
     ).toBeInTheDocument();
   });
 
-  // --- Section 5: Your Control ---
-
-  it('renders section 5 content about user control', () => {
+  it('discloses Plaid token application-layer encryption', () => {
     renderWithProviders(<Privacy />);
     expect(
-      screen.getByText(/you are in full control of when and how you interact/i),
+      screen.getByText(
+        /plaid access tokens that authorize ongoing access.*encrypted at the application layer/i,
+      ),
     ).toBeInTheDocument();
   });
 
-  it('renders section 5 content about contact details not retained', () => {
+  it('discloses Plaid disconnection and 7-day data purge', () => {
     renderWithProviders(<Privacy />);
     expect(
-      screen.getByText(/we use your contact details only to respond and do not retain them/i),
+      screen.getByText(/disconnection revokes the plaid access token.*purge.*within 7 days/i),
     ).toBeInTheDocument();
   });
 
-  // --- Section 6: Policy Updates ---
+  // --- Section 4: Third-Party Processors ---
 
-  it('renders section 6 content about amending the policy', () => {
+  it('discloses infrastructure processors (Supabase, Render, Fly.io, Vercel)', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/we may amend this privacy policy occasionally/i)).toBeInTheDocument();
+    expect(screen.getByText(/supabase.*render.*fly\.io.*vercel/i)).toBeInTheDocument();
   });
 
-  // --- Section 7: Contact ---
+  it('discloses LLM/AI processors (Anthropic, OpenAI, Google, Perplexity, OpenRouter)', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/anthropic.*openai.*google.*perplexity.*openrouter/i),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses payments processor (Stripe)', () => {
+    renderWithProviders(<Privacy />);
+    expect(screen.getByText(/^payments: stripe\.$/i)).toBeInTheDocument();
+  });
+
+  // --- Section 5: Data Retention and Deletion ---
+
+  it('discloses retention period for active account data', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/active account data is retained for the lifetime of your active account/i),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses 30-day deletion SLA and 90-day backup rollover', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(
+        /purge your personal data.*within 30 days.*encrypted database backups roll off within 90 days/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // --- Section 6: Security ---
+
+  it('discloses TLS 1.2+ in transit and AES-256 at rest', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/tls 1\.2 or higher.*tls 1\.3 negotiated where supported/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/aes-256 by our managed infrastructure providers/i),
+    ).toBeInTheDocument();
+  });
+
+  it('discloses row-level security isolation', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/row-level security: each user can only read and write their own data/i),
+    ).toBeInTheDocument();
+  });
+
+  // --- Section 7: Your Rights and Controls ---
+
+  it('discloses CCPA and GDPR rights with statutory deadlines', () => {
+    renderWithProviders(<Privacy />);
+    expect(screen.getByText(/45 days for ccpa, 30 days for gdpr/i)).toBeInTheDocument();
+  });
+
+  it('discloses integration-disconnection rights', () => {
+    renderWithProviders(<Privacy />);
+    expect(screen.getByText(/you can disconnect any third-party integration/i)).toBeInTheDocument();
+  });
+
+  // --- Section 8: Children ---
+
+  it('renders children policy', () => {
+    renderWithProviders(<Privacy />);
+    expect(screen.getByText(/rose labs is not directed to children under 13/i)).toBeInTheDocument();
+  });
+
+  // --- Section 9: International Users ---
+
+  it('renders international users policy', () => {
+    renderWithProviders(<Privacy />);
+    expect(screen.getByText(/rose labs is operated from the united states/i)).toBeInTheDocument();
+  });
+
+  // --- Section 10: Policy Updates ---
+
+  it('renders policy updates section', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/we may update this privacy policy from time to time/i),
+    ).toBeInTheDocument();
+  });
+
+  // --- Section 11: Contact ---
 
   it('renders the contact prompt', () => {
     renderWithProviders(<Privacy />);
@@ -167,9 +225,9 @@ describe('Privacy page', () => {
 
   it('renders the contact email link with correct mailto href', () => {
     renderWithProviders(<Privacy />);
-    const emailLink = screen.getByRole('link', { name: /andy@roselabs\.ai/i });
+    const emailLink = screen.getByRole('link', { name: /security@roselabs\.ai/i });
     expect(emailLink).toBeInTheDocument();
-    expect(emailLink).toHaveAttribute('href', 'mailto:andy@roselabs.ai');
+    expect(emailLink).toHaveAttribute('href', 'mailto:security@roselabs.ai');
   });
 
   // --- Navigation ---
