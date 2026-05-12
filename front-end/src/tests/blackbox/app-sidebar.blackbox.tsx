@@ -88,11 +88,10 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     renderWithProviders(<AppSidebar {...defaultProps()} />);
     await u.click(screen.getByLabelText('Expand sidebar'));
-    // Now the label flips to "Collapse sidebar"
     expect(screen.getByLabelText('Collapse sidebar')).toBeInTheDocument();
-    // And visible labels appear: Create Agent, Feedback, Integrations, Settings, Logout
     expect(screen.getByText('Create Agent')).toBeInTheDocument();
     expect(screen.getByText('Feedback')).toBeInTheDocument();
+    expect(screen.queryByText('Browse')).not.toBeInTheDocument();
     expect(screen.getByText('Integrations')).toBeInTheDocument();
     expect(screen.getByText('Network')).toBeInTheDocument();
     expect(screen.getByText('Settings')).toBeInTheDocument();
@@ -175,9 +174,7 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onViewChange = vi.fn();
     const onSelectAgent = vi.fn();
-    renderWithProviders(
-      <AppSidebar {...defaultProps({ onViewChange, onSelectAgent })} />,
-    );
+    renderWithProviders(<AppSidebar {...defaultProps({ onViewChange, onSelectAgent })} />);
     await u.click(screen.getByLabelText('Expand sidebar'));
 
     await u.click(screen.getByText('Integrations'));
@@ -189,6 +186,21 @@ describe('AppSidebar', () => {
 
     await u.click(screen.getByText('Network'));
     expect(onViewChange).toHaveBeenCalledWith('network');
+  });
+
+  it('shows Browse only when explicitly enabled', async () => {
+    const u = userEvent.setup();
+    const onViewChange = vi.fn();
+    const onSelectAgent = vi.fn();
+    renderWithProviders(
+      <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showBrowse: true })} />,
+    );
+    await u.click(screen.getByLabelText('Expand sidebar'));
+
+    await u.click(screen.getByText('Browse'));
+
+    expect(onViewChange).toHaveBeenCalledWith('browse');
+    expect(onSelectAgent).toHaveBeenCalledWith(null);
   });
 
   it('renders Login when user is null, calls onLoginClick on click', async () => {

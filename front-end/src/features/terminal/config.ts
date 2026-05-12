@@ -65,6 +65,11 @@ export const DEFAULT_BORDER = 23;
 
 export const DEFAULT_MODEL = 'rose-labs/rose-1-lite';
 
+// ── Browser review account ────────────────────────────────────────────────
+
+/** Phone number for the entitlement-review account; it lands on Browse after auth. */
+export const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
+
 // ── Default price limit ───────────────────────────────────────────────────
 
 /** Default price limit in cents for new agents ($1.00). */

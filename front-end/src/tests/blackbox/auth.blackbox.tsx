@@ -6,6 +6,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import { LoginButton, PhoneAuthModal, ProtectedRoute } from '@/features/auth';
+import { shouldEnableDevAutoLogin } from '@/features/auth/config';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -130,6 +131,32 @@ describe('LoginButton', () => {
       expect(anonReq).toBeDefined();
       expect(anonReq!.method).toBe('POST');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth configuration
+// ---------------------------------------------------------------------------
+
+describe('auth config', () => {
+  it('disables dev auto-login inside the Electron app', () => {
+    expect(
+      shouldEnableDevAutoLogin({
+        isDev: true,
+        isVitest: false,
+        clientSource: 'MAC_APP',
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps dev auto-login available for non-Electron dev web sessions', () => {
+    expect(
+      shouldEnableDevAutoLogin({
+        isDev: true,
+        isVitest: false,
+        clientSource: 'WEB',
+      }),
+    ).toBe(true);
   });
 });
 

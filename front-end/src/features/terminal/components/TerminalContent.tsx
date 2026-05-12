@@ -5,6 +5,7 @@
  * Delegates business logic to hooks; this file is purely composition and JSX.
  *
  * VIEW ROUTING:
+ *   currentView === 'browse'       → <Browse />
  *   currentView === 'settings'     → <Settings />
  *   currentView === 'integrations' → <Integrations />
  *   currentView === 'usage'        → <Usage />
@@ -16,8 +17,9 @@ import { useState, useMemo, lazy } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { AppSidebar } from '@/features/terminal-component-group';
+import { AppSidebar, SIDEBAR_WIDTH_COLLAPSED } from '@/features/terminal-component-group';
 import Settings from '@/pages/Settings';
+import Browse from '@/pages/Browse';
 import Integrations from '@/pages/Integrations';
 import Usage from '@/pages/Usage';
 import { NetworkView } from '@/features/terminal-component-group';
@@ -34,6 +36,7 @@ import {
   deriveHasActiveAttentionRequest,
 } from '../hooks/derivations';
 import type { TerminalView } from '../types';
+import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
 import { BackgroundPattern } from './BackgroundPattern';
 import { TerminalHeader } from './TerminalHeader';
@@ -47,13 +50,22 @@ const BrowserStatusBarCarousel = lazy(() =>
 );
 
 export function TerminalContent() {
-  const [currentView, setCurrentView] = useState<TerminalView>('agents');
-
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
+  const initialView = useMemo<TerminalView>(() => {
+    const stored = window.localStorage.getItem('app-user');
+    if (stored === null) return 'agents';
+    try {
+      const user = JSON.parse(stored) as { phone?: string };
+      return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
+    } catch {
+      return 'agents';
+    }
+  }, []);
+  const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
 
@@ -87,17 +99,19 @@ export function TerminalContent() {
         selectedAgentId={agents.selectedAgentId}
       />
 
-      <TerminalHeader
-        onCreateNewAgent={agents.handleCreateNewAgent}
-        onSelectAgent={agents.handleSelectAgent}
-        clientSource={agents.clientSource}
-        realtimeReady={agents.realtimeReady}
-        dripStyles={drip.dripStyles}
-        blur={drip.blur}
-        backgroundColors={drip.backgroundColors}
-        borderColor={drip.borderColor}
-        shadowIntensity={drip.shadowIntensity}
-      />
+      {currentView !== 'browse' && (
+        <TerminalHeader
+          onCreateNewAgent={agents.handleCreateNewAgent}
+          onSelectAgent={agents.handleSelectAgent}
+          clientSource={agents.clientSource}
+          realtimeReady={agents.realtimeReady}
+          dripStyles={drip.dripStyles}
+          blur={drip.blur}
+          backgroundColors={drip.backgroundColors}
+          borderColor={drip.borderColor}
+          shadowIntensity={drip.shadowIntensity}
+        />
+      )}
 
       <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
         <SidebarSection
@@ -105,6 +119,7 @@ export function TerminalContent() {
           drip={drip}
           currentView={currentView}
           setCurrentView={setCurrentView}
+          showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
         />
 
         <MainContent
@@ -133,16 +148,19 @@ function SidebarSection({
   drip,
   currentView,
   setCurrentView,
+  showBrowse,
 }: {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
+  showBrowse: boolean;
 }) {
   return (
     <AppSidebar
       currentView={currentView}
       onViewChange={setCurrentView}
+      showBrowse={showBrowse}
       agents={agents.agents}
       isLoadingAgents={agents.isLoadingAgents}
       selectedAgentId={agents.selectedAgentId}
@@ -151,7 +169,9 @@ function SidebarSection({
       onResumeAgent={agents.handleResumeAgent}
       resumingAgentId={agents.resumingAgentId}
       user={agents.user}
-      onLogout={() => { void agents.handleLogout(); }}
+      onLogout={() => {
+        void agents.handleLogout();
+      }}
       onLoginClick={agents.handleLoginClick}
       dripStyles={drip.dripStyles}
       blur={drip.blur}
@@ -185,24 +205,52 @@ function MainContent({
   hasActiveAttention: boolean;
   browserStatusProps: { browsers: { taskId: string; browserUrl: string }[] } | null;
   systemMessages: ReturnType<typeof useTerminalAgents>['messages'];
-  BrowserStatusBarCarousel: React.ComponentType<{ browsers: { taskId: string; browserUrl: string }[] }>;
+  BrowserStatusBarCarousel: React.ComponentType<{
+    browsers: { taskId: string; browserUrl: string }[];
+  }>;
 }) {
+  const browseOffsetStyle =
+    currentView === 'browse'
+      ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
+      : undefined;
+
   return (
-    <main className="flex-1 flex justify-center h-screen overflow-hidden" style={{ height: '100dvh' }}>
+    <main
+      className={cn(
+        'flex-1 flex justify-center h-screen overflow-hidden',
+        currentView === 'browse' && 'md:pl-[var(--browse-sidebar-offset)]',
+      )}
+      style={{ height: '100dvh', ...browseOffsetStyle }}
+    >
       <div
         className={cn(
-          'flex flex-col relative w-full px-2 md:px-6 h-full overflow-hidden',
-          currentView === 'network' ? 'max-w-none' : 'max-w-5xl',
+          'flex flex-col relative w-full h-full overflow-hidden',
+          currentView === 'browse' ? 'px-0' : 'px-2 md:px-6',
+          currentView === 'network' || currentView === 'browse' ? 'max-w-none' : 'max-w-5xl',
         )}
       >
         {agents.clientSource === 'WEB' && <DesktopNavLinks />}
 
-        {currentView === 'settings' ? (
-          <ScrollArea className="flex-1 h-full"><div className="pt-24 pb-8"><Settings /></div></ScrollArea>
+        {currentView === 'browse' ? (
+          <Browse />
+        ) : currentView === 'settings' ? (
+          <ScrollArea className="flex-1 h-full">
+            <div className="pt-24 pb-8">
+              <Settings />
+            </div>
+          </ScrollArea>
         ) : currentView === 'integrations' ? (
-          <ScrollArea className="flex-1 h-full"><div className="pt-24 pb-8"><Integrations /></div></ScrollArea>
+          <ScrollArea className="flex-1 h-full">
+            <div className="pt-24 pb-8">
+              <Integrations />
+            </div>
+          </ScrollArea>
         ) : currentView === 'usage' ? (
-          <ScrollArea className="flex-1 h-full"><div className="pt-24 pb-8"><Usage /></div></ScrollArea>
+          <ScrollArea className="flex-1 h-full">
+            <div className="pt-24 pb-8">
+              <Usage />
+            </div>
+          </ScrollArea>
         ) : currentView === 'network' ? (
           <NetworkView />
         ) : (

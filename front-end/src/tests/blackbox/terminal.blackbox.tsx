@@ -22,6 +22,22 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
+function mockBrowserReviewSession() {
+  const session = {
+    access_token: 'review-token',
+    refresh_token: 'review-refresh',
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    token_type: 'bearer',
+    user: { id: 'review-user', phone: '+15555550123', is_anonymous: false },
+  };
+  localStorage.setItem('rose-session', JSON.stringify(session));
+  localStorage.setItem(
+    'app-user',
+    JSON.stringify({ id: 'review-user', phone: '+15555550123', is_anonymous: false }),
+  );
+}
+
 function mockAnonymousSession() {
   const session = {
     access_token: 'test-anon-token',
@@ -135,6 +151,26 @@ describe('Terminal page', () => {
         expect(screen.getByText('Privacy')).toBeInTheDocument();
         expect(screen.getByText('Terms')).toBeInTheDocument();
       });
+    });
+
+    it('lands the browser-review account on Browse by default', async () => {
+      localStorage.clear();
+      mockBrowserReviewSession();
+
+      renderWithProviders(<Terminal />);
+
+      expect(await screen.findByLabelText('URL or search')).toHaveValue('https://www.roselabs.ai');
+      expect(screen.queryByRole('button', { name: /^rose$/i })).not.toBeInTheDocument();
+    });
+
+    it('does not show Browse in the sidebar for regular users', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<Terminal />);
+
+      await user.click(await screen.findByLabelText('Expand sidebar'));
+
+      expect(screen.queryByText('Browse')).not.toBeInTheDocument();
+      expect(screen.getByText('Integrations')).toBeInTheDocument();
     });
   });
 

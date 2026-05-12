@@ -32,6 +32,7 @@ import type { SidebarDripStyles, SidebarView } from '../types';
 interface AppSidebarProps {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
+  showBrowse?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
   selectedAgentId: string | null;
@@ -140,6 +141,7 @@ function SidebarCreateAgentButton({
 export default function AppSidebar({
   currentView,
   onViewChange,
+  showBrowse = false,
   agents,
   isLoadingAgents,
   selectedAgentId,
@@ -157,7 +159,7 @@ export default function AppSidebar({
 }: AppSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const currentWidth = isCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
-  const navItems = useSidebarNavItems({ currentView, onViewChange, onSelectAgent });
+  const navItems = useSidebarNavItems({ currentView, onViewChange, onSelectAgent, showBrowse });
   const style = useMemo(
     () =>
       buildSidebarStyle({

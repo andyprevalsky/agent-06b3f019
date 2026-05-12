@@ -17,7 +17,7 @@ import type {
 
 // ── View state ────────────────────────────────────────────────────────────
 
-export type TerminalView = 'agents' | 'integrations' | 'settings' | 'usage' | 'network';
+export type TerminalView = 'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
 

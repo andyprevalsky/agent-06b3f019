@@ -78,6 +78,7 @@ export function createMainWindow({
       // The preload is compiled by tsc as a small CommonJS module graph.
       // Electron's sandbox preload loader cannot resolve those local files.
       sandbox: false,
+      webviewTag: true,
       preload: path.join(__dirname, '../preload.js'),
     },
   });
