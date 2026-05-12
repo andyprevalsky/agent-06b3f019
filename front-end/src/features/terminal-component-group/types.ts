@@ -10,7 +10,7 @@ import type { FilePointer } from '@/lib/api';
 // ─── App Sidebar ──────────────────────────────────────────────────────────
 
 /** Sidebar top-level view identifier. */
-export type SidebarView = 'agents' | 'integrations' | 'settings' | 'usage' | 'network';
+export type SidebarView = 'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network';
 
 /** One bottom-navigation entry in the sidebar. */
 export interface SidebarNavItem {

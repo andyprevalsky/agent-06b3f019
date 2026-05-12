@@ -16,6 +16,24 @@ import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 const DEV_TEST_PHONE = '+19729777432';
 const DEV_TEST_OTP = '181818';
 
+// Review credentials: bypass Twilio in all environments so external reviewers
+// can use fixed evaluation credentials without receiving a real SMS.
+const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
+const BROWSER_REVIEW_TEST_OTP = '191919';
+
+function shouldBypassOtpSend(phone: string): boolean {
+  return (
+    phone === BROWSER_REVIEW_TEST_PHONE || (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE)
+  );
+}
+
+function shouldBypassOtpCheck(phone: string, code: string): boolean {
+  return (
+    (phone === BROWSER_REVIEW_TEST_PHONE && code === BROWSER_REVIEW_TEST_OTP) ||
+    (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE && code === DEV_TEST_OTP)
+  );
+}
+
 const log = createLogger('Auth');
 
 /**
@@ -24,9 +42,9 @@ const log = createLogger('Auth');
 export async function sendTwilioVerifyOTP(
   phone: string
 ): Promise<{ success: boolean; error?: string }> {
-  // Dev bypass: skip Twilio for test phone (disabled in blackbox tests)
-  if (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE) {
-    log.info('Dev bypass: skipping Twilio send for test phone');
+  // Bypass Twilio only for fixed internal/review evaluation credentials.
+  if (shouldBypassOtpSend(phone)) {
+    log.info('OTP bypass: skipping Twilio send for test phone');
     return { success: true };
   }
 
@@ -90,9 +108,9 @@ export async function checkTwilioVerifyOTP(
   phone: string,
   code: string
 ): Promise<{ approved: boolean; error?: string }> {
-  // Dev bypass: auto-approve test phone + test OTP (disabled in blackbox tests)
-  if (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE && code === DEV_TEST_OTP) {
-    log.info('Dev bypass: auto-approving test OTP');
+  // Bypass Twilio only for fixed internal/review evaluation credentials.
+  if (shouldBypassOtpCheck(phone, code)) {
+    log.info('OTP bypass: auto-approving test OTP');
     return { approved: true };
   }
 

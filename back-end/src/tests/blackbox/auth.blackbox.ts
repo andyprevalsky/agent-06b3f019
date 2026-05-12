@@ -854,6 +854,8 @@ async function testErrorSurface_400sHaveErrorField() {
 
 const TEST_PHONE = '+19729777432';
 const TEST_OTP = '181818';
+const REVIEW_TEST_PHONE = '+15555550123';
+const REVIEW_TEST_OTP = '191919';
 
 /**
  * POST /api/auth/anonymous makes NO outbound HTTP calls.
@@ -1077,6 +1079,50 @@ async function testBoundary_verifyOtpCallOrdering() {
 }
 
 /**
+ * Review credentials bypass Twilio in every environment. This is intentionally
+ * narrower than the dev bypass: only the review phone + review OTP work.
+ */
+async function testBoundary_reviewOtpBypassNoTwilio() {
+  const phone = REVIEW_TEST_PHONE;
+  const userId = randomUUID();
+  if (SUPABASE_URL !== '') {
+    seedSupabaseAdminCreate(phone, { userId });
+  }
+
+  const sendToken = captureToken('review-send-otp-bypass');
+  const sendRes = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': sendToken },
+    body: JSON.stringify({ phone }),
+  });
+  assertStatus(sendRes.status, 200, sendRes.data);
+  const sendCalls = await readCapturesForToken(sendToken);
+  const sendTwilioCalls = sendCalls.filter((c) => c.url.includes('verify.twilio.com'));
+  assert(
+    sendTwilioCalls.length === 0,
+    `Expected review send-otp bypass to make 0 Twilio calls, got ${sendTwilioCalls.length}`
+  );
+
+  const verifyToken = captureToken('review-verify-otp-bypass');
+  const verifyRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': verifyToken },
+    body: JSON.stringify({ phone, token: REVIEW_TEST_OTP }),
+  });
+  if (verifyRes.status !== 200 && verifyRes.status !== 500) {
+    throw new Error(
+      `Expected review verify bypass to approve OTP before user init, got ${verifyRes.status}: ${JSON.stringify(verifyRes.data)}`
+    );
+  }
+  const verifyCalls = await readCapturesForToken(verifyToken);
+  const verifyTwilioCalls = verifyCalls.filter((c) => c.url.includes('verify.twilio.com'));
+  assert(
+    verifyTwilioCalls.length === 0,
+    `Expected review verify-otp bypass to make 0 Twilio calls, got ${verifyTwilioCalls.length}`
+  );
+}
+
+/**
  * POST /api/auth/send-otp validation failures do NOT call Twilio.
  * Missing phone is caught before any outbound call.
  */
@@ -1154,6 +1200,14 @@ async function testSendOtp_happyPath() {
   }
 }
 
+async function testSendOtp_reviewBypassHappyPath() {
+  const res = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone: REVIEW_TEST_PHONE }),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
 async function testSendOtp_invalidPhoneFormat() {
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
@@ -1175,6 +1229,16 @@ async function testVerifyOtp_wrongCode() {
   // Wrong OTP → 400 or 500 (depending on Twilio config)
   if (res.status === 200) {
     throw new Error('Expected failure for wrong OTP code');
+  }
+}
+
+async function testVerifyOtp_reviewPhoneRejectsMainOtp() {
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone: REVIEW_TEST_PHONE, token: TEST_OTP }),
+  });
+  if (res.status === 200) {
+    throw new Error('Expected review phone to reject the main dev OTP');
   }
 }
 
@@ -2225,8 +2289,13 @@ async function runAll() {
     { name: 'error surface -- all 400s have error field', fn: testErrorSurface_400sHaveErrorField },
     // OTP flow
     { name: 'POST /send-otp -- happy path', fn: testSendOtp_happyPath },
+    { name: 'POST /send-otp -- review bypass happy path', fn: testSendOtp_reviewBypassHappyPath },
     { name: 'POST /send-otp -- invalid phone format', fn: testSendOtp_invalidPhoneFormat },
     { name: 'POST /verify-otp -- wrong code', fn: testVerifyOtp_wrongCode },
+    {
+      name: 'POST /verify-otp -- review phone rejects main OTP',
+      fn: testVerifyOtp_reviewPhoneRejectsMainOtp,
+    },
     { name: 'POST /verify-otp -- with anonymous userId', fn: testVerifyOtp_withAnonymousUserId },
     {
       name: 'POST /verify-otp -- without optional fields',
@@ -2408,6 +2477,10 @@ async function runAll() {
       {
         name: 'boundary -- verify-otp call ordering (Twilio before Supabase)',
         fn: testBoundary_verifyOtpCallOrdering,
+      },
+      {
+        name: 'boundary -- review OTP bypass makes no Twilio calls',
+        fn: testBoundary_reviewOtpBypassNoTwilio,
       },
       {
         name: 'boundary -- complete-onboarding anon user makes no SMS calls',

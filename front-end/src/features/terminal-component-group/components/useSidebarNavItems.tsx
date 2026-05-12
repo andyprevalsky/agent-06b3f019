@@ -4,19 +4,21 @@
  */
 
 import { useMemo } from 'react';
-import { Network, Plug, Settings as SettingsIcon } from 'lucide-react';
+import { Globe, Network, Plug, Settings as SettingsIcon } from 'lucide-react';
 import type { SidebarNavItem, SidebarView } from '../types';
 
 interface UseSidebarNavItemsArgs {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   onSelectAgent: (agentId: string | null) => void;
+  showBrowse: boolean;
 }
 
 export function useSidebarNavItems({
   currentView,
   onViewChange,
   onSelectAgent,
+  showBrowse,
 }: UseSidebarNavItemsArgs): SidebarNavItem[] {
   return useMemo(() => {
     const makeHandler = (view: SidebarView) => () => {
@@ -24,6 +26,17 @@ export function useSidebarNavItems({
       onSelectAgent(null);
     };
     return [
+      ...(showBrowse
+        ? [
+            {
+              id: 'browse',
+              label: 'Browse',
+              icon: <Globe className="h-4 w-4" />,
+              onClick: makeHandler('browse'),
+              isActive: currentView === 'browse',
+            },
+          ]
+        : []),
       {
         id: 'integrations',
         label: 'Integrations',
@@ -46,5 +59,5 @@ export function useSidebarNavItems({
         isActive: currentView === 'settings',
       },
     ];
-  }, [currentView, onViewChange, onSelectAgent]);
+  }, [currentView, onViewChange, onSelectAgent, showBrowse]);
 }
