@@ -30,9 +30,7 @@ export default function ResponseSchemaSection({ agent }: ResponseSchemaSectionPr
                 <code className="font-mono text-xs bg-background px-1.5 py-0.5 rounded">
                   {field.name}
                 </code>
-                <span className="text-muted-foreground text-xs">
-                  {formatFieldType(field.type)}
-                </span>
+                <span className="text-muted-foreground text-xs">{formatFieldType(field.type)}</span>
                 {field.required && (
                   <span className="text-[10px] text-amber-600 dark:text-amber-500 font-medium">
                     required

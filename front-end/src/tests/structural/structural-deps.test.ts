@@ -156,9 +156,7 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     'Cross-domain import: "@/features/auth"',
     'Cross-domain import: "@/features/agent-context"',
   ],
-  'features/terminal/hooks/useTerminalAuth.ts': [
-    'Cross-domain import: "@/features/auth"',
-  ],
+  'features/terminal/hooks/useTerminalAuth.ts': ['Cross-domain import: "@/features/auth"'],
   'features/terminal-component-group/hooks.ts': [
     'Cross-domain import: "@/features/auth"',
     'Cross-domain import: "@/features/agent-context"',

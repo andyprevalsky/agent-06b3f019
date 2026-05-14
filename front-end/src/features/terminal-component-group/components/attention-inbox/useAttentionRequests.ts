@@ -141,7 +141,10 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
         clearTimeout(reconnectTimeoutRef.current);
       }
       const attempt = reconnectAttemptRef.current;
-      const delay = Math.min(BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt), MAX_RECONNECT_DELAY_MS);
+      const delay = Math.min(
+        BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt),
+        MAX_RECONNECT_DELAY_MS,
+      );
       reconnectAttemptRef.current += 1;
       reconnectTimeoutRef.current = window.setTimeout(() => {
         setForceResubscribe((prev) => prev + 1);

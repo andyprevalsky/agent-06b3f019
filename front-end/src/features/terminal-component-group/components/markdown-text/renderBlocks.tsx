@@ -83,11 +83,7 @@ export function renderBlock(
   if (isSpecial && animate) {
     if (blockType === 'blockquote') {
       return (
-        <motion.blockquote
-          key={key}
-          className="custom-blockquote"
-          {...animatedBlockProps(delay)}
-        >
+        <motion.blockquote key={key} className="custom-blockquote" {...animatedBlockProps(delay)}>
           {finalContent}
         </motion.blockquote>
       );

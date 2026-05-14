@@ -23,7 +23,8 @@ export function AttentionMessageWrapper({
   onTypingComplete,
   onSendMessage,
 }: AttentionMessageWrapperProps) {
-  const attentionMessage = (message.metadata?.attentionMessage as string | undefined) || message.text;
+  const attentionMessage =
+    (message.metadata?.attentionMessage as string | undefined) || message.text;
   const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
 
   const handleStartExecution = onSendMessage

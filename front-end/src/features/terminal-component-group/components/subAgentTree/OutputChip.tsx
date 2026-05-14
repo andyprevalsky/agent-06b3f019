@@ -116,7 +116,9 @@ function FallbackRows({
         <div key={key}>
           <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
           <span
-            className={cn(isPartial ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground')}
+            className={cn(
+              isPartial ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+            )}
           >
             {formatValue(value)}
           </span>

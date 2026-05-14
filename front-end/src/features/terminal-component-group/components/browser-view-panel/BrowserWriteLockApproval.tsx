@@ -1,11 +1,7 @@
 import { useCallback, useState } from 'react';
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  respondToAttentionRequest,
-  rejectAttentionRequest,
-  useToast,
-} from '../../hooks';
+import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../../hooks';
 
 interface BrowserWriteLockApprovalProps {
   attentionRequestId: string;

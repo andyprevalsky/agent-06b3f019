@@ -1,10 +1,5 @@
 import { Button } from '@/components/ui/button';
-import {
-  Command,
-  CommandGroup,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
+import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command';
 import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -49,10 +44,7 @@ export function ReasoningEffortSelect({ value, onChange }: ReasoningEffortSelect
                     className="cursor-pointer"
                   >
                     <Check
-                      className={cn(
-                        'mr-2 h-4 w-4',
-                        value === effort ? 'opacity-100' : 'opacity-0',
-                      )}
+                      className={cn('mr-2 h-4 w-4', value === effort ? 'opacity-100' : 'opacity-0')}
                     />
                     <span className="capitalize">{effort}</span>
                   </CommandItem>

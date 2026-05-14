@@ -320,6 +320,7 @@ async def test_stream_assistant_chunk_happy_path():
         sub_agent_id="sub-1",
         is_claude=True,
         is_gpt=True,
+        llm_started_at_ms=1700000000000,
     )
 
     captures = get_captured_requests()
@@ -331,6 +332,7 @@ async def test_stream_assistant_chunk_happy_path():
     assert record["subAgentId"] == "sub-1"
     assert record["is_claude"] is True
     assert record["is_gpt"] is True
+    assert record["llm_started_at_ms"] == 1700000000000
     assert body["messages"][0]["event"] == "ASSISTANT_STREAM"
 
 
@@ -370,6 +372,7 @@ async def test_stream_plan_event_broadcasts():
         tool_call_id="tc-1",
         title="Generating Plan",
         char_count=42,
+        llm_started_at_ms=1700000000000,
     )
 
     captures = get_captured_requests()
@@ -379,6 +382,7 @@ async def test_stream_plan_event_broadcasts():
     record = body["messages"][0]["payload"]["record"]
     assert record["title"] == "Generating Plan"
     assert record["char_count"] == 42
+    assert record["llm_started_at_ms"] == 1700000000000
 
 
 async def test_stream_plan_event_handles_errors():
@@ -412,6 +416,7 @@ async def test_stream_tool_event_broadcasts():
         title="Starting web_search...",
         char_count=123,
         is_claude=True,
+        llm_started_at_ms=1700000000000,
     )
 
     captures = get_captured_requests()
@@ -422,6 +427,7 @@ async def test_stream_tool_event_broadcasts():
     assert record["tool_name"] == "web_search"
     assert record["char_count"] == 123
     assert record["is_claude"] is True
+    assert record["llm_started_at_ms"] == 1700000000000
 
 
 async def test_stream_tool_event_handles_errors():

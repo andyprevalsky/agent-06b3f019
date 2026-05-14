@@ -38,7 +38,7 @@ describe('PlanChip', () => {
     expect(screen.getByText('Plan to do X')).toBeInTheDocument();
   });
 
-  it('shows shimmer + char counter when streaming', () => {
+  it('shows shimmer + elapsed token download counter when streaming', () => {
     render(
       <PlanChip
         plan={{
@@ -51,9 +51,12 @@ describe('PlanChip', () => {
         }}
         toolStatus="IN_PROGRESS"
         charCount={1234}
+        streamStartedAtMs={Date.now() - 1800}
       />,
     );
     expect(screen.getByText('Generating...')).toBeInTheDocument();
+    expect(document.body.textContent).toMatch(/\d+\.\ds·\d+ tokens/);
+    expect(document.querySelector('.lucide-arrow-down')).not.toBeNull();
     // Tasks section should NOT render while streaming
     expect(screen.queryByText(/Tasks/)).not.toBeInTheDocument();
   });

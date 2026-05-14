@@ -429,7 +429,7 @@ async def test_handler_execute_tool_happy_path_returns_usage():
     calls = []
 
     async def fake_execute_activity(fn, args=None, **kwargs):
-        calls.append(("activity", getattr(fn, "__name__", "?")))
+        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args})
         # Activity name is post_agent_message for handle_tool_event; web_fetch_activity for work
         name = getattr(fn, "__name__", "")
         if name == "web_fetch_activity":
@@ -450,8 +450,15 @@ async def test_handler_execute_tool_happy_path_returns_usage():
     assert out["result"]["title"] == "Example"
     assert out["usage"]["service"][0]["provider"] == "Parallel AI Extract"
     # Activity was invoked at least twice (pre-event post, main call, post-event post)
-    activity_names = [name for _, name in calls]
+    activity_names = [call["activity"] for call in calls]
     assert "web_fetch_activity" in activity_names
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[0] == "Fetching https://example.com/a for read"
+    assert tool_titles[-1] == "Fetched https://example.com/a for read"
 
 
 async def test_handler_execute_tool_long_objective_truncated_in_display():
@@ -478,7 +485,10 @@ async def test_handler_execute_tool_activity_error_reraises():
     """Activity exception is re-raised after posting the error event."""
     from domains.web_fetch.handler import WebFetchManager
 
+    calls = []
+
     async def fake_execute_activity(fn, args=None, **kwargs):
+        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args})
         if getattr(fn, "__name__", "") == "web_fetch_activity":
             raise RuntimeError("parallel down")
         return None
@@ -494,6 +504,12 @@ async def test_handler_execute_tool_activity_error_reraises():
         raise AssertionError("Expected RuntimeError")
     except RuntimeError as e:
         assert "parallel down" in str(e)
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[-1] == "\u274c Web fetch failed for https://example.com/bad for x"
 
 
 async def test_handler_web_fetch_top_level_wraps_manager():

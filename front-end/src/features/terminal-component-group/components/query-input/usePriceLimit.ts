@@ -39,18 +39,14 @@ export function usePriceLimit({
 
   const startEdit = useCallback(() => {
     if (agentDetail?.parent_agent_id) return;
-    const cents = agentDetail
-      ? agentDetail.price_limit_cents || 100
-      : pendingPriceLimitCents;
+    const cents = agentDetail ? agentDetail.price_limit_cents || 100 : pendingPriceLimitCents;
     setInput((cents / 100).toFixed(2));
     setIsEditing(true);
   }, [agentDetail, pendingPriceLimitCents]);
 
   const cancel = useCallback(() => {
     setIsEditing(false);
-    const cents = agentDetail
-      ? agentDetail.price_limit_cents || 100
-      : pendingPriceLimitCents;
+    const cents = agentDetail ? agentDetail.price_limit_cents || 100 : pendingPriceLimitCents;
     setInput((cents / 100).toFixed(2));
   }, [agentDetail, pendingPriceLimitCents]);
 

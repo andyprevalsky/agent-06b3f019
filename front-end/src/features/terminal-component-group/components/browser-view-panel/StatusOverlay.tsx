@@ -13,9 +13,7 @@ export function StatusOverlay({ isResuming, onResume }: StatusOverlayProps) {
         disabled={isResuming}
         className={cn(
           'flex items-center gap-1 px-2 py-1 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground text-xs shadow-sm transition-colors',
-          isResuming
-            ? 'opacity-50 cursor-not-allowed'
-            : 'hover:bg-foreground/20 cursor-pointer',
+          isResuming ? 'opacity-50 cursor-not-allowed' : 'hover:bg-foreground/20 cursor-pointer',
         )}
       >
         {isResuming ? 'Loading...' : 'Take Control'}

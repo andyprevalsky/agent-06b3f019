@@ -36,7 +36,12 @@ interface TickContext {
   schedule: () => void;
 }
 
-function computeSeek(refs: MachineRefs, normalized: MarkersFile, key: FeatureKey | null, baseTime: number): number {
+function computeSeek(
+  refs: MachineRefs,
+  normalized: MarkersFile,
+  key: FeatureKey | null,
+  baseTime: number,
+): number {
   return computeSeekForKey({
     key,
     baseTime,
@@ -46,7 +51,11 @@ function computeSeek(refs: MachineRefs, normalized: MarkersFile, key: FeatureKey
   });
 }
 
-function startRampOrSeek(ctx: TickContext, requested: FeatureKey, where: { key: FeatureKey; part: string }) {
+function startRampOrSeek(
+  ctx: TickContext,
+  requested: FeatureKey,
+  where: { key: FeatureKey; part: string },
+) {
   const { refs, normalized } = ctx;
   const targetSeg = normalized[requested];
   if (where.part === 'cycle' || where.part === 'outro') {
@@ -154,7 +163,11 @@ function handleSeeking(ctx: TickContext, requested: FeatureKey) {
   schedule();
 }
 
-function maybeActivateCustomAwait(ctx: TickContext, where: { key: FeatureKey }, requested: FeatureKey) {
+function maybeActivateCustomAwait(
+  ctx: TickContext,
+  where: { key: FeatureKey },
+  requested: FeatureKey,
+) {
   const { refs, normalized } = ctx;
   if (where.key !== 'customization' || requested === 'customization') return;
   const cur = refs.mode.current;

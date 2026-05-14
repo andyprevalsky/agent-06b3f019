@@ -11,7 +11,9 @@ export default defineConfig({
   },
   define: {
     'import.meta.env.VITE_SUPABASE_URL': JSON.stringify('https://test.supabase.co'),
-    'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify('test-anon-key-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.fake'),
+    'import.meta.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(
+      'test-anon-key-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.fake',
+    ),
     'import.meta.env.VITE_BACKEND_API_URL': JSON.stringify('http://localhost:3001'),
   },
   test: {
@@ -47,9 +49,11 @@ export default defineConfig({
         'src/lib/smallTileAnimations.ts',
         'src/lib/shaderTileAnimations.ts',
         'src/lib/tileAnimation.ts',
+        'src/dev/**',
         'src/components/ThinkingAnimation.tsx',
         'src/features/terminal-component-group/components/SmallTileAnimationCanvas.tsx',
         'src/features/terminal-component-group/components/BrowserBorderGlow.tsx',
+        'src/features/terminal-component-group/components/browserBorderGlow/**',
         'src/features/terminal-component-group/components/BrowserCursorOverlay.tsx',
         // shadcn/ui primitives — vendored third-party components, covered by
         // their upstream library's own test suite.

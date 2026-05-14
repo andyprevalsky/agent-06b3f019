@@ -21,35 +21,30 @@ import { renderWithProviders } from './test-wrapper';
 
 // BrowserStatusBar is heavy — it imports realtime subscriptions, xterm adjacents,
 // and DOM/ref-heavy behavior. Stub it to a simple placeholder that exposes its props.
-vi.mock(
-  '@/features/terminal-component-group/components/BrowserStatusBar',
-  () => ({
-    default: ({
-      taskId,
-      browserUrl,
-      forceMinimized,
-    }: {
-      taskId: string;
-      browserUrl: string;
-      forceMinimized?: boolean;
-    }) => (
-      <div
-        data-testid={`browser-status-bar-${taskId}`}
-        data-url={browserUrl}
-        data-force-minimized={String(!!forceMinimized)}
-      >
-        browser-{taskId}
-      </div>
-    ),
-  }),
-);
+vi.mock('@/features/terminal-component-group/components/BrowserStatusBar', () => ({
+  default: ({
+    taskId,
+    browserUrl,
+    forceMinimized,
+  }: {
+    taskId: string;
+    browserUrl: string;
+    forceMinimized?: boolean;
+  }) => (
+    <div
+      data-testid={`browser-status-bar-${taskId}`}
+      data-url={browserUrl}
+      data-force-minimized={String(!!forceMinimized)}
+    >
+      browser-{taskId}
+    </div>
+  ),
+}));
 
 // MarkdownText is used by ApprovalChip. Replace with a passthrough to avoid
 // having to stub react-markdown.
 vi.mock('@/features/terminal-component-group/components/MarkdownText', () => ({
-  MarkdownText: ({ text }: { text: string }) => (
-    <div data-testid="markdown-text">{text}</div>
-  ),
+  MarkdownText: ({ text }: { text: string }) => <div data-testid="markdown-text">{text}</div>,
 }));
 
 // Mock the hooks module for ApprovalChip: imperative API fns + useToast.
@@ -60,10 +55,8 @@ vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
   const actual = await importOriginal<any>();
   return {
     ...actual,
-    respondToAttentionRequest: (...args: unknown[]) =>
-      respondToAttentionRequestMock(...args),
-    rejectAttentionRequest: (...args: unknown[]) =>
-      rejectAttentionRequestMock(...args),
+    respondToAttentionRequest: (...args: unknown[]) => respondToAttentionRequestMock(...args),
+    rejectAttentionRequest: (...args: unknown[]) => rejectAttentionRequestMock(...args),
     useToast: () => ({ toast: toastMock, dismiss: vi.fn() }),
   };
 });
@@ -81,18 +74,58 @@ import { FeedbackBanner } from '@/features/terminal-component-group/components/F
 
 describe('CompletionSummaryCard', () => {
   it('renders task-complete header with summary only', () => {
-    renderWithProviders(
-      <CompletionSummaryCard data={{ summary: 'All good.' }} />,
-    );
+    renderWithProviders(<CompletionSummaryCard data={{ summary: 'All good.' }} />);
     expect(screen.getByText('Task Complete')).toBeInTheDocument();
     expect(screen.getByText('All good.')).toBeInTheDocument();
   });
 
   it('renders task-failed header when error=true', () => {
-    renderWithProviders(
-      <CompletionSummaryCard data={{ summary: 'Oops', error: true }} />,
-    );
+    renderWithProviders(<CompletionSummaryCard data={{ summary: 'Oops', error: true }} />);
     expect(screen.getByText('Task Failed')).toBeInTheDocument();
+  });
+
+  it('renders arrays of structured output objects in a human-readable format', () => {
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [
+            {
+              key: 'search_result_sections',
+              label: 'Search Result Sections',
+              value: [
+                {
+                  section_label: 'Best cities to live in during your 20s',
+                  search_query: 'best cities to live in your 20s 2024 2025',
+                  findings: [
+                    'Cities were ranked for quality of life, value, and desirability.',
+                    'Young professional lists emphasize jobs, rent, and nightlife.',
+                  ],
+                },
+                {
+                  section_label: 'Cheapest cost-of-living places in North America',
+                  search_query: 'cheapest cost of living cities in North America 2024 2025',
+                  findings: [
+                    'Cost indexes compare rent, groceries, restaurants, and local buying power.',
+                  ],
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Search Result Sections')).toBeInTheDocument();
+    expect(screen.getByText('1. Best cities to live in during your 20s')).toBeInTheDocument();
+    expect(
+      screen.getByText('2. Cheapest cost-of-living places in North America'),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Search Query:', { exact: false })).toHaveLength(2);
+    expect(
+      screen.getByText('Cities were ranked for quality of life, value, and desirability.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
   });
 
   it.skip('renders outputs with various value types and copy button', async () => {
@@ -191,11 +224,7 @@ describe('CompletionSummaryCard', () => {
   });
 
   it('renders short duration in seconds only', () => {
-    renderWithProviders(
-      <CompletionSummaryCard
-        data={{ summary: 'Done', durationSeconds: 5 }}
-      />,
-    );
+    renderWithProviders(<CompletionSummaryCard data={{ summary: 'Done', durationSeconds: 5 }} />);
     expect(screen.getByText('5s')).toBeInTheDocument();
   });
 
@@ -227,9 +256,7 @@ describe('ApprovalChip', () => {
   });
 
   it('returns null when no pending approval', () => {
-    const { container } = renderWithProviders(
-      <ApprovalChip pendingApproval={null} />,
-    );
+    const { container } = renderWithProviders(<ApprovalChip pendingApproval={null} />);
     expect(container.firstChild).toBeNull();
   });
 
@@ -260,28 +287,18 @@ describe('ApprovalChip', () => {
     );
     await user.click(screen.getByText('Accept'));
     expect(respondToAttentionRequestMock).toHaveBeenCalledWith('req-1', 'Approved');
-    expect(toastMock).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'Approved' }),
-    );
+    expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Approved' }));
     expect(onHandled).toHaveBeenCalled();
   });
 
   it('Accept: uses trimmed context input when provided', async () => {
     const user = userEvent.setup();
     renderWithProviders(
-      <ApprovalChip
-        pendingApproval={{ attentionRequestId: 'req-1', question: 'Go?' }}
-      />,
+      <ApprovalChip pendingApproval={{ attentionRequestId: 'req-1', question: 'Go?' }} />,
     );
-    await user.type(
-      screen.getByPlaceholderText('Add context (optional)...'),
-      '  custom reason  ',
-    );
+    await user.type(screen.getByPlaceholderText('Add context (optional)...'), '  custom reason  ');
     await user.click(screen.getByText('Accept'));
-    expect(respondToAttentionRequestMock).toHaveBeenCalledWith(
-      'req-1',
-      'custom reason',
-    );
+    expect(respondToAttentionRequestMock).toHaveBeenCalledWith('req-1', 'custom reason');
   });
 
   it('Accept: surfaces error toast on failure', async () => {
@@ -289,9 +306,7 @@ describe('ApprovalChip', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const user = userEvent.setup();
     renderWithProviders(
-      <ApprovalChip
-        pendingApproval={{ attentionRequestId: 'req-1', question: 'Go?' }}
-      />,
+      <ApprovalChip pendingApproval={{ attentionRequestId: 'req-1', question: 'Go?' }} />,
     );
     await user.click(screen.getByText('Accept'));
     expect(toastMock).toHaveBeenCalledWith(
@@ -311,9 +326,7 @@ describe('ApprovalChip', () => {
     );
     await user.click(screen.getByText('Reject'));
     expect(rejectAttentionRequestMock).toHaveBeenCalledWith('req-2', undefined);
-    expect(toastMock).toHaveBeenCalledWith(
-      expect.objectContaining({ title: 'Rejected' }),
-    );
+    expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Rejected' }));
     expect(onHandled).toHaveBeenCalled();
   });
 
@@ -322,9 +335,7 @@ describe('ApprovalChip', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const user = userEvent.setup();
     renderWithProviders(
-      <ApprovalChip
-        pendingApproval={{ attentionRequestId: 'req-3', question: 'Stop?' }}
-      />,
+      <ApprovalChip pendingApproval={{ attentionRequestId: 'req-3', question: 'Stop?' }} />,
     );
     await user.click(screen.getByText('Reject'));
     expect(toastMock).toHaveBeenCalledWith(
@@ -416,17 +427,13 @@ describe('SubAgentToolBubble', () => {
 
 describe('BrowserStatusBarCarousel', () => {
   it('returns null when no browsers given', () => {
-    const { container } = renderWithProviders(
-      <BrowserStatusBarCarousel browsers={[]} />,
-    );
+    const { container } = renderWithProviders(<BrowserStatusBarCarousel browsers={[]} />);
     expect(container.firstChild).toBeNull();
   });
 
   it('renders a single browser without carousel controls', () => {
     renderWithProviders(
-      <BrowserStatusBarCarousel
-        browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]}
-      />,
+      <BrowserStatusBarCarousel browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]} />,
     );
     expect(screen.getByTestId('browser-status-bar-t1')).toBeInTheDocument();
     expect(screen.queryByLabelText('Previous browser')).not.toBeInTheDocument();
@@ -497,9 +504,7 @@ describe('BrowserStatusBarCarousel', () => {
     );
     // Reduce to 1 → single browser path
     rerender(
-      <BrowserStatusBarCarousel
-        browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]}
-      />,
+      <BrowserStatusBarCarousel browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]} />,
     );
     expect(screen.getByTestId('browser-status-bar-t1')).toBeInTheDocument();
   });
@@ -518,9 +523,7 @@ describe('FeedbackBanner', () => {
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
     expect(screen.getByText('How was this result?')).toBeInTheDocument();
     // 5 star buttons
-    const buttons = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const buttons = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     expect(buttons).toHaveLength(5);
   });
 
@@ -538,9 +541,7 @@ describe('FeedbackBanner', () => {
   it('clicking a star expands the panel and reveals form controls', async () => {
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[2]); // rating = 3
     expect(screen.getByText('Issue type (optional)')).toBeInTheDocument();
     expect(screen.getByText('Comment (optional)')).toBeInTheDocument();
@@ -550,9 +551,7 @@ describe('FeedbackBanner', () => {
   it.skip('Cancel resets selected rating and collapses panel', async () => {
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[1]);
     expect(screen.getByText('Submit')).toBeInTheDocument();
     await user.click(screen.getByText('Cancel'));
@@ -564,9 +563,7 @@ describe('FeedbackBanner', () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[4]); // rating = 5
     await user.type(screen.getByPlaceholderText('Additional feedback'), 'Great!');
     await user.click(screen.getByText('Submit'));
@@ -578,9 +575,7 @@ describe('FeedbackBanner', () => {
       }),
     );
     // Thank-you state
-    expect(
-      await screen.findByText('Thanks for your feedback!'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('Thanks for your feedback!')).toBeInTheDocument();
   });
 
   it('Submit: logs error when onSubmit rejects, stays in form', async () => {
@@ -588,16 +583,12 @@ describe('FeedbackBanner', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[0]);
     await user.click(screen.getByText('Submit'));
     expect(errSpy).toHaveBeenCalled();
     // Should not transition to thank-you
-    expect(
-      screen.queryByText('Thanks for your feedback!'),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Thanks for your feedback!')).not.toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -614,9 +605,7 @@ describe('FeedbackBanner', () => {
     // Before opening, Submit is not in the DOM.
     expect(screen.queryByText('Submit')).not.toBeInTheDocument();
     // Click the first star — sets rating=1 AND expands the panel.
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[0]);
     // Submit now renders and is enabled (rating > 0).
     const submitBtn = await screen.findByRole('button', { name: 'Submit' });
@@ -627,17 +616,13 @@ describe('FeedbackBanner', () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
+    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
     await user.click(stars[2]);
     const checkbox = screen.getByRole('checkbox', {
       name: /help rose improve/i,
     });
     await user.click(checkbox); // uncheck
     await user.click(screen.getByText('Submit'));
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({ helpImprove: false }),
-    );
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ helpImprove: false }));
   });
 });

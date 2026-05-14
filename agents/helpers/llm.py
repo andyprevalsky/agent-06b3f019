@@ -3938,6 +3938,20 @@ async def call_llm_activity(  # noqa: C901
         # Streaming callback - posts directly to Supabase Realtime
         sequence = [0]
         last_text = [""]
+        llm_started_at_ms = int(time.time() * 1000)
+        if agent_id and stream_id:
+            await stream_assistant_chunk(
+                agent_id=agent_id,
+                stream_id=stream_id,
+                delta="",
+                done=False,
+                sequence=sequence[0],
+                sub_agent_id=task_id,
+                is_claude=_is_claude[0],
+                is_gpt=_is_gpt[0],
+                llm_started_at_ms=llm_started_at_ms,
+            )
+            sequence[0] += 1
 
         async def on_chunk(text_so_far: str, tokens: int):
             _safe_heartbeat(f"LLM streaming... {len(text_so_far)} chars")
@@ -3953,6 +3967,7 @@ async def call_llm_activity(  # noqa: C901
                         sub_agent_id=task_id,
                         is_claude=_is_claude[0],
                         is_gpt=_is_gpt[0],
+                        llm_started_at_ms=llm_started_at_ms,
                     )
                     sequence[0] += 1
                 last_text[0] = text_so_far
@@ -3976,6 +3991,7 @@ async def call_llm_activity(  # noqa: C901
                     char_count=latest_raw_chars[0],
                     is_claude=_is_claude[0],
                     is_gpt=_is_gpt[0],
+                    llm_started_at_ms=llm_started_at_ms,
                 )
 
         async def on_raw_progress(total_chars: int):
@@ -3995,6 +4011,7 @@ async def call_llm_activity(  # noqa: C901
                 char_count=total_chars,
                 is_claude=_is_claude[0],
                 is_gpt=_is_gpt[0],
+                llm_started_at_ms=llm_started_at_ms,
             )
 
         result, usage, detected_tools_ordered = await call_llm_structured_streaming(
@@ -4037,6 +4054,7 @@ async def call_llm_activity(  # noqa: C901
                     sub_agent_id=task_id,
                     is_claude=_is_claude[0],
                     is_gpt=_is_gpt[0],
+                    llm_started_at_ms=llm_started_at_ms,
                 )
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {e}")
@@ -4572,6 +4590,8 @@ async def call_planner_llm_activity(
     async def on_plan_heartbeat(text: str, count: int):
         _safe_heartbeat(f"Planner thinking... {len(text)} chars")
 
+    llm_started_at_ms = [None]
+
     async def on_plan_progress(total_bytes: int):
         """Called every 5 chunks with total accumulated bytes (reasoning + json)."""
         # Only broadcast when 50+ new bytes since last broadcast
@@ -4583,10 +4603,21 @@ async def call_planner_llm_activity(
                 tool_call_id=tool_call_id,
                 title="Generating Plan",
                 char_count=total_bytes,
+                llm_started_at_ms=llm_started_at_ms[0],
             )
 
     try:
         llm_start = time.perf_counter()
+        llm_started_at_ms[0] = int(time.time() * 1000)
+        if agent_id and tool_call_id:
+            await stream_plan_event(
+                agent_id=agent_id,
+                stream_id=plan_stream_id,
+                tool_call_id=tool_call_id,
+                title="Generating Plan",
+                char_count=0,
+                llm_started_at_ms=llm_started_at_ms[0],
+            )
         result, usage, _ = await call_llm_structured_streaming(
             messages=full_messages,
             model=model,

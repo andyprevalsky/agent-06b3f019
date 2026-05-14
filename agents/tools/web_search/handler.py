@@ -73,12 +73,13 @@ class WebSearchManager(ToolManager):
         display_query = (
             query if len(query) <= QUERY_DISPLAY_MAX_LENGTH else query[: QUERY_DISPLAY_MAX_LENGTH - 3] + "..."
         )
+        search_title = f"Searching the web for {display_query}" if display_query else "Searching the web"
 
         # 1. Pre-execution status
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Searching the web",
+                title=search_title,
                 message=f"Query: {display_query}",
                 status=MessageStatus.IN_PROGRESS,
             ),
@@ -115,7 +116,7 @@ class WebSearchManager(ToolManager):
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Web search completed",
+                    title=f"Searched the web for {display_query}" if display_query else "Web search completed",
                     message=message,
                     status=MessageStatus.FINISHED,
                 ),
@@ -142,7 +143,7 @@ class WebSearchManager(ToolManager):
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="\u274c Web search failed",
+                    title=f"\u274c Web search failed for {display_query}" if display_query else "\u274c Web search failed",
                     message=error_message,
                     status=MessageStatus.ERROR,
                 ),

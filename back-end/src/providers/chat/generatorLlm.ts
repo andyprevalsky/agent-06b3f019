@@ -384,6 +384,8 @@ export async function callGeneratorLlm(params: {
     });
   });
 
+  await broadcastAssistantStream(params.agentId, streamId, '', false, 0, false, false, startTime);
+
   // Create streaming completion via Supabase completions endpoint
   const stream = await createStreamingCompletion({
     model: params.model,
@@ -410,7 +412,7 @@ export async function callGeneratorLlm(params: {
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
-  let sequence = 0;
+  let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
   const usage: ChatLlmUsage = {
@@ -477,7 +479,8 @@ export async function callGeneratorLlm(params: {
           false,
           sequence++,
           isClaude,
-          isGpt
+          isGpt,
+          startTime
         );
       }
     }
@@ -505,7 +508,16 @@ export async function callGeneratorLlm(params: {
   const fullJson = accumulatedJson;
 
   // Broadcast final "done" signal
-  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude, isGpt);
+  await broadcastAssistantStream(
+    params.agentId,
+    streamId,
+    '',
+    true,
+    sequence,
+    isClaude,
+    isGpt,
+    startTime
+  );
 
   const streamDuration = Date.now() - startTime;
   log.info('[GeneratorLLM] Streaming complete', {

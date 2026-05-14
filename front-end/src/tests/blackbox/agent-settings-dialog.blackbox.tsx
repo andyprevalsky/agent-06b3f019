@@ -192,9 +192,7 @@ describe('AgentSettingsDialog', () => {
   it('rejects price limit lower than tree_cost_cents', async () => {
     const u = userEvent.setup();
     renderWithProviders(
-      <AgentSettingsDialog
-        agent={makeAgent({ price_limit_cents: 500, tree_cost_cents: 300 })}
-      />,
+      <AgentSettingsDialog agent={makeAgent({ price_limit_cents: 500, tree_cost_cents: 300 })} />,
     );
     await u.click(document.querySelector('button')!);
     await u.click((await screen.findAllByText('$5.00'))[0]);

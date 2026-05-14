@@ -29,7 +29,7 @@ export interface MessageListViewProps {
   waitForCheckMap: Map<string, WaitForCheck[]>;
   streaming: FilteredStreamingState;
   animation: MessageAnimationState;
-  animatedCharCount: number;
+  animatedTokenCount: number;
   onAddCredits?: () => void;
   onIncreaseCostLimit?: () => void;
   onNavigateToAgent?: (agentId: string) => void;
@@ -54,7 +54,7 @@ export function MessageListView(props: MessageListViewProps) {
     waitForCheckMap,
     streaming,
     animation,
-    animatedCharCount,
+    animatedTokenCount,
     onAddCredits,
     onIncreaseCostLimit,
     onNavigateToAgent,
@@ -66,6 +66,7 @@ export function MessageListView(props: MessageListViewProps) {
   const showAttention =
     streaming.attention !== null && subAgentId === undefined && streaming.bubbles.size > 0;
   const showWebPreview = showMainBanners && agent?.source === 'WEB';
+  const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
 
   return (
     <div ref={containerRef} className={containerClassName}>
@@ -81,6 +82,9 @@ export function MessageListView(props: MessageListViewProps) {
         exploreStepMap={exploreStepMap}
         waitForCheckMap={waitForCheckMap}
         streamingPlanCharCount={streaming.plan?.char_count}
+        streamingPlanStartedAtMs={streaming.plan?.startedAtMs}
+        thinkingStreamTokenCount={thinkingStreamTokenCount}
+        thinkingStreamStartedAtMs={streaming.streamStartedAtMs}
       />
       {chatActionsVisible && (
         <ChatModeActions filteredMessages={filteredMessages} selectedAgentId={selectedAgentId} />
@@ -96,8 +100,9 @@ export function MessageListView(props: MessageListViewProps) {
         <ThinkingIndicator
           compact={compact}
           isClaudeStreaming={streaming.isClaude || streaming.isGpt}
-          streamingCharCount={streaming.charCount}
-          animatedCharCount={animatedCharCount}
+          streamStartedAtMs={streaming.streamStartedAtMs}
+          streamingTokenCount={thinkingStreamTokenCount}
+          animatedTokenCount={animatedTokenCount}
         />
       )}
       <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />

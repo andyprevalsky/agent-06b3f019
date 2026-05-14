@@ -4,16 +4,23 @@
  * Like the browser agent panel but inline as a chip.
  *
  * HEADER (always visible, clickable to expand/collapse):
- *   [thinking.svg|Sparkles] {prefix} - {actionOrGoal}    {N steps}  [chevron]
+ *   [ThinkingAnimation|Sparkles] {prefix} | [vertical carousel: active tool icon + action]    {N steps}  [chevron]
  *
  * Status drives icon + prefix:
- *   IN_PROGRESS → thinking.svg + "Exploring"
+ *   IN_PROGRESS → terminal ThinkingAnimation + "Exploring | [tool] {action}"
  *   FINISHED    → green Sparkles + "Explored"
- *   ERROR       → red Sparkles + "Explore failed"
+ *   ERROR       → red Sparkles + "Explore Failed"
  *
  * actionOrGoal: while IN_PROGRESS, the title of the most recent non-thinking
  * step (e.g. "Grep: andy prevalsky"); falls back to the goal text when no
- * action has run yet. When FINISHED/ERROR, always the goal text.
+ * action has run yet. When FINISHED/ERROR, the title row only shows the
+ * terminal state label.
+ *
+ * ACTIVE TOOL TRANSITION:
+ *   first IN_PROGRESS for a toolCallId -> debounced slide to that tool
+ *   FINISHED for a still-parallel toolCallId -> no immediate slide
+ *   FINISHED for the last active toolCallId -> immediate "X.Ys · ↓ X tokens"
+ *   Token counts spring in when ASSISTANT_STREAM/TOOL_STREAM updates arrive.
  *
  * RESULT (always visible when FINISHED/ERROR, fixed max-height):
  *   The concrete result from attempt_completion (plain text, no icon).
@@ -30,10 +37,14 @@
 import { ChevronRight, Lightbulb, Sparkles, Globe } from 'lucide-react';
 import { memo, useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import thinkingIcon from '@/assets/thinking.svg';
+import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { MarkdownText } from './MarkdownText';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 import type { ExploreStep } from '../types';
+import {
+  ExploreActiveToolCarousel,
+  type ExploreActiveToolCarouselItem,
+} from './ExploreActiveToolCarousel';
 
 export type { ExploreStep } from '../types';
 
@@ -43,6 +54,8 @@ interface ExploreAgentBubbleProps {
   message: string;
   status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   stepHistory: ExploreStep[];
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
   onTypingComplete?: () => void;
 }
 
@@ -65,15 +78,94 @@ function getStepIcon(step: ExploreStep) {
   return (step.toolName && TOOL_ICONS[step.toolName]) || TOOL_ICONS.default;
 }
 
+function getActiveActions(steps: ExploreStep[]): ExploreStep[] {
+  return steps.filter((step) => !isThinkingStep(step) && step.status === 'IN_PROGRESS');
+}
+
+function getFallbackActions(steps: ExploreStep[]): ExploreStep[] {
+  const mostRecentAction = [...steps].reverse().find((step) => !isThinkingStep(step));
+  return mostRecentAction ? [mostRecentAction] : [];
+}
+
+function getLatestFinishedActionStartedAtMs(steps: ExploreStep[]): number | undefined {
+  const latestFinished = [...steps]
+    .reverse()
+    .find((step) => !isThinkingStep(step) && step.status === 'FINISHED' && step.timestamp);
+  if (!latestFinished?.timestamp) return undefined;
+
+  const parsed = Date.parse(latestFinished.timestamp);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function getThinkingStartedAtMs(
+  postToolThinkingStartedAtMs: number | undefined,
+  streamStartedAtMs: number | undefined,
+): number | undefined {
+  if (!postToolThinkingStartedAtMs) return streamStartedAtMs;
+  if (!streamStartedAtMs) return postToolThinkingStartedAtMs;
+  return Math.min(postToolThinkingStartedAtMs, streamStartedAtMs);
+}
+
+function buildCarouselItems(
+  actions: ExploreStep[],
+  fallbackText?: string,
+  thinkingStreamTokenCount: number = 0,
+  thinkingStreamStartedAtMs?: number,
+  showThinking: boolean = thinkingStreamTokenCount > 0,
+): ExploreActiveToolCarouselItem[] {
+  const actionItems = actions
+    .map((action, index) => {
+      const text = action.title?.replace(/\n/g, ' ').trim();
+      if (!text) return null;
+      return {
+        key:
+          action.toolCallId || `${action.toolName || 'tool'}:${action.timestamp || index}:${text}`,
+        text: truncate(text, 100),
+        icon: getStepIcon(action),
+      };
+    })
+    .filter((item): item is ExploreActiveToolCarouselItem => item !== null);
+
+  const items: ExploreActiveToolCarouselItem[] = [...actionItems];
+
+  if (items.length === 0 && fallbackText && !showThinking) {
+    items.push({
+      key: `goal:${fallbackText}`,
+      text: truncate(fallbackText.replace(/\n/g, ' '), 100),
+      icon: null,
+    });
+  }
+
+  if (showThinking) {
+    items.push({
+      key: 'thinking-stream',
+      kind: 'thinking',
+      tokenCount: thinkingStreamTokenCount,
+      startedAtMs: thinkingStreamStartedAtMs,
+      pauseMs: 10_000,
+    });
+  }
+
+  return items;
+}
+
 interface HeaderProps {
   status: ExploreAgentBubbleProps['status'];
-  headerText: string;
+  titleText: string;
+  carouselItems: ExploreActiveToolCarouselItem[];
   stepCount: number;
   isExpanded: boolean;
   onToggle: () => void;
 }
 
-function Header({ status, headerText, stepCount, isExpanded, onToggle }: HeaderProps) {
+function Header({
+  status,
+  titleText,
+  carouselItems,
+  stepCount,
+  isExpanded,
+  onToggle,
+}: HeaderProps) {
   const isInProgress = status === 'IN_PROGRESS';
   const isComplete = status === 'FINISHED';
   const isError = status === 'ERROR';
@@ -83,13 +175,18 @@ function Header({ status, headerText, stepCount, isExpanded, onToggle }: HeaderP
       onClick={onToggle}
     >
       {isInProgress ? (
-        <img
-          src={thinkingIcon}
-          alt=""
-          aria-hidden="true"
+        <div
           data-testid="explore-thinking-icon"
-          className="h-4 w-4 flex-shrink-0"
-        />
+          className="mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center"
+        >
+          <ThinkingAnimation
+            dataUrl="/thinking_animations.txt"
+            autoplay
+            loop
+            className="h-[14.4px] w-[14.4px]"
+            style={{ width: 14.4, height: 14.4 }}
+          />
+        </div>
       ) : (
         <Sparkles
           className={cn(
@@ -100,7 +197,18 @@ function Header({ status, headerText, stepCount, isExpanded, onToggle }: HeaderP
         />
       )}
       <div className="flex-1 min-w-0">
-        <span className="text-xs font-medium text-foreground/80 truncate block">{headerText}</span>
+        <span className="text-xs font-medium text-foreground/80 flex items-center min-w-0">
+          <span className="flex-shrink-0">{titleText}</span>
+          {carouselItems.length > 0 && (
+            <>
+              <span className="mx-1.5 text-muted-foreground/40 flex-shrink-0">|</span>
+              <ExploreActiveToolCarousel
+                items={carouselItems}
+                iconClassName="mr-1.5 h-3 w-3 text-muted-foreground/50"
+              />
+            </>
+          )}
+        </span>
       </div>
       {stepCount > 0 && (
         <span className="text-[10px] text-muted-foreground/50 tabular-nums flex-shrink-0">
@@ -196,6 +304,8 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
   message,
   status,
   stepHistory,
+  thinkingStreamTokenCount = 0,
+  thinkingStreamStartedAtMs,
   onTypingComplete,
 }: ExploreAgentBubbleProps) {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -230,10 +340,33 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
   const goal = truncate(fullGoal || title || 'Researching...', 100);
   const steps = stepHistory;
   const hasSteps = steps.length > 0;
-  const mostRecentAction = [...steps].reverse().find((s) => !isThinkingStep(s));
-  const prefix = isInProgress ? 'Exploring' : isError ? 'Explore failed' : 'Explored';
-  const detail = isInProgress && mostRecentAction?.title ? mostRecentAction.title : goal;
-  const headerText = `${prefix} - ${truncate(detail.replace(/\n/g, ' '), 100)}`;
+  const activeActions = isInProgress ? getActiveActions(steps) : [];
+  const postToolThinkingStartedAtMs =
+    isInProgress && activeActions.length === 0
+      ? getLatestFinishedActionStartedAtMs(steps)
+      : undefined;
+  const showThinking = thinkingStreamTokenCount > 0 || postToolThinkingStartedAtMs !== undefined;
+  const thinkingStartedAtMs = getThinkingStartedAtMs(
+    postToolThinkingStartedAtMs,
+    thinkingStreamStartedAtMs,
+  );
+  const displayActions = isInProgress
+    ? activeActions.length > 0
+      ? activeActions
+      : showThinking
+        ? []
+        : getFallbackActions(steps)
+    : [];
+  const titleText = isInProgress ? 'Exploring' : isError ? 'Explore Failed' : 'Explored';
+  const carouselItems = isInProgress
+    ? buildCarouselItems(
+        displayActions,
+        goal,
+        thinkingStreamTokenCount,
+        thinkingStartedAtMs,
+        showThinking,
+      )
+    : [];
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
@@ -241,8 +374,9 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
         <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2">
           <Header
             status={status}
-            headerText={headerText}
-            stepCount={steps.length}
+            titleText={titleText}
+            carouselItems={carouselItems}
+            stepCount={isInProgress ? steps.length : 0}
             isExpanded={isExpanded}
             onToggle={toggleExpanded}
           />

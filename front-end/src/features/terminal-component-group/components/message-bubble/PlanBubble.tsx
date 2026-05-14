@@ -5,6 +5,10 @@
  * Terminal message queue is not blocked. Handles ERROR, IN_PROGRESS, and
  * FINISHED statuses by feeding the PlanChip with either the streamed data
  * payload or the fallback error/loading state.
+ *
+ * STREAMING METRIC:
+ * PLAN_STREAM supplies char count plus llm_started_at_ms. PlanChip converts
+ * chars to token estimate and renders X.Ys · ↓ X tokens.
  */
 import type { Message } from '../../hooks';
 import { PlanChip } from '../PlanChip';
@@ -34,6 +38,7 @@ interface PlanBubbleProps {
   shouldType?: boolean;
   onTypingComplete?: () => void;
   planCharCount?: number;
+  planStreamStartedAtMs?: number;
 }
 
 function normalizeDependencyRecord(value: unknown): Record<string, string[]> | null {
@@ -96,6 +101,7 @@ export function PlanBubble({
   shouldType,
   onTypingComplete,
   planCharCount,
+  planStreamStartedAtMs,
 }: PlanBubbleProps) {
   const toolStatus = message.metadata?.toolStatus as
     | 'IN_PROGRESS'
@@ -150,6 +156,7 @@ export function PlanBubble({
           }}
           toolStatus={toolStatus}
           charCount={planCharCount}
+          streamStartedAtMs={planStreamStartedAtMs}
         />
       </div>
     </div>

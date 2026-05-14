@@ -3,7 +3,8 @@
  *
  * Thin wiring file — delegates all initialization to features/app-wiring.
  *
- * [INIT] --> initDevLogging, logStartupMode, initAmplitude, initViewportHeight
+ * [INIT] --> initDevLogging, logStartupMode, initAmplitude
+ *        --> initViewportHeight, initViewportScale
  *   |
  *   v
  * [RENDER] --> Mount <AppShell /> with providers + toasters to DOM
@@ -17,6 +18,7 @@ import AppShell, {
   initDevLogging,
   initAmplitude,
   initViewportHeight,
+  initViewportScale,
   logStartupMode,
 } from '@/features/app-wiring';
 import './index.css';
@@ -26,6 +28,7 @@ initDevLogging();
 logStartupMode();
 initAmplitude();
 initViewportHeight();
+initViewportScale();
 
 // Render main app
 createRoot(document.getElementById('root')!).render(

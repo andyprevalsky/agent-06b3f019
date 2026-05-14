@@ -111,22 +111,20 @@ interface HiddenFileInputProps {
   onPicked: (files: FileList) => void;
 }
 
-const HiddenFileInput = forwardRef<HTMLInputElement, HiddenFileInputProps>(
-  ({ onPicked }, ref) => (
-    <input
-      ref={ref}
-      type="file"
-      multiple
-      className="hidden"
-      onChange={(e) => {
-        if (e.target.files && e.target.files.length > 0) {
-          onPicked(e.target.files);
-          e.target.value = '';
-        }
-      }}
-    />
-  ),
-);
+const HiddenFileInput = forwardRef<HTMLInputElement, HiddenFileInputProps>(({ onPicked }, ref) => (
+  <input
+    ref={ref}
+    type="file"
+    multiple
+    className="hidden"
+    onChange={(e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        onPicked(e.target.files);
+        e.target.value = '';
+      }
+    }}
+  />
+));
 HiddenFileInput.displayName = 'HiddenFileInput';
 
 interface TextareaRowProps {

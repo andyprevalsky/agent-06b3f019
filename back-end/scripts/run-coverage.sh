@@ -54,15 +54,32 @@ export CONTRACT_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
 if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
   LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 10))
   DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
-  if [[ -n "$ACTUAL_PORT" ]]; then
-    LOCAL_DB_PORT="$ACTUAL_PORT"
+  DB_FOUND=false
+
+  if docker info >/dev/null 2>&1; then
+    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+    if [[ -n "$ACTUAL_PORT" ]]; then
+      LOCAL_DB_PORT="$ACTUAL_PORT"
+    fi
+    if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+      DB_FOUND=true
+      echo "Using local Postgres (Docker) at localhost:$LOCAL_DB_PORT"
+    fi
   fi
-  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
-  if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+
+  if ! $DB_FOUND; then
+    SYSTEM_PG_PORT=5432
+    if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      DB_FOUND=true
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+    fi
+  fi
+
+  if $DB_FOUND; then
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
     export DATABASE_URL="$LOCAL_DB_URL"
     export DIRECT_URL="$LOCAL_DB_URL"
-    echo "Using local Postgres at localhost:$LOCAL_DB_PORT"
   fi
 fi
 
