@@ -89,7 +89,7 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # stream for 60–90s via Supabase Realtime without posting intermediate rows to
 # the messages table — 60s here produces false-positive stalls on the synthesis
 # step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 180
+AGENT_STALL_SECONDS = 240
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets")
@@ -366,6 +366,28 @@ async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, 
     return counts
 
 
+def _validate_tool_count_expectations(
+    actual_counts: Dict[str, int],
+    min_tool_counts: Optional[dict],
+    forbidden_tools: List[str],
+) -> Optional[str]:
+    """Validate minimum and forbidden tool-count benchmark expectations."""
+    for tool_name, minimum in (min_tool_counts or {}).items():
+        actual = actual_counts.get(tool_name, 0)
+        if actual < minimum:
+            return (
+                f"Tool '{tool_name}': expected at least {minimum} call(s), "
+                f"got {actual}. Full counts: {actual_counts}"
+            )
+
+    for tool_name in forbidden_tools:
+        actual = actual_counts.get(tool_name, 0)
+        if actual > 0:
+            return f"Forbidden tool '{tool_name}' was called {actual} time(s). Full counts: {actual_counts}"
+
+    return None
+
+
 async def post_message(base_url: str, agent_id: str, message: str) -> bool:
     """POST /api/agents/:id/messages — send a user message (unblocks send_message_to_user waits)."""
     headers = await _api_headers()
@@ -471,6 +493,26 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "error_agents": [],
             "all_agents": [],
         }
+
+
+async def _fetch_message_counts(base_url: str, agent_ids: List[str]) -> Dict[str, int]:
+    """Fetch actual message-row counts for agents whose tree counters can lag."""
+    if not agent_ids:
+        return {}
+
+    async def _fetch_one(aid: str) -> Tuple[str, Optional[int]]:
+        try:
+            data = await get_agent(base_url, aid)
+            return aid, len(data.get("messages", []))
+        except Exception:
+            return aid, None
+
+    counts: Dict[str, int] = {}
+    results = await asyncio.gather(*(_fetch_one(aid) for aid in agent_ids), return_exceptions=False)
+    for aid, count in results:
+        if count is not None:
+            counts[aid] = count
+    return counts
 
 
 def suite_name_for_error(args) -> str:
@@ -639,6 +681,20 @@ async def poll_agent(
             tree_total_msgs = tree_stats["total_messages"]
             tree_agent_count = tree_stats["agent_count"]
             tree_cost = tree_stats["total_cost_cents"]
+            tree_agents = tree_stats.get("all_agents", [])
+            active_non_root_ids = [
+                a.get("agent_id", "")
+                for a in tree_agents
+                if a.get("agent_id") and a.get("agent_id") != agent_id and a.get("status") not in TERMINAL_STATUSES
+            ]
+            detail_message_counts = await _fetch_message_counts(base_url, active_non_root_ids)
+            if detail_message_counts:
+                tree_total_msgs = root_msg_count
+                for a in tree_agents:
+                    aid = a.get("agent_id", "")
+                    if aid == agent_id:
+                        continue
+                    tree_total_msgs += detail_message_counts.get(aid, int(a.get("message_count", 0) or 0))
 
             # Activity check: tree API message_count lags behind reality,
             # so we use MULTIPLE signals: tree message count, root real message count,
@@ -680,11 +736,14 @@ async def poll_agent(
             # messages into the root's list but don't increment the tree
             # counter). Use the detail-API root_msg_count for root tracking
             # so legitimate progress isn't flagged as a stall.
-            for a in tree_stats.get("all_agents", []):
+            for a in tree_agents:
                 aid = a.get("agent_id", "")
                 if not aid:
                     continue
-                mc = root_msg_count if aid == agent_id else int(a.get("message_count", 0) or 0)
+                if aid == agent_id:
+                    mc = root_msg_count
+                else:
+                    mc = detail_message_counts.get(aid, int(a.get("message_count", 0) or 0))
                 st = a.get("status", "UNKNOWN")
                 cur = per_agent_state.get(aid)
                 if cur is None:
@@ -697,7 +756,7 @@ async def poll_agent(
 
             # Build parent→children map from the tree.
             children_of: Dict[str, List[str]] = {}
-            for a in tree_stats.get("all_agents", []):
+            for a in tree_agents:
                 pid = a.get("parent_agent_id")
                 cid = a.get("agent_id")
                 if pid and cid:
@@ -707,7 +766,7 @@ async def poll_agent(
             # it is still active. An agent with all-terminal children counts
             # as a leaf even though it briefly had children.
             leaves: List[str] = []
-            for a in tree_stats.get("all_agents", []):
+            for a in tree_agents:
                 aid = a.get("agent_id")
                 if not aid:
                     continue
@@ -1162,11 +1221,11 @@ async def run_single_task(
             except Exception as e:
                 print(f"    ⚠ Tree count check failed: {e}")
 
-        # Tree-wide tool count check — verifies exact tool call counts
-        if task.expected_tool_counts and passed:
+        # Tree-wide tool count checks — verifies exact, minimum, and forbidden tool calls.
+        if (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
             try:
                 actual_counts = await count_tree_tool_calls(base_url, agent_id)
-                for tool_name, expected_count in task.expected_tool_counts.items():
+                for tool_name, expected_count in (task.expected_tool_counts or {}).items():
                     actual = actual_counts.get(tool_name, 0)
                     if actual != expected_count:
                         passed = False
@@ -1175,6 +1234,15 @@ async def run_single_task(
                             f"got {actual}. Full counts: {actual_counts}"
                         )
                         break
+                if passed:
+                    tool_count_error = _validate_tool_count_expectations(
+                        actual_counts,
+                        task.min_tool_counts,
+                        task.forbidden_tools,
+                    )
+                    if tool_count_error:
+                        passed = False
+                        failure_reason = tool_count_error
             except Exception as e:
                 print(f"    ⚠ Tool count check failed: {e}")
 

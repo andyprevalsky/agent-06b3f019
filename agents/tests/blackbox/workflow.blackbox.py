@@ -2796,37 +2796,32 @@ async def test_workflow_execute_tool_unknown_tool_returns_error():
         _restore_workflow(original)
 
 
-async def test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn():
-    """PLAN phase + non-explore spawn_agent: returns error AND posts a TOOL event.
+async def test_plan_phase_spawn_agent_schema_rejects_non_explore_types():
+    """PLAN phase: the LLM-facing schema enforces type='explore' at parse time.
 
-    Regression: smoke task `parallel-tool-calls` failed with a context
-    role_alternation violation because this branch returned an error dict
-    without posting a TOOL row, so the next iteration's LLM saw its prior
-    ASSISTANT tool_use without any tool_result and re-emitted tool_calls,
-    leaving two back-to-back ASSISTANTs.
+    Replaces the old runtime-gate regression test: PLAN now narrows
+    spawn_agent.type to a const "explore" via PLAN_TOOL_MODELS, so a
+    type="browser" call never gets past create_agent_action_model parse —
+    the runtime gate has been deleted as redundant.
     """
-    wf = _bare_workflow_instance()
-    wf.agent_id = "a1"
-    wf.current_phase = "PLAN"
-    handle_calls = []
+    from utils.tool_schemas import PLAN_PHASE_TOOLS, PLAN_TOOL_MODELS, create_agent_action_model
 
-    async def fake_handle(event, tool_call_id, tool_name):
-        handle_calls.append((event, tool_call_id, tool_name))
+    AgentAction = create_agent_action_model(PLAN_PHASE_TOOLS, tool_registry=PLAN_TOOL_MODELS)
 
-    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
-    fake = _FakeWorkflowModule()
-    original = _patch_workflow(fake)
-    try:
-        result = await wf._execute_tool("spawn_agent", {"type": "browser", "goal": "x"}, "call-1")
-        assert result.get("error") is True
-        assert "PLAN" in result.get("message", "") or "explore" in result.get("message", "")
-        assert len(handle_calls) == 1, "Expected one TOOL event posted for PLAN+non-explore block"
-        event, tcid, tname = handle_calls[0]
-        assert tcid == "call-1"
-        assert tname == "spawn_agent"
-        assert getattr(event, "status", None).name == "ERROR"
-    finally:
-        _restore_workflow(original)
+    valid = AgentAction.model_validate(
+        {"response": "ok", "tool_calls": [{"tool": "spawn_agent", "type": "explore", "goal": "x"}]}
+    )
+    assert valid is not None
+
+    rejected = 0
+    for bad_type in ("browser", "code", "general_purpose", "for_each"):
+        try:
+            AgentAction.model_validate(
+                {"response": "ok", "tool_calls": [{"tool": "spawn_agent", "type": bad_type, "goal": "x"}]}
+            )
+        except Exception:
+            rejected += 1
+    assert rejected == 4, f"PLAN AgentAction must reject all 4 non-explore types; got {rejected}/4 rejections"
 
 
 async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event():
@@ -3027,7 +3022,7 @@ async def test_workflow_on_tokens_transient_error_keeps_claude_token():
             tokens_out_delta=2,
             actual_model="gemini/gemini-2.5-pro",
             call_site="test",
-            claude_token_error="stall",  # transient - keep token
+            claude_token_error="server_error",  # 5xx — transient, keep token
         )
         assert wf.claude_max_token == "keep-me"
         # mark activity NOT executed
@@ -3130,7 +3125,7 @@ async def test_workflow_on_tokens_transient_error_keeps_gpt_token():
             tokens_out_delta=2,
             actual_model="openai/gpt-5.4",
             call_site="test",
-            gpt_token_error="stall",
+            gpt_token_error="server_error",  # 5xx — transient, keep token
         )
         assert wf.compute_token_provider == "gpt"
         assert wf.gpt_code_token == "keep-gpt"
@@ -3297,7 +3292,7 @@ async def run_all_tests():
     await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_returns_empty)
     await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
     await r.record_async(
-        "wf_execute_tool_plan_blocks_nonexplore", test_workflow_execute_tool_plan_phase_blocks_non_explore_spawn
+        "wf_plan_schema_rejects_nonexplore", test_plan_phase_spawn_agent_schema_rejects_non_explore_types
     )
     await r.record_async(
         "wf_execute_tool_invalid_params_posts_event",

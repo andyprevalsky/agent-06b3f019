@@ -103,7 +103,7 @@ def test_outreach_batch_has_timeout_floor():
     """Outreach batch keeps enough time for root research before row fanout."""
     from benchmarks.benchmark_tasks import get_timeout_floor
 
-    assert get_timeout_floor("outreach-batch") == 480
+    assert get_timeout_floor("outreach-batch") == 600
     assert get_timeout_floor("chat-mode") is None
 
 
@@ -125,7 +125,7 @@ def test_timeout_default_respects_explicit_floor():
 
     task = get_task_by_name("outreach-batch")
 
-    assert _default_timeout_for_task(task, max_seconds=120) == 480
+    assert _default_timeout_for_task(task, max_seconds=120) == 600
 
 
 async def test_code_agent_preflight_accepts_gpt_compute_token():
@@ -706,6 +706,54 @@ def test_logical_tool_counts_ignore_progress_messages():
     }
 
 
+def test_tool_count_expectations_support_minimums_and_forbidden_tools():
+    """Benchmark tasks can require direct tools and reject unintended sub-agents."""
+    from benchmarks.run_benchmark import _validate_tool_count_expectations
+
+    assert (
+        _validate_tool_count_expectations(
+            {"web_search": 3},
+            {"web_search": 3},
+            ["spawn_agent", "spawn_general_purpose_agent"],
+        )
+        is None
+    )
+    assert "expected at least 3" in _validate_tool_count_expectations(
+        {"web_search": 2},
+        {"web_search": 3},
+        [],
+    )
+    assert "Forbidden tool 'spawn_agent'" in _validate_tool_count_expectations(
+        {"web_search": 3, "spawn_agent": 1},
+        {"web_search": 3},
+        ["spawn_agent"],
+    )
+
+
+def test_parallel_tool_calls_smoke_requires_direct_web_search():
+    """The parallel search smoke should not pass by farming the task to sub-agents."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("parallel-tool-calls")
+
+    assert task.start_phase == "execute"
+    assert task.min_tool_counts == {"web_search": 3}
+    assert "spawn_agent" in task.forbidden_tools
+    assert "spawn_general_purpose_agent" in task.forbidden_tools
+
+
+def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
+    """Population smoke should exercise general-purpose fanout without slow browser/code paths."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("spawn-sub-agents")
+
+    assert task.min_tool_counts == {"web_search": 2}
+    assert task.expected_tool_counts["spawn_general_purpose_agent"] == 2
+    assert task.expected_tool_counts["spawn_browser_agent"] == 0
+    assert task.expected_tool_counts["spawn_claude_code_agent"] == 0
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -741,4 +789,7 @@ async def run_all_tests():
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
+    r.record("parallel_tool_calls_direct_web_search", test_parallel_tool_calls_smoke_requires_direct_web_search)
+    r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
     return r.all_passed

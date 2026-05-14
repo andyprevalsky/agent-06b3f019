@@ -66,11 +66,45 @@ async def test_boundary():
     )
 
 
+async def test_rose_pool_returns_200k_from_seed():
+    """Rose pool ids resolve to 200k without hitting OpenRouter."""
+    # Don't call _setup() — we want to prove no HTTP is made.
+    import helpers.model_info as mi
+    # Restore the seeded cache (other tests may have cleared it).
+    mi._model_context_cache.clear()
+    mi._model_context_cache.update(mi._ROSE_POOL_CONTEXT_WINDOWS)
+    initial_request_count = len(get_captured_requests() or [])
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.model_info import get_model_context_window
+        for pool_id in ("rose-labs/rose-1-lite", "rose-labs/rose-1-ultra", "rose-labs/rose-1-browser-use"):
+            assert await get_model_context_window(pool_id) == 200_000, pool_id
+
+    # Cache hits, no new HTTP calls.
+    assert len(get_captured_requests() or []) == initial_request_count
+
+
+async def test_unknown_model_default_is_200k():
+    """Unknown model falls back to 200k (not 100k) — every routed model is ≥200k."""
+    _setup()
+    import helpers.model_info as mi
+    mi._model_context_cache.clear()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.model_info import get_model_context_window
+
+        result = await get_model_context_window("not/a/real-model")
+
+    assert result == 200_000
+
+
 async def run_all_tests():
     print("model-info blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
     await r.record_async("boundary", test_boundary)
+    await r.record_async("rose_pool_returns_200k_from_seed", test_rose_pool_returns_200k_from_seed)
+    await r.record_async("unknown_model_default_is_200k", test_unknown_model_default_is_200k)
     teardown_mock()
     return r.all_passed
 

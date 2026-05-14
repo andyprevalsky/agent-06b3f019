@@ -8,8 +8,24 @@ from config import load_config
 
 logger = structlog.get_logger()
 
+# Pool strings the workflow may emit. OpenRouter does not list these IDs
+# (they route in-process via Rose), so we seed them with the underlying
+# Anthropic Sonnet 4.6 window (200k, no `context-1m-2025-08-07` beta).
+_ROSE_POOL_CONTEXT_WINDOWS = {
+    "rose-labs/rose-1-lite": 200_000,
+    "rose-labs/rose-1-ultra": 200_000,
+    "rose-labs/rose-1-browser-use": 200_000,
+    "rose": 200_000,
+    "rose-ultra": 200_000,
+    "rose-lite": 200_000,
+}
+
 # In-memory cache for model context windows (avoid repeated API calls)
-_model_context_cache: dict[str, int] = {}
+_model_context_cache: dict[str, int] = dict(_ROSE_POOL_CONTEXT_WINDOWS)
+
+# Default fallback when a model is unknown. Every model we currently route to
+# is at least 200k (Sonnet 4.6 default, no 1M beta header).
+_DEFAULT_CONTEXT_WINDOW = 200_000
 
 
 @activity.defn
@@ -52,7 +68,7 @@ async def get_model_context_window(model: str) -> int:
             # Find the specific model
             for model_data in models:
                 if model_data.get("id") == model:
-                    context_length = model_data.get("context_length", 100_000)
+                    context_length = model_data.get("context_length", _DEFAULT_CONTEXT_WINDOW)
 
                     # Cache it
                     _model_context_cache[model] = context_length
@@ -64,18 +80,18 @@ async def get_model_context_window(model: str) -> int:
                     return context_length
 
         # Model not found, use default
-        default_context = 100_000
-        _model_context_cache[model] = default_context
+        _model_context_cache[model] = _DEFAULT_CONTEXT_WINDOW
 
         logger.warning(
-            "Model not found in OpenRouter, using default context window", model=model, default_context=default_context
+            "Model not found in OpenRouter, using default context window",
+            model=model,
+            default_context=_DEFAULT_CONTEXT_WINDOW,
         )
 
-        return default_context
+        return _DEFAULT_CONTEXT_WINDOW
 
     except Exception as e:
         logger.error("Failed to fetch model context window", model=model, error=str(e))
         # Return safe default on error
-        default_context = 100_000
-        _model_context_cache[model] = default_context
-        return default_context
+        _model_context_cache[model] = _DEFAULT_CONTEXT_WINDOW
+        return _DEFAULT_CONTEXT_WINDOW
