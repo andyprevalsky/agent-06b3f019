@@ -427,11 +427,15 @@ async function callSupervisorLlm(
 
   const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId);
   if (blackboxFixture) {
+    if (blackboxFixture.delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, blackboxFixture.delayMs));
+    }
     log.info('[SmsSupervisorLLM] Using blackbox response fixture', {
-      toolCallCount: blackboxFixture.tool_calls.length,
+      toolCallCount: blackboxFixture.response.tool_calls.length,
+      delayMs: blackboxFixture.delayMs,
       durationMs: Date.now() - startTime,
     });
-    return blackboxFixture;
+    return blackboxFixture.response;
   }
 
   // Consume streaming response fully (no FE broadcast needed)
@@ -577,7 +581,12 @@ export function clearSupervisorFixtureOverride(userId: string): void {
   supervisorFixtureOverrides.delete(userId);
 }
 
-function loadBlackboxSupervisorResponseFixture(userId: string): SupervisorResponse | null {
+interface LoadedFixture {
+  response: SupervisorResponse;
+  delayMs: number;
+}
+
+function loadBlackboxSupervisorResponseFixture(userId: string): LoadedFixture | null {
   if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') {
     return null;
   }
@@ -592,10 +601,20 @@ function loadBlackboxSupervisorResponseFixture(userId: string): SupervisorRespon
     return null;
   }
 
-  const parsed = SmsSupervisorResponseSchema.parse(JSON.parse(raw));
+  // `delay_ms` is an out-of-band fixture-control field; strip it before
+  // validating the rest against SmsSupervisorResponseSchema so the schema
+  // stays in sync with what production model responses look like.
+  const rawObj = JSON.parse(raw) as Record<string, unknown>;
+  const delayMs =
+    typeof rawObj.delay_ms === 'number' && Number.isFinite(rawObj.delay_ms) && rawObj.delay_ms >= 0
+      ? rawObj.delay_ms
+      : 0;
+  delete rawObj.delay_ms;
+
+  const parsed = SmsSupervisorResponseSchema.parse(rawObj);
   return {
-    reasoning: parsed.reasoning,
-    tool_calls: parsed.tool_calls,
+    response: { reasoning: parsed.reasoning, tool_calls: parsed.tool_calls },
+    delayMs,
   };
 }
 

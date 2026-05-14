@@ -390,8 +390,12 @@ async function testBoundary_vapiCallCreation() {
   if (!systemMessage.includes('Boundary test')) {
     throw new Error('Expected per-call system prompt in outbound assistant config');
   }
-  if (assistant.voice?.provider !== '11labs' || assistant.voice.voiceId !== 'paula') {
-    throw new Error(`Expected 11labs/paula voice, got ${JSON.stringify(assistant.voice)}`);
+  // "Rose" preset from mac-app onboarding VoiceSelector (PRESET_VOICES[0]).
+  if (
+    assistant.voice?.provider !== '11labs' ||
+    assistant.voice.voiceId !== '6fZce9LFNG3iEITDfqZZ'
+  ) {
+    throw new Error(`Expected 11labs/Rose voice, got ${JSON.stringify(assistant.voice)}`);
   }
   if (
     assistant.transcriber?.provider !== 'deepgram' ||
@@ -452,8 +456,8 @@ async function testBoundary_vapiCallWithUserOverrides() {
   assertStatus(patchRes.status, 200, patchRes.data);
 
   // 3. Trigger an outbound call as the agent worker would.
-  const cursor = ((await request(`${BASE_URL}/api/test/captures`)).data as { nextId: number })
-    .nextId - 1;
+  const cursor =
+    ((await request(`${BASE_URL}/api/test/captures`)).data as { nextId: number }).nextId - 1;
   await request(`${BASE_URL}/api/vapi/call`, {
     method: 'POST',
     headers: apiKeyHeaders(),

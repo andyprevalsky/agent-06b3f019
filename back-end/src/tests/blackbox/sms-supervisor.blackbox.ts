@@ -394,7 +394,11 @@ async function testWs2_suppressedRunDiscardsStartNewAgent() {
   const token = captureToken('sms-supervisor-ws2-discard');
   const goal = `WS2-discard-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const replyText = `Started agent for: ${goal.substring(0, 30)}`;
-  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5);
+  // delay_ms keeps both supervisor runs inside their LLM call long enough for
+  // B's webhook to bump lastInboundSeq before A reaches its commit gate —
+  // otherwise A finishes in ~5ms and commits before B has bumped, defeating
+  // the seq-gating logic this test was written to verify.
+  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5, 250);
   const firstText = 'WS2 discard — first inbound (suppressed)';
   const secondText = 'WS2 discard — second inbound (committing)';
 

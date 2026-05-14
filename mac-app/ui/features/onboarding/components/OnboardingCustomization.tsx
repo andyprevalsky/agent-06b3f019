@@ -50,6 +50,52 @@ const saveVoicePreference = (voice: VoicePreference): void => {
   localStorage.setItem(VOICE_STORAGE_KEY, JSON.stringify(voice));
 };
 
+interface NameFieldProps {
+  name: string;
+  saving: boolean;
+  setName: (value: string) => void;
+}
+
+const NameField = ({ name, saving, setName }: NameFieldProps): JSX.Element => (
+  <div className="space-y-2">
+    <label htmlFor="agentName" className="text-sm font-medium text-foreground">
+      Name
+    </label>
+    <input
+      id="agentName"
+      type="text"
+      value={name}
+      onChange={(e) => setName(e.target.value)}
+      maxLength={MAX_NAME_LENGTH}
+      disabled={saving}
+      placeholder="Rose"
+      className="w-full h-10 rounded-lg border border-muted-foreground/30 bg-background px-3 text-sm outline-none focus:border-foreground"
+    />
+  </div>
+);
+
+interface ContinueButtonProps {
+  saving: boolean;
+  onClick: () => void;
+}
+
+const ContinueButton = ({ saving, onClick }: ContinueButtonProps): JSX.Element => (
+  <button
+    onClick={onClick}
+    disabled={saving}
+    className="w-full h-12 rounded-lg bg-foreground text-background hover:bg-foreground/90 transition-all duration-200 flex items-center justify-center gap-2 text-sm font-medium"
+  >
+    {saving ? (
+      <Loader2 className="w-4 h-4 animate-spin" />
+    ) : (
+      <>
+        Continue
+        <ArrowRight className="w-4 h-4" />
+      </>
+    )}
+  </button>
+);
+
 const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): JSX.Element => {
   const customizationApi = useOnboardingCustomizationApi();
   const [loading, setLoading] = useState(true);
@@ -81,11 +127,7 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
     try {
       saveVoicePreference(voice);
       await customizationApi.saveCustomization(
-        {
-          systemName: name,
-          profilePicture: null,
-          customSystemPrompt: '',
-        },
+        { systemName: name, profilePicture: null, customSystemPrompt: '' },
         { voicePreferenceId: voice.voiceId === '' ? null : voice.voiceId }
       );
       onComplete();
@@ -106,11 +148,9 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
   return (
     <div className="flex-1 flex flex-col px-8 pt-6 pb-20 overflow-y-auto relative">
       <BackgroundTiles />
-
       <div className="text-center mb-6 relative z-10">
         <h1 className="text-2xl font-semibold text-foreground">Create your Agent</h1>
       </div>
-
       <div className="flex-1 max-w-md mx-auto w-full space-y-8 relative z-10">
         <VoiceSelector
           value={voice}
@@ -119,47 +159,20 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
           onChange={setVoice}
           onCustomVoiceIdChange={setCustomVoiceId}
         />
-
-        <div className="space-y-2">
-          <label htmlFor="agentName" className="text-sm font-medium text-foreground">
-            Name
-          </label>
-          <input
-            id="agentName"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={MAX_NAME_LENGTH}
-            disabled={saving}
-            placeholder="Rose"
-            className="w-full h-10 rounded-lg border border-muted-foreground/30 bg-background px-3 text-sm outline-none focus:border-foreground"
-          />
-        </div>
+        <NameField name={name} saving={saving} setName={setName} />
       </div>
-
       {error !== null && error.length > 0 ? (
         <div className="max-w-md mx-auto w-full mt-4 p-3 bg-destructive/10 border border-destructive rounded-lg text-sm text-destructive relative z-10">
           {error}
         </div>
       ) : null}
-
       <div className="max-w-md mx-auto w-full mt-6 relative z-10">
-        <button
+        <ContinueButton
+          saving={saving}
           onClick={() => {
             void handleContinue();
           }}
-          disabled={saving}
-          className="w-full h-12 rounded-lg bg-foreground text-background hover:bg-foreground/90 transition-all duration-200 flex items-center justify-center gap-2 text-sm font-medium"
-        >
-          {saving ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <>
-              Continue
-              <ArrowRight className="w-4 h-4" />
-            </>
-          )}
-        </button>
+        />
       </div>
     </div>
   );

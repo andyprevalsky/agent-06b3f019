@@ -85,8 +85,7 @@ export async function partialUpdateUser(userId: string, data: UpdateUserBody) {
   if (data.profilePicture !== undefined) updateData.profilePicture = data.profilePicture;
   if (data.customSystemPrompt !== undefined)
     updateData.customSystemPrompt = data.customSystemPrompt;
-  if (data.voicePreferenceId !== undefined)
-    updateData.voicePreferenceId = data.voicePreferenceId;
+  if (data.voicePreferenceId !== undefined) updateData.voicePreferenceId = data.voicePreferenceId;
 
   if (Object.keys(updateData).length === 0) {
     return prisma.user.findUniqueOrThrow({ where: { userId } });

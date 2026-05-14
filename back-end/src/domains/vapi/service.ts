@@ -16,7 +16,7 @@ import {
   ToolSideEffectAlreadyStartedError,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
-import { findUser } from '../user-settings/repo';
+import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
@@ -30,8 +30,6 @@ type PreparedCall = {
   operationKey?: string;
   voiceId?: string;
 };
-
-const DEFAULT_SYSTEM_NAME = 'Rose';
 
 export class VapiNotConfiguredError extends Error {
   constructor() {
@@ -91,98 +89,6 @@ function getRandomPhoneNumberId(): string {
   }
   const index = Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length);
   return OUTBOUND_PHONE_NUMBER_POOL[index];
-}
-
-/**
- * Normalize JSON Schema to ensure it has a valid format for Vapi
- *
- * Handles malformed schemas like {"field_name": "description"} and converts them
- * to proper JSON Schema format.
- */
-function normalizeJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  const validTypes = ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'];
-  if (typeof schema.type === 'string' && validTypes.includes(schema.type)) {
-    return schema;
-  }
-
-  // If schema has properties but no type, it's meant to be an object
-  if (schema.properties !== undefined && schema.type === undefined) {
-    return { type: 'object', ...schema };
-  }
-
-  // Check if schema is malformed: {"field_name": "description", ...}
-  const keys = Object.keys(schema);
-  if (keys.length > 0 && keys.every((k) => typeof schema[k] === 'string')) {
-    const properties: Record<string, unknown> = {};
-    for (const key of keys) {
-      properties[key] = {
-        type: 'string',
-        description: schema[key],
-      };
-    }
-    return {
-      type: 'object',
-      properties,
-    };
-  }
-
-  // Default to object type if no type specified
-  return { type: 'object', ...schema };
-}
-
-/**
- * Normalize phone number to E.164 format (+1XXXXXXXXXX for US numbers)
- */
-function normalizePhoneNumber(number: string): string {
-  // Strip all non-digit characters
-  const digits = number.replace(/\D/g, '');
-
-  // Handle 11-digit US numbers (with leading 1)
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return '+' + digits;
-  }
-
-  // Handle 10-digit US numbers (without country code)
-  if (digits.length === 10) {
-    return '+1' + digits;
-  }
-
-  // If already has + prefix, return as-is
-  if (number.startsWith('+')) {
-    return number;
-  }
-
-  // Otherwise prepend + and return
-  return '+' + digits;
-}
-
-async function lookupUserVoiceAndName(
-  userId: string | undefined
-): Promise<{ systemName: string; voiceId?: string }> {
-  if (userId === undefined || userId === '') {
-    return { systemName: DEFAULT_SYSTEM_NAME };
-  }
-  try {
-    const user = await findUser(userId);
-    return {
-      systemName:
-        user?.systemName !== null && user?.systemName !== undefined && user.systemName !== ''
-          ? user.systemName
-          : DEFAULT_SYSTEM_NAME,
-      voiceId:
-        user?.voicePreferenceId !== null &&
-        user?.voicePreferenceId !== undefined &&
-        user.voicePreferenceId !== ''
-          ? user.voicePreferenceId
-          : undefined,
-    };
-  } catch (err) {
-    log.warn('Failed to load user for Vapi call; using defaults', {
-      userId: userId.substring(0, 8),
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return { systemName: DEFAULT_SYSTEM_NAME };
-  }
 }
 
 async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {

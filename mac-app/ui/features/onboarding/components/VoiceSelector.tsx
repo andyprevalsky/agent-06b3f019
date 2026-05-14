@@ -92,19 +92,11 @@ interface VoiceSelectorProps {
   onCustomVoiceIdChange: (value: string) => void;
 }
 
-const VoiceSelector = ({
-  value,
-  customVoiceId,
-  disabled,
-  onChange,
-  onCustomVoiceIdChange,
-}: VoiceSelectorProps): JSX.Element => {
-  const isCustom = value.mode === 'custom';
-  const activeSlot = isCustom ? CUSTOM_SLOT : findPresetIndex(value.voiceId);
-  const preset = isCustom ? null : PRESET_VOICES[activeSlot];
-  const hue = isCustom ? CUSTOM_HUE : (preset as PresetVoice).hue;
-  const slotLabel = isCustom ? 'Custom' : (preset as PresetVoice).label;
-
+function usePreviewAudio(
+  isCustom: boolean,
+  customVoiceId: string,
+  preset: PresetVoice | null
+): void {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastPlayedRef = useRef<string | null>(null);
 
@@ -132,6 +124,142 @@ const VoiceSelector = ({
       if (audioRef.current !== null) audioRef.current.pause();
     };
   }, [isCustom, customVoiceId, preset]);
+}
+
+interface CarouselHeaderProps {
+  slotLabel: string;
+  activeSlot: number;
+  disabled: boolean;
+  selectSlot: (next: number) => void;
+}
+
+const CarouselHeader = ({
+  slotLabel,
+  activeSlot,
+  disabled,
+  selectSlot,
+}: CarouselHeaderProps): JSX.Element => (
+  <div className="flex items-center gap-3 select-none">
+    <button
+      type="button"
+      aria-label="Previous voice"
+      disabled={disabled}
+      onClick={() => selectSlot(activeSlot - 1)}
+      className="h-9 w-9 rounded-full text-foreground/60 hover:text-foreground transition-colors flex items-center justify-center disabled:opacity-30"
+    >
+      <ChevronLeft className="w-4 h-4" />
+    </button>
+
+    <div className="flex-1 text-center">
+      <div className="text-lg font-medium tracking-tight text-foreground">{slotLabel}</div>
+    </div>
+
+    <button
+      type="button"
+      aria-label="Next voice"
+      disabled={disabled}
+      onClick={() => selectSlot(activeSlot + 1)}
+      className="h-9 w-9 rounded-full text-foreground/60 hover:text-foreground transition-colors flex items-center justify-center disabled:opacity-30"
+    >
+      <ChevronRight className="w-4 h-4" />
+    </button>
+  </div>
+);
+
+interface SlotIndicatorsProps {
+  activeSlot: number;
+  disabled: boolean;
+  selectSlot: (next: number) => void;
+}
+
+const SlotIndicators = ({ activeSlot, disabled, selectSlot }: SlotIndicatorsProps): JSX.Element => (
+  <div
+    className="flex items-center justify-center gap-1.5"
+    role="tablist"
+    aria-label="Voice options"
+  >
+    {PRESET_VOICES.map((p, idx) => (
+      <button
+        key={p.voiceId}
+        type="button"
+        role="tab"
+        aria-selected={activeSlot === idx}
+        aria-label={p.label}
+        disabled={disabled}
+        onClick={() => selectSlot(idx)}
+        className={`h-1.5 rounded-full transition-all ${
+          activeSlot === idx ? 'w-6 bg-foreground' : 'w-1.5 bg-foreground/25 hover:bg-foreground/50'
+        }`}
+      />
+    ))}
+    <button
+      type="button"
+      role="tab"
+      aria-selected={activeSlot === CUSTOM_SLOT}
+      aria-label="Custom"
+      disabled={disabled}
+      onClick={() => selectSlot(CUSTOM_SLOT)}
+      className={`h-1.5 rounded-full transition-all ${
+        activeSlot === CUSTOM_SLOT
+          ? 'w-6 bg-foreground'
+          : 'w-1.5 bg-foreground/25 hover:bg-foreground/50'
+      }`}
+    />
+  </div>
+);
+
+interface CustomVoiceInputProps {
+  customVoiceId: string;
+  disabled: boolean;
+  onCustomVoiceIdChange: (value: string) => void;
+  onChange: (value: VoicePreference) => void;
+}
+
+const CustomVoiceInput = ({
+  customVoiceId,
+  disabled,
+  onCustomVoiceIdChange,
+  onChange,
+}: CustomVoiceInputProps): JSX.Element => (
+  <div className="space-y-2 pt-3 border-t border-border/40">
+    <input
+      id="customVoiceId"
+      type="text"
+      value={customVoiceId}
+      disabled={disabled}
+      placeholder="ElevenLabs voice ID"
+      onChange={(event) => {
+        const next = event.target.value;
+        onCustomVoiceIdChange(next);
+        onChange({ mode: 'custom', voiceId: next.trim(), label: 'Custom' });
+      }}
+      className="w-full h-9 rounded-lg border border-muted-foreground/30 bg-background px-3 text-sm outline-none focus:border-foreground"
+    />
+    <button
+      type="button"
+      onClick={openVoiceLibrary}
+      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+    >
+      Browse the ElevenLabs voice library
+      <ExternalLink className="w-3 h-3" />
+    </button>
+  </div>
+);
+
+const VoiceSelector = ({
+  value,
+  customVoiceId,
+  disabled,
+  onChange,
+  onCustomVoiceIdChange,
+}: VoiceSelectorProps): JSX.Element => {
+  const isCustom = value.mode === 'custom';
+  const activeSlot = isCustom ? CUSTOM_SLOT : findPresetIndex(value.voiceId);
+  const preset = isCustom ? null : PRESET_VOICES[activeSlot];
+  const hue = isCustom ? CUSTOM_HUE : (preset as PresetVoice).hue;
+  const slotLabel = isCustom ? 'Custom' : (preset as PresetVoice).label;
+
+  usePreviewAudio(isCustom, customVoiceId, preset);
 
   const selectSlot = (next: number): void => {
     const wrapped = ((next % TOTAL_SLOTS) + TOTAL_SLOTS) % TOTAL_SLOTS;
@@ -151,8 +279,7 @@ const VoiceSelector = ({
           style={{
             WebkitMaskImage:
               'radial-gradient(circle at center, black 0%, black 35%, transparent 75%)',
-            maskImage:
-              'radial-gradient(circle at center, black 0%, black 35%, transparent 75%)',
+            maskImage: 'radial-gradient(circle at center, black 0%, black 35%, transparent 75%)',
           }}
         />
         <div className="relative">
@@ -161,92 +288,20 @@ const VoiceSelector = ({
       </div>
 
       <div className="w-[260px] rounded-2xl border border-border/50 backdrop-blur-xl bg-background/40 px-4 py-4 space-y-3">
-        <div className="flex items-center gap-3 select-none">
-          <button
-            type="button"
-            aria-label="Previous voice"
-            disabled={disabled}
-            onClick={() => selectSlot(activeSlot - 1)}
-            className="h-9 w-9 rounded-full text-foreground/60 hover:text-foreground transition-colors flex items-center justify-center disabled:opacity-30"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-
-          <div className="flex-1 text-center">
-            <div className="text-lg font-medium tracking-tight text-foreground">{slotLabel}</div>
-          </div>
-
-          <button
-            type="button"
-            aria-label="Next voice"
-            disabled={disabled}
-            onClick={() => selectSlot(activeSlot + 1)}
-            className="h-9 w-9 rounded-full text-foreground/60 hover:text-foreground transition-colors flex items-center justify-center disabled:opacity-30"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div
-          className="flex items-center justify-center gap-1.5"
-          role="tablist"
-          aria-label="Voice options"
-        >
-          {PRESET_VOICES.map((p, idx) => (
-            <button
-              key={p.voiceId}
-              type="button"
-              role="tab"
-              aria-selected={activeSlot === idx}
-              aria-label={p.label}
-              disabled={disabled}
-              onClick={() => selectSlot(idx)}
-              className={`h-1.5 rounded-full transition-all ${
-                activeSlot === idx
-                  ? 'w-6 bg-foreground'
-                  : 'w-1.5 bg-foreground/25 hover:bg-foreground/50'
-              }`}
-            />
-          ))}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSlot === CUSTOM_SLOT}
-            aria-label="Custom"
-            disabled={disabled}
-            onClick={() => selectSlot(CUSTOM_SLOT)}
-            className={`h-1.5 rounded-full transition-all ${
-              activeSlot === CUSTOM_SLOT
-                ? 'w-6 bg-foreground'
-                : 'w-1.5 bg-foreground/25 hover:bg-foreground/50'
-            }`}
-          />
-        </div>
-
+        <CarouselHeader
+          slotLabel={slotLabel}
+          activeSlot={activeSlot}
+          disabled={disabled}
+          selectSlot={selectSlot}
+        />
+        <SlotIndicators activeSlot={activeSlot} disabled={disabled} selectSlot={selectSlot} />
         {isCustom ? (
-          <div className="space-y-2 pt-3 border-t border-border/40">
-            <input
-              id="customVoiceId"
-              type="text"
-              value={customVoiceId}
-              disabled={disabled}
-              placeholder="ElevenLabs voice ID"
-              onChange={(event) => {
-                const next = event.target.value;
-                onCustomVoiceIdChange(next);
-                onChange({ mode: 'custom', voiceId: next.trim(), label: 'Custom' });
-              }}
-              className="w-full h-9 rounded-lg border border-muted-foreground/30 bg-background px-3 text-sm outline-none focus:border-foreground"
-            />
-            <button
-              type="button"
-              onClick={openVoiceLibrary}
-              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Browse the ElevenLabs voice library
-              <ExternalLink className="w-3 h-3" />
-            </button>
-          </div>
+          <CustomVoiceInput
+            customVoiceId={customVoiceId}
+            disabled={disabled}
+            onCustomVoiceIdChange={onCustomVoiceIdChange}
+            onChange={onChange}
+          />
         ) : null}
       </div>
     </div>

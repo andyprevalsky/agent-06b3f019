@@ -13,7 +13,6 @@ import * as repo from './repo';
 import { SHORTCODE_REGEX, SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
 import type { ShortcodeResult } from './types';
 import { validateSurgeSignature, parseSurgePayload } from './service.validation';
-import { prisma } from '../../providers/database';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
 import { SMS_TEMPLATES } from '../../providers/smsTemplates';
@@ -219,13 +218,7 @@ export async function routeToSupervisor(
   // `mySeq`. The supervisor re-reads this value at attempt_completion time —
   // if a newer SMS has bumped it past `mySeq`, this run discards its queued
   // writes and stays silent. See providers/smsSupervisor/supervisorHandler.ts.
-  const session = await prisma.smsSession.upsert({
-    where: { userId },
-    update: { lastInboundSeq: { increment: 1 } },
-    create: { userId, messages: '[]', lastInboundSeq: 1 },
-    select: { lastInboundSeq: true },
-  });
-  const mySeq = session.lastInboundSeq;
+  const mySeq = await repo.bumpInboundSeq(userId);
 
   log.info('Routing to SMS Supervisor', {
     userId,
@@ -276,14 +269,14 @@ export async function routeToSupervisor(
       // Send error SMS as fallback. Gate on the same seq the run captured:
       // if a newer SMS arrived during our run, stay silent — the newer run
       // is responsible for the user reply.
-      prisma.smsSession
-        .findUnique({ where: { userId }, select: { lastInboundSeq: true } })
-        .then(async (cur) => {
-          if ((cur?.lastInboundSeq ?? 0) > mySeq) {
+      repo
+        .getInboundSeq(userId)
+        .then(async (currentSeq) => {
+          if ((currentSeq ?? 0) > mySeq) {
             log.info('Error path: seq advanced, suppressing fallback SMS', {
               userId,
               mySeq,
-              currentSeq: cur?.lastInboundSeq,
+              currentSeq,
             });
             return;
           }

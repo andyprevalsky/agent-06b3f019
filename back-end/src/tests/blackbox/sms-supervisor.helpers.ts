@@ -185,7 +185,8 @@ export async function clearFixtureOverride(userId: string): Promise<void> {
 export function buildStartNewAgentFixture(
   goal: string,
   replyText: string,
-  budgetDollars = 0.5
+  budgetDollars = 0.5,
+  delayMs = 0
 ): string {
   return JSON.stringify({
     reasoning: 'spawn agent then send sms',
@@ -193,6 +194,7 @@ export function buildStartNewAgentFixture(
       { tool: 'start_new_agent', arguments: { goal, budget_dollars: budgetDollars } },
       { tool: 'attempt_completion', arguments: { message: replyText } },
     ],
+    ...(delayMs > 0 ? { delay_ms: delayMs } : {}),
   });
 }
 

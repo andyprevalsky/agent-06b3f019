@@ -10,6 +10,11 @@ export const OUTBOUND_PHONE_NUMBER_POOL = [
   '2fe93786-c619-4a57-8a74-710f87b7b13b', // +1 (415) 941-6744
 ];
 
+// Default ElevenLabs voice ID for outbound calls — "Rose", the first preset
+// in mac-app/ui/features/onboarding/components/VoiceSelector.tsx
+// (PRESET_VOICES[0]). Used when the user has not selected a custom voice.
+export const DEFAULT_OUTBOUND_VOICE_ID = '6fZce9LFNG3iEITDfqZZ';
+
 // Base system prompt that gets combined with the LLM-defined system_prompt
 export const BASE_SYSTEM_PROMPT = `You are making an outbound phone call. Be polite, professional, and conversational.
 If the person is busy or uninterested, thank them for their time and end the call.
@@ -25,7 +30,7 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   },
   voice: {
     provider: '11labs',
-    voiceId: 'paula',
+    voiceId: DEFAULT_OUTBOUND_VOICE_ID,
   },
   transcriber: {
     provider: 'deepgram',
