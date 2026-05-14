@@ -54,6 +54,13 @@ def test_execute_phase_tools_subset():
         )
 
 
+def test_execute_phase_includes_direct_web_search():
+    """Execute-phase agents can satisfy direct web-search tasks without sub-agents."""
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    assert "web_search" in EXECUTE_PHASE_TOOLS
+
+
 def test_all_phase_tools_superset():
     """ALL_PHASE_TOOLS contains every tool from both phases."""
     from utils.tool_schemas import ALL_PHASE_TOOLS, EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
@@ -634,6 +641,7 @@ async def run_all_tests():
     r.record("tool_models_has_all_tools", test_tool_models_has_all_tools)
     r.record("plan_phase_tools_subset", test_plan_phase_tools_subset)
     r.record("execute_phase_tools_subset", test_execute_phase_tools_subset)
+    r.record("execute_phase_direct_web_search", test_execute_phase_includes_direct_web_search)
     r.record("create_agent_action_model", test_create_agent_action_model)
     r.record("create_agent_action_model_single_tool", test_create_agent_action_model_single_tool)
     r.record(
