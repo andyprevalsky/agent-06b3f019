@@ -133,6 +133,16 @@ fi
 export TEST_BASE_URL="http://localhost:$PORT"
 BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT_DIR/backend.log}}"
 
+# Deterministic SMS smoke fixtures for the isolated backend. These are only
+# consumed when BLACKBOX_TEST_CAPTURE_OUTBOUND=1, so production/development
+# behavior is unchanged.
+export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
+export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
+  export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"attempt_completion","arguments":{"message":"Blackbox SMS smoke reply"}}]}'
+fi
+
 cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}
 EOF

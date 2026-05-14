@@ -210,6 +210,7 @@ model User {
   systemName                  String?
   profilePicture              String?
   customSystemPrompt          String?
+  voicePreferenceId           String?
   credits                     Credit[]
   subscriptions               Subscription?
 
@@ -319,7 +320,7 @@ model MessageRecord {
   to         String
   timestamp  DateTime
   message    String
-  externalId String?        // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
   createdAt  DateTime       @default(now())
   person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
@@ -516,7 +517,6 @@ model GoalHistory {
   @@index([archivedAt])
   @@index([originalAgentId])
 }
-
 
 model ImessageQueue {
   id          String   @id @default(uuid())
@@ -716,11 +716,18 @@ enum EmailProvider {
 }
 
 model SmsSession {
-  id        String   @id @default(uuid())
-  userId    String   @unique
-  messages  Json     @default("[]")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  messages       Json     @default("[]")
+  // Monotonic per-user inbound-SMS counter. Incremented on every inbound SMS.
+  // Each supervisor run captures it at start (`mySeq`); at attempt_completion
+  // the run re-reads it. If the persisted value now exceeds `mySeq`, a newer
+  // SMS arrived during this run — the run discards its pendingWrites buffer
+  // and stays silent, letting the newer run produce the user-facing reply.
+  // See providers/smsSupervisor/supervisorHandler.ts for the gate.
+  lastInboundSeq Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@index([userId])
 }

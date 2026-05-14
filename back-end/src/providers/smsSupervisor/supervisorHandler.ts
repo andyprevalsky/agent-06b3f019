@@ -20,47 +20,54 @@ import { prisma } from '../database';
 import { createStreamingCompletion, CompletionMessage, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
-import { executeToolCall, ToolCall, ToolResult } from './supervisorTools';
+import {
+  commitPendingWrites,
+  dispatchToolCall,
+  PendingOp,
+  ToolCall,
+  ToolResult,
+} from './supervisorTools';
 import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
+import { SmsSupervisorResponseSchema, SUPERVISOR_RESPONSE_MODEL } from './schema';
 
 const log = createLogger('SmsSupervisor');
 
 const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
 const MAX_TOOL_ROUNDS = 10; // Safety cap
 
-// JSON schema for structured LLM output (no response field — must use attempt_completion)
-const SUPERVISOR_RESPONSE_SCHEMA = {
-  type: 'json_schema' as const,
-  json_schema: {
-    name: 'sms_supervisor_response',
-    strict: true,
-    schema: {
-      type: 'object',
-      properties: {
-        reasoning: {
-          type: 'string',
-          description: 'Internal thought process (not shown to user)',
-        },
-        tool_calls: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              tool: { type: 'string' },
-              arguments: { type: 'object' },
-            },
-            required: ['tool', 'arguments'],
-            additionalProperties: false,
-          },
-          description: 'Tool calls to execute. Include attempt_completion when ready to respond.',
-        },
-      },
-      required: ['reasoning', 'tool_calls'],
-      additionalProperties: false,
-    },
-  },
-};
+/**
+ * Per-user commit lock. Held while a run flushes pendingWrites + sends SMS +
+ * persists transcript so two near-simultaneous attempt_completions cannot
+ * interleave their side effects.
+ *
+ * The seq gate (inside the locked region) is what actually decides whether to
+ * commit — the lock just serializes ordering.
+ */
+const commitLocksByUser = new Map<string, Promise<void>>();
+async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = commitLocksByUser.get(userId) ?? Promise.resolve();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // Anyone arriving after us awaits BOTH the previous holder AND our own
+  // release. Storing the chained promise (prev → released) is what keeps
+  // the queue strictly ordered.
+  const myTurn = prev.then(() => released);
+  commitLocksByUser.set(userId, myTurn);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    // If no one queued behind us, clear the slot. Otherwise leave the latest
+    // entry in place so the next holder's queue remains intact.
+    if (commitLocksByUser.get(userId) === myTurn) {
+      commitLocksByUser.delete(userId);
+    }
+  }
+}
 
 interface SupervisorResponse {
   reasoning: string;
@@ -76,18 +83,26 @@ interface SessionMessage {
 export interface SmsSupervisorResult {
   responseText: string;
   toolsExecuted: string[];
+  /** True iff the run reached commit (seq gate passed and writes were flushed + SMS sent). */
+  committed: boolean;
 }
 
 /**
  * Handle an inbound SMS message through the supervisor agent.
+ *
+ * `mySeq` is the value of `SmsSession.lastInboundSeq` captured by the webhook
+ * layer when this SMS arrived. At attempt_completion we re-read the persisted
+ * value: if it now exceeds `mySeq`, a newer SMS arrived during our run and we
+ * discard pendingWrites + skip the SMS so the newer run produces the reply.
  */
 export async function handleSmsSupervisorMessage(config: {
   userId: string;
   phoneNumber: string;
   inboundMessage: string;
+  mySeq: number;
   abortSignal?: AbortSignal;
 }): Promise<SmsSupervisorResult> {
-  const { userId, phoneNumber, inboundMessage, abortSignal } = config;
+  const { userId, phoneNumber, inboundMessage, mySeq, abortSignal } = config;
   const overallStart = Date.now();
 
   log.info('[SmsSupervisor] === START ===', {
@@ -136,14 +151,18 @@ export async function handleSmsSupervisorMessage(config: {
     { role: 'user', content: inboundMessage },
   ];
 
-  // 5. LLM call loop — loop until attempt_completion or safety cap
+  // 5. LLM call loop — loop until attempt_completion or safety cap.
+  // Write tools queue into `pendingWrites`; only attempt_completion flushes
+  // them, and only after the commit gate confirms no newer SMS arrived.
   let finalResponse = '';
   const allToolsExecuted: string[] = [];
+  const pendingWrites: PendingOp[] = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     log.info('[SmsSupervisor] LLM call round', {
       round,
       messageCount: messages.length,
+      pendingWritesCount: pendingWrites.length,
       totalTokenEstimate: messages.reduce(
         (acc, m) => acc + (typeof m.content === 'string' ? m.content.length : 0),
         0
@@ -152,7 +171,7 @@ export async function handleSmsSupervisorMessage(config: {
 
     // Call LLM
     const llmStart = Date.now();
-    const llmResponse = await callSupervisorLlm(messages, computeToken);
+    const llmResponse = await callSupervisorLlm(messages, computeToken, userId);
 
     log.info('[SmsSupervisor] LLM response received', {
       round,
@@ -163,21 +182,18 @@ export async function handleSmsSupervisorMessage(config: {
       durationMs: Date.now() - llmStart,
     });
 
-    // Check for attempt_completion in tool_calls
     const completionCall = llmResponse.tool_calls.find((tc) => tc.tool === 'attempt_completion');
-
-    // Separate real tool calls from attempt_completion
     const realToolCalls = llmResponse.tool_calls.filter((tc) => tc.tool !== 'attempt_completion');
 
-    // Execute real tool calls (if any)
+    // Dispatch real tool calls: read tools run inline, write tools queue.
     const toolResults: ToolResult[] = [];
     for (const toolCall of realToolCalls) {
       const toolStart = Date.now();
-      const result = await executeToolCall(toolCall, userId);
+      const result = await dispatchToolCall(toolCall, userId, pendingWrites);
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
 
-      log.info('[SmsSupervisor] Tool executed', {
+      log.info('[SmsSupervisor] Tool dispatched', {
         round,
         tool: toolCall.tool,
         success: result.success,
@@ -187,7 +203,7 @@ export async function handleSmsSupervisorMessage(config: {
       });
     }
 
-    // If attempt_completion was called, extract the message and exit
+    // attempt_completion ends the run; the gated commit happens below.
     if (completionCall) {
       const completionMessage = completionCall.arguments?.message;
       finalResponse = typeof completionMessage === 'string' ? completionMessage : '';
@@ -195,6 +211,7 @@ export async function handleSmsSupervisorMessage(config: {
         round,
         responseLength: finalResponse.length,
         responsePreview: finalResponse.substring(0, 200),
+        pendingWritesCount: pendingWrites.length,
       });
       break;
     }
@@ -204,10 +221,7 @@ export async function handleSmsSupervisorMessage(config: {
       log.warn('[SmsSupervisor] No tool calls and no attempt_completion', { round });
       messages.push({
         role: 'assistant',
-        content: JSON.stringify({
-          reasoning: llmResponse.reasoning,
-          tool_calls: [],
-        }),
+        content: JSON.stringify({ reasoning: llmResponse.reasoning, tool_calls: [] }),
       });
       messages.push({
         role: 'user',
@@ -234,27 +248,68 @@ export async function handleSmsSupervisorMessage(config: {
       content: `Tool results:\n${toolResultSummary}\n\nIncorporate these results and either use more tools or call attempt_completion to send your SMS response.`,
     });
 
-    // On last round safety cap, force a response
+    // Safety cap: if the model never calls attempt_completion, the post-loop
+    // gate still runs with a fallback message so we either send-or-discard
+    // — never leave the user hanging silently.
     if (round === MAX_TOOL_ROUNDS - 1 && !finalResponse) {
       finalResponse = 'Sorry, I had trouble processing that. Please try again.';
       log.warn('[SmsSupervisor] Hit safety cap without attempt_completion');
     }
   }
 
-  // 6. Check if session was cleared while we were processing
+  // 6. Pre-commit abort check — /clear or similar cancellation supersedes both
+  // the SMS and the queued writes.
   if (abortSignal?.aborted) {
-    log.info('[SmsSupervisor] Aborted before sending SMS (session cleared)', {
+    log.info('[SmsSupervisor] Aborted before commit (session cleared)', {
       userId,
       responseLength: finalResponse.length,
+      pendingWritesCount: pendingWrites.length,
     });
-    return { responseText: '', toolsExecuted: allToolsExecuted };
+    return { responseText: '', toolsExecuted: allToolsExecuted, committed: false };
   }
 
-  // 7. Send response SMS
-  if (finalResponse) {
+  if (!finalResponse) {
+    finalResponse = "Sorry, I couldn't process that. Try again or text a task to get started.";
+  }
+
+  // 7. Commit gate: under the per-user lock, re-read lastInboundSeq. If a
+  // newer SMS landed during our run, discard everything and stay silent —
+  // the newer run is responsible for the user-facing reply.
+  const committed = await withCommitLock(userId, async () => {
+    const current = await prisma.smsSession.findUnique({
+      where: { userId },
+      select: { lastInboundSeq: true },
+    });
+    const currentSeq = current?.lastInboundSeq ?? 0;
+
+    if (currentSeq > mySeq) {
+      log.info('[SmsSupervisor] Seq advanced — discarding pendingWrites + skipping SMS', {
+        userId,
+        mySeq,
+        currentSeq,
+        pendingWritesCount: pendingWrites.length,
+        finalResponseLength: finalResponse.length,
+      });
+      return false;
+    }
+
+    // Flush queued writes in order. Each commitX function is idempotent enough
+    // for v1 (start_new_agent dedupes on PK; kill is a no-op on absence;
+    // increase_budget and reply_to_agent are guarded by this commit-lock).
+    if (pendingWrites.length > 0) {
+      const commitStart = Date.now();
+      const commitResults = await commitPendingWrites(pendingWrites, userId);
+      log.info('[SmsSupervisor] Pending writes committed', {
+        userId,
+        count: pendingWrites.length,
+        successes: commitResults.filter((r) => r.success).length,
+        durationMs: Date.now() - commitStart,
+      });
+    }
+
+    // Send the SMS.
     const smsStart = Date.now();
     const smsResult = await sendSms(phoneNumber, finalResponse);
-
     log.info('[SmsSupervisor] SMS sent', {
       userId,
       phone: phoneNumber.substring(0, 7) + '****',
@@ -265,28 +320,27 @@ export async function handleSmsSupervisorMessage(config: {
       error: smsResult.error,
       durationMs: Date.now() - smsStart,
     });
-  } else {
-    log.warn('[SmsSupervisor] No response to send', { userId });
-    finalResponse = "Sorry, I couldn't process that. Try again or text a task to get started.";
-    await sendSms(phoneNumber, finalResponse);
-  }
 
-  // 8. Save session — only the user's inbound message and assistant's final response
-  session.messages.push({
-    role: 'user',
-    content: inboundMessage,
-    timestamp: new Date().toISOString(),
-  });
-  session.messages.push({
-    role: 'assistant',
-    content: finalResponse,
-    timestamp: new Date().toISOString(),
-  });
+    // Persist the user→assistant turn pair (no tool transcript).
+    session.messages.push({
+      role: 'user',
+      content: inboundMessage,
+      timestamp: new Date().toISOString(),
+    });
+    session.messages.push({
+      role: 'assistant',
+      content: finalResponse,
+      timestamp: new Date().toISOString(),
+    });
+    await saveSession(userId, session.messages);
 
-  await saveSession(userId, session.messages);
+    return true;
+  });
 
   log.info('[SmsSupervisor] === END ===', {
     userId,
+    mySeq,
+    committed,
     toolsExecuted: allToolsExecuted,
     responseLength: finalResponse.length,
     sessionMessageCount: session.messages.length,
@@ -294,7 +348,8 @@ export async function handleSmsSupervisorMessage(config: {
   });
 
   return {
-    responseText: finalResponse,
+    responseText: committed ? finalResponse : '',
+    committed,
     toolsExecuted: allToolsExecuted,
   };
 }
@@ -343,7 +398,8 @@ async function getComputeToken(userId: string): Promise<SupervisorComputeToken |
 
 async function callSupervisorLlm(
   messages: CompletionMessage[],
-  computeToken: SupervisorComputeToken | null
+  computeToken: SupervisorComputeToken | null,
+  userId: string
 ): Promise<SupervisorResponse> {
   const startTime = Date.now();
   const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
@@ -369,18 +425,28 @@ async function callSupervisorLlm(
     })),
   });
 
+  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId);
+  if (blackboxFixture) {
+    log.info('[SmsSupervisorLLM] Using blackbox response fixture', {
+      toolCallCount: blackboxFixture.tool_calls.length,
+      durationMs: Date.now() - startTime,
+    });
+    return blackboxFixture;
+  }
+
   // Consume streaming response fully (no FE broadcast needed)
   const stream = await createStreamingCompletion({
     model: SMS_SUPERVISOR_MODEL,
     messages,
     temperature: 0.3,
-    response_format: SUPERVISOR_RESPONSE_SCHEMA,
+    response_model: SUPERVISOR_RESPONSE_MODEL,
     ...(claudeToken ? { claude_token: claudeToken } : {}),
     ...(gptToken ? { gpt_token: gptToken, gpt_account_id: gptAccountId } : {}),
   });
 
   let accumulatedContent = '';
   let accumulatedReasoning = '';
+  const accumulatedToolCalls: ToolCall[] = [];
   let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
   let actualModel = '';
   let poolName = '';
@@ -392,6 +458,30 @@ async function callSupervisorLlm(
     }
     if (choice?.delta?.reasoning) {
       accumulatedReasoning += choice.delta.reasoning;
+    }
+    if (choice?.delta?.tool_calls) {
+      for (const tc of choice.delta.tool_calls) {
+        const name = tc.function?.name;
+        const argsStr = tc.function?.arguments ?? '';
+        if (!name) continue;
+        try {
+          const parsedInput = argsStr ? JSON.parse(argsStr) : {};
+          // Native-tool path: the response_format envelope nests real args under
+          // `arguments`, so the tool_use input is `{ arguments: {...} }` and we
+          // unwrap it; if the model emitted the args flat, take them as-is.
+          const innerArgs =
+            parsedInput && typeof parsedInput === 'object' && 'arguments' in parsedInput
+              ? (parsedInput as { arguments: Record<string, unknown> }).arguments
+              : (parsedInput as Record<string, unknown>);
+          accumulatedToolCalls.push({ tool: name, arguments: innerArgs ?? {} });
+        } catch (err) {
+          log.warn('[SmsSupervisorLLM] Failed to parse tool_use arguments', {
+            tool: name,
+            argsPreview: argsStr.substring(0, 200),
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
     if (chunk.usage) {
       usage = chunk.usage;
@@ -407,13 +497,27 @@ async function callSupervisorLlm(
   log.info('[SmsSupervisorLLM] Response stream consumed', {
     contentLength: accumulatedContent.length,
     reasoningLength: accumulatedReasoning.length,
+    toolCallCount: accumulatedToolCalls.length,
     actualModel,
     poolName,
     usage,
     durationMs: Date.now() - startTime,
   });
 
-  // Parse the structured JSON response
+  // Native tool path (claudeAuth + response_model extracted to tools): each
+  // tool_use block came through as a tool_calls delta. Use those directly.
+  if (accumulatedToolCalls.length > 0) {
+    log.info('[SmsSupervisorLLM] Native tool calls received', {
+      tools: accumulatedToolCalls.map((tc) => tc.tool),
+    });
+    return {
+      reasoning: accumulatedReasoning,
+      tool_calls: accumulatedToolCalls,
+    };
+  }
+
+  // Fallback: structured-output JSON envelope arrived as content (Codex /
+  // waterfall path, or claudeAuth when extraction didn't fit the schema shape).
   let parsed: SupervisorResponse;
   try {
     parsed = JSON.parse(accumulatedContent);
@@ -424,7 +528,7 @@ async function callSupervisorLlm(
       contentLength: accumulatedContent.length,
     });
 
-    // Fallback: send a user-friendly error (never send raw JSON/garbage to the user)
+    // Never send raw garbage to the user — fall through to a friendly error.
     parsed = {
       reasoning: accumulatedReasoning || 'Failed to parse structured response',
       tool_calls: [
@@ -436,7 +540,6 @@ async function callSupervisorLlm(
     };
   }
 
-  // Log the full parsed response
   log.info('[SmsSupervisorLLM] Parsed response', {
     reasoning: parsed.reasoning.substring(0, 300),
     toolCallCount: parsed.tool_calls?.length || 0,
@@ -452,6 +555,50 @@ async function callSupervisorLlm(
   };
 }
 
+/**
+ * Per-user fixture overrides set by blackbox tests via
+ * `POST /api/test/sms-supervisor-fixture`. When present for a user, takes
+ * precedence over `BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON`. Lets each test
+ * inject its own LLM response without rebooting the backend.
+ *
+ * The sentinel `BYPASS_FIXTURE_REAL_LLM` registers a user as opted-out of
+ * BOTH the per-user override and the env-var fallback — that user's run hits
+ * the real Rose stack (claudeAuth + native tool_use + waterfall). Used by the
+ * real-LLM smoke test to exercise the full WS-3 pipeline.
+ */
+const supervisorFixtureOverrides = new Map<string, string>();
+export const BYPASS_FIXTURE_REAL_LLM = '__bypass_real_llm__';
+
+export function setSupervisorFixtureOverride(userId: string, fixture: string): void {
+  supervisorFixtureOverrides.set(userId, fixture);
+}
+
+export function clearSupervisorFixtureOverride(userId: string): void {
+  supervisorFixtureOverrides.delete(userId);
+}
+
+function loadBlackboxSupervisorResponseFixture(userId: string): SupervisorResponse | null {
+  if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') {
+    return null;
+  }
+
+  const override = supervisorFixtureOverrides.get(userId);
+  if (override === BYPASS_FIXTURE_REAL_LLM) {
+    // Per-user opt-out: skip both override and env fallback; run hits real LLM.
+    return null;
+  }
+  const raw = override ?? process.env.BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON;
+  if (!raw) {
+    return null;
+  }
+
+  const parsed = SmsSupervisorResponseSchema.parse(JSON.parse(raw));
+  return {
+    reasoning: parsed.reasoning,
+    tool_calls: parsed.tool_calls,
+  };
+}
+
 // ============================================
 // Session Management
 // ============================================
@@ -463,26 +610,14 @@ interface SessionData {
 }
 
 async function loadOrCreateSession(userId: string): Promise<SessionData> {
-  const existing = await prisma.smsSession.findUnique({
+  const session = await prisma.smsSession.upsert({
     where: { userId },
+    update: {},
+    create: { userId, messages: JSON.stringify([]) },
   });
+  const messages = parseSessionMessages(session.messages);
 
-  if (existing) {
-    const messages = parseSessionMessages(existing.messages);
-    return { id: existing.id, messages, isNew: false };
-  }
-
-  // Create new session
-  const session = await prisma.smsSession.create({
-    data: { userId, messages: JSON.stringify([]) },
-  });
-
-  log.info('[SmsSession] Created new session', {
-    userId,
-    sessionId: session.id,
-  });
-
-  return { id: session.id, messages: [], isNew: true };
+  return { id: session.id, messages, isNew: messages.length === 0 };
 }
 
 function parseSessionMessages(raw: unknown): SessionMessage[] {

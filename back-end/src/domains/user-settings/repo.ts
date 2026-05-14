@@ -28,6 +28,7 @@ export async function upsertUser(userId: string, data: UpdateUserBody) {
       systemName: data.systemName,
       profilePicture: data.profilePicture,
       customSystemPrompt: data.customSystemPrompt,
+      voicePreferenceId: data.voicePreferenceId,
     },
     create: {
       userId,
@@ -42,6 +43,7 @@ export async function upsertUser(userId: string, data: UpdateUserBody) {
       systemName: data.systemName,
       profilePicture: data.profilePicture,
       customSystemPrompt: data.customSystemPrompt,
+      voicePreferenceId: data.voicePreferenceId,
     },
   });
 }
@@ -62,6 +64,7 @@ export async function createUser(userId: string, data: UpdateUserBody) {
       systemName: data.systemName,
       profilePicture: data.profilePicture,
       customSystemPrompt: data.customSystemPrompt,
+      voicePreferenceId: data.voicePreferenceId,
     },
   });
 }
@@ -82,6 +85,8 @@ export async function partialUpdateUser(userId: string, data: UpdateUserBody) {
   if (data.profilePicture !== undefined) updateData.profilePicture = data.profilePicture;
   if (data.customSystemPrompt !== undefined)
     updateData.customSystemPrompt = data.customSystemPrompt;
+  if (data.voicePreferenceId !== undefined)
+    updateData.voicePreferenceId = data.voicePreferenceId;
 
   if (Object.keys(updateData).length === 0) {
     return prisma.user.findUniqueOrThrow({ where: { userId } });

@@ -159,6 +159,63 @@ button { font: inherit; color: inherit; }
   margin-left: auto;
 }
 
+.prompt-list li.section-header {
+  padding: 14px 14px 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  cursor: pointer;
+  border-left: 0;
+  user-select: none;
+}
+.prompt-list li.section-header:first-child { padding-top: 8px; }
+.prompt-list li.section-header:hover { background: transparent; color: var(--text); }
+.prompt-list li.section-header .caret {
+  display: inline-block;
+  width: 10px;
+  color: var(--muted);
+  transition: transform 80ms;
+}
+.prompt-list li.section-header.collapsed .caret { transform: rotate(-90deg); }
+.prompt-list li.section-header .section-label { flex: 1; }
+.prompt-list li.section-header .section-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.prompt-list li.subsection-header {
+  padding: 8px 14px 2px 22px;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-left: 0;
+  cursor: default;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.prompt-list li.subsection-header:hover { background: transparent; }
+.prompt-list li.subsection-header .sub-label { flex: 1; }
+.prompt-list li.subsection-header .sub-count {
+  font-size: 9px;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.prompt-list li.entry { padding-left: 28px; }
+
 /* --- content ------------------------------------------------------------- */
 .content {
   display: grid;

@@ -1,54 +1,95 @@
 /**
  * STATE MACHINE: OnboardingCustomization
  *
- *   [LOADING] ────────────────────────────────────────────────────────────────┐
- *       │                                                                      │
- *       v (fetch settings)                                                     │
- *   [READY] ──────────────────────────────────────────────────────────────────┤
- *       │                                                                      │
- *       ├── (edit fields) → update local state                                │
- *       │                                                                      │
- *       └── (click Continue) → [SAVING] → (success) → onComplete() ───────────┘
- *                                 │
- *                                 └── (error) → show error → [READY]
+ *   [LOADING] ─(fetch settings + local voice)→ [READY]
+ *       │                                      │
+ *       │                                      ├─(edit name / pick voice)→ [READY]
+ *       │                                      └─(Continue)→ [SAVING]
+ *       │                                                       │
+ *       └──────────────────────────────(success)←──────────────┘
+ *                                                               │
+ *                                  (save error) → [READY + error]
  */
 
-import { useState, useEffect } from 'react';
-import { Loader2, ArrowRight, Sparkles } from 'lucide-react';
-import { SystemCustomization, type CustomizationData } from '@/features/customization';
+import { useEffect, useState } from 'react';
+import { ArrowRight, Loader2 } from 'lucide-react';
 import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 import { useOnboardingCustomizationApi } from '../hooks';
+import VoiceSelector, { DEFAULT_VOICE_PREFERENCE, type VoicePreference } from './VoiceSelector';
+import BackgroundTiles from './BackgroundTiles';
 
 interface OnboardingCustomizationProps {
   onComplete: () => void;
 }
+
+const VOICE_STORAGE_KEY = 'rose.onboarding.voicePreference';
+const MAX_NAME_LENGTH = 50;
+
+const loadVoicePreference = (): VoicePreference => {
+  const raw = localStorage.getItem(VOICE_STORAGE_KEY);
+  if (raw === null || raw === '') return DEFAULT_VOICE_PREFERENCE;
+  try {
+    const parsed = JSON.parse(raw) as Partial<VoicePreference>;
+    if (parsed.mode === 'custom' && typeof parsed.voiceId === 'string') {
+      return { mode: 'custom', voiceId: parsed.voiceId, label: 'Custom' };
+    }
+    if (parsed.mode === 'preset' && typeof parsed.voiceId === 'string') {
+      return {
+        mode: 'preset',
+        voiceId: parsed.voiceId,
+        label: typeof parsed.label === 'string' ? parsed.label : 'Selected voice',
+      };
+    }
+  } catch {
+    localStorage.removeItem(VOICE_STORAGE_KEY);
+  }
+  return DEFAULT_VOICE_PREFERENCE;
+};
+
+const saveVoicePreference = (voice: VoicePreference): void => {
+  localStorage.setItem(VOICE_STORAGE_KEY, JSON.stringify(voice));
+};
 
 const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): JSX.Element => {
   const customizationApi = useOnboardingCustomizationApi();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [customization, setCustomization] = useState<CustomizationData>({
-    systemName: 'Rose',
-    profilePicture: null,
-    customSystemPrompt: '',
-  });
+  const [name, setName] = useState('Rose');
+  const [voice, setVoice] = useState<VoicePreference>(DEFAULT_VOICE_PREFERENCE);
+  const [customVoiceId, setCustomVoiceId] = useState('');
 
   useEffect(() => {
-    void customizationApi.fetchCustomization().then((loaded) => {
-      if (loaded !== null) setCustomization(loaded);
+    const loaded = loadVoicePreference();
+    setVoice(loaded);
+    if (loaded.mode === 'custom') setCustomVoiceId(loaded.voiceId);
+    void customizationApi.fetchCustomization().then((loadedCustomization) => {
+      if (loadedCustomization !== null && loadedCustomization.systemName.length > 0) {
+        setName(loadedCustomization.systemName);
+      }
       setLoading(false);
     });
   }, [customizationApi]);
 
   const handleContinue = async (): Promise<void> => {
+    if (voice.mode === 'custom' && voice.voiceId === '') {
+      setError('Enter an ElevenLabs voice ID');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await customizationApi.saveCustomization(customization);
+      saveVoicePreference(voice);
+      await customizationApi.saveCustomization(
+        {
+          systemName: name,
+          profilePicture: null,
+          customSystemPrompt: '',
+        },
+        { voicePreferenceId: voice.voiceId === '' ? null : voice.voiceId }
+      );
       onComplete();
     } catch (err) {
-      console.error('Failed to save customization:', err);
       setError(getErrorMessageOrFallback(err, 'Failed to save'));
       setSaving(false);
     }
@@ -63,39 +104,52 @@ const OnboardingCustomization = ({ onComplete }: OnboardingCustomizationProps): 
   }
 
   return (
-    <div className="flex-1 flex flex-col px-8 pt-6 pb-20 overflow-y-auto">
-      <div className="text-center mb-6">
-        <div className="flex items-center justify-center gap-2 mb-2">
-          <Sparkles className="w-6 h-6 text-primary" />
-          <h1 className="text-2xl font-semibold text-foreground">Customize Your Assistant</h1>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Give your AI assistant a unique personality and appearance
-        </p>
+    <div className="flex-1 flex flex-col px-8 pt-6 pb-20 overflow-y-auto relative">
+      <BackgroundTiles />
+
+      <div className="text-center mb-6 relative z-10">
+        <h1 className="text-2xl font-semibold text-foreground">Create your Agent</h1>
       </div>
 
-      <div className="flex-1 max-w-md mx-auto w-full">
-        <SystemCustomization
-          data={customization}
-          onChange={setCustomization}
-          isLoading={saving}
-          compact
+      <div className="flex-1 max-w-md mx-auto w-full space-y-8 relative z-10">
+        <VoiceSelector
+          value={voice}
+          customVoiceId={customVoiceId}
+          disabled={saving}
+          onChange={setVoice}
+          onCustomVoiceIdChange={setCustomVoiceId}
         />
+
+        <div className="space-y-2">
+          <label htmlFor="agentName" className="text-sm font-medium text-foreground">
+            Name
+          </label>
+          <input
+            id="agentName"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={MAX_NAME_LENGTH}
+            disabled={saving}
+            placeholder="Rose"
+            className="w-full h-10 rounded-lg border border-muted-foreground/30 bg-background px-3 text-sm outline-none focus:border-foreground"
+          />
+        </div>
       </div>
 
       {error !== null && error.length > 0 ? (
-        <div className="max-w-md mx-auto w-full mt-4 p-3 bg-destructive/10 border border-destructive rounded-lg text-sm text-destructive">
+        <div className="max-w-md mx-auto w-full mt-4 p-3 bg-destructive/10 border border-destructive rounded-lg text-sm text-destructive relative z-10">
           {error}
         </div>
       ) : null}
 
-      <div className="max-w-md mx-auto w-full mt-6">
+      <div className="max-w-md mx-auto w-full mt-6 relative z-10">
         <button
           onClick={() => {
             void handleContinue();
           }}
           disabled={saving}
-          className="w-full h-12 rounded-xl bg-foreground text-background hover:bg-foreground/90 transition-all duration-200 flex items-center justify-center gap-2 text-sm font-medium"
+          className="w-full h-12 rounded-lg bg-foreground text-background hover:bg-foreground/90 transition-all duration-200 flex items-center justify-center gap-2 text-sm font-medium"
         >
           {saving ? (
             <Loader2 className="w-4 h-4 animate-spin" />

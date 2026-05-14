@@ -18,6 +18,13 @@ if (!supabaseUrl || !supabaseAnonKey) {
 // Storage keys
 const SESSION_KEY = 'rose-session';
 const USER_CACHE_KEY = 'app-user';
+const LOGOUT_EPOCH_KEY = 'rose-session-logout-epoch';
+const LOGOUT_PENDING_KEY = 'rose-session-logout-pending';
+export const AUTH_SESSION_CHANGED_EVENT = 'rose-auth-session-changed';
+
+function notifyAuthSessionChanged(): void {
+  window.dispatchEvent(new CustomEvent(AUTH_SESSION_CHANGED_EVENT));
+}
 
 // API Configuration
 const API_BASE_URL = BACKEND_BASE_URL;
@@ -120,11 +127,18 @@ export function storeSession(session: Session): void {
 
   console.log('[Supabase] Storing session', { userId: session.user?.id });
 
+  const isAnonymousSession = isAnonymousUser(session.user);
+  if (!isAnonymousSession) {
+    window.localStorage.removeItem(LOGOUT_PENDING_KEY);
+  }
+
   // Store in localStorage
   window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 
-  // For Electron, also use auth bridge
-  if (window.api?.auth) {
+  // For Electron, persist only real signed-in sessions. Anonymous sessions are
+  // renderer bootstrap state; saving them to the main-process auth store makes
+  // refresh-after-logout look authenticated again.
+  if (window.api?.auth && !isAnonymousSession) {
     window.api.auth.save(session).catch((error: unknown) => {
       console.warn('[Supabase] Failed to save to Electron auth bridge', error);
     });
@@ -134,24 +148,41 @@ export function storeSession(session: Session): void {
   if (session.user) {
     persistCachedUser(session.user);
   }
+
+  notifyAuthSessionChanged();
 }
 
 /**
  * Clear the session from all storage.
  */
-export function clearSession(): void {
+export async function clearSession(): Promise<void> {
   if (typeof window === 'undefined') return;
 
   console.log('[Supabase] Clearing session');
 
   window.localStorage.removeItem(SESSION_KEY);
   window.localStorage.removeItem(USER_CACHE_KEY);
+  const nextLogoutEpoch = Number(window.localStorage.getItem(LOGOUT_EPOCH_KEY) ?? '0') + 1;
+  window.localStorage.setItem(LOGOUT_EPOCH_KEY, String(nextLogoutEpoch));
+  window.localStorage.setItem(LOGOUT_PENDING_KEY, '1');
+  notifyAuthSessionChanged();
 
   // For Electron, also clear auth bridge
   if (window.api?.auth) {
-    window.api.auth.clear().catch((error: unknown) => {
-      console.warn('[Supabase] Failed to clear Electron auth bridge', error);
-    });
+    let clearedElectronStore = false;
+    try {
+      await window.api.auth.clear();
+      clearedElectronStore = true;
+    } finally {
+      if (
+        clearedElectronStore &&
+        window.localStorage.getItem(LOGOUT_EPOCH_KEY) === String(nextLogoutEpoch)
+      ) {
+        window.localStorage.removeItem(LOGOUT_PENDING_KEY);
+      }
+    }
+  } else {
+    window.localStorage.removeItem(LOGOUT_PENDING_KEY);
   }
 }
 
@@ -242,7 +273,7 @@ export async function createAnonymousSession(): Promise<{ user: User; session: S
  * Sign out - just clears the session.
  */
 export async function signOut(): Promise<void> {
-  clearSession();
+  await clearSession();
 }
 
 // =============================================================================
@@ -337,13 +368,26 @@ export const clearStoredSession = clearSession;
 // Electron auth bridge priming (for mac-app)
 // Bidirectional: Electron store → localStorage, and localStorage → Electron store
 if (typeof window !== 'undefined' && window.api?.auth) {
+  const bridgeCheckStartedAtLogoutEpoch = window.localStorage.getItem(LOGOUT_EPOCH_KEY);
+  const bridgeCheckStartedDuringLogout = window.localStorage.getItem(LOGOUT_PENDING_KEY) === '1';
+
   window.api.auth
     .check()
     .then((electronSession) => {
+      if (window.localStorage.getItem(LOGOUT_EPOCH_KEY) !== bridgeCheckStartedAtLogoutEpoch) {
+        console.log('[Supabase] Skipping stale Electron auth bridge result after logout');
+        return;
+      }
+
       if (electronSession) {
+        if (bridgeCheckStartedDuringLogout || window.localStorage.getItem(LOGOUT_PENDING_KEY)) {
+          console.log('[Supabase] Skipping Electron auth bridge prime after logout');
+          return;
+        }
         console.log('[Supabase] Primed session from Electron auth bridge');
         window.localStorage.setItem(SESSION_KEY, JSON.stringify(electronSession));
       } else {
+        if (window.localStorage.getItem(LOGOUT_PENDING_KEY)) return;
         // Electron store empty but localStorage may have a session — sync it over
         // so main-process services (BrowserStateSync, etc.) can authenticate
         const localSession = getSession();

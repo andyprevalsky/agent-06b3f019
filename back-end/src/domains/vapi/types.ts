@@ -3,6 +3,7 @@ export interface CreateCallRequest {
   system_prompt: string;
   output_schema: Record<string, unknown>;
   idempotency_key?: string;
+  user_id?: string;
 }
 
 export interface VapiCallResponse {

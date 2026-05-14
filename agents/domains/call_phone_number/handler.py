@@ -263,6 +263,7 @@ async def call_phone_number_activity(
                 "system_prompt": system_prompt,
                 "output_schema": output_schema,
                 "idempotency_key": f"{agent_id}:{tool_call_id}",
+                "user_id": user_id,
             },
         )
 

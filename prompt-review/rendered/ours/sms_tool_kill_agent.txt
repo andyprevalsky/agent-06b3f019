@@ -1,0 +1,16 @@
+{
+  "name": "kill_agent",
+  "description": "Stop/kill an agent and all its sub-agents. Use the 6-character prefix or full ID.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "agent_id_or_prefix": {
+        "type": "string",
+        "description": "Agent ID or 6-char prefix (e.g. \"a3f2b1\")"
+      }
+    },
+    "required": [
+      "agent_id_or_prefix"
+    ]
+  }
+}

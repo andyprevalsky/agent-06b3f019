@@ -13,7 +13,8 @@
         "evidence",
         "scoring",
         "rules"
-      ]
+      ],
+      "agent": "verifier"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -27,7 +28,8 @@
         "agent",
         "self-contained",
         "context"
-      ]
+      ],
+      "agent": "shared"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -41,7 +43,8 @@
         "browser",
         "sandbox",
         "lifecycle"
-      ]
+      ],
+      "agent": "shared"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -55,7 +58,8 @@
         "references",
         "memory",
         "compaction"
-      ]
+      ],
+      "agent": "shared"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -68,7 +72,8 @@
         "attachment",
         "output",
         "handoff"
-      ]
+      ],
+      "agent": "shared"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -81,7 +86,8 @@
         "parallel",
         "execution",
         "ephemeral"
-      ]
+      ],
+      "agent": "shared"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -102,7 +108,8 @@
         "claude": "claude_getSystemPrompt",
         "openclaw": "openclaw_buildAgentSystemPrompt",
         "hermes": "hermes_default_agent_identity"
-      }
+      },
+      "agent": "main_shared"
     },
     {
       "path": "agents/helpers/get_user_context.py",
@@ -131,7 +138,8 @@
         "state",
         "research",
         "set_plan"
-      ]
+      ],
+      "agent": "main_plan"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -145,7 +153,8 @@
         "approved",
         "plan",
         "completion"
-      ]
+      ],
+      "agent": "main_execute"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -164,7 +173,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "verifier"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -177,7 +187,8 @@
         "build",
         "prompt",
         "schema"
-      ]
+      ],
+      "agent": "verifier"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -196,7 +207,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "planner"
     },
     {
       "path": "agents/utils/prompts.py",
@@ -216,7 +228,8 @@
         "claude": "claude_builtin_explore_agent",
         "openclaw": "openclaw_subagent_system_prompt",
         "hermes": "hermes_explore_reference"
-      }
+      },
+      "agent": "explore"
     },
     {
       "path": "agents/tools/prompts/attempt_completion.py",
@@ -235,7 +248,8 @@
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "main_shared"
     },
     {
       "path": "agents/tools/prompts/call_phone_number.py",
@@ -254,7 +268,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/grep.py",
@@ -273,7 +288,8 @@
         "claude": "claude_tool_grep",
         "openclaw": null,
         "hermes": "hermes_search_files_tool"
-      }
+      },
+      "agent": "explore"
     },
     {
       "path": "agents/tools/prompts/message_person.py",
@@ -293,7 +309,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/reasoning.py",
@@ -311,7 +328,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/send_message_to_user.py",
@@ -331,7 +349,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool"
-      }
+      },
+      "agent": "main_plan"
     },
     {
       "path": "agents/tools/prompts/send_message_to_user_execute_phase.py",
@@ -350,7 +369,8 @@
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
         "hermes": "hermes_send_message_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/set_plan.py",
@@ -369,7 +389,8 @@
         "claude": "claude_tool_enter_plan_mode",
         "openclaw": "openclaw_update_plan",
         "hermes": null
-      }
+      },
+      "agent": "main_plan"
     },
     {
       "path": "agents/tools/prompts/spawn_agent.py",
@@ -389,7 +410,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_shared"
     },
     {
       "path": "agents/tools/prompts/spawn_browser_agent.py",
@@ -409,7 +431,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/spawn_code_agent.py",
@@ -429,7 +452,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/spawn_explore_agent.py",
@@ -449,7 +473,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_shared"
     },
     {
       "path": "agents/tools/prompts/spawn_sub_agent.py",
@@ -468,7 +493,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/spawn_sub_agent_for_each.py",
@@ -488,7 +514,8 @@
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
         "hermes": "hermes_delegate_tool"
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/wait_for.py",
@@ -507,7 +534,8 @@
         "claude": "claude_tool_sleep",
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/tools/prompts/web_fetch.py",
@@ -527,7 +555,8 @@
         "claude": "claude_tool_web_fetch",
         "openclaw": "openclaw_web_fetch",
         "hermes": "hermes_web_extract_tool"
-      }
+      },
+      "agent": "explore"
     },
     {
       "path": "agents/tools/prompts/web_search.py",
@@ -547,7 +576,8 @@
         "claude": "claude_tool_web_search",
         "openclaw": "openclaw_web_search",
         "hermes": "hermes_web_search_tool"
-      }
+      },
+      "agent": "explore"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -566,7 +596,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -585,7 +616,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot",
         "hermes": "hermes_browser_snapshot"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -604,7 +636,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -624,7 +657,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_click",
         "hermes": "hermes_browser_click"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -643,7 +677,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_fill",
         "hermes": "hermes_browser_type"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -662,7 +697,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_type",
         "hermes": "hermes_browser_type"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -681,7 +717,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_press",
         "hermes": "hermes_browser_press"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -699,7 +736,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_navigate",
         "hermes": "hermes_browser_navigate"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -716,7 +754,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": "hermes_browser_scroll"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -734,7 +773,8 @@
         "claude": "claude_tool_sleep",
         "openclaw": "openclaw_browser_action_act_wait",
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -752,7 +792,8 @@
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -770,7 +811,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_screenshot",
         "hermes": "hermes_browser_vision"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -789,7 +831,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot_aria",
         "hermes": "hermes_browser_snapshot"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -807,7 +850,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": "hermes_browser_back"
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/browser_tools/tool_definitions.py",
@@ -825,7 +869,8 @@
         "claude": null,
         "openclaw": "openclaw_browser_action_act_clickCoords",
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/domains/reasoning/config.py",
@@ -843,7 +888,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "main_execute"
     },
     {
       "path": "agents/providers/rose/browser_use.py",
@@ -862,7 +908,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "browser"
     },
     {
       "path": "agents/domains/spawn_browser_agent_v3/service.py",
@@ -953,7 +1000,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "planner"
     },
     {
       "path": "agents/domains/param_populator/config.py",
@@ -966,7 +1014,8 @@
         "param",
         "requirements",
         "config"
-      ]
+      ],
+      "agent": "planner"
     },
     {
       "path": "agents/helpers/knowledge_base.py",
@@ -985,7 +1034,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "shared"
     },
     {
       "path": "agents/helpers/summarize.py",
@@ -1032,7 +1082,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "chat"
     },
     {
       "path": "back-end/src/providers/chat/chatPrompts.ts",
@@ -1051,7 +1102,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "chat"
     },
     {
       "path": "back-end/src/providers/chat/chatPrompts.ts",
@@ -1069,7 +1121,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "chat"
     },
     {
       "path": "back-end/src/domains/vapi/config.ts",
@@ -1088,7 +1141,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "voice"
     },
     {
       "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
@@ -1107,7 +1161,8 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "sms"
     },
     {
       "path": "back-end/src/providers/smsSupervisor/contextBuilder.ts",
@@ -1155,7 +1210,92 @@
         "claude": null,
         "openclaw": null,
         "hermes": null
-      }
+      },
+      "agent": "shared"
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'reply_to_agent'",
+      "id": "sms_tool_reply_to_agent",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Send a reply to an agent \u2014 answers questions, approves/rejects write-locks, or sends any m",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "reply_to_agent"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'kill_agent'",
+      "id": "sms_tool_kill_agent",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Stop/kill an agent and all its sub-agents. Use the 6-character prefix or full ID.",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "kill_agent"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'increase_budget'",
+      "id": "sms_tool_increase_budget",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Increase an agent's cost limit. The amount is ADDED to the current limit.",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "increase_budget"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'start_new_agent'",
+      "id": "sms_tool_start_new_agent",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Start a new autonomous Rose Labs agent. These agents are superintelligent \u2014 they recursive",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "start_new_agent"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'web_search'",
+      "id": "sms_tool_web_search",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Search the web for current information",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "web_search"
+      ]
+    },
+    {
+      "path": "back-end/src/providers/smsSupervisor/supervisorTools.ts",
+      "anchor": "name: 'attempt_completion'",
+      "id": "sms_tool_attempt_completion",
+      "category": "tool_description",
+      "agent": "sms",
+      "summary": "SMS supervisor tool: Send the final SMS message to the user. Call this when you are done thinking and using too",
+      "keywords": [
+        "sms",
+        "supervisor",
+        "tool",
+        "attempt_completion"
+      ]
     }
   ],
   "claude-code-src": [

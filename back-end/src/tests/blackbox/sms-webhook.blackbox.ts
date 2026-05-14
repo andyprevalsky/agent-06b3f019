@@ -14,6 +14,7 @@
  *   - same-input reproducibility: three sequential invalid requests return identical status
  *   - cleanup: unknown phone tests send async SMS but don't mutate test-visible state
  *   - harness independence: supervisor runs async; webhook returns 200 immediately
+ *   - smoke: known-phone regular SMS reaches supervisor loop and emits outbound SMS response
  *   - observability: covered by runner manifest and artifact directory
  *
  * Invariants not applicable:
@@ -549,106 +550,11 @@ async function testCoverage_routeToSupervisorReturnsImmediately() {
   }
 }
 
-// ==================== BOUNDARY CAPTURE — SURGE SMS ====================
-
-async function testBoundary_unknownPhoneCapturesSurgeCall() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) {
-    console.warn('  ⚠ capture harness not active — skipping');
-    return;
-  }
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
-
-  await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      data: {
-        body: 'Boundary test message',
-        conversation: {
-          contact: { phone_number: '+10000000099' },
-          phone_number: { number: '+14154498072' },
-        },
-      },
-    }),
-  });
-
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
-  };
-
-  const surgeCalls = body.captures.filter((c) => c.url.includes('surge.app'));
-  if (surgeCalls.length === 0) {
-    // SURGE_API_KEY not configured — no outbound call, acceptable
-    return;
-  }
-
-  const call = surgeCalls[0];
-  if (call.method !== 'POST') {
-    throw new Error(`Expected POST to Surge, got ${call.method}`);
-  }
-  if (!call.url.includes('/messages')) {
-    throw new Error(`Expected /messages in URL, got ${call.url}`);
-  }
-  const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
-  if (!headerKeys.includes('authorization')) {
-    throw new Error('Expected Authorization header in Surge call');
-  }
-}
-
-const SMS_WEBHOOK_INFRA_HOSTS = [
-  'api.github.com',
-  'openrouter.ai',
-  'anthropic.com',
-  'openai.com',
-  'ip-api.com',
-  'supabase.co',
-  'surge.app',
-  'verify.twilio.com',
-  'e2b.app',
-  'stripe.com',
-  'parallel.ai',
-  'api.steel.dev',
-  'perplexity.ai',
-  'exa.ai',
-  'vapi.ai',
-  'googleapis.com',
-];
-
-async function testBoundary_invalidPayloadZeroCaptures() {
-  // Wait for any in-flight async work from prior tests (notably the supervisor
-  // LLM call kicked off by testCoverage_routeToSupervisorReturnsImmediately,
-  // even though that test issues /clear to abort it) to fully settle before
-  // we read our cursor.
-  await new Promise((r) => setTimeout(r, 500));
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) {
-    console.warn('  ⚠ capture harness not active — skipping');
-    return;
-  }
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
-
-  await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: { url: string }[] };
-  // Cross-test pollution: prior tests' fire-and-forget LLM/realtime calls
-  // can drift in after our cursor read. Filter to non-infra captures only,
-  // matching the convention used by claude-code.blackbox.ts and friends.
-  const domainCaptures = body.captures.filter(
-    (c) => !SMS_WEBHOOK_INFRA_HOSTS.some((host) => c.url.includes(host))
-  );
-  if (domainCaptures.length > 0) {
-    throw new Error(
-      `Expected 0 domain-side captures on invalid payload, got ${domainCaptures.length}: ${JSON.stringify(domainCaptures.map((c) => c.url))}`
-    );
-  }
-}
+// ==================== SUPERVISOR-PATH TESTS ====================
+//
+// The supervisor smoke, boundary-capture, and WS-2 deferred-commit tests live
+// in src/tests/blackbox/sms-supervisor.blackbox.ts (a sibling domain) so this
+// file stays focused on the HTTP-shape invariants of /sms/inbound.
 
 // ==================== RUN ====================
 
@@ -711,15 +617,8 @@ async function runAll() {
       name: 'coverage -- regular message routes to supervisor (returns 200 immediately)',
       fn: testCoverage_routeToSupervisorReturnsImmediately,
     },
-    // boundary capture (must be sequential due to shared capture buffer)
-    {
-      name: 'boundary -- unknown phone captures Surge SMS call',
-      fn: testBoundary_unknownPhoneCapturesSurgeCall,
-    },
-    {
-      name: 'boundary -- invalid payload produces 0 captures',
-      fn: testBoundary_invalidPayloadZeroCaptures,
-    },
+    // Supervisor smoke + boundary tests live in sms-supervisor.blackbox.ts so
+    // this domain stays focused on the HTTP-shape invariants of /sms/inbound.
   ];
 
   console.log(
