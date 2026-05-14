@@ -1,392 +1,209 @@
-"""Blackbox tests for web-fetch domain."""
+"""Blackbox tests for web-fetch domain (Firecrawl + Haiku-filter flow)."""
 
 import asyncio
-import json
-from unittest.mock import patch
+import os
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
-    get_captured_requests,
     setup_mock,
     setup_mock_fn,
     teardown_mock,
 )
 
 
-def _setup():
+# =========================================================================
+# Firecrawl scrape + activity
+# =========================================================================
+
+
+def _firecrawl_mock_body(markdown: str = "Hello world.", links: list[str] | None = None) -> dict:
+    return {
+        "success": True,
+        "data": {
+            "markdown": markdown,
+            "links": links or [],
+            "metadata": {"title": "Example Page", "url": "https://example.com/article"},
+        },
+    }
+
+
+def _setup_firecrawl(markdown: str = "Page body.", links: list[str] | None = None) -> None:
+    os.environ["FIRECRAWL_API_KEY"] = "test-key"
     setup_mock({
-        "api.parallel.ai/v1beta/extract": {
+        "api.firecrawl.dev/v2/scrape": {
             "status": 200,
-            "json": {
-                "text": "This is the extracted content from the webpage.",
-                "title": "Example Page",
-                "url": "https://example.com/article",
-            },
+            "json": _firecrawl_mock_body(markdown=markdown, links=links or []),
         },
     })
 
 
-async def test_web_fetch_happy_path():
-    """web_fetch_activity returns extracted content from Parallel AI."""
-    _setup()
+async def test_scrape_url_returns_markdown_and_links():
+    """fetch_firecrawl_scrape unwraps the Firecrawl `data` envelope."""
+    _setup_firecrawl(markdown="**Page**", links=["https://example.com/a.pdf"])
+    with patch("temporalio.activity.heartbeat"):
+        from domains.web_fetch.service import scrape_url
+
+        out = await scrape_url("https://example.com/article")
+    assert out["markdown"] == "**Page**"
+    assert out["links"] == ["https://example.com/a.pdf"]
+    assert out["metadata"]["title"] == "Example Page"
+
+
+async def test_firecrawl_boundary_request_shape():
+    """The Firecrawl request uses Bearer auth and asks only for markdown+links."""
+    import json as _json
+
+    _setup_firecrawl()
     with patch("temporalio.activity.heartbeat"):
         from tools.web_fetch import web_fetch_activity
 
-        result = await web_fetch_activity(
-            url="https://example.com/article",
-            objective="Extract the main content",
-        )
+        await web_fetch_activity(url="https://example.com/a")
 
-    assert "text" in result or "content" in result or "title" in result
-
-
-async def test_web_fetch_boundary():
-    """Verify HTTP request sent to Parallel AI extract endpoint."""
-    _setup()
-    with patch("temporalio.activity.heartbeat"):
-        from tools.web_fetch import web_fetch_activity
-
-        await web_fetch_activity(
-            url="https://example.com/research",
-            objective="Get research findings",
-            excerpts=True,
-        )
-
-    call = assert_captured_call(
-        url_contains="api.parallel.ai/v1beta/extract",
+    # Authorization header is redacted in capture; presence is enough.
+    assert_captured_call(
+        url_contains="api.firecrawl.dev/v2/scrape",
         method="POST",
-        header_present="x-api-key",
-    )
-    body = json.loads(call["requestBody"])
-    assert "https://example.com/research" in json.dumps(body)
-
-
-# ── Pure helper coverage ──────────────────────────────────────────
-
-
-def test_get_filename_from_url_simple():
-    """Extracts basename for a plain URL."""
-    from domains.web_fetch.service import get_filename_from_url
-
-    assert get_filename_from_url("https://example.com/files/report.pdf") == "report.pdf"
-
-
-def test_get_filename_from_url_cdn_transform():
-    """Resolves filename through CDN transform suffix."""
-    from domains.web_fetch.service import get_filename_from_url
-
-    url = "https://cdn.example.com/photo.jpg/:/cr=t:0%25/rs=w:600"
-    assert get_filename_from_url(url) == "photo.jpg"
-
-
-def test_get_filename_from_url_fallback_basename():
-    """Falls back to basename when no extension matches."""
-    from domains.web_fetch.service import get_filename_from_url
-
-    assert get_filename_from_url("https://example.com/some-path/abc") == "abc"
-
-
-def test_get_filename_from_url_empty_path():
-    """Empty path returns 'download'."""
-    from domains.web_fetch.service import get_filename_from_url
-
-    assert get_filename_from_url("https://example.com/") == "download"
-
-
-def test_matches_extensions_end():
-    """Matches extension at end of path."""
-    from domains.web_fetch.service import matches_extensions
-
-    assert matches_extensions("https://x.com/a.pdf", ["pdf"]) is True
-
-
-def test_matches_extensions_middle():
-    """Matches extension embedded in CDN path with trailing segment."""
-    from domains.web_fetch.service import matches_extensions
-
-    assert matches_extensions("https://x.com/photo.jpg/:/cr=rs", ["jpg", "png"]) is True
-
-
-def test_matches_extensions_no_match():
-    """Unmatched extension returns False."""
-    from domains.web_fetch.service import matches_extensions
-
-    assert matches_extensions("https://x.com/a.html", ["pdf", "csv"]) is False
-
-
-def test_matches_extensions_with_dot_prefix():
-    """Extensions with leading dot still match."""
-    from domains.web_fetch.service import matches_extensions
-
-    assert matches_extensions("https://x.com/a.pdf", [".pdf"]) is True
-
-
-def test_extract_media_urls_all_types():
-    """extract_media_urls finds images, files, and non-image links."""
-    from domains.web_fetch.service import extract_media_urls
-
-    text = (
-        "Here is an image: ![alt](https://x.com/a.png)\n"
-        "Bare image https://x.com/b.jpg .\n"
-        "Download: https://x.com/spec.pdf\n"
-        "Read [this](https://docs.com/page)"
-    )
-    media = extract_media_urls(text)
-    assert "https://x.com/a.png" in media["images"]
-    assert "https://x.com/b.jpg" in media["images"]
-    assert "https://x.com/spec.pdf" in media["files"]
-    assert "https://docs.com/page" in media["links"]
-
-
-def test_extract_media_urls_dedupes():
-    """Duplicate URLs are collapsed."""
-    from domains.web_fetch.service import extract_media_urls
-
-    text = "![](https://x.com/a.png) ![](https://x.com/a.png)"
-    media = extract_media_urls(text)
-    assert media["images"].count("https://x.com/a.png") == 1
-
-
-def test_extract_media_urls_excludes_image_from_links():
-    """Markdown image should NOT appear in links."""
-    from domains.web_fetch.service import extract_media_urls
-
-    text = "![img](https://x.com/a.png) [txt](https://x.com/b.html)"
-    media = extract_media_urls(text)
-    assert "https://x.com/a.png" not in media["links"]
-    assert "https://x.com/b.html" in media["links"]
-
-
-def test_extract_asset_urls_from_html():
-    """Resolves asset src/href values relative to base URL."""
-    from domains.web_fetch.service import extract_asset_urls_from_html
-
-    html = (
-        '<img src="/a/img.png"/>'
-        '<a href="https://other.com/doc.pdf">doc</a>'
-        '<a href="relative.pdf">rel</a>'
-        '<a href="mailto:foo@example.com">email</a>'
-        '<a href="#frag">anchor</a>'
-        '<script src="data:application/javascript,..."></script>'
-    )
-    urls = extract_asset_urls_from_html(html, "https://example.com/page/")
-    assert "https://example.com/a/img.png" in urls
-    assert "https://other.com/doc.pdf" in urls
-    assert "https://example.com/page/relative.pdf" in urls
-    # None of the excluded schemes
-    assert not any(u.startswith("mailto:") for u in urls)
-    assert not any(u.startswith("data:") for u in urls)
-    assert not any(u.startswith("#") for u in urls)
-
-
-def test_extract_asset_urls_dedupes():
-    """Duplicate asset URLs collapse after resolution."""
-    from domains.web_fetch.service import extract_asset_urls_from_html
-
-    html = '<img src="/a.png"/><img src="/a.png"/>'
-    urls = extract_asset_urls_from_html(html, "https://example.com")
-    assert urls == ["https://example.com/a.png"]
-
-
-def test_format_extract_results_empty():
-    """Empty results list returns a friendly default string."""
-    from domains.web_fetch.service import format_extract_results
-
-    assert format_extract_results([], full_content=False) == "No content extracted."
-
-
-def test_format_extract_results_with_title_excerpts():
-    """Formats with **Title** (url) prefix using excerpts."""
-    from domains.web_fetch.service import format_extract_results
-
-    result = format_extract_results(
-        [
-            {
-                "url": "https://example.com/a",
-                "title": "Article A",
-                "excerpts": ["first", "second"],
-                "full_content": "full text",
-            }
-        ],
-        full_content=False,
-    )
-    assert "**Article A**" in result
-    assert "first" in result
-    assert "second" in result
-
-
-def test_format_extract_results_full_content_no_title():
-    """When no title, only URL is bolded."""
-    from domains.web_fetch.service import format_extract_results
-
-    result = format_extract_results(
-        [{"url": "https://example.com/a", "title": "", "full_content": "big content body"}],
-        full_content=True,
-    )
-    assert "**https://example.com/a**" in result
-    assert "big content body" in result
-
-
-def test_format_extract_results_all_empty_content():
-    """Results with no content yield 'No relevant content found.'"""
-    from domains.web_fetch.service import format_extract_results
-
-    result = format_extract_results(
-        [{"url": "https://x.com", "title": "T", "excerpts": [], "full_content": ""}],
-        full_content=False,
-    )
-    assert "No relevant content found" in result
-
-
-# ── Orchestration coverage ────────────────────────────────────────
-
-
-async def test_fetch_and_extract_no_files():
-    """fetch_and_extract returns full shape with downloaded_files empty when not requested."""
-    setup_mock({
-        "api.parallel.ai/v1beta/extract": {
-            "status": 200,
-            "json": {
-                "results": [
-                    {
-                        "url": "https://example.com/a",
-                        "title": "A",
-                        "excerpts": ["hi"],
-                        "full_content": "See ![](https://example.com/img.png)",
-                    }
-                ],
-                "errors": [],
-            },
+        header_present="Authorization",
+        body_contains={
+            "url": "https://example.com/a",
+            "formats": ["markdown", "links"],
+            "onlyMainContent": True,
         },
-    })
+    )
+
+
+async def test_firecrawl_activity_raises_on_missing_key():
+    """If FIRECRAWL_API_KEY is unset the activity raises a clear RuntimeError."""
+    os.environ.pop("FIRECRAWL_API_KEY", None)
+    # Force config cache refresh so the empty env var takes effect
+    import config as cfg_mod
+
+    cfg_mod._config_cache = None  # type: ignore[attr-defined]
     with patch("temporalio.activity.heartbeat"):
-        from domains.web_fetch.service import fetch_and_extract
+        from tools.web_fetch import web_fetch_activity
 
-        result = await fetch_and_extract(
-            url="https://example.com/a",
-            objective="Extract",
-            excerpts=True,
-        )
-    assert "downloaded_files" in result
-    assert result["downloaded_files"] == []
-    assert result["sources"] == ["https://example.com/a"]
-    # img.png picked up from full_content
-    assert "https://example.com/img.png" in result["images"]
-
-
-async def test_fetch_and_extract_logs_errors():
-    """Errors array from Parallel AI is forwarded."""
-    setup_mock({
-        "api.parallel.ai/v1beta/extract": {
-            "status": 200,
-            "json": {
-                "results": [],
-                "errors": [{"url": "https://example.com/b", "message": "blocked"}],
-            },
-        },
-    })
-    with patch("temporalio.activity.heartbeat"):
-        from domains.web_fetch.service import fetch_and_extract
-
-        result = await fetch_and_extract(
-            url="https://example.com/b",
-            objective="x",
-        )
-    assert result["errors"]
-    assert result["content"] == "No content extracted."
-
-
-async def test_download_matching_files_no_matches():
-    """download_matching_files returns [] when no URL matches extensions."""
-    with patch("temporalio.activity.heartbeat"):
-        from domains.web_fetch.service import download_matching_files
-
-        out = await download_matching_files(
-            urls=["https://x.com/a.html", "https://x.com/b.xml"],
-            extensions=["pdf"],
-            user_id="u-1",
-        )
-    assert out == []
-
-
-async def test_download_matching_files_happy_path():
-    """download_matching_files downloads pdf files and uploads via supabase."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if "example.com/a.pdf" in url:
-            return httpx.Response(200, content=b"%PDF-1.4 fake", headers={"Content-Type": "application/pdf"})
-        if "/storage/v1/object/" in url:
-            return httpx.Response(200, json={"Key": "user/u-1/a.pdf"})
-        return httpx.Response(404, json={"error": "no mock"})
-
-    setup_mock_fn(handler)
-
-    # The upload path calls helpers.attachments.upload_to_storage which uses
-    # Supabase's client. Patch it to return a synthetic file pointer.
-    async def fake_upload(user_id, file_content, filename, mime_type):
-        return {
-            "id": "fp-1",
-            "user_id": user_id,
-            "storage_path": f"{user_id}/{filename}",
-            "original_filename": filename,
-            "mime_type": mime_type,
-            "size": len(file_content),
-        }
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
-    ):
-        from domains.web_fetch.service import download_matching_files
-
-        pointers = await download_matching_files(
-            urls=["https://example.com/a.pdf", "https://example.com/a.pdf"],  # dup
-            extensions=["pdf"],
-            user_id="u-1",
-        )
-    assert len(pointers) == 1
-    assert pointers[0]["original_filename"] == "a.pdf"
-
-
-async def test_download_matching_files_skips_failed_download():
-    """Failed downloads contribute 0 file pointers."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if "example.com/bad.pdf" in url:
-            return httpx.Response(500, content=b"oops")
-        return httpx.Response(404, json={"error": "no mock"})
-
-    setup_mock_fn(handler)
-
-    async def fake_upload(user_id, file_content, filename, mime_type):
-        raise AssertionError("Should not be called when download fails")
-
-    with (
-        patch("temporalio.activity.heartbeat"),
-        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
-    ):
-        from domains.web_fetch.service import download_matching_files
-
-        pointers = await download_matching_files(
-            urls=["https://example.com/bad.pdf"],
-            extensions=["pdf"],
-            user_id="u-1",
-        )
-    assert pointers == []
+        try:
+            await web_fetch_activity(url="https://example.com/a")
+            raised = False
+        except RuntimeError as e:
+            raised = "FIRECRAWL_API_KEY" in str(e)
+    assert raised, "expected RuntimeError mentioning FIRECRAWL_API_KEY"
 
 
 # =========================================================================
-# WebFetchManager.execute_tool + web_fetch() top-level wrapper
+# get_filename_from_url (pure helper)
+# =========================================================================
+
+
+def test_get_filename_from_url_simple():
+    from domains.web_fetch.service import get_filename_from_url
+
+    assert get_filename_from_url("https://example.com/a.pdf") == "a.pdf"
+
+
+def test_get_filename_from_url_url_encoded():
+    """%20 in the filename is decoded."""
+    from domains.web_fetch.service import get_filename_from_url
+
+    assert get_filename_from_url("https://example.com/path/My%20Doc.pdf") == "My Doc.pdf"
+
+
+def test_get_filename_from_url_empty_path():
+    from domains.web_fetch.service import get_filename_from_url
+
+    assert get_filename_from_url("https://example.com") == "download"
+
+
+# =========================================================================
+# download_and_attach (orchestration)
+# =========================================================================
+
+
+async def test_download_and_attach_no_user_id_returns_empty():
+    from domains.web_fetch.service import download_and_attach
+
+    out = await download_and_attach(file_urls=["https://example.com/a.pdf"], user_id=None)
+    assert out == []
+
+
+async def test_download_and_attach_happy_path():
+    """Downloads bytes, uploads to storage, returns one file_pointer per URL."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"PDF-BYTES")
+
+    setup_mock_fn(handler)
+
+    uploaded: list[dict] = []
+
+    async def fake_upload(user_id, file_content, filename, mime_type):
+        pointer = {
+            "id": f"fp-{len(uploaded)}",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(file_content),
+        }
+        uploaded.append(pointer)
+        return pointer
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
+    ):
+        from domains.web_fetch.service import download_and_attach
+
+        pointers = await download_and_attach(
+            file_urls=["https://example.com/a.pdf", "https://example.com/b.pdf"],
+            user_id="u-1",
+        )
+    assert len(pointers) == 2
+    assert pointers[0]["original_filename"] == "a.pdf"
+    assert pointers[0]["mime_type"] == "application/pdf"
+    assert pointers[1]["original_filename"] == "b.pdf"
+
+
+async def test_download_and_attach_skips_failed_downloads():
+    """A 5xx on one URL silently skips it; other URLs still upload."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "bad" in str(request.url):
+            return httpx.Response(500, content=b"oops")
+        return httpx.Response(200, content=b"GOOD")
+
+    setup_mock_fn(handler)
+
+    uploaded: list[dict] = []
+
+    async def fake_upload(user_id, file_content, filename, mime_type):
+        p = {"id": f"fp-{len(uploaded)}", "original_filename": filename, "mime_type": mime_type, "size_bytes": len(file_content)}
+        uploaded.append(p)
+        return p
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
+    ):
+        from domains.web_fetch.service import download_and_attach
+
+        pointers = await download_and_attach(
+            file_urls=["https://example.com/bad.pdf", "https://example.com/good.pdf"],
+            user_id="u-1",
+        )
+    names = [p["original_filename"] for p in pointers]
+    assert "good.pdf" in names
+    assert "bad.pdf" not in names
+
+
+# =========================================================================
+# Handler: full happy path through the 3 activities
 # =========================================================================
 
 
 def test_handler_safe_time_happy_path():
-    """_safe_time returns a float when time.time works."""
     from domains.web_fetch.handler import _safe_time
 
     t = _safe_time()
@@ -395,7 +212,6 @@ def test_handler_safe_time_happy_path():
 
 
 def test_handler_safe_time_fallback():
-    """_safe_time returns 0.0 if time.time raises."""
     from domains.web_fetch import handler
 
     original_time = handler.time
@@ -412,7 +228,6 @@ def test_handler_safe_time_fallback():
 
 
 def test_handler_get_manager_singleton():
-    """get_manager() returns the same WebFetchManager instance."""
     from domains.web_fetch.handler import get_manager
 
     a = get_manager()
@@ -422,158 +237,170 @@ def test_handler_get_manager_singleton():
     assert a.read_only is True
 
 
-async def test_handler_execute_tool_happy_path_returns_usage():
-    """WebFetchManager.execute_tool returns a result dict with usage on success."""
+async def test_handler_execute_tool_happy_path():
+    """Manager dispatches scrape → Haiku → download in order and returns the assembled result."""
     from domains.web_fetch.handler import WebFetchManager
 
-    calls = []
+    captured = []
 
     async def fake_execute_activity(fn, args=None, **kwargs):
-        calls.append(("activity", getattr(fn, "__name__", "?")))
-        # Activity name is post_agent_message for handle_tool_event; web_fetch_activity for work
         name = getattr(fn, "__name__", "")
+        captured.append(name)
         if name == "web_fetch_activity":
-            return {"text": "extracted content", "title": "Example"}
-        # Otherwise assume it's a post_agent_message – return nothing
+            return {"markdown": "page text", "links": ["https://example.com/file.pdf"], "metadata": {}}
+        if name == "summarize_and_filter_links":
+            return {
+                "summary": "Source: example.com\nA summary of the page.",
+                "files_to_download": ["https://example.com/file.pdf"],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+                "summarized": True,
+            }
+        if name == "web_fetch_download_activity":
+            return [{"id": "fp-1", "original_filename": "file.pdf", "mime_type": "application/pdf", "size_bytes": 12}]
+        # post_agent_message and any other no-op activities
         return None
 
     manager = WebFetchManager()
     out = await manager.execute_tool(
         execute_activity=fake_execute_activity,
-        tool_call={"url": "https://example.com/a", "objective": "read"},
+        tool_call={"url": "https://example.com/a", "objective": "download the PDF"},
         tool_call_id="tc-wf",
         agent_id="a-1",
         user_id="u-1",
     )
 
-    assert "result" in out
-    assert out["result"]["title"] == "Example"
-    assert out["usage"]["service"][0]["provider"] == "Parallel AI Extract"
-    # Activity was invoked at least twice (pre-event post, main call, post-event post)
-    activity_names = [name for _, name in calls]
-    assert "web_fetch_activity" in activity_names
+    # Activities fired in the right order
+    assert "web_fetch_activity" in captured
+    assert "summarize_and_filter_links" in captured
+    assert "web_fetch_download_activity" in captured
+
+    # Result wires the file_pointer through
+    assert out["result"]["downloaded_files"][0]["original_filename"] == "file.pdf"
+    assert out["result"]["links_downloaded"] == 1
+    # Attachment note appended to the summary
+    assert "Downloaded 1 file" in out["result"]["content"]
+    # Service cost line attributed to Firecrawl
+    assert out["usage"]["service"][0]["provider"] == "Firecrawl scrape"
 
 
-async def test_handler_execute_tool_long_objective_truncated_in_display():
-    """Long objectives (>100 chars) are truncated for the display message."""
+async def test_handler_skips_download_when_haiku_returns_no_files():
+    """When the Haiku filter returns an empty files_to_download list, the download activity is not invoked."""
     from domains.web_fetch.handler import WebFetchManager
 
+    captured = []
+
     async def fake_execute_activity(fn, args=None, **kwargs):
-        if getattr(fn, "__name__", "") == "web_fetch_activity":
-            return {"text": "x", "title": "t"}
+        name = getattr(fn, "__name__", "")
+        captured.append(name)
+        if name == "web_fetch_activity":
+            return {"markdown": "page", "links": ["https://example.com/file.pdf"], "metadata": {}}
+        if name == "summarize_and_filter_links":
+            return {"summary": "Summary.", "files_to_download": [], "usage": {}, "summarized": True}
+        if name == "web_fetch_download_activity":
+            raise AssertionError("Should not be called when no files selected")
         return None
 
     manager = WebFetchManager()
-    long_objective = "y" * 300
     out = await manager.execute_tool(
         execute_activity=fake_execute_activity,
-        tool_call={"url": "https://example.com/a", "objective": long_objective},
-        tool_call_id="tc-long",
+        tool_call={"url": "https://example.com/a", "objective": "just summarize"},
+        tool_call_id="tc-wf",
         agent_id="a-1",
+        user_id="u-1",
     )
-    assert "result" in out
+    assert "web_fetch_download_activity" not in captured
+    assert out["result"]["downloaded_files"] == []
+    assert out["result"]["links_downloaded"] == 0
+    # No attachment note when no files
+    assert "Downloaded" not in out["result"]["content"]
 
 
 async def test_handler_execute_tool_activity_error_reraises():
-    """Activity exception is re-raised after posting the error event."""
+    """When the Firecrawl activity raises, the manager re-raises after posting the error event."""
     from domains.web_fetch.handler import WebFetchManager
 
     async def fake_execute_activity(fn, args=None, **kwargs):
-        if getattr(fn, "__name__", "") == "web_fetch_activity":
-            raise RuntimeError("parallel down")
+        name = getattr(fn, "__name__", "")
+        if name == "web_fetch_activity":
+            raise RuntimeError("firecrawl 402")
         return None
 
     manager = WebFetchManager()
+    raised = False
     try:
         await manager.execute_tool(
             execute_activity=fake_execute_activity,
             tool_call={"url": "https://example.com/bad", "objective": "x"},
-            tool_call_id="tc-err",
+            tool_call_id="tc-wf",
             agent_id="a-1",
+            user_id="u-1",
         )
-        raise AssertionError("Expected RuntimeError")
     except RuntimeError as e:
-        assert "parallel down" in str(e)
+        raised = "firecrawl 402" in str(e)
+    assert raised
 
 
-async def test_handler_web_fetch_top_level_wraps_manager():
-    """web_fetch top-level function forwards to get_manager().execute_tool."""
-    from domains.web_fetch.handler import web_fetch
-
-    async def fake_execute_activity(fn, args=None, **kwargs):
-        if getattr(fn, "__name__", "") == "web_fetch_activity":
-            return {"text": "hi"}
-        return None
-
-    out = await web_fetch(
-        execute_activity=fake_execute_activity,
-        tool_call={"url": "https://example.com/x", "objective": "y"},
-        tool_call_id="tc-tl",
-        agent_id="a-1",
-        user_id="u-1",
-    )
-    assert "result" in out
-    assert out["result"]["text"] == "hi"
+# =========================================================================
+# Tool prompt + schema sanity (PROMPT shape changed)
+# =========================================================================
 
 
-async def test_handler_activity_error_path_logged_and_reraised():
-    """web_fetch_activity error path re-raises after logging."""
-    from unittest.mock import patch
+def test_web_fetch_prompt_describes_objective_driven_downloads():
+    """The tool prompt must instruct the agent to state file needs in the objective."""
+    from tools.prompts.web_fetch import PROMPT
 
-    from domains.web_fetch.handler import web_fetch_activity
-
-    with patch("temporalio.activity.heartbeat"), patch(
-        "domains.web_fetch.handler.fetch_and_extract",
-        side_effect=RuntimeError("fetch failed"),
-    ):
-        try:
-            await web_fetch_activity(
-                url="https://example.com/a",
-                objective="obj",
-            )
-            raise AssertionError("Expected RuntimeError")
-        except RuntimeError as e:
-            assert "fetch failed" in str(e)
+    assert "objective" in PROMPT.lower()
+    assert "download" in PROMPT.lower()
+    # Should NOT advertise the removed parameters
+    assert "download_files" not in PROMPT
+    assert "excerpts" not in PROMPT.lower()
+    assert "full_content" not in PROMPT
 
 
-async def run_all_tests():
+def test_web_fetch_tool_schema_has_only_url_and_objective():
+    """WebFetchTool drops excerpts/full_content/download_files."""
+    from utils.tool_schemas import WebFetchTool
+
+    fields = set(WebFetchTool.model_fields.keys())
+    assert fields == {"tool", "url", "objective"}, fields
+
+
+# =========================================================================
+# Runner
+# =========================================================================
+
+
+async def run_all_tests() -> bool:
     print("web-fetch blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("happy_path", test_web_fetch_happy_path)
-    await r.record_async("boundary", test_web_fetch_boundary)
+
+    # Firecrawl scrape
+    await r.record_async("scrape_url_returns_md_and_links", test_scrape_url_returns_markdown_and_links)
+    await r.record_async("firecrawl_boundary_request_shape", test_firecrawl_boundary_request_shape)
+    await r.record_async("firecrawl_activity_raises_no_key", test_firecrawl_activity_raises_on_missing_key)
+
     # Pure helpers
     r.record("get_filename_simple", test_get_filename_from_url_simple)
-    r.record("get_filename_cdn", test_get_filename_from_url_cdn_transform)
-    r.record("get_filename_fallback", test_get_filename_from_url_fallback_basename)
+    r.record("get_filename_url_encoded", test_get_filename_from_url_url_encoded)
     r.record("get_filename_empty", test_get_filename_from_url_empty_path)
-    r.record("match_ext_end", test_matches_extensions_end)
-    r.record("match_ext_middle", test_matches_extensions_middle)
-    r.record("match_ext_no", test_matches_extensions_no_match)
-    r.record("match_ext_dot", test_matches_extensions_with_dot_prefix)
-    r.record("extract_media_all_types", test_extract_media_urls_all_types)
-    r.record("extract_media_dedupes", test_extract_media_urls_dedupes)
-    r.record("extract_media_links_exclude_image", test_extract_media_urls_excludes_image_from_links)
-    r.record("extract_asset_urls", test_extract_asset_urls_from_html)
-    r.record("extract_asset_urls_dedup", test_extract_asset_urls_dedupes)
-    r.record("format_extract_empty", test_format_extract_results_empty)
-    r.record("format_extract_title", test_format_extract_results_with_title_excerpts)
-    r.record("format_extract_full_no_title", test_format_extract_results_full_content_no_title)
-    r.record("format_extract_all_empty", test_format_extract_results_all_empty_content)
-    # Orchestration
-    await r.record_async("fetch_and_extract_no_files", test_fetch_and_extract_no_files)
-    await r.record_async("fetch_and_extract_errors", test_fetch_and_extract_logs_errors)
-    await r.record_async("download_no_matches", test_download_matching_files_no_matches)
-    await r.record_async("download_happy_path", test_download_matching_files_happy_path)
-    await r.record_async("download_skips_failed", test_download_matching_files_skips_failed_download)
+
+    # Download/attach orchestration
+    await r.record_async("download_no_user_returns_empty", test_download_and_attach_no_user_id_returns_empty)
+    await r.record_async("download_happy_path", test_download_and_attach_happy_path)
+    await r.record_async("download_skips_failed", test_download_and_attach_skips_failed_downloads)
+
     # Handler
     r.record("handler_safe_time_ok", test_handler_safe_time_happy_path)
     r.record("handler_safe_time_fallback", test_handler_safe_time_fallback)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
-    await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path_returns_usage)
-    await r.record_async("handler_exec_long_objective", test_handler_execute_tool_long_objective_truncated_in_display)
-    await r.record_async("handler_exec_error", test_handler_execute_tool_activity_error_reraises)
-    await r.record_async("handler_web_fetch_wrapper", test_handler_web_fetch_top_level_wraps_manager)
-    await r.record_async("handler_activity_error_reraises", test_handler_activity_error_path_logged_and_reraised)
+    await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
+    await r.record_async("handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files)
+    await r.record_async("handler_activity_error_reraises", test_handler_execute_tool_activity_error_reraises)
+
+    # Tool surface
+    r.record("prompt_objective_driven", test_web_fetch_prompt_describes_objective_driven_downloads)
+    r.record("tool_schema_shrunk", test_web_fetch_tool_schema_has_only_url_and_objective)
+
     teardown_mock()
     return r.all_passed
 

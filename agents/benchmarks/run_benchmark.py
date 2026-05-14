@@ -89,7 +89,7 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # stream for 60–90s via Supabase Realtime without posting intermediate rows to
 # the messages table — 60s here produces false-positive stalls on the synthesis
 # step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 180
+AGENT_STALL_SECONDS = 240
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets")

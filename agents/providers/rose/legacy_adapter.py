@@ -31,9 +31,11 @@ from providers.rose.types import ClaudeAuthContext, GptAuthContext
 # The TS edge function accepted any of these and routed by pool name; we
 # preserve that lookup here so call sites don't have to change strings.
 _MODEL_TO_POOL: dict[str, PoolName] = {
+    "rose-labs/rose-1-mini": "rose-1-mini",
     "rose-labs/rose-1-lite": "rose-1-lite",
     "rose-labs/rose-1-ultra": "rose-1-ultra",
     "rose": "rose-1-lite",
+    "rose-mini": "rose-1-mini",
     "rose-ultra": "rose-1-ultra",
 }
 
@@ -56,10 +58,12 @@ def pool_for_model(model: str) -> Optional[PoolName]:
     lowered = model.lower()
     if lowered in _MODEL_TO_POOL:
         return _MODEL_TO_POOL[lowered]
-    # Fuzzy fall-back: "rose-labs/..." with anything after lite/ultra.
+    # Fuzzy fall-back: "rose-labs/..." with anything after mini/lite/ultra.
     if "rose-labs" in lowered:
         if "ultra" in lowered:
             return "rose-1-ultra"
+        if "mini" in lowered:
+            return "rose-1-mini"
         return "rose-1-lite"
     return None
 

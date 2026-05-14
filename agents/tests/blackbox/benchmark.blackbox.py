@@ -103,7 +103,7 @@ def test_outreach_batch_has_timeout_floor():
     """Outreach batch keeps enough time for root research before row fanout."""
     from benchmarks.benchmark_tasks import get_timeout_floor
 
-    assert get_timeout_floor("outreach-batch") == 480
+    assert get_timeout_floor("outreach-batch") == 600
     assert get_timeout_floor("chat-mode") is None
 
 
@@ -125,7 +125,7 @@ def test_timeout_default_respects_explicit_floor():
 
     task = get_task_by_name("outreach-batch")
 
-    assert _default_timeout_for_task(task, max_seconds=120) == 480
+    assert _default_timeout_for_task(task, max_seconds=120) == 600
 
 
 async def test_code_agent_preflight_accepts_gpt_compute_token():

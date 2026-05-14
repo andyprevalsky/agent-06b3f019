@@ -178,29 +178,39 @@ def test_wait_for_tool_with_condition_only():
 # ── WebFetchTool validation ───────────────────────────────────────────
 
 
-def test_web_fetch_tool_full_content_overrides_excerpts():
-    """WebFetchTool sets excerpts=False when full_content is True."""
+def test_web_fetch_tool_fields_are_url_and_objective_only():
+    """WebFetchTool exposes only tool + url + objective after the Firecrawl swap.
+
+    The legacy excerpts/full_content/download_files params were Parallel AI
+    artifacts; the Haiku filter on top of Firecrawl now picks files based on
+    the objective string, so no extension filter is needed at the tool layer.
+    """
+    from utils.tool_schemas import WebFetchTool
+
+    fields = set(WebFetchTool.model_fields.keys())
+    assert fields == {"tool", "url", "objective"}, fields
+
+
+def test_web_fetch_tool_drops_removed_params():
+    """Legacy params (excerpts/full_content/download_files) are silently dropped.
+
+    Pydantic v2's default is ``extra='ignore'`` — passing legacy fields
+    constructs the model fine but the values aren't accessible as attributes.
+    Codebase-wide convention; mirrored here to avoid breaking older agents
+    that still emit the removed kwargs during the rollout.
+    """
     from utils.tool_schemas import WebFetchTool
 
     t = WebFetchTool(
         tool="web_fetch",
         url="https://example.com",
-        objective="get content",
-        full_content=True,
+        objective="x",
         excerpts=True,
+        full_content=True,
+        download_files=["pdf"],
     )
-    # validator silently flips excerpts to False
-    assert t.excerpts is False
-    assert t.full_content is True
-
-
-def test_web_fetch_tool_default_mode():
-    """WebFetchTool default has excerpts=True, full_content=False."""
-    from utils.tool_schemas import WebFetchTool
-
-    t = WebFetchTool(tool="web_fetch", url="https://example.com", objective="get content")
-    assert t.excerpts is True
-    assert t.full_content is False
+    for removed in ("excerpts", "full_content", "download_files"):
+        assert not hasattr(t, removed), f"{removed} should not be an attribute on the narrowed model"
 
 
 # ── SpawnAgentTool model_validator ────────────────────────────────────
@@ -638,8 +648,8 @@ async def run_all_tests():
     r.record("wait_for_with_timestamp", test_wait_for_tool_with_timestamp_only)
     r.record("wait_for_with_condition", test_wait_for_tool_with_condition_only)
     # WebFetchTool validation
-    r.record("web_fetch_full_overrides", test_web_fetch_tool_full_content_overrides_excerpts)
-    r.record("web_fetch_default", test_web_fetch_tool_default_mode)
+    r.record("web_fetch_fields_url_objective_only", test_web_fetch_tool_fields_are_url_and_objective_only)
+    r.record("web_fetch_drops_removed_params", test_web_fetch_tool_drops_removed_params)
     # SpawnAgentTool model_validator
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)

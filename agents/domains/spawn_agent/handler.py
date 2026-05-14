@@ -222,6 +222,7 @@ class SpawnAgentManager(ToolManager):
                         gpt_token_source,
                         gpt_token_pool_id,
                         attachment_texts,
+                        getattr(workflow_instance, "max_context_tokens", None) or 200_000,
                     ],
                     start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,
                     heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,

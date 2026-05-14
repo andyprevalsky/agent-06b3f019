@@ -1,11 +1,55 @@
 """Tool for compressing agent context and generating completion summaries."""
 
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
+from pydantic import BaseModel, Field
 from temporalio import activity
 
 logger = structlog.get_logger()
+
+
+class WebFetchHaikuResponse(BaseModel):
+    """Structured output for the web_fetch Haiku filter pass.
+
+    Returned by ``summarize_and_filter_links`` — one Haiku call that does two
+    jobs: (1) produce an objective-focused summary of the page markdown, and
+    (2) select which discovered links the caller should actually download.
+    """
+
+    summary: str = Field(
+        description=(
+            "Objective-focused summary of the page (target 1500 tokens, "
+            "hard cap 2000). Preserve direct quotes, statistics, dates, "
+            "names, URLs, and identifiers relevant to the objective. "
+            "Start with the source URL and page title. Omit nav, ads, "
+            "related-articles, and boilerplate."
+        )
+    )
+    files_to_download: List[str] = Field(
+        default_factory=list,
+        description=(
+            "URLs from the page's link inventory that the objective explicitly "
+            "requires the caller to download. Empty list when no files are "
+            "needed. Do NOT download arbitrary files just because they exist."
+        ),
+    )
+
+# Number of trailing TOOL/ASSISTANT messages kept verbatim in head/tail-protected
+# compaction. Matches Hermes `trajectory_compressor.py:482-528`.
+HEAD_TAIL_PROTECTED_TURNS = 4
+
+# Threshold below which we skip compaction entirely — context is already small.
+MIN_CONTEXT_LEN_FOR_COMPACTION = HEAD_TAIL_PROTECTED_TURNS + 2
+
+COMPACTION_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+
+# Per-tool summarizer threshold (chars). Hermes parity at web_tools.py:613-682.
+TOOL_SUMMARIZER_CHAR_THRESHOLD = 5_000
+# Hard cap when the LLM summarizer itself fails — matches OpenClaw default
+# (firecrawl-client.ts:42).
+TOOL_RESULT_HARD_CAP_CHARS = 50_000
 
 # Tool name → Human-readable label mapping for summary display
 TOOL_DISPLAY_NAMES = {
@@ -101,6 +145,125 @@ def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
     return footer
 
 
+def _build_tool_pair_maps(
+    context: List[Dict[str, Any]],
+) -> Tuple[Dict[str, int], Dict[str, List[int]]]:
+    """Map tool_call_id → ASSISTANT idx and tool_call_id → [TOOL idxs].
+
+    Used by the head/tail compactor to keep ASSISTANT tool_use blocks paired
+    with their TOOL result blocks. An orphan tool_use without its tool_result
+    hard-errors at the Anthropic API boundary.
+    """
+    asst_by_id: Dict[str, int] = {}
+    tools_by_id: Dict[str, List[int]] = {}
+    for i, msg in enumerate(context):
+        meta = msg.get("metadata") or {}
+        role = msg.get("role")
+        if role == "ASSISTANT":
+            for tc in meta.get("tool_calls") or []:
+                tc_id = tc.get("tool_call_id")
+                if tc_id:
+                    asst_by_id[str(tc_id)] = i
+        elif role == "TOOL":
+            tc_id = meta.get("toolCallId")
+            if tc_id:
+                tools_by_id.setdefault(str(tc_id), []).append(i)
+    return asst_by_id, tools_by_id
+
+
+def split_head_middle_tail(
+    context: List[Dict[str, Any]],
+    n_tail: int = HEAD_TAIL_PROTECTED_TURNS,
+) -> Optional[Tuple[List[int], List[int], List[int]]]:
+    """Pick (head, middle, tail) message indices for head/tail-protected compaction.
+
+    Head: first SYSTEM message (if any) + first USER message (the goal).
+    Tail: last `n_tail` messages of role TOOL/ASSISTANT/USER, expanded to
+          preserve every ASSISTANT tool_use ↔ TOOL tool_result pair.
+    Middle: everything else.
+
+    Returns None when the context is already small enough that compaction
+    would be pointless.
+    """
+    if len(context) < MIN_CONTEXT_LEN_FOR_COMPACTION:
+        return None
+
+    head_indices: List[int] = []
+    seen_first_user = False
+    for i, msg in enumerate(context):
+        role = msg.get("role")
+        if role == "SYSTEM" and not head_indices:
+            head_indices.append(i)
+        elif role == "USER" and not seen_first_user:
+            head_indices.append(i)
+            seen_first_user = True
+            break
+
+    head_set = set(head_indices)
+
+    tail_indices: set[int] = set()
+    count = 0
+    for i in range(len(context) - 1, -1, -1):
+        if i in head_set:
+            break
+        role = context[i].get("role")
+        if role in ("USER", "ASSISTANT", "TOOL"):
+            tail_indices.add(i)
+            count += 1
+            if count >= n_tail:
+                break
+
+    asst_by_id, tools_by_id = _build_tool_pair_maps(context)
+
+    # Expand tail until every tool_use ↔ tool_result pair is fully inside
+    # head ∪ tail (no orphans crossing the summary boundary).
+    changed = True
+    while changed:
+        changed = False
+        for idx in list(tail_indices):
+            msg = context[idx]
+            meta = msg.get("metadata") or {}
+            role = msg.get("role")
+            if role == "TOOL":
+                tc_id = meta.get("toolCallId")
+                if tc_id is not None:
+                    a_idx = asst_by_id.get(str(tc_id))
+                    if a_idx is not None and a_idx not in tail_indices and a_idx not in head_set:
+                        tail_indices.add(a_idx)
+                        changed = True
+            elif role == "ASSISTANT":
+                for tc in meta.get("tool_calls") or []:
+                    tc_id = tc.get("tool_call_id")
+                    if tc_id is None:
+                        continue
+                    for t_idx in tools_by_id.get(str(tc_id), []):
+                        if t_idx not in tail_indices and t_idx not in head_set:
+                            tail_indices.add(t_idx)
+                            changed = True
+
+    middle_indices = [i for i in range(len(context)) if i not in head_set and i not in tail_indices]
+    if not middle_indices:
+        return None
+
+    return head_indices, middle_indices, sorted(tail_indices)
+
+
+def _format_middle_for_prompt(context: List[Dict[str, Any]], middle_indices: List[int]) -> str:
+    """Render middle messages as plain text for the summarizer LLM."""
+    parts: List[str] = []
+    for i in middle_indices:
+        msg = context[i]
+        role = msg.get("role", "unknown")
+        text = msg.get("text", "")
+        meta = msg.get("metadata") or {}
+        tool_name = meta.get("toolName")
+        prefix = f"[{role}]"
+        if tool_name:
+            prefix += f"[{tool_name}]"
+        parts.append(f"{prefix} {text}")
+    return "\n".join(parts)
+
+
 @activity.defn
 async def compress_context(
     context: List[Dict],
@@ -117,59 +280,62 @@ async def compress_context(
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> Dict:
-    """
-    Use LLM to compress context into key learnings.
+    """Head/tail-protected context compaction.
 
-    Args:
-        context: Full message history (first USER message is the goal)
-        iteration_count: Current iteration number
-        model: LLM model to use for compression
+    Keeps first SYSTEM + first USER + last 4 turns verbatim. Replaces the
+    middle range with one synthetic USER turn containing an LLM-generated
+    summary. ASSISTANT.tool_calls and TOOL.toolCallId pairs that straddle
+    the boundary are pulled into the tail so the Anthropic API never sees
+    an orphan tool_use.
 
     Returns:
-        Dict with 'learnings' string and 'usage' dict for cost tracking
+        Dict with:
+          - context: new context list (head + synthetic summary USER + tail)
+          - usage:   token usage from the summarizer call
+          - success: True iff the LLM call returned non-empty text
+        On any failure: {"context": None, "usage": {}, "success": False, "error": str}
     """
     try:
-        activity.heartbeat(f"Compressing {len(context)} messages into learnings")
+        activity.heartbeat(f"Compacting {len(context)} messages (head/tail-protected)")
+
+        split = split_head_middle_tail(context)
+        if split is None:
+            logger.info("Context too small to compact; skipping", messages=len(context))
+            return {"context": context, "usage": {}, "success": True}
+        head_indices, middle_indices, tail_indices = split
 
         # Import here to avoid circular dependency
         from helpers.llm import call_llm
 
-        # Build full context
-        full_context = "\n".join([f"[{msg.get('role', 'unknown')}] {msg.get('text', '')}" for msg in context])
+        middle_text = _format_middle_for_prompt(context, middle_indices)
 
-        prompt = f"""You are analyzing an autonomous AI agent's execution history to extract key learnings.
+        prompt = f"""You are summarizing a portion of an autonomous agent's execution history.
+Write the summary from a neutral perspective describing what the agent did.
 
-EXECUTION HISTORY ({len(context)} messages, {iteration_count} iterations):
-{full_context}
+MUST PRESERVE:
+1. Per-source evidence: every URL fetched, every claim cited with its source,
+   key quoted snippets, file names, identifiers.
+2. Active tasks and their current status (in-progress, blocked, pending).
+3. The last user/parent request and what the agent was doing about it.
+4. Decisions made and their rationale.
+5. Open questions and constraints.
 
-Analyze this execution and extract:
+PRIORITIZE recent context over older history. The agent needs to know what
+it was doing, not just what was discussed.
 
-1. **What went RIGHT** - Successful strategies, good decisions, effective tools used
-2. **What went WRONG** - Mistakes made, failed approaches, errors encountered
+Preserve all opaque identifiers exactly as written (no shortening or
+reconstruction), including UUIDs, hashes, IDs, URLs, and file names.
 
-Be concise but specific. Focus on actionable insights that would help the agent continue more effectively.
+TURNS TO SUMMARIZE:
+{middle_text}
 
-Format your response as:
-## Key Learnings After {iteration_count} Iterations
+Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix."""
 
-### ✅ What Worked
-- [specific successful action/strategy]
-- [another success]
-
-### ❌ What Didn't Work
-- [specific mistake/failure]
-- [another mistake]
-
-### 💡 Recommended Approach Going Forward
-- [concrete next steps based on learnings]
-"""
-
-        # Use call_llm which handles Rose model routing automatically
         result = await call_llm(
             messages=[{"role": "user", "content": prompt}],
             model=model,
             temperature=0.3,
-            max_tokens=1000,
+            max_tokens=8000,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
             claude_token_pool_id=claude_token_pool_id,
@@ -179,33 +345,310 @@ Format your response as:
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
-            skip_cache_write=True,  # One-shot call — no cache reuse
+            skip_cache_write=True,
             call_site="context_compression",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
         )
 
-        learnings = result.get("content", "")
+        summary = (result.get("content") or "").strip()
         usage = result.get("usage", {})
 
+        if not summary:
+            logger.warning("Compactor returned empty summary; treating as failure")
+            return {"context": None, "usage": usage, "success": False, "error": "empty summary"}
+
+        if not summary.startswith(COMPACTION_SUMMARY_PREFIX):
+            summary = f"{COMPACTION_SUMMARY_PREFIX} {summary}"
+
+        synthetic_summary_msg = {
+            "role": "USER",
+            "text": summary,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"compactionSummary": True},
+        }
+
+        new_context = (
+            [context[i] for i in head_indices]
+            + [synthetic_summary_msg]
+            + [context[i] for i in tail_indices]
+        )
+
         logger.info(
-            "Context compressed",
+            "Context compacted",
             original_messages=len(context),
-            learnings_length=len(learnings),
+            head=len(head_indices),
+            middle=len(middle_indices),
+            tail=len(tail_indices),
+            summary_length=len(summary),
             tokens_used=usage.get("total_tokens", 0),
         )
 
-        return {"learnings": learnings, "usage": usage}
+        return {"context": new_context, "usage": usage, "success": True}
 
     except Exception as e:
         logger.error("Failed to compress context", error=str(e))
-        # Fallback: just return a simple summary
-        return {
-            "learnings": f"""## Context Reset After {iteration_count} Iterations
+        return {"context": None, "usage": {}, "success": False, "error": str(e)}
 
-Previous execution had {len(context)} messages. Context has been reset to prevent memory overflow.
-Continue working toward the task with a fresh start.""",
+
+@activity.defn
+async def summarize_tool_result(
+    tool_name: str,
+    tool_result_text: str,
+    parent_objective: str,
+    model: str = "rose-labs/rose-1-lite",
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Summarize a verbose tool result (e.g. web_fetch body) before it lands in context.
+
+    Callers should only invoke this when len(tool_result_text) exceeds
+    TOOL_SUMMARIZER_CHAR_THRESHOLD; below that the raw body is small enough
+    to keep verbatim.
+
+    Returns:
+        Dict with:
+          - summary:    str (final text to substitute into context)
+          - usage:      LLM usage dict
+          - summarized: True iff the LLM summarizer ran successfully
+        On failure: summary is the raw text hard-capped to TOOL_RESULT_HARD_CAP_CHARS
+        with a marker, and summarized=False.
+    """
+    try:
+        activity.heartbeat(f"Summarizing {tool_name} result ({len(tool_result_text)} chars)")
+
+        from helpers.llm import call_llm
+
+        prompt = f"""You are summarizing a web page so an autonomous agent can use its contents
+without holding the full body in its conversation.
+
+The agent is trying to: {parent_objective}
+
+Web page contents:
+---
+{tool_result_text}
+---
+
+Produce a concise summary (target 1,500 tokens, hard cap 2,000) that:
+- Preserves every direct quote, statistic, date, name, URL, and identifier
+  relevant to the agent's objective.
+- States the source URL and page title at the top.
+- Captures any claims that contradict or qualify common knowledge.
+- Omits navigation, ads, related-articles sidebars, and boilerplate.
+
+Output the summary only — no preamble."""
+
+        result = await call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            temperature=0.3,
+            max_tokens=2000,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
+            skip_cache_write=True,
+            call_site=f"summarize_{tool_name}",
+            agent_id=agent_id,
+            user_id=claude_token_user_id or gpt_token_user_id,
+        )
+
+        summary = (result.get("content") or "").strip()
+        usage = result.get("usage", {})
+
+        if not summary:
+            raise ValueError("summarizer returned empty content")
+
+        logger.info(
+            "Tool result summarized",
+            tool_name=tool_name,
+            original_length=len(tool_result_text),
+            summary_length=len(summary),
+            tokens_used=usage.get("total_tokens", 0),
+        )
+
+        return {"summary": summary, "usage": usage, "summarized": True}
+
+    except Exception as e:
+        logger.warning(
+            "Tool-result summarizer failed; falling back to hard-cap truncation",
+            tool_name=tool_name,
+            error=str(e),
+        )
+        original_len = len(tool_result_text)
+        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
+            truncated = (
+                tool_result_text[:TOOL_RESULT_HARD_CAP_CHARS]
+                + f"\n\n...[truncated, original_len={original_len}]"
+            )
+        else:
+            truncated = tool_result_text
+        return {"summary": truncated, "usage": {}, "summarized": False, "error": str(e)}
+
+
+@activity.defn
+async def summarize_and_filter_links(
+    url: str,
+    objective: str,
+    markdown: str,
+    links: List[str],
+    max_markdown_length: int = 40_000,
+    model: str = "rose-labs/rose-1-mini",
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    claude_token_user_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    gpt_token_user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run one Haiku call that summarizes a fetched web page and curates which
+    of the page's links are worth downloading.
+
+    Used by the ``web_fetch`` tool after Firecrawl returns ``{markdown, links}``.
+    Structured output is enforced via the ``WebFetchHaikuResponse`` Pydantic
+    schema (Rose route → ``response_model=WebFetchHaikuResponse``), mirroring
+    the same pattern we use for blueprint compression. The Haiku prompt shape
+    mirrors Claude Code's ``WebFetchTool/prompt.ts:makeSecondaryModelPrompt``.
+
+    Returns
+        Dict with:
+          - summary:           str — objective-focused summary text
+          - files_to_download: List[str] — URLs the caller should download
+          - usage:             dict — LLM usage stats (for cost accounting)
+          - summarized:        bool — True if Haiku call succeeded
+        On failure: ``summary`` is the raw markdown hard-capped to
+        ``TOOL_RESULT_HARD_CAP_CHARS`` with no files selected and
+        ``summarized=False``.
+    """
+    import json
+
+    try:
+        activity.heartbeat(f"Summarizing web_fetch result ({len(markdown)} chars, {len(links)} links)")
+
+        from helpers.llm import call_llm
+
+        truncation_marker = "\n\n[Content truncated due to length...]"
+        if len(markdown) > max_markdown_length:
+            markdown_for_prompt = markdown[: max_markdown_length - len(truncation_marker)] + truncation_marker
+        else:
+            markdown_for_prompt = markdown
+
+        prompt = f"""You are filtering a fetched web page for an autonomous agent.
+
+The agent is trying to: {objective}
+
+PAGE URL: {url}
+PAGE CONTENT (markdown):
+---
+{markdown_for_prompt}
+---
+
+LINKS DISCOVERED ON THE PAGE:
+{json.dumps(links)}
+
+Return JSON matching the WebFetchHaikuResponse schema.
+
+Rules for summary:
+- Preserve direct quotes, statistics, dates, names, URLs, and identifiers
+  relevant to the objective.
+- Start with the source URL and page title (if known).
+- Omit nav, ads, related-articles, and boilerplate.
+- If the input ended with "[Content truncated due to length...]", note that
+  the page was truncated.
+
+Rules for files_to_download:
+- Only URLs the objective explicitly requires. Empty list is the default.
+- Do NOT download arbitrary files just because they exist on the page.
+- One URL per entry; deduplicate."""
+
+        result = await call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            temperature=0.3,
+            max_tokens=2500,
+            response_model=WebFetchHaikuResponse,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            claude_token_user_id=claude_token_user_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            gpt_token_user_id=gpt_token_user_id,
+            skip_cache_write=True,
+            call_site="summarize_web_fetch",
+            agent_id=agent_id,
+            user_id=claude_token_user_id or gpt_token_user_id,
+        )
+
+        content_str = (result.get("content") or "").strip()
+        usage = result.get("usage", {})
+
+        if not content_str:
+            raise ValueError("Haiku returned empty content")
+
+        parsed = WebFetchHaikuResponse.model_validate_json(content_str)
+        summary = parsed.summary.strip()
+        files_to_download = [u for u in parsed.files_to_download if isinstance(u, str) and u.strip()]
+
+        if not summary:
+            raise ValueError("Haiku returned empty summary")
+
+        logger.info(
+            "web_fetch Haiku filter completed",
+            url=url,
+            markdown_chars=len(markdown),
+            summary_chars=len(summary),
+            links_in=len(links),
+            files_selected=len(files_to_download),
+            tokens_used=usage.get("total_tokens", 0),
+        )
+
+        return {
+            "summary": summary,
+            "files_to_download": files_to_download,
+            "usage": usage,
+            "summarized": True,
+        }
+
+    except Exception as e:
+        logger.warning(
+            "web_fetch Haiku filter failed; falling back to truncated markdown",
+            url=url,
+            error=str(e),
+        )
+        original_len = len(markdown)
+        if original_len > TOOL_RESULT_HARD_CAP_CHARS:
+            truncated = (
+                markdown[:TOOL_RESULT_HARD_CAP_CHARS]
+                + f"\n\n...[truncated, original_len={original_len}]"
+            )
+        else:
+            truncated = markdown
+        return {
+            "summary": truncated,
+            "files_to_download": [],
             "usage": {},
+            "summarized": False,
+            "error": str(e),
         }
 
 

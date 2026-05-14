@@ -43,7 +43,7 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     # 2–3 sub-agents each (web research). Recent p95×1.5 lands ~320s; bumping
     # the ceiling to 400s absorbs the upper tail of LLM streaming variance
     # without disabling the dynamic cap as a regression detector.
-    "spawn-sub-agents": 400,
+    "spawn-sub-agents": 480,
     "parallel-tool-calls": 400,
     "claude-code-agent": 300,
     "browser-smoke": 300,
@@ -54,7 +54,7 @@ TASK_TIMEOUT_FLOORS: dict[str, int] = {
     # This batch intentionally does upfront outreach research before spawning
     # 40 row agents. Historical local passes are from older, narrower task
     # shapes, so do not let the dynamic cap collapse below this floor.
-    "outreach-batch": 480,
+    "outreach-batch": 600,
 }
 
 

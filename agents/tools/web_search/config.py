@@ -4,9 +4,12 @@
 PARALLEL_API_URL = "https://api.parallel.ai/v1beta/search"
 PARALLEL_BETA_HEADER = "search-extract-2025-10-10"
 
-# Defaults
-DEFAULT_MAX_TOKENS = 1500
-DEFAULT_MAX_RESULTS = 10
+# Defaults. Capped at the source so parallel-fanout sub-agents don't dump
+# 60k chars / 15k tokens of search answer into context per call (see
+# docs/plans/active context-management-overhaul). 500 tokens × 4 chars = 2k
+# chars per result, 5 results = ~10k chars / ~2.5k tokens per call.
+DEFAULT_MAX_TOKENS = 500
+DEFAULT_MAX_RESULTS = 5
 
 # Display
 QUERY_DISPLAY_MAX_LENGTH = 100

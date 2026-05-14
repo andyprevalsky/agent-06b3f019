@@ -1,4 +1,4 @@
-"""Web fetch domain repo — external data access (Parallel AI API, HTTP fetches, file uploads)."""
+"""Web fetch domain repo — external data access (Firecrawl scrape, HTTP file downloads, storage uploads)."""
 
 from typing import Any, Dict, List, Optional
 
@@ -7,67 +7,58 @@ import structlog
 from temporalio import activity
 
 from config import load_config
-from domains.web_fetch.config import MAX_DOWNLOAD_SIZE, MIME_TYPES
+from domains.web_fetch.config import FIRECRAWL_SCRAPE_TIMEOUT_SECONDS, MAX_DOWNLOAD_SIZE, MIME_TYPES
 from helpers.attachments import upload_to_storage
 
 logger = structlog.get_logger()
 
 
-async def fetch_parallel_ai_extract(
-    url: str,
-    objective: str,
-    excerpts: bool,
-) -> Dict[str, Any]:
-    """Call Parallel AI extract API and return the raw JSON response.
+async def fetch_firecrawl_scrape(url: str) -> Dict[str, Any]:
+    """Call Firecrawl `/v2/scrape` and return the page as markdown + link inventory.
 
-    Args:
-        url: URL to extract content from.
-        objective: What content to focus on.
-        excerpts: Whether to return focused excerpts.
+    Firecrawl handles JS rendering, paywall/ad stripping, and main-content
+    extraction in one paid hop (1 credit). We ask for only the formats we
+    actually use downstream so credits stay at 1 per call:
+      - ``markdown`` for the cleaned page body (Haiku summarizes it).
+      - ``links`` for the discovered URL inventory (Haiku decides which to
+        download via our own httpx — we deliberately don't use Firecrawl's
+        ``parsers`` / ``json`` extraction because we already pay Anthropic
+        for the downstream Haiku pass).
 
-    Returns:
-        Raw JSON dict from the Parallel AI response.
+    Returns the unwrapped ``data`` block ``{"markdown": str, "links": [str]}``.
+    Raises ``httpx.HTTPStatusError`` on Firecrawl errors so the caller can
+    surface the failure to the agent rather than silently degrading.
     """
     config = load_config()
-    api_key = config.parallel.api_key
+    api_key = config.firecrawl.api_key
+    if not api_key:
+        raise RuntimeError("FIRECRAWL_API_KEY is not configured (agents/.env)")
 
     headers = {
-        "x-api-key": api_key,
-        "parallel-beta": "search-extract-2025-10-10",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-
-    # Always request full_content so we can extract images/links from the page.
     payload = {
-        "urls": [url],
-        "objective": objective,
-        "excerpts": excerpts,
-        "full_content": True,
+        "url": url,
+        "formats": ["markdown", "links"],
+        "onlyMainContent": True,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=FIRECRAWL_SCRAPE_TIMEOUT_SECONDS) as client:
         response = await client.post(
-            "https://api.parallel.ai/v1beta/extract",
+            "https://api.firecrawl.dev/v2/scrape",
             headers=headers,
             json=payload,
         )
         response.raise_for_status()
-        return response.json()
+        body = response.json()
 
-
-async def fetch_raw_html(url: str) -> Optional[str]:
-    """Fetch raw HTML from a URL for asset extraction.
-
-    Returns None on failure (logs a warning).
-    """
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.text
-    except Exception as e:
-        logger.warning("[web_fetch] Failed to fetch raw HTML for asset extraction", url=url, error=str(e))
-        return None
+    data = body.get("data") or {}
+    return {
+        "markdown": data.get("markdown") or "",
+        "links": data.get("links") or [],
+        "metadata": data.get("metadata") or {},
+    }
 
 
 async def download_files_batch(urls: List[str]) -> Dict[str, Optional[bytes]]:
