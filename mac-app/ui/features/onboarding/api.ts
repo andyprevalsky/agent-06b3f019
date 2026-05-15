@@ -204,21 +204,18 @@ export const createPlaidLinkToken = async (): Promise<PlaidLinkTokenResponse> =>
 };
 
 export const exchangePlaidPublicToken = async (
-  input: PlaidExchangeInput,
+  input: PlaidExchangeInput
 ): Promise<{ item: PlaidIntegrationItem }> => {
   const token = requireToken();
-  const response = await fetch(
-    `${getBackendUrl()}/api/integrations/plaid/exchange-public-token`,
-    {
-      method: 'POST',
-      headers: { ...authHeader(token), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        public_token: input.publicToken,
-        institution_id: input.institutionId,
-        institution_name: input.institutionName,
-      }),
-    },
-  );
+  const response = await fetch(`${getBackendUrl()}/api/integrations/plaid/exchange-public-token`, {
+    method: 'POST',
+    headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      public_token: input.publicToken,
+      institution_id: input.institutionId,
+      institution_name: input.institutionName,
+    }),
+  });
   if (!response.ok) {
     const err = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(err?.error ?? 'Failed to exchange Plaid public token');
@@ -233,9 +230,9 @@ export const fetchPlaidItems = async (): Promise<PlaidIntegrationItem[]> => {
     headers: authHeader(token),
   });
   if (!response.ok) return [];
-  const data = (await response.json().catch(() => null)) as
-    | { items?: PlaidIntegrationItem[] }
-    | null;
+  const data = (await response.json().catch(() => null)) as {
+    items?: PlaidIntegrationItem[];
+  } | null;
   return data?.items ?? [];
 };
 

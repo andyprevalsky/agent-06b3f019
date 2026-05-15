@@ -19,8 +19,8 @@ import React from 'react';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
-import { PlaidSection } from '@/features/plaid';
-import type { PlaidItem } from '@/features/plaid';
+import PlaidSection from '@/features/integrations/components/PlaidSection';
+import type { PlaidItem } from '@/features/integrations/types';
 import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
 
 /**
@@ -52,7 +52,13 @@ interface MockLinkController {
     publicToken: string,
     metadata?: Partial<{
       institution: { institution_id: string; name: string };
-      accounts: Array<{ id: string; name: string; mask: string | null; type: string; subtype: string | null }>;
+      accounts: Array<{
+        id: string;
+        name: string;
+        mask: string | null;
+        type: string;
+        subtype: string | null;
+      }>;
       link_session_id: string;
     }>,
   ) => void;
@@ -77,7 +83,13 @@ vi.mock('react-plaid-link', () => ({
       publicToken: string,
       metadata: {
         institution: { institution_id: string; name: string } | null;
-        accounts: Array<{ id: string; name: string; mask: string | null; type: string; subtype: string | null }>;
+        accounts: Array<{
+          id: string;
+          name: string;
+          mask: string | null;
+          type: string;
+          subtype: string | null;
+        }>;
         link_session_id: string;
       },
     ) => void;
@@ -85,9 +97,18 @@ vi.mock('react-plaid-link', () => ({
   }) => {
     linkController.fireSuccess = (publicToken, metadata = {}) => {
       onSuccess(publicToken, {
-        institution: metadata.institution ?? { institution_id: 'ins_109508', name: 'First Platypus Bank' },
+        institution: metadata.institution ?? {
+          institution_id: 'ins_109508',
+          name: 'First Platypus Bank',
+        },
         accounts: metadata.accounts ?? [
-          { id: 'acct-1', name: 'Plaid Checking', mask: '0000', type: 'depository', subtype: 'checking' },
+          {
+            id: 'acct-1',
+            name: 'Plaid Checking',
+            mask: '0000',
+            type: 'depository',
+            subtype: 'checking',
+          },
         ],
         link_session_id: metadata.link_session_id ?? 'sess-1',
       });
@@ -195,9 +216,7 @@ describe('PlaidSection (rendering)', () => {
   it('renders the Plaid value proposition copy', async () => {
     renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(
-        screen.getByText(/balances, transactions, investments/i),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/balances, transactions, investments/i)).toBeInTheDocument();
     });
   });
 
@@ -480,14 +499,10 @@ describe('PlaidSection (disconnect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    await userEvent.click(
-      screen.getByRole('button', { name: /disconnect first platypus bank/i }),
-    );
+    await userEvent.click(screen.getByRole('button', { name: /disconnect first platypus bank/i }));
     await waitFor(() => expect(deleted).toBe(true));
     await waitFor(() => expect(listCalls).toBeGreaterThan(1));
-    await waitFor(() =>
-      expect(screen.queryByText('First Platypus Bank')).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText('First Platypus Bank')).not.toBeInTheDocument());
   });
 
   it('shows an error if DELETE fails', async () => {
@@ -501,9 +516,7 @@ describe('PlaidSection (disconnect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    await userEvent.click(
-      screen.getByRole('button', { name: /disconnect first platypus bank/i }),
-    );
+    await userEvent.click(screen.getByRole('button', { name: /disconnect first platypus bank/i }));
     await waitFor(() => expect(screen.getByText(/item is locked/i)).toBeInTheDocument());
   });
 });
@@ -545,11 +558,7 @@ describe('PlaidSection (items list)', () => {
   });
 
   it('surfaces an items-list error message', async () => {
-    server.use(
-      http.get(`${API_BASE}/integrations/plaid/items`, () =>
-        HttpResponse.error(),
-      ),
-    );
+    server.use(http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.error()));
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     // The hook swallows fetch errors and returns []; assert the CTA still renders.
     await waitFor(() =>

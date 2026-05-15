@@ -15,6 +15,7 @@ import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import AgentPayModal from '../../../components/AgentPayModal';
 import type { BrowserInfo, BrowserType, Integration } from '../types';
 import { useOnboardingDataApi } from '../hooks';
+import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 
 // Browser icons
 import chromeIcon from '../../../assets/chrome-icon.png';
@@ -338,7 +339,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           setConnectedBanks(
             plaidItems
               .filter((i) => i.status === 'ACTIVE')
-              .map((i) => i.institutionName ?? 'Connected institution'),
+              .map((i) => i.institutionName ?? 'Connected institution')
           );
         } catch (err) {
           // Plaid hydration failures are non-fatal during onboarding.
@@ -617,7 +618,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
   const handlePlaidSuccess = async (
     publicToken: string,
-    metadata: PlaidLinkOnSuccessMetadata,
+    metadata: PlaidLinkOnSuccessMetadata
   ): Promise<void> => {
     try {
       await onboardingDataApi.exchangePlaidPublicToken({
@@ -629,11 +630,11 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       setConnectedBanks(
         items
           .filter((i) => i.status === 'ACTIVE')
-          .map((i) => i.institutionName ?? 'Connected institution'),
+          .map((i) => i.institutionName ?? 'Connected institution')
       );
       setPlaidError(null);
     } catch (err) {
-      setPlaidError(err instanceof Error ? err.message : 'Failed to connect bank');
+      setPlaidError(getErrorMessageOrFallback(err, 'Failed to connect bank'));
     } finally {
       setPlaidLoading(false);
       setPlaidLinkToken(null);
@@ -641,7 +642,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   };
 
   const handlePlaidExit = (
-    err: { display_message?: string; error_message?: string } | null,
+    err: { display_message?: string; error_message?: string } | null
   ): void => {
     if (err) {
       setPlaidError(err.display_message ?? err.error_message ?? 'Plaid Link exited');
@@ -664,7 +665,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     if (plaidLinkToken !== null && plaidLink.ready) {
       plaidLink.open();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plaidLinkToken, plaidLink.ready]);
 
   const handlePlaidConnect = async (): Promise<void> => {
@@ -674,7 +674,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       const tokenResp = await onboardingDataApi.createPlaidLinkToken();
       setPlaidLinkToken(tokenResp.link_token);
     } catch (err) {
-      setPlaidError(err instanceof Error ? err.message : 'Failed to create Plaid link token');
+      setPlaidError(getErrorMessageOrFallback(err, 'Failed to create Plaid link token'));
       setPlaidLoading(false);
     }
   };
@@ -1409,13 +1409,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
                     <defs>
-                      <linearGradient
-                        id="plaidBankingGradient"
-                        x1="0%"
-                        y1="0%"
-                        x2="100%"
-                        y2="100%"
-                      >
+                      <linearGradient id="plaidBankingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
                         <stop offset="0%" stopColor="#10b981" />
                         <stop offset="100%" stopColor="#22c55e" />
                       </linearGradient>

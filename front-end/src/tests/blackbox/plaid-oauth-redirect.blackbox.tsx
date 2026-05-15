@@ -15,7 +15,7 @@ import { http, HttpResponse } from 'msw';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-import { PlaidOAuthRedirect } from '@/features/plaid';
+import PlaidOAuthRedirect from '@/features/integrations/components/PlaidOAuthRedirect';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -43,7 +43,13 @@ vi.mock('react-plaid-link', () => ({
       publicToken: string,
       metadata: {
         institution: { institution_id: string; name: string } | null;
-        accounts: Array<{ id: string; name: string; mask: string | null; type: string; subtype: string | null }>;
+        accounts: Array<{
+          id: string;
+          name: string;
+          mask: string | null;
+          type: string;
+          subtype: string | null;
+        }>;
         link_session_id: string;
       },
     ) => void;
@@ -55,7 +61,13 @@ vi.mock('react-plaid-link', () => ({
       opts.onSuccess(publicToken, {
         institution: { institution_id: 'ins_chase', name: 'Chase' },
         accounts: [
-          { id: 'acct-x', name: 'Plaid Saving', mask: '1111', type: 'depository', subtype: 'savings' },
+          {
+            id: 'acct-x',
+            name: 'Plaid Saving',
+            mask: '1111',
+            type: 'depository',
+            subtype: 'savings',
+          },
         ],
         link_session_id: 'sess-redirect-1',
       });
@@ -145,15 +157,17 @@ describe('PlaidOAuthRedirect', () => {
     const replaceMock = vi.fn();
     Object.defineProperty(window, 'location', {
       writable: true,
-      value: { ...window.location, replace: replaceMock, href: 'http://localhost/plaid-oauth-redirect?oauth_state=xyz' },
+      value: {
+        ...window.location,
+        replace: replaceMock,
+        href: 'http://localhost/plaid-oauth-redirect?oauth_state=xyz',
+      },
     });
     renderWithProviders(<PlaidOAuthRedirect successHref="/done" />);
     await waitFor(() => expect(link.opened).toBe(true));
     link.fireSuccess('public-oauth-token');
     await waitFor(() => expect(exchanged).toBe(true));
-    await waitFor(() =>
-      expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull(),
-    );
+    await waitFor(() => expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull());
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/done'));
   });
 
@@ -176,9 +190,7 @@ describe('PlaidOAuthRedirect', () => {
     renderWithProviders(<PlaidOAuthRedirect />);
     await waitFor(() => expect(link.opened).toBe(true));
     link.fireExit({ display_message: 'Bank rejected the session' });
-    await waitFor(() =>
-      expect(screen.getByText(/bank rejected the session/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/bank rejected the session/i)).toBeInTheDocument());
   });
 
   it('shows a generic message if Plaid Link exits without an error object', async () => {

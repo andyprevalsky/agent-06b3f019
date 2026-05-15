@@ -28,10 +28,9 @@ import {
   createPlaidLinkTokenApi,
   disconnectPlaidItemApi,
   exchangePlaidPublicTokenApi,
-  listPlaidItemsApi,
-} from './api';
-import { PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } from './config';
-import type { PlaidItem } from './types';
+} from '../api';
+import { PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } from '../config';
+import type { PlaidItem } from '../types';
 
 type ConnectState =
   | 'idle'
@@ -46,47 +45,6 @@ interface UsePlaidConnectOptions {
   onDisconnected?: (itemId: string) => void;
 }
 
-/**
- * usePlaidItems: fetch + cache the user's connected Plaid items.
- */
-export function usePlaidItems(): {
-  items: PlaidItem[];
-  loading: boolean;
-  error: string | null;
-  refresh: () => Promise<void>;
-} {
-  const [items, setItems] = useState<PlaidItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async (): Promise<void> => {
-    setLoading(true);
-    setError(null);
-    try {
-      const fetched = await listPlaidItemsApi();
-      setItems(fetched);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load Plaid items');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  return { items, loading, error, refresh };
-}
-
-/**
- * usePlaidConnect: drive the Plaid Link lifecycle.
- *
- * Returns:
- *   - `connect()` — fetch a link_token + open Plaid Link
- *   - `disconnect(itemId)` — call our DELETE route
- *   - `state` / `error` / `linkToken` for UI feedback
- */
 export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
   state: ConnectState;
   error: string | null;
@@ -122,7 +80,6 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
             link_session_id: metadata.link_session_id,
           },
         });
-        // Clear any persisted link_token used for OAuth resume.
         try {
           window.localStorage.removeItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY);
         } catch {
@@ -159,7 +116,6 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
     },
   });
 
-  // Open Link once the SDK is ready and we have a token loaded.
   useEffect(() => {
     if (linkToken !== null && ready && state === 'fetching_link_token') {
       setState('link_open');
@@ -173,7 +129,6 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
     try {
       const tokenResp = await createPlaidLinkTokenApi();
       setLinkToken(tokenResp.link_token);
-      // Persist for OAuth-bank resume (see PlaidOAuthRedirect page).
       try {
         window.localStorage.setItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY, tokenResp.link_token);
       } catch {

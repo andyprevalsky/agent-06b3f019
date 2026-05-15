@@ -9,6 +9,10 @@ export { useFileUpload } from './useFileUpload';
 export { useGmailConnect } from './useGmailConnect';
 export { useOAuthRedirect } from './useOAuthRedirect';
 export { useIntegrationActions } from './useIntegrationActions';
+export { usePlaidIntegration } from './usePlaidIntegration';
+export { usePlaidConnect } from './usePlaidConnect';
+export { usePlaidItems } from './usePlaidItems';
+export { usePlaidOAuthResume } from './usePlaidOAuthResume';
 
 // Re-export shared hooks for consumers
 export { useIntegrationHandlers } from '@/features/integration-handlers-context';

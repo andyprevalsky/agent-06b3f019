@@ -48,7 +48,7 @@ export function getPlaidClient(): PlaidApi {
   }
   if (!PLAID_SECRET) {
     throw new Error(
-      `PLAID_${PLAID_ENV === 'production' ? 'PRODUCTION' : 'SANDBOX'}_SECRET is not configured`,
+      `PLAID_${PLAID_ENV === 'production' ? 'PRODUCTION' : 'SANDBOX'}_SECRET is not configured`
     );
   }
 
@@ -116,7 +116,7 @@ export type CreateLinkTokenInput = {
 };
 
 export async function createLinkToken(
-  input: CreateLinkTokenInput,
+  input: CreateLinkTokenInput
 ): Promise<LinkTokenCreateResponse> {
   const client = getPlaidClient();
   const products = input.products ?? PLAID_DEFAULT_PRODUCTS;
@@ -137,7 +137,7 @@ export async function createLinkToken(
 }
 
 export async function exchangePublicToken(
-  publicToken: string,
+  publicToken: string
 ): Promise<ItemPublicTokenExchangeResponse> {
   const client = getPlaidClient();
   const response = await client.itemPublicTokenExchange({ public_token: publicToken });

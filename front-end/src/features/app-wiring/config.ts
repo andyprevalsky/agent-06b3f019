@@ -10,7 +10,7 @@ import Terminal from '@/features/terminal';
 import ResearchBlog from '@/features/research-blog';
 import ResearchBlogPost from '@/features/research-blog-post';
 import Download from '@/features/download';
-import { PlaidOAuthRedirect } from '@/features/plaid';
+import { PlaidOAuthRedirect } from '@/features/integrations';
 
 /**
  * Application route table.

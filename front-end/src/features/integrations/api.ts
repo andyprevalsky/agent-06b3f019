@@ -1,7 +1,12 @@
 import { getStoredSession } from '@/lib/supabase';
 
 import { API_BASE_URL, API_BASE_WITH_PATH } from './config';
-import type { ConnectedIntegration } from './types';
+import type {
+  ConnectedIntegration,
+  PlaidItem,
+  PlaidLinkSuccessMetadata,
+  PlaidLinkTokenResponse,
+} from './types';
 
 export function getAuthHeaders(): Record<string, string> {
   const session = getStoredSession();
@@ -141,4 +146,63 @@ Steps:
     const error = await response.json();
     throw new Error(error.error || 'Failed to create agent');
   }
+}
+
+// ─── Plaid (consolidated from former features/plaid) ────────────────────────
+
+async function plaidJsonOrThrow<T>(response: Response, label: string): Promise<T> {
+  const payload = (await response.json().catch(() => null)) as unknown;
+  if (!response.ok) {
+    const message =
+      payload !== null &&
+      typeof payload === 'object' &&
+      'error' in payload &&
+      typeof (payload as { error: unknown }).error === 'string'
+        ? (payload as { error: string }).error
+        : `${label} failed (HTTP ${response.status})`;
+    throw new Error(message);
+  }
+  return payload as T;
+}
+
+export async function createPlaidLinkTokenApi(): Promise<PlaidLinkTokenResponse> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/link-token`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  return plaidJsonOrThrow<PlaidLinkTokenResponse>(response, 'Create Plaid link token');
+}
+
+export async function exchangePlaidPublicTokenApi(input: {
+  publicToken: string;
+  metadata?: PlaidLinkSuccessMetadata;
+}): Promise<{ item: PlaidItem }> {
+  const body: Record<string, unknown> = { public_token: input.publicToken };
+  if (input.metadata?.institution) {
+    body.institution_id = input.metadata.institution.institution_id;
+    body.institution_name = input.metadata.institution.name;
+  }
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/exchange-public-token`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(body),
+  });
+  return plaidJsonOrThrow<{ item: PlaidItem }>(response, 'Exchange Plaid public token');
+}
+
+export async function listPlaidItemsApi(): Promise<PlaidItem[]> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/items`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) return [];
+  const data = (await response.json().catch(() => null)) as { items?: PlaidItem[] } | null;
+  return data?.items ?? [];
+}
+
+export async function disconnectPlaidItemApi(itemId: string): Promise<{ ok: true }> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/items/${itemId}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  });
+  return plaidJsonOrThrow<{ ok: true }>(response, 'Disconnect Plaid item');
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console, max-lines */
+/* eslint-disable no-console */
 /**
  * Black-box tests for the Plaid integration routes.
  *
@@ -62,7 +62,7 @@ const sandboxClient = new PlaidApi(
         'PLAID-SECRET': PLAID_SECRET,
       },
     },
-  }),
+  })
 );
 
 // ==================== SCHEMAS ====================
@@ -111,7 +111,7 @@ const AnonymousResponse = z.object({
 
 async function request(
   url: string,
-  init: { method?: string; body?: string; headers?: Record<string, string> } = {},
+  init: { method?: string; body?: string; headers?: Record<string, string> } = {}
 ): Promise<{ status: number; data: unknown }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -208,7 +208,7 @@ async function teardown(): Promise<void> {
     where: { userId: { in: userIds }, name: 'plaid' },
   });
   console.log(
-    `\nTeardown: deleted ${accounts.count} accounts, ${items.count} items, ${integrations.count} integrations`,
+    `\nTeardown: deleted ${accounts.count} accounts, ${items.count} items, ${integrations.count} integrations`
   );
   createdAnonUserIds.clear();
 }
@@ -302,7 +302,7 @@ async function testExchange_happyPath_persistsItemEncrypted(): Promise<void> {
     assert(row.encryptedAccessToken.length > 0, 'encryptedAccessToken not empty');
     assert(
       !row.encryptedAccessToken.startsWith('access-'),
-      'encryptedAccessToken is not plaintext Plaid token',
+      'encryptedAccessToken is not plaintext Plaid token'
     );
     // Envelope structure check: base64-encoded JSON
     const envelopeJson = Buffer.from(row.encryptedAccessToken, 'base64').toString('utf8');
@@ -409,7 +409,7 @@ async function testDisconnect_unknownItem_404(): Promise<void> {
   const { accessToken } = await createAnonSession();
   const res = await request(
     `${BASE_URL}/api/integrations/plaid/items/00000000-0000-0000-0000-000000000000`,
-    { method: 'DELETE', headers: authHeaders(accessToken) },
+    { method: 'DELETE', headers: authHeaders(accessToken) }
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, '404 unknown item');
@@ -490,7 +490,10 @@ async function runAll(): Promise<void> {
     { name: 'delete-item: no auth -> 401', fn: testDeleteItem_noAuth },
     { name: 'link-token: happy path', fn: testLinkToken_happyPath },
     { name: 'exchange: missing public_token -> 400', fn: testExchange_missingPublicToken },
-    { name: 'exchange: invalid public_token -> 502 plaid error', fn: testExchange_invalidPublicToken },
+    {
+      name: 'exchange: invalid public_token -> 502 plaid error',
+      fn: testExchange_invalidPublicToken,
+    },
     {
       name: 'exchange: happy path persists encrypted item',
       fn: testExchange_happyPath_persistsItemEncrypted,
@@ -517,7 +520,7 @@ async function runAll(): Promise<void> {
     results.push(result);
     const icon = result.passed ? '  PASS' : '  FAIL';
     console.log(
-      `${icon}  ${test.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`,
+      `${icon}  ${test.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
     );
   }
 

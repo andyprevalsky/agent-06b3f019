@@ -195,15 +195,3 @@ export const UPLOAD_LIMITS = {
   fileSize: 500 * 1024 * 1024, // 500MB max file size
   fieldSize: 200 * 1024 * 1024, // 200MB max field size (for localStorage uploads which can be large)
 };
-
-// RSA-2048 Public Key - same as in browserPasswordReader.ts (mac-app)
-// The corresponding private key is stored as PAYMENT_DECRYPTION_KEY on agent workers
-export const RSA_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjSyJhixvre5abdAOA8QK
-MZN9ftryV1ST5bQ/Ne2SsA0LUlsy/t0gVickAHf/iMAI473qBGrJIgYgEBrnQ9Vy
-ak1DpYWG9rC8KNZs/AQnWHiDWKGNUwWTAbT0fZeDHbckgJXiAok2U23F7tHtA1v6
-V65dHj1C+wlb8bBkJtDgSxKIcG6GMZFfR5Arzq8ILQ20mtAP2HW80SeWGiw6Ecnd
-a0RL0kn3Mqzjuw8NB4Iqx7UThKuIZdEnUhdnlVcXhfpEJUngcOm6pqQGNQok+VtL
-MHxsrQsQo0UMgE8zQamTXpTGJEB1G22gPaEY5FB2V8dgWs6PxBTaYZMOH9TRy2G4
-EwIDAQAB
------END PUBLIC KEY-----`;

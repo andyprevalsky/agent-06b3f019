@@ -12,18 +12,9 @@
  *
  * Access tokens are encrypted at the application layer using AES-256-GCM with
  * RSA-OAEP-SHA256 envelope encryption before they touch the database (see
- * providers/plaidCredentials.ts). This matches the commitment made in the
- * Rose Labs Information Security Policy §7 and Privacy Policy §3.
+ * providers/plaidCredentials.ts).
  */
 
-import {
-  IntegrationStatus,
-  IntegrationType,
-  PlaidItemStatus,
-  type PlaidAccount,
-  type PlaidItem,
-} from '@prisma/client';
-import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 import {
   createLinkToken,
@@ -31,12 +22,21 @@ import {
   getAccounts,
   removeItem,
   isPlaidError,
-  PLAID_DEFAULT_PRODUCTS,
 } from '../../providers/plaid';
 import {
   encryptPlaidAccessToken,
   decryptPlaidAccessTokenOrThrow,
 } from '../../providers/plaidCredentials';
+import {
+  countActivePlaidItems,
+  findActivePlaidItemsForUser,
+  findPlaidItemForUser,
+  markIntegrationDisconnected,
+  markPlaidItemDisconnected,
+  persistPlaidItem,
+  PlaidItemStatus,
+  type PlaidItemWithAccounts,
+} from './repo.plaid';
 
 const log = createLogger('PlaidService');
 
@@ -51,7 +51,7 @@ export class PlaidApiError extends Error {
   constructor(
     public readonly errorCode: string,
     public readonly errorType: string,
-    message: string,
+    message: string
   ) {
     super(message);
     this.name = 'PlaidApiError';
@@ -101,17 +101,12 @@ function toApiError(err: unknown, context: string): never {
     throw new PlaidApiError(
       err.response.data.error_code,
       err.response.data.error_type,
-      err.response.data.error_message,
+      err.response.data.error_message
     );
   }
   throw err;
 }
 
-/**
- * Create a Plaid Link token for the given user. The Link token is short-lived
- * (Plaid defaults to ~4 hours) and is consumed once by the front-end Link
- * client.
- */
 export async function createPlaidLinkToken(userId: string): Promise<CreatedLinkToken> {
   try {
     const data = await createLinkToken({ clientUserId: userId });
@@ -126,24 +121,14 @@ export async function createPlaidLinkToken(userId: string): Promise<CreatedLinkT
   }
 }
 
-/**
- * Exchange the front-end's `public_token` for a long-lived `access_token`,
- * encrypt it, and persist a PlaidItem (+ accounts) for the user.
- *
- * Idempotent on plaid_item_id: if the user already has a PlaidItem with the
- * same plaidItemId (e.g., they re-connected the same institution), the
- * existing row is updated rather than duplicated.
- */
 export async function exchangePlaidPublicToken(
   userId: string,
   input: {
     publicToken: string;
     institutionId?: string;
     institutionName?: string;
-  },
+  }
 ): Promise<PublicTokenExchangeResult> {
-  // Exchange + fetch accounts in two Plaid calls (Plaid does not return
-  // accounts in the exchange response).
   let accessToken: string;
   let plaidItemId: string;
   try {
@@ -154,7 +139,7 @@ export async function exchangePlaidPublicToken(
     return toApiError(err, 'exchangePublicToken');
   }
 
-  let accountsResponse;
+  let accountsResponse: Awaited<ReturnType<typeof getAccounts>>;
   try {
     accountsResponse = await getAccounts(accessToken);
   } catch (err) {
@@ -163,88 +148,16 @@ export async function exchangePlaidPublicToken(
 
   const encryptedAccessToken = encryptPlaidAccessToken(accessToken);
 
-  // Upsert the parent Integration row + the PlaidItem + each PlaidAccount in
-  // a single transaction so partial failures don't leave orphan rows.
-  const item = await prisma.$transaction(async (tx) => {
-    const integration = await tx.integration.upsert({
-      where: { userId_name: { userId, name: 'plaid' } },
-      create: {
-        userId,
-        type: IntegrationType.DATA_SOURCE,
-        name: 'plaid',
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-      },
-      update: {
-        status: IntegrationStatus.CONNECTED,
-        isActive: true,
-        lastSyncAt: new Date(),
-        failureReason: null,
-      },
-    });
-
-    const plaidItem = await tx.plaidItem.upsert({
-      where: { plaidItemId },
-      create: {
-        userId,
-        integrationId: integration.id,
-        plaidItemId,
-        plaidInstitutionId: input.institutionId ?? null,
-        institutionName: input.institutionName ?? null,
-        encryptedAccessToken,
-        status: PlaidItemStatus.ACTIVE,
-        products: PLAID_DEFAULT_PRODUCTS,
-        lastSyncAt: new Date(),
-      },
-      update: {
-        encryptedAccessToken,
-        plaidInstitutionId: input.institutionId ?? null,
-        institutionName: input.institutionName ?? null,
-        status: PlaidItemStatus.ACTIVE,
-        disconnectedAt: null,
-        errorCode: null,
-        errorMessage: null,
-        lastSyncAt: new Date(),
-      },
-    });
-
-    // Upsert accounts: Plaid account_ids are stable per item.
-    await Promise.all(
-      accountsResponse.accounts.map((acct) =>
-        tx.plaidAccount.upsert({
-          where: { plaidAccountId: acct.account_id },
-          create: {
-            userId,
-            plaidItemId: plaidItem.id,
-            plaidAccountId: acct.account_id,
-            name: acct.name,
-            officialName: acct.official_name ?? null,
-            mask: acct.mask ?? null,
-            type: acct.type,
-            subtype: acct.subtype ?? null,
-            verificationStatus: acct.verification_status ?? null,
-          },
-          update: {
-            name: acct.name,
-            officialName: acct.official_name ?? null,
-            mask: acct.mask ?? null,
-            type: acct.type,
-            subtype: acct.subtype ?? null,
-            verificationStatus: acct.verification_status ?? null,
-            disconnectedAt: null,
-          },
-        }),
-      ),
-    );
-
-    const updated = await tx.plaidItem.findUnique({
-      where: { id: plaidItem.id },
-      include: { accounts: true },
-    });
-    if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
-    return updated;
-  });
+  const item = await persistPlaidItem(
+    userId,
+    {
+      plaidItemId,
+      encryptedAccessToken,
+      institutionId: input.institutionId,
+      institutionName: input.institutionName,
+    },
+    accountsResponse.accounts
+  );
 
   log.info('Exchanged Plaid public token', {
     userId,
@@ -256,81 +169,60 @@ export async function exchangePlaidPublicToken(
 }
 
 export async function listPlaidItems(userId: string): Promise<SerializedPlaidItem[]> {
-  const items = await prisma.plaidItem.findMany({
-    where: { userId, status: { not: PlaidItemStatus.DISCONNECTED } },
-    include: { accounts: { where: { disconnectedAt: null } } },
-    orderBy: { createdAt: 'asc' },
-  });
+  const items = await findActivePlaidItemsForUser(userId);
   return items.map(serializeItem);
+}
+
+async function revokePlaidItemAtProvider(
+  userId: string,
+  plaidItemId: string,
+  encryptedAccessToken: string
+): Promise<void> {
+  try {
+    const accessToken = decryptPlaidAccessTokenOrThrow(encryptedAccessToken);
+    await removeItem(accessToken);
+  } catch (err) {
+    if (isPlaidError(err)) {
+      log.warn('Plaid /item/remove rejected; proceeding with local disconnect', {
+        userId,
+        plaidItemId,
+        code: err.response.data.error_code,
+      });
+    } else {
+      log.error('Unexpected error during /item/remove', {
+        userId,
+        plaidItemId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
 
 export async function disconnectPlaidItem(
   userId: string,
-  plaidItemId: string,
+  plaidItemId: string
 ): Promise<{ ok: true }> {
-  const item = await prisma.plaidItem.findFirst({
-    where: { id: plaidItemId, userId },
-  });
+  const item = await findPlaidItemForUser(userId, plaidItemId);
   if (!item) {
     throw new PlaidItemNotFoundError(plaidItemId);
   }
 
   if (item.status !== PlaidItemStatus.DISCONNECTED) {
-    try {
-      const accessToken = decryptPlaidAccessTokenOrThrow(item.encryptedAccessToken);
-      await removeItem(accessToken);
-    } catch (err) {
-      // We want disconnection to succeed locally even if Plaid 4xx-rejects the
-      // /item/remove call (e.g., token already revoked). Log and proceed.
-      if (isPlaidError(err)) {
-        log.warn('Plaid /item/remove rejected; proceeding with local disconnect', {
-          userId,
-          plaidItemId,
-          code: err.response.data.error_code,
-        });
-      } else {
-        log.error('Unexpected error during /item/remove', {
-          userId,
-          plaidItemId,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    await revokePlaidItemAtProvider(userId, plaidItemId, item.encryptedAccessToken);
   }
 
-  const now = new Date();
-  await prisma.$transaction([
-    prisma.plaidAccount.updateMany({
-      where: { plaidItemId: item.id, disconnectedAt: null },
-      data: { disconnectedAt: now },
-    }),
-    prisma.plaidItem.update({
-      where: { id: item.id },
-      data: { status: PlaidItemStatus.DISCONNECTED, disconnectedAt: now },
-    }),
-  ]);
+  await markPlaidItemDisconnected(item.id);
 
-  // If this was the user's last active Plaid item, flip the parent Integration
-  // row to NOT_CONNECTED so the Integrations list mirrors the truth.
-  const remaining = await prisma.plaidItem.count({
-    where: {
-      userId,
-      integrationId: item.integrationId,
-      status: { not: PlaidItemStatus.DISCONNECTED },
-    },
-  });
+  const remaining = await countActivePlaidItems(userId, item.integrationId);
   if (remaining === 0) {
-    await prisma.integration.update({
-      where: { id: item.integrationId },
-      data: { status: IntegrationStatus.NOT_CONNECTED, isActive: false },
-    });
+    await markIntegrationDisconnected(item.integrationId);
   }
 
   log.info('Disconnected Plaid item', { userId, plaidItemId });
   return { ok: true };
 }
 
-function serializeItem(item: PlaidItem & { accounts: PlaidAccount[] }): SerializedPlaidItem {
+function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {
   return {
     id: item.id,
     plaidItemId: item.plaidItemId,

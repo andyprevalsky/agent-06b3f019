@@ -11,8 +11,9 @@
 
 import { useCallback, useState } from 'react';
 
-import { usePlaidConnect, usePlaidItems } from '@/features/plaid';
-import type { PlaidItem } from '@/features/plaid';
+import { usePlaidConnect } from './usePlaidConnect';
+import { usePlaidItems } from './usePlaidItems';
+import type { PlaidItem } from '../types';
 
 export function usePlaidIntegration(): {
   items: PlaidItem[];

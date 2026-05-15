@@ -1,7 +1,7 @@
 import { randomBytes, createCipheriv, publicEncrypt, constants } from './crypto';
 import { createLogger } from './logger';
 import { decryptCredentialEnvelope } from './claudeCredentials';
-import { RSA_PUBLIC_KEY_PEM } from '../domains/integrations/config';
+import { RSA_PUBLIC_KEY_PEM } from './encryptionKeys';
 
 const log = createLogger('PlaidCredentials');
 
@@ -37,7 +37,7 @@ export function encryptPlaidAccessToken(accessToken: string): string {
       padding: constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: 'sha256',
     },
-    aesKey,
+    aesKey
   );
 
   const envelope = {

@@ -20,7 +20,7 @@ import PasswordsSection from './PasswordsSection';
 import MessagesSyncSection from './MessagesSyncSection';
 import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
-import { PlaidSection } from '@/features/plaid';
+import PlaidSection from './PlaidSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -38,6 +38,25 @@ interface IntegrationSectionsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
+}
+
+function PlaidIntegrationSection({
+  accordion,
+  plaid,
+}: Pick<IntegrationSectionsProps, 'accordion' | 'plaid'>) {
+  return (
+    <PlaidSection
+      expanded={accordion.plaidExpanded}
+      onToggle={() => accordion.toggleSection('plaid')}
+      items={plaid.items}
+      itemsLoading={plaid.itemsLoading}
+      connectLoading={plaid.connectLoading}
+      disconnectingItemId={plaid.disconnectingItemId}
+      error={plaid.error}
+      onConnect={plaid.onConnect}
+      onDisconnect={plaid.onDisconnect}
+    />
+  );
 }
 
 function ComputeIntegrationSection({
@@ -140,19 +159,7 @@ export default function IntegrationSections({
         />
       )}
 
-      {isFullySignedIn && (
-        <PlaidSection
-          expanded={accordion.plaidExpanded}
-          onToggle={() => accordion.toggleSection('plaid')}
-          items={plaid.items}
-          itemsLoading={plaid.itemsLoading}
-          connectLoading={plaid.connectLoading}
-          disconnectingItemId={plaid.disconnectingItemId}
-          error={plaid.error}
-          onConnect={plaid.onConnect}
-          onDisconnect={plaid.onDisconnect}
-        />
-      )}
+      {isFullySignedIn && <PlaidIntegrationSection accordion={accordion} plaid={plaid} />}
 
       <SocialsSection
         expanded={accordion.socialsExpanded}

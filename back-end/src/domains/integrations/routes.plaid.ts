@@ -49,7 +49,7 @@ router.post(
       }
       throw err;
     }
-  }),
+  })
 );
 
 router.post(
@@ -99,7 +99,7 @@ router.post(
       }
       throw err;
     }
-  }),
+  })
 );
 
 router.get(
@@ -113,7 +113,7 @@ router.get(
 
     const items = await plaidService.listPlaidItems(userId);
     return res.json({ items });
-  }),
+  })
 );
 
 router.delete(
@@ -139,7 +139,7 @@ router.delete(
       }
       throw err;
     }
-  }),
+  })
 );
 
 export default router;

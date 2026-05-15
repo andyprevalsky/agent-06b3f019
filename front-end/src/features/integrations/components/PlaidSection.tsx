@@ -13,8 +13,8 @@
 import { Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-import SectionToggleButton from '@/features/integrations/components/SectionToggleButton';
-import SyncItemButton from '@/features/integrations/components/SyncItemButton';
+import SectionToggleButton from './SectionToggleButton';
+import SyncItemButton from './SyncItemButton';
 import type { PlaidItem } from '../types';
 
 interface PlaidSectionProps {
@@ -64,9 +64,7 @@ function ItemRow({
         <span className="text-xs text-muted-foreground truncate">
           {item.accounts.length} account{item.accounts.length === 1 ? '' : 's'}
           {item.accounts.length > 0 ? ' — ' : ''}
-          {item.accounts
-            .map((a) => `${a.name}${a.mask ? ` ••${a.mask}` : ''}`)
-            .join(', ')}
+          {item.accounts.map((a) => `${a.name}${a.mask ? ` ••${a.mask}` : ''}`).join(', ')}
         </span>
       </div>
       <Button

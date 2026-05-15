@@ -32,9 +32,15 @@ vi.mock('react-plaid-link', () => ({
       publicToken: string,
       metadata: {
         institution: { institution_id: string; name: string } | null;
-        accounts: Array<{ id: string; name: string; mask: string | null; type: string; subtype: string | null }>;
+        accounts: Array<{
+          id: string;
+          name: string;
+          mask: string | null;
+          type: string;
+          subtype: string | null;
+        }>;
         link_session_id: string;
-      },
+      }
     ) => void;
     onExit: (err: { display_message?: string; error_message?: string } | null) => void;
   }) => {
@@ -43,7 +49,13 @@ vi.mock('react-plaid-link', () => ({
       opts.onSuccess(publicToken, {
         institution: { institution_id: 'ins_109508', name: 'First Platypus Bank' },
         accounts: [
-          { id: 'acct-1', name: 'Plaid Checking', mask: '0000', type: 'depository', subtype: 'checking' },
+          {
+            id: 'acct-1',
+            name: 'Plaid Checking',
+            mask: '0000',
+            type: 'depository',
+            subtype: 'checking',
+          },
         ],
         link_session_id: 'sess-onboarding-1',
       });
@@ -345,7 +357,7 @@ describe('OnboardingData', () => {
       expect(screen.getByText(/Connect a bank account via Plaid/i)).toBeInTheDocument();
       expect(screen.getByRole('link', { name: /plaid/i })).toHaveAttribute(
         'href',
-        'https://plaid.com',
+        'https://plaid.com'
       );
     });
 
@@ -363,8 +375,8 @@ describe('OnboardingData', () => {
                 accounts: [],
               },
             ],
-          }),
-        ),
+          })
+        )
       );
       installOnboardingApiMocks();
       renderWithProviders(<OnboardingData onComplete={() => {}} />);
@@ -382,7 +394,7 @@ describe('OnboardingData', () => {
             expiration: '2026-05-12T21:00:00Z',
             request_id: 'req-1',
           });
-        }),
+        })
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
@@ -412,7 +424,7 @@ describe('OnboardingData', () => {
             link_token: 'link-onboarding-2',
             expiration: '2026-05-12T21:00:00Z',
             request_id: 'req-2',
-          }),
+          })
         ),
         http.post(`${API_BASE}/integrations/plaid/exchange-public-token`, () => {
           exchanged = true;
@@ -429,8 +441,8 @@ describe('OnboardingData', () => {
           return HttpResponse.json({ item: plaidItems[0] });
         }),
         http.get(`${API_BASE}/integrations/plaid/items`, () =>
-          HttpResponse.json({ items: plaidItems }),
-        ),
+          HttpResponse.json({ items: plaidItems })
+        )
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
@@ -443,9 +455,7 @@ describe('OnboardingData', () => {
       await waitFor(() => expect(plaidLink.opened).toBe(true));
       plaidLink.fireSuccess('public-sandbox-onboarding');
       await waitFor(() => expect(exchanged).toBe(true));
-      await waitFor(() =>
-        expect(screen.getByText('First Platypus Bank')).toBeInTheDocument(),
-      );
+      await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
     });
 
     it('surfaces an error if exchange fails after Plaid Link success', async () => {
@@ -455,11 +465,11 @@ describe('OnboardingData', () => {
             link_token: 'link-onboarding-3',
             expiration: '2026-05-12T21:00:00Z',
             request_id: 'req-3',
-          }),
+          })
         ),
         http.post(`${API_BASE}/integrations/plaid/exchange-public-token`, () =>
-          HttpResponse.json({ error: 'INVALID_PUBLIC_TOKEN' }, { status: 502 }),
-        ),
+          HttpResponse.json({ error: 'INVALID_PUBLIC_TOKEN' }, { status: 502 })
+        )
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
@@ -472,15 +482,15 @@ describe('OnboardingData', () => {
       plaidLink.fireSuccess('public-bad-token');
 
       await waitFor(() =>
-        expect(within(section('Banking')).getByText(/INVALID_PUBLIC_TOKEN/i)).toBeInTheDocument(),
+        expect(within(section('Banking')).getByText(/INVALID_PUBLIC_TOKEN/i)).toBeInTheDocument()
       );
     });
 
     it('shows an error if link-token creation fails', async () => {
       server.use(
         http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
-          HttpResponse.json({ error: 'Plaid unavailable' }, { status: 502 }),
-        ),
+          HttpResponse.json({ error: 'Plaid unavailable' }, { status: 502 })
+        )
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
@@ -491,7 +501,7 @@ describe('OnboardingData', () => {
       await user.click(bankingButton);
 
       await waitFor(() =>
-        expect(within(section('Banking')).getByText(/plaid unavailable/i)).toBeInTheDocument(),
+        expect(within(section('Banking')).getByText(/plaid unavailable/i)).toBeInTheDocument()
       );
       expect(plaidLink.opened).toBe(false);
     });
@@ -503,8 +513,8 @@ describe('OnboardingData', () => {
             link_token: 'link-onboarding-4',
             expiration: '2026-05-12T21:00:00Z',
             request_id: 'req-4',
-          }),
-        ),
+          })
+        )
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
@@ -517,7 +527,7 @@ describe('OnboardingData', () => {
 
       plaidLink.fireExit({ display_message: 'Bank session aborted' });
       await waitFor(() =>
-        expect(within(section('Banking')).getByText(/bank session aborted/i)).toBeInTheDocument(),
+        expect(within(section('Banking')).getByText(/bank session aborted/i)).toBeInTheDocument()
       );
     });
   });
