@@ -50,6 +50,7 @@ export interface CompletionOptions {
   temperature?: number;
   stream?: boolean;
   response_format?: ResponseFormat;
+  response_model?: import('./schema').ZodResponseModel;
   tools?: Array<Record<string, unknown>>;
   tool_choice?: unknown;
   effort?: string;
@@ -71,6 +72,11 @@ export interface CompletionChunk {
       content?: string;
       reasoning?: string;
       role?: string;
+      tool_calls?: Array<{
+        id: string;
+        type: 'function';
+        function: { name: string; arguments: string };
+      }>;
     };
     finish_reason?: string | null;
   }>;
@@ -85,6 +91,7 @@ export interface CompletionChunk {
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
   };
+  codex_reasoning_item?: Record<string, unknown>;
 }
 
 /**
@@ -92,7 +99,14 @@ export interface CompletionChunk {
  * Producers (claudeAuth/waterfall + parsers) yield these; the client wraps
  * them into the OpenAI-shaped CompletionChunk for chat callers.
  */
-export type ChunkKind = 'metadata' | 'content' | 'tool_call' | 'reasoning' | 'usage' | 'done';
+export type ChunkKind =
+  | 'metadata'
+  | 'content'
+  | 'tool_call'
+  | 'reasoning'
+  | 'codex_reasoning_item'
+  | 'usage'
+  | 'done';
 
 export type RoseStreamChunk =
   | {
@@ -102,6 +116,7 @@ export type RoseStreamChunk =
   | { kind: 'content'; data: { text: string } }
   | { kind: 'reasoning'; data: { text: string } }
   | { kind: 'tool_call'; data: { id: string; name: string; arguments: string } }
+  | { kind: 'codex_reasoning_item'; data: Record<string, unknown> }
   | {
       kind: 'usage';
       data: {

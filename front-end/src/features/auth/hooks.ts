@@ -10,6 +10,7 @@ import {
   createAnonymousSession,
   isAnonymousUser,
   setRealtimeAuth,
+  AUTH_SESSION_CHANGED_EVENT,
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
 
@@ -246,7 +247,7 @@ function useAuthActions(setters: AuthStateSetters) {
 
   const signOut = useCallback(async () => {
     logAuth('Signing out');
-    clearSession();
+    await clearSession();
     setSession(null);
     setUser(null);
     persistCachedUser(null);
@@ -300,6 +301,16 @@ export function useAuth() {
       mounted = false;
     };
   }, [applySession]);
+
+  useEffect(() => {
+    const onAuthSessionChanged = () => {
+      void refreshAuthState('session-storage-event');
+    };
+    window.addEventListener(AUTH_SESSION_CHANGED_EVENT, onAuthSessionChanged);
+    return () => {
+      window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, onAuthSessionChanged);
+    };
+  }, [refreshAuthState]);
 
   useEffect(() => {
     logAuth('State changed', {

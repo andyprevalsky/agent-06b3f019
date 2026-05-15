@@ -13,131 +13,19 @@
  * All executors log extensively at boundaries.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { prisma } from '../database';
-import { getTemporalClient, startAgentWorkflow } from '../temporal';
+import { startAgentWorkflow, getTemporalClient } from '../temporal';
 import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
-import { cleanupAgentSessions } from '../agentCleanup';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
+import { deleteAgentRecursive, resolveAgentPrefix } from './supervisorTools.helpers';
 
 const log = createLogger('SmsSupervisorTools');
 
-// ============================================
-// Tool Schemas (for LLM structured output)
-// ============================================
-
-export const TOOL_SCHEMAS = [
-  {
-    name: 'reply_to_agent',
-    description:
-      'Send a reply to an agent — answers questions, approves/rejects write-locks, or sends any message.',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        agent_id_or_prefix: {
-          type: 'string' as const,
-          description: 'Agent ID or 6-char prefix (e.g. "a3f2b1")',
-        },
-        message: {
-          type: 'string' as const,
-          description: 'The reply text to send to the agent',
-        },
-        attention_request_id: {
-          type: 'string' as const,
-          description:
-            'If resolving a pending attention request, provide the attn_id from the Pending Requests list',
-        },
-        reject: {
-          type: 'boolean' as const,
-          description: 'Set to true to reject an attention request. Default: false (approve)',
-        },
-      },
-      required: ['agent_id_or_prefix', 'message'],
-    },
-  },
-  {
-    name: 'kill_agent',
-    description:
-      'Stop/kill an agent and all its sub-agents. Use the 6-character prefix or full ID.',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        agent_id_or_prefix: {
-          type: 'string' as const,
-          description: 'Agent ID or 6-char prefix (e.g. "a3f2b1")',
-        },
-      },
-      required: ['agent_id_or_prefix'],
-    },
-  },
-  {
-    name: 'increase_budget',
-    description: "Increase an agent's cost limit. The amount is ADDED to the current limit.",
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        agent_id_or_prefix: {
-          type: 'string' as const,
-          description: 'Agent ID or 6-char prefix',
-        },
-        amount_dollars: {
-          type: 'number' as const,
-          description: 'Amount in dollars to ADD to the current budget (e.g. 5.00 adds $5)',
-        },
-      },
-      required: ['agent_id_or_prefix', 'amount_dollars'],
-    },
-  },
-  {
-    name: 'start_new_agent',
-    description:
-      'Start a new autonomous Rose Labs agent. These agents are superintelligent — they recursively decompose any problem and run an entire agentic swarm in parallel to accomplish ANY goal, from curing cancer to simple shopping tasks and everything in between.',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        goal: {
-          type: 'string' as const,
-          description: 'The task goal for the agent',
-        },
-        budget_dollars: {
-          type: 'number' as const,
-          description: 'Budget in dollars (default: $1.00)',
-        },
-      },
-      required: ['goal'],
-    },
-  },
-  {
-    name: 'web_search',
-    description: 'Search the web for current information',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        query: {
-          type: 'string' as const,
-          description: 'Search query',
-        },
-      },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'attempt_completion',
-    description:
-      'Send the final SMS message to the user. Call this when you are done thinking and using tools.',
-    parameters: {
-      type: 'object' as const,
-      properties: {
-        message: {
-          type: 'string' as const,
-          description: 'The SMS message to send to the user',
-        },
-      },
-      required: ['message'],
-    },
-  },
-];
+export { TOOL_SCHEMAS } from './supervisorTools.schemas';
 
 // ============================================
 // Tool Call Type
@@ -185,102 +73,87 @@ interface WebSearchArgs {
 // Prefix Resolution Helper
 // ============================================
 
-async function resolveAgentPrefix(
-  prefixOrId: string,
-  userId: string
-): Promise<{
-  id: string;
-  goal: string;
-  status: string;
-  priceLimitCents: number;
-  treeCostCents: number;
-  temporalWorkflowId: string | null;
-} | null> {
-  const input = prefixOrId.trim();
-
-  log.info('Resolving agent prefix', { input, userId });
-
-  // Try exact match first (full UUID)
-  if (input.length > 6) {
-    const agent = await prisma.agent.findFirst({
-      where: { id: input, userId, deletedAt: null },
-    });
-    if (agent) {
-      log.info('Resolved by exact match', { agentId: agent.id });
-      return agent;
-    }
-  }
-
-  // Prefix match
-  const agent = await prisma.agent.findFirst({
-    where: {
-      id: { startsWith: input },
-      userId,
-      deletedAt: null,
-    },
-    orderBy: { createdAt: 'desc' },
-  });
-
-  if (agent) {
-    log.info('Resolved by prefix', {
-      prefix: input,
-      agentId: agent.id,
-      goal: agent.goal.substring(0, 50),
-    });
-  } else {
-    log.info('No agent found for prefix', { prefix: input, userId });
-  }
-
-  return agent;
-}
+// resolveAgentPrefix + deleteAgentRecursive live in supervisorTools.helpers.ts
+// so this file stays under the max-lines budget. Both are pure DB/Temporal
+// operations with no tool-specific logic.
 
 // ============================================
-// Tool Executors
+// Deferred-commit pipeline (WS-2)
 // ============================================
+//
+// Read-only tools run inline so the model sees their results within the same
+// LLM round-trip. Write tools (start_new_agent, kill_agent, increase_budget,
+// reply_to_agent) are NEVER executed inside the loop — they only get queued
+// to a per-run `PendingOp[]` buffer. The supervisor handler later calls
+// `commitPendingWrites` exactly once, at attempt_completion, after re-checking
+// that no newer inbound SMS arrived. If the gate denies the commit, the buffer
+// is discarded; no side effect ever fires.
+//
+// This gives us:
+//   - Natural debounce: a follow-up SMS while a run is mid-flight invalidates
+//     the queued writes; only the latest run produces side effects + reply.
+//   - Atomic per-turn commit: every queued op fires together with the SMS, or
+//     none of them do.
+//   - Idempotency without per-tool rollback: writes never run speculatively,
+//     so there's nothing to undo on abort.
 
-export async function executeToolCall(toolCall: ToolCall, userId: string): Promise<ToolResult> {
+export type PendingOp =
+  | { kind: 'reply_to_agent'; args: ReplyToAgentArgs; agentId: string }
+  | { kind: 'kill_agent'; args: KillAgentArgs; agentId: string }
+  | { kind: 'increase_budget'; args: IncreaseBudgetArgs; agentId: string }
+  | { kind: 'start_new_agent'; args: StartNewAgentArgs; provisionalId: string };
+
+/**
+ * Tool dispatcher used inside the supervisor loop. Read tools execute inline;
+ * write tools validate args, push a {@link PendingOp} onto `pendingWrites`,
+ * and return a synthetic "queued" tool_result so the model can keep reasoning.
+ */
+export async function dispatchToolCall(
+  toolCall: ToolCall,
+  userId: string,
+  pendingWrites: PendingOp[]
+): Promise<ToolResult> {
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
 
-  log.info('Executing tool', {
-    tool,
-    args: JSON.stringify(args),
-    userId,
-  });
+  log.info('Dispatching tool', { tool, args: JSON.stringify(args), userId });
 
   try {
     let result: ToolResult;
 
     switch (tool) {
       case 'reply_to_agent':
-        result = await executeReplyToAgent(args as unknown as ReplyToAgentArgs, userId);
+        result = await validateReplyToAgent(
+          args as unknown as ReplyToAgentArgs,
+          userId,
+          pendingWrites
+        );
         break;
       case 'kill_agent':
-        result = await executeKillAgent(args as unknown as KillAgentArgs, userId);
+        result = await validateKillAgent(args as unknown as KillAgentArgs, userId, pendingWrites);
         break;
       case 'increase_budget':
-        result = await executeIncreaseBudget(args as unknown as IncreaseBudgetArgs, userId);
+        result = await validateIncreaseBudget(
+          args as unknown as IncreaseBudgetArgs,
+          userId,
+          pendingWrites
+        );
         break;
       case 'start_new_agent':
-        result = await executeStartNewAgent(args as unknown as StartNewAgentArgs, userId);
+        result = validateStartNewAgent(args as unknown as StartNewAgentArgs, pendingWrites);
         break;
       case 'web_search':
         result = await executeWebSearchTool(args as unknown as WebSearchArgs);
         break;
       case 'attempt_completion':
-        // attempt_completion is handled by the handler loop, not here
+        // Loop terminator — the handler intercepts before reaching this point.
         result = { tool, success: true, result: 'Completion signaled' };
         break;
       default:
-        result = {
-          tool,
-          success: false,
-          result: '',
-          error: `Unknown tool: ${tool}`,
-        };
+        result = { tool, success: false, result: '', error: `Unknown tool: ${tool}` };
     }
 
-    log.info('Tool execution complete', {
+    log.info('Tool dispatch complete', {
       tool,
       success: result.success,
       resultLength: result.result.length,
@@ -291,37 +164,196 @@ export async function executeToolCall(toolCall: ToolCall, userId: string): Promi
     return result;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    log.error('Tool execution failed', {
+    log.error('Tool dispatch failed', {
       tool,
       args: JSON.stringify(args),
       error: errorMsg,
       stack: error instanceof Error ? error.stack : undefined,
       durationMs: Date.now() - startTime,
     });
-
-    return {
-      tool,
-      success: false,
-      result: '',
-      error: errorMsg,
-    };
+    return { tool, success: false, result: '', error: errorMsg };
   }
 }
 
+/**
+ * Flush every queued {@link PendingOp} in order. Called by the supervisor
+ * handler under the per-user commit lock, after the inbound-seq gate has
+ * confirmed this run is still the most-recent. Returns one {@link ToolResult}
+ * per op describing what actually happened (for logging / transcript shape).
+ *
+ * Each commit function is idempotent enough for v1:
+ *   - start_new_agent: client-supplied provisional UUID; a duplicate `create`
+ *     collides on PK and is caught.
+ *   - kill_agent: deleting an already-deleted agent is a no-op.
+ *   - increase_budget / reply_to_agent: the per-user commit lock + seq gate
+ *     ensures we never reach commit twice for the same run.
+ */
+export async function commitPendingWrites(
+  pendingWrites: readonly PendingOp[],
+  userId: string
+): Promise<ToolResult[]> {
+  const results: ToolResult[] = [];
+  for (const op of pendingWrites) {
+    const start = Date.now();
+    try {
+      let result: ToolResult;
+      switch (op.kind) {
+        case 'reply_to_agent':
+          result = await commitReplyToAgent(op, userId);
+          break;
+        case 'kill_agent':
+          result = await commitKillAgent(op);
+          break;
+        case 'increase_budget':
+          result = await commitIncreaseBudget(op);
+          break;
+        case 'start_new_agent':
+          result = await commitStartNewAgent(op, userId);
+          break;
+      }
+      log.info('Pending op committed', {
+        kind: op.kind,
+        success: result.success,
+        durationMs: Date.now() - start,
+      });
+      results.push(result);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      log.error('Pending op commit failed', {
+        kind: op.kind,
+        error: errorMsg,
+        durationMs: Date.now() - start,
+      });
+      results.push({ tool: op.kind, success: false, result: '', error: errorMsg });
+    }
+  }
+  return results;
+}
+
 // ============================================
-// Individual Tool Implementations
+// Validators — fast, side-effect-free; queue PendingOps
 // ============================================
 
-async function executeReplyToAgent(args: ReplyToAgentArgs, userId: string): Promise<ToolResult> {
-  const { agent_id_or_prefix, message, attention_request_id, reject } = args;
-
-  const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
+async function validateReplyToAgent(
+  args: ReplyToAgentArgs,
+  userId: string,
+  pendingWrites: PendingOp[]
+): Promise<ToolResult> {
+  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
   if (!agent) {
     return {
       tool: 'reply_to_agent',
       success: false,
       result: '',
-      error: `No agent found matching "${agent_id_or_prefix}"`,
+      error: `No agent found matching "${args.agent_id_or_prefix}"`,
+    };
+  }
+  pendingWrites.push({ kind: 'reply_to_agent', args, agentId: agent.id });
+  const verb = args.attention_request_id
+    ? args.reject
+      ? 'will reject'
+      : 'will approve'
+    : 'will reply';
+  return {
+    tool: 'reply_to_agent',
+    success: true,
+    result: `queued: ${verb} → agent [${agent.id.substring(0, 6)}]`,
+  };
+}
+
+async function validateKillAgent(
+  args: KillAgentArgs,
+  userId: string,
+  pendingWrites: PendingOp[]
+): Promise<ToolResult> {
+  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  if (!agent) {
+    return {
+      tool: 'kill_agent',
+      success: false,
+      result: '',
+      error: `No agent found matching "${args.agent_id_or_prefix}"`,
+    };
+  }
+  pendingWrites.push({ kind: 'kill_agent', args, agentId: agent.id });
+  return {
+    tool: 'kill_agent',
+    success: true,
+    result: `queued: will kill agent [${agent.id.substring(0, 6)}]`,
+  };
+}
+
+async function validateIncreaseBudget(
+  args: IncreaseBudgetArgs,
+  userId: string,
+  pendingWrites: PendingOp[]
+): Promise<ToolResult> {
+  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  if (!agent) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `No agent found matching "${args.agent_id_or_prefix}"`,
+    };
+  }
+  if (!Number.isFinite(args.amount_dollars) || args.amount_dollars <= 0) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `amount_dollars must be a positive number, got ${args.amount_dollars}`,
+    };
+  }
+  pendingWrites.push({ kind: 'increase_budget', args, agentId: agent.id });
+  return {
+    tool: 'increase_budget',
+    success: true,
+    result: `queued: will add $${args.amount_dollars.toFixed(2)} to agent [${agent.id.substring(0, 6)}]`,
+  };
+}
+
+function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp[]): ToolResult {
+  if (!args.goal || typeof args.goal !== 'string' || args.goal.trim().length === 0) {
+    return {
+      tool: 'start_new_agent',
+      success: false,
+      result: '',
+      error: 'goal is required and must be a non-empty string',
+    };
+  }
+  const provisionalId = randomUUID();
+  pendingWrites.push({ kind: 'start_new_agent', args, provisionalId });
+  return {
+    tool: 'start_new_agent',
+    success: true,
+    result: `queued: will start agent [${provisionalId.substring(0, 6)}] for "${args.goal.substring(0, 80)}"`,
+  };
+}
+
+// ============================================
+// Commit Implementations — run inside the commit gate, exactly once per run
+// ============================================
+
+async function commitReplyToAgent(
+  op: Extract<PendingOp, { kind: 'reply_to_agent' }>,
+  userId: string
+): Promise<ToolResult> {
+  const { args, agentId } = op;
+  const { message, attention_request_id, reject } = args;
+
+  // Re-fetch the agent in case it changed between validate and commit. If it
+  // was deleted, surface the error in logs but don't try to recover — the SMS
+  // commit is committed by this point.
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, userId, deletedAt: null },
+  });
+  if (!agent) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: `Agent ${agentId.substring(0, 6)} no longer exists`,
     };
   }
 
@@ -426,16 +458,19 @@ async function executeReplyToAgent(args: ReplyToAgentArgs, userId: string): Prom
   };
 }
 
-async function executeKillAgent(args: KillAgentArgs, userId: string): Promise<ToolResult> {
-  const { agent_id_or_prefix } = args;
-
-  const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
+async function commitKillAgent(
+  op: Extract<PendingOp, { kind: 'kill_agent' }>
+): Promise<ToolResult> {
+  const { agentId } = op;
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, deletedAt: null },
+  });
   if (!agent) {
+    // Already deleted — kill is idempotent, treat as success.
     return {
       tool: 'kill_agent',
-      success: false,
-      result: '',
-      error: `No agent found matching "${agent_id_or_prefix}"`,
+      success: true,
+      result: `Agent [${agentId.substring(0, 6)}] already deleted`,
     };
   }
 
@@ -457,19 +492,21 @@ async function executeKillAgent(args: KillAgentArgs, userId: string): Promise<To
   };
 }
 
-async function executeIncreaseBudget(
-  args: IncreaseBudgetArgs,
-  userId: string
+async function commitIncreaseBudget(
+  op: Extract<PendingOp, { kind: 'increase_budget' }>
 ): Promise<ToolResult> {
-  const { agent_id_or_prefix, amount_dollars } = args;
+  const { args, agentId } = op;
+  const { amount_dollars } = args;
 
-  const agent = await resolveAgentPrefix(agent_id_or_prefix, userId);
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, deletedAt: null },
+  });
   if (!agent) {
     return {
       tool: 'increase_budget',
       success: false,
       result: '',
-      error: `No agent found matching "${agent_id_or_prefix}"`,
+      error: `Agent ${agentId.substring(0, 6)} no longer exists`,
     };
   }
 
@@ -520,48 +557,78 @@ async function executeIncreaseBudget(
   };
 }
 
-async function executeStartNewAgent(args: StartNewAgentArgs, userId: string): Promise<ToolResult> {
+async function commitStartNewAgent(
+  op: Extract<PendingOp, { kind: 'start_new_agent' }>,
+  userId: string
+): Promise<ToolResult> {
+  const { args, provisionalId } = op;
   const { goal, budget_dollars } = args;
   const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
 
   log.info('Starting new agent', {
     phase: 'start',
     userId,
+    provisionalId,
     goal: goal.substring(0, 100),
     priceLimitCents,
   });
 
-  const agent = await prisma.$transaction(async (tx) => {
-    const newAgent = await tx.agent.create({
-      data: {
-        userId,
-        goal,
-        source: 'SMS',
-        model: 'rose-labs/rose-1-lite',
-        reasoningMaxTokens: 2048,
-        status: 'STARTING_UP',
-        priceLimitCents,
-      },
-    });
+  let agent;
+  try {
+    agent = await prisma.$transaction(async (tx) => {
+      const newAgent = await tx.agent.create({
+        data: {
+          // Client-supplied UUID makes commit idempotent: a retried commit
+          // would collide on the PK and we catch P2002 below as already-done.
+          id: provisionalId,
+          userId,
+          goal,
+          source: 'SMS',
+          model: 'rose-labs/rose-1-lite',
+          reasoningMaxTokens: 2048,
+          status: 'STARTING_UP',
+          priceLimitCents,
+        },
+      });
 
-    await tx.verifier.create({
-      data: {
-        agentId: newAgent.id,
-        type: 'FLOAT_LLM_JUDGE',
-      },
-    });
+      await tx.verifier.create({
+        data: {
+          agentId: newAgent.id,
+          type: 'FLOAT_LLM_JUDGE',
+        },
+      });
 
-    await tx.message.create({
-      data: {
-        agentId: newAgent.id,
-        text: goal,
-        role: 'USER',
-        timestamp: new Date(),
-      },
-    });
+      await tx.message.create({
+        data: {
+          agentId: newAgent.id,
+          text: goal,
+          role: 'USER',
+          timestamp: new Date(),
+        },
+      });
 
-    return newAgent;
-  });
+      return newAgent;
+    });
+  } catch (error) {
+    // P2002 = unique constraint violation. Means this provisional ID was
+    // already created — a previous commit fired (the seq gate normally
+    // prevents this, but a backend restart mid-flush could rerun us). Treat
+    // as already-committed and report the existing agent.
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code: string }).code === 'P2002'
+    ) {
+      log.info('start_new_agent commit already done (PK collision)', { provisionalId });
+      return {
+        tool: 'start_new_agent',
+        success: true,
+        result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
+      };
+    }
+    throw error;
+  }
 
   // Start Temporal workflow
   try {
@@ -638,55 +705,4 @@ async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
   };
 }
 
-// ============================================
-// Agent Deletion Helper (extracted pattern from agents.ts:1068)
-// ============================================
-
-async function deleteAgentRecursive(agentId: string): Promise<void> {
-  const agent = await prisma.agent.findFirst({
-    where: { id: agentId, deletedAt: null },
-    include: {
-      children: {
-        where: { deletedAt: null },
-      },
-    },
-  });
-
-  if (!agent) return;
-
-  // Recursively delete children
-  for (const child of agent.children) {
-    await deleteAgentRecursive(child.id);
-  }
-
-  // Clean up E2B sandboxes and Steel browser sessions before terminating workflow
-  await cleanupAgentSessions(agentId);
-
-  // Terminate Temporal workflow
-  if (agent.temporalWorkflowId) {
-    try {
-      log.info('Terminating workflow', {
-        phase: 'kill',
-        workflowId: agent.temporalWorkflowId,
-        agentId,
-      });
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Agent killed via SMS');
-    } catch (error) {
-      log.warn('Failed to terminate workflow', {
-        phase: 'kill',
-        workflowId: agent.temporalWorkflowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  // Soft delete
-  await prisma.agent.update({
-    where: { id: agentId },
-    data: { deletedAt: new Date() },
-  });
-
-  log.info('Deleted agent', { phase: 'kill', agentId });
-}
+// deleteAgentRecursive moved to supervisorTools.helpers.ts

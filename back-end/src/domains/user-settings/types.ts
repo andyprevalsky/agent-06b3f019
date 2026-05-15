@@ -18,6 +18,7 @@ export const updateUserSchema = z.object({
   systemName: z.string().max(50).optional().nullable(),
   profilePicture: z.string().max(500).optional().nullable(),
   customSystemPrompt: z.string().max(2000).optional().nullable(),
+  voicePreferenceId: z.string().max(100).optional().nullable(),
 });
 
 export type UpdateUserBody = z.infer<typeof updateUserSchema>;
@@ -37,4 +38,5 @@ export interface UserSettingsResponse {
   systemName: string | null;
   profilePicture: string | null;
   customSystemPrompt: string | null;
+  voicePreferenceId: string | null;
 }

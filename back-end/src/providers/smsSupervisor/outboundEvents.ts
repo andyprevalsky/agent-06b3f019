@@ -36,9 +36,8 @@ export async function notifyAgentStarted(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const goalPreview = agent.goal.length > 80 ? agent.goal.substring(0, 77) + '...' : agent.goal;
   const url = getAgentUrl(agent.id);
-  const message = SMS_TEMPLATES.agentStarted(prefix, goalPreview, url);
+  const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url);
 
   const result = await sendSms(phone, message);
 
@@ -77,10 +76,9 @@ export async function notifyPlannerMessage(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const preview = messageText.length > 200 ? messageText.substring(0, 197) + '...' : messageText;
   const message = isQuestion
-    ? SMS_TEMPLATES.plannerQuestion(prefix, preview)
-    : SMS_TEMPLATES.plannerFyi(prefix, preview);
+    ? SMS_TEMPLATES.plannerQuestion(prefix, messageText)
+    : SMS_TEMPLATES.plannerFyi(prefix, messageText);
 
   const result = await sendSms(phone, message);
 
@@ -128,8 +126,7 @@ export async function notifyWriteLock(
   });
 
   const prefix = agent.id.substring(0, 6);
-  const questionPreview = question.length > 150 ? question.substring(0, 147) + '...' : question;
-  const message = SMS_TEMPLATES.writeLock(prefix, questionPreview, shortcode);
+  const message = SMS_TEMPLATES.writeLock(prefix, question, shortcode);
 
   const result = await sendSms(phone, message);
 
@@ -168,8 +165,7 @@ export async function notifyCompletion(
 
   const prefix = agent.id.substring(0, 6);
   const url = getAgentUrl(agent.id);
-  const summaryPreview = summary.length > 200 ? summary.substring(0, 197) + '...' : summary;
-  const message = SMS_TEMPLATES.agentCompleted(prefix, summaryPreview, url);
+  const message = SMS_TEMPLATES.agentCompleted(prefix, summary, url);
 
   const result = await sendSms(phone, message);
 

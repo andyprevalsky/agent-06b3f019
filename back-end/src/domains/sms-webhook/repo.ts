@@ -44,6 +44,26 @@ export async function findActiveSmsAgents(userId: string) {
   });
 }
 
+/** Atomically bump the per-user inbound seq counter and return the new value. */
+export async function bumpInboundSeq(userId: string): Promise<number> {
+  const session = await prisma.smsSession.upsert({
+    where: { userId },
+    update: { lastInboundSeq: { increment: 1 } },
+    create: { userId, messages: '[]', lastInboundSeq: 1 },
+    select: { lastInboundSeq: true },
+  });
+  return session.lastInboundSeq;
+}
+
+/** Read the current inbound seq for a user (returns null if no session). */
+export async function getInboundSeq(userId: string): Promise<number | null> {
+  const session = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { lastInboundSeq: true },
+  });
+  return session?.lastInboundSeq ?? null;
+}
+
 /** Soft-delete an agent and all descendants (children, grandchildren, etc.) */
 export async function softDeleteAgentAndChildren(agentId: string) {
   // Use recursive CTE to find all descendants, then soft-delete them all

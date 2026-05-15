@@ -301,7 +301,12 @@ async function testBoundary_vapiCallCreation() {
   const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
-    captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
+    captures: {
+      url: string;
+      method: string;
+      requestHeaders: Record<string, string>;
+      requestBody: string | null;
+    }[];
   };
 
   const vapiCalls = body.captures.filter(
@@ -320,6 +325,178 @@ async function testBoundary_vapiCallCreation() {
   const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
   if (!headerKeys.includes('authorization')) {
     throw new Error(`Expected Authorization header in Vapi call`);
+  }
+  if (call.requestBody === null) {
+    throw new Error('Expected Vapi call request body');
+  }
+
+  const outboundBody = JSON.parse(call.requestBody) as {
+    phoneNumberId?: string;
+    customer?: { number?: string };
+    assistant?: {
+      name?: string;
+      model?: {
+        provider?: string;
+        model?: string;
+        messages?: { role?: string; content?: string }[];
+      };
+      voice?: {
+        provider?: string;
+        voiceId?: string;
+      };
+      transcriber?: {
+        provider?: string;
+        model?: string;
+        language?: string;
+        eotThreshold?: number;
+        eotTimeoutMs?: number;
+      };
+      firstMessage?: string;
+      endCallMessage?: string;
+      silenceTimeoutSeconds?: number;
+      maxDurationSeconds?: number;
+      analysisPlan?: {
+        summaryPlan?: { enabled?: boolean };
+        successEvaluationPlan?: { enabled?: boolean };
+        structuredDataPlan?: { enabled?: boolean; schema?: unknown };
+      };
+      serverMessages?: string[];
+      clientMessages?: string[];
+    };
+  };
+
+  const assistant = outboundBody.assistant;
+  if (!assistant) {
+    throw new Error('Expected inline Vapi assistant config');
+  }
+  if (outboundBody.customer?.number !== '+10000000000') {
+    throw new Error(`Expected normalized customer number, got ${outboundBody.customer?.number}`);
+  }
+  if (assistant.name !== 'Rose Outbound Call Agent') {
+    throw new Error(`Expected assistant name to be code-controlled, got ${assistant.name}`);
+  }
+  if (assistant.model?.provider !== 'openai' || assistant.model.model !== 'gpt-4o') {
+    throw new Error(`Expected openai/gpt-4o model, got ${JSON.stringify(assistant.model)}`);
+  }
+  const systemMessage = assistant.model.messages?.find((m) => m.role === 'system')?.content;
+  if (!systemMessage?.startsWith('You are Rose.')) {
+    throw new Error(
+      `Expected deterministic "You are <name>." identity prefix at top of system prompt, got: ${systemMessage?.substring(0, 60)}`
+    );
+  }
+  if (!systemMessage.includes('You are making an outbound phone call.')) {
+    throw new Error('Expected base system prompt in outbound assistant config');
+  }
+  if (!systemMessage.includes('Boundary test')) {
+    throw new Error('Expected per-call system prompt in outbound assistant config');
+  }
+  // "Rose" preset from mac-app onboarding VoiceSelector (PRESET_VOICES[0]).
+  if (
+    assistant.voice?.provider !== '11labs' ||
+    assistant.voice.voiceId !== '6fZce9LFNG3iEITDfqZZ'
+  ) {
+    throw new Error(`Expected 11labs/Rose voice, got ${JSON.stringify(assistant.voice)}`);
+  }
+  if (
+    assistant.transcriber?.provider !== 'deepgram' ||
+    assistant.transcriber.model !== 'flux-general-en' ||
+    assistant.transcriber.language !== 'en' ||
+    assistant.transcriber.eotThreshold !== 0.7 ||
+    assistant.transcriber.eotTimeoutMs !== 5000
+  ) {
+    throw new Error(
+      `Expected deepgram transcriber config, got ${JSON.stringify(assistant.transcriber)}`
+    );
+  }
+  if (assistant.firstMessage !== 'Hello, how are you today?') {
+    throw new Error(`Expected first message to be code-controlled, got ${assistant.firstMessage}`);
+  }
+  if (assistant.silenceTimeoutSeconds !== 30 || assistant.maxDurationSeconds !== 600) {
+    throw new Error(
+      `Expected timeout settings, got silence=${assistant.silenceTimeoutSeconds}, max=${assistant.maxDurationSeconds}`
+    );
+  }
+  if (assistant.analysisPlan?.structuredDataPlan?.enabled !== true) {
+    throw new Error('Expected structured data extraction to be enabled');
+  }
+  if (!assistant.serverMessages?.includes('end-of-call-report')) {
+    throw new Error('Expected server messages to be code-controlled');
+  }
+  if (!assistant.clientMessages?.includes('transcript')) {
+    throw new Error('Expected client messages to be code-controlled');
+  }
+}
+
+async function testBoundary_vapiCallWithUserOverrides() {
+  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
+  if (cursorRes.status !== 200) return; // capture harness not active
+
+  // 1. Create an anonymous user to attach settings to.
+  const anonRes = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
+  if (anonRes.status !== 200) {
+    return; // anonymous auth disabled in this env
+  }
+  const anonBody = anonRes.data as {
+    user: { id: string };
+    session: { access_token: string };
+  };
+  const access_token = anonBody.session.access_token;
+  const user_id = anonBody.user.id;
+
+  // 2. Persist the user's chosen system name + voice ID via the same path the
+  //    onboarding flow uses.
+  const patchRes = await request(`${BASE_URL}/api/user-settings`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${access_token}` },
+    body: JSON.stringify({
+      systemName: 'Atlas',
+      voicePreferenceId: 'voice_test_atlas_xyz',
+    }),
+  });
+  assertStatus(patchRes.status, 200, patchRes.data);
+
+  // 3. Trigger an outbound call as the agent worker would.
+  const cursor =
+    ((await request(`${BASE_URL}/api/test/captures`)).data as { nextId: number }).nextId - 1;
+  await request(`${BASE_URL}/api/vapi/call`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      to: '+10000000000',
+      system_prompt: 'User-override boundary test',
+      output_schema: { result: 'string' },
+      user_id,
+    }),
+  });
+
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  assertStatus(capturesRes.status, 200, capturesRes.data);
+  const body = capturesRes.data as {
+    captures: { url: string; method: string; requestBody: string | null }[];
+  };
+  const vapiCalls = body.captures.filter(
+    (c) => c.url.includes('api.vapi.ai') && c.url.includes('/call')
+  );
+  if (vapiCalls.length === 0) return; // VAPI_PRIVATE_KEY not configured
+
+  const outbound = JSON.parse(vapiCalls[0].requestBody ?? '{}') as {
+    assistant?: {
+      model?: { messages?: { role?: string; content?: string }[] };
+      voice?: { voiceId?: string };
+    };
+  };
+  const systemMessage = outbound.assistant?.model?.messages?.find(
+    (m) => m.role === 'system'
+  )?.content;
+  if (!systemMessage?.startsWith('You are Atlas.')) {
+    throw new Error(
+      `Expected user's systemName to flow into identity prefix, got: ${systemMessage?.substring(0, 60)}`
+    );
+  }
+  if (outbound.assistant?.voice?.voiceId !== 'voice_test_atlas_xyz') {
+    throw new Error(
+      `Expected user's voicePreferenceId to override default voice, got: ${outbound.assistant?.voice?.voiceId}`
+    );
   }
 }
 
@@ -451,6 +628,10 @@ async function runAll() {
   const sequentialTests = [
     // boundary capture (must be sequential due to shared capture buffer)
     { name: 'boundary -- Vapi call creation outbound', fn: testBoundary_vapiCallCreation },
+    {
+      name: 'boundary -- Vapi call honors user systemName + voicePreferenceId',
+      fn: testBoundary_vapiCallWithUserOverrides,
+    },
     { name: 'boundary -- Vapi call poll outbound', fn: testBoundary_vapiCallPoll },
   ];
 

@@ -28,6 +28,7 @@ import { claudeAuthComplete } from './claudeAuth';
 import { isFallThroughError, RoseError } from './errors';
 import { gptAuthComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
+import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
 
@@ -76,6 +77,16 @@ export async function createStreamingCompletion(
         `rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
     );
   }
+  if (options.response_format && options.response_model) {
+    throw new Error('Rose: pass either response_format or response_model, not both');
+  }
+
+  const normalizedOptions: CompletionOptions = {
+    ...options,
+    response_format: options.response_model
+      ? buildOpenAiResponseFormat(options.response_model)
+      : options.response_format,
+  };
 
   const requestId = shortRequestId();
   const callSite = 'chat';
@@ -86,15 +97,16 @@ export async function createStreamingCompletion(
     has_claude_token: !!options.claude_token,
     has_gpt_token: !!options.gpt_token,
     body: logJson({
-      model: options.model,
-      message_count: options.messages.length,
-      response_format: options.response_format?.json_schema?.name,
-      temperature: options.temperature,
+      model: normalizedOptions.model,
+      message_count: normalizedOptions.messages.length,
+      response_format: normalizedOptions.response_format?.json_schema?.name,
+      response_model: normalizedOptions.response_model?.name,
+      temperature: normalizedOptions.temperature,
     }),
   });
 
   return wrapStream({
-    options,
+    options: normalizedOptions,
     pool,
     requestId,
     callSite,
@@ -162,6 +174,39 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         },
       };
     }
+    if (chunk.kind === 'tool_call') {
+      return {
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  id: chunk.data.id,
+                  type: 'function',
+                  function: { name: chunk.data.name, arguments: chunk.data.arguments },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+        requested_model: opts.options.model,
+        actual_model: metadata.actual_model,
+        pool_name: metadata.pool_name,
+        pool_size: poolSpec.waterfall.length,
+      };
+    }
+    if (chunk.kind === 'codex_reasoning_item') {
+      return {
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        requested_model: opts.options.model,
+        actual_model: metadata.actual_model,
+        pool_name: metadata.pool_name,
+        pool_size: poolSpec.waterfall.length,
+        codex_reasoning_item: chunk.data,
+      };
+    }
     return null;
   };
 
@@ -176,6 +221,8 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             poolSpec,
             messages: opts.options.messages,
             responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
             maxTokens: opts.options.max_tokens,
             temperature: opts.options.temperature,
             claudeToken: opts.options.claude_token!,

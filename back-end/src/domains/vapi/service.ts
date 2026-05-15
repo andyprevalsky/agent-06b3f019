@@ -3,6 +3,7 @@ import {
   VAPI_PRIVATE_KEY,
   OUTBOUND_PHONE_NUMBER_POOL,
   BASE_SYSTEM_PROMPT,
+  buildCallAssistantConfig,
 } from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
@@ -15,6 +16,7 @@ import {
   ToolSideEffectAlreadyStartedError,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
+import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
@@ -26,6 +28,7 @@ type PreparedCall = {
   normalizedPhone: string;
   normalizedSchema: Record<string, unknown>;
   operationKey?: string;
+  voiceId?: string;
 };
 
 export class VapiNotConfiguredError extends Error {
@@ -88,83 +91,24 @@ function getRandomPhoneNumberId(): string {
   return OUTBOUND_PHONE_NUMBER_POOL[index];
 }
 
-/**
- * Normalize JSON Schema to ensure it has a valid format for Vapi
- *
- * Handles malformed schemas like {"field_name": "description"} and converts them
- * to proper JSON Schema format.
- */
-function normalizeJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  const validTypes = ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'];
-  if (typeof schema.type === 'string' && validTypes.includes(schema.type)) {
-    return schema;
-  }
-
-  // If schema has properties but no type, it's meant to be an object
-  if (schema.properties !== undefined && schema.type === undefined) {
-    return { type: 'object', ...schema };
-  }
-
-  // Check if schema is malformed: {"field_name": "description", ...}
-  const keys = Object.keys(schema);
-  if (keys.length > 0 && keys.every((k) => typeof schema[k] === 'string')) {
-    const properties: Record<string, unknown> = {};
-    for (const key of keys) {
-      properties[key] = {
-        type: 'string',
-        description: schema[key],
-      };
-    }
-    return {
-      type: 'object',
-      properties,
-    };
-  }
-
-  // Default to object type if no type specified
-  return { type: 'object', ...schema };
-}
-
-/**
- * Normalize phone number to E.164 format (+1XXXXXXXXXX for US numbers)
- */
-function normalizePhoneNumber(number: string): string {
-  // Strip all non-digit characters
-  const digits = number.replace(/\D/g, '');
-
-  // Handle 11-digit US numbers (with leading 1)
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return '+' + digits;
-  }
-
-  // Handle 10-digit US numbers (without country code)
-  if (digits.length === 10) {
-    return '+1' + digits;
-  }
-
-  // If already has + prefix, return as-is
-  if (number.startsWith('+')) {
-    return number;
-  }
-
-  // Otherwise prepend + and return
-  return '+' + digits;
-}
-
-function prepareCall(body: CreateCallRequest): PreparedCall {
-  const { to, system_prompt, output_schema, idempotency_key } = body;
+async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
+  const { to, system_prompt, output_schema, idempotency_key, user_id } = body;
   const operationKey =
     typeof idempotency_key === 'string' && idempotency_key !== ''
       ? getIdempotencyOperationKey(idempotency_key)
       : undefined;
 
+  const { systemName, voiceId } = await lookupUserVoiceAndName(user_id);
+  const identityPrefix = `You are ${systemName}.\n\n`;
+
   return {
     vapiPrivateKey: getVapiPrivateKey(),
     phoneNumberId: getRandomPhoneNumberId(),
-    fullSystemPrompt: BASE_SYSTEM_PROMPT + system_prompt,
+    fullSystemPrompt: identityPrefix + BASE_SYSTEM_PROMPT + system_prompt,
     normalizedPhone: normalizePhoneNumber(to),
     normalizedSchema: normalizeJsonSchema(output_schema),
     operationKey,
+    voiceId,
   };
 }
 
@@ -211,24 +155,7 @@ function buildCreateCallBody(call: PreparedCall): string {
     customer: {
       number: call.normalizedPhone,
     },
-    assistant: {
-      model: {
-        provider: 'openai',
-        model: 'gpt-4o',
-        messages: [{ role: 'system', content: call.fullSystemPrompt }],
-      },
-      voice: {
-        provider: '11labs',
-        voiceId: 'paula', // Default voice - can be made configurable later
-      },
-      firstMessage: 'Hello, how are you today?',
-      analysisPlan: {
-        structuredDataPlan: {
-          enabled: true,
-          schema: call.normalizedSchema,
-        },
-      },
-    },
+    assistant: buildCallAssistantConfig(call.fullSystemPrompt, call.normalizedSchema, call.voiceId),
   });
 }
 
@@ -263,7 +190,7 @@ async function createVapiCall(call: PreparedCall): Promise<Response> {
 export async function initiateCall(
   body: CreateCallRequest
 ): Promise<{ success: true; call_id: string; status: string }> {
-  const call = prepareCall(body);
+  const call = await prepareCall(body);
   const existingCall = await getExistingIdempotentCall(call);
   if (existingCall !== undefined) {
     return existingCall;

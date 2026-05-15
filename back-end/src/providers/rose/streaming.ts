@@ -75,6 +75,13 @@ export async function* parseAnthropicSSE(
   let finishReason = '';
   let emittedContentOrTool = false;
 
+  // Per-content-block state. Anthropic streams blocks one-at-a-time so a
+  // single mutable slot is sufficient.
+  let currentBlockKind: 'text' | 'thinking' | 'tool_use' | null = null;
+  let currentToolId: string | null = null;
+  let currentToolName: string | null = null;
+  let currentToolArgs: string[] = [];
+
   const stopReasonMap: Record<string, string> = {
     end_turn: 'stop',
     max_tokens: 'length',
@@ -119,6 +126,24 @@ export async function* parseAnthropicSSE(
       continue;
     }
 
+    if (type === 'content_block_start') {
+      const block = event.content_block ?? {};
+      const blockType = block.type;
+      if (blockType === 'tool_use') {
+        currentBlockKind = 'tool_use';
+        currentToolId = typeof block.id === 'string' ? block.id : null;
+        currentToolName = typeof block.name === 'string' ? block.name : '';
+        currentToolArgs = [];
+      } else if (blockType === 'text') {
+        currentBlockKind = 'text';
+      } else if (blockType === 'thinking') {
+        currentBlockKind = 'thinking';
+      } else {
+        currentBlockKind = null;
+      }
+      continue;
+    }
+
     if (type === 'content_block_delta') {
       const delta = event.delta ?? {};
       if (delta.type === 'text_delta') {
@@ -133,7 +158,31 @@ export async function* parseAnthropicSSE(
           emittedContentOrTool = true;
           yield { kind: 'reasoning', data: { text } };
         }
+      } else if (delta.type === 'input_json_delta') {
+        const fragment = delta.partial_json ?? '';
+        if (fragment) {
+          currentToolArgs.push(fragment);
+        }
       }
+      continue;
+    }
+
+    if (type === 'content_block_stop') {
+      if (currentBlockKind === 'tool_use' && currentToolName !== null) {
+        emittedContentOrTool = true;
+        yield {
+          kind: 'tool_call',
+          data: {
+            id: currentToolId ?? '',
+            name: currentToolName,
+            arguments: currentToolArgs.join(''),
+          },
+        };
+      }
+      currentBlockKind = null;
+      currentToolId = null;
+      currentToolName = null;
+      currentToolArgs = [];
       continue;
     }
 
@@ -336,6 +385,20 @@ export async function* parseResponsesSSE(
 
     if (type === 'response.output_item.done') {
       const item = event.item as Record<string, unknown> | undefined;
+      if (item?.type === 'reasoning') {
+        const encryptedContent = stringValue(item.encrypted_content);
+        if (encryptedContent) {
+          yield {
+            kind: 'codex_reasoning_item',
+            data: {
+              id: item.id,
+              encrypted_content: encryptedContent,
+              summary: Array.isArray(item.summary) ? item.summary : [],
+            },
+          };
+          continue;
+        }
+      }
       if (item?.type === 'function_call') {
         emittedContentOrTool = true;
         yield {

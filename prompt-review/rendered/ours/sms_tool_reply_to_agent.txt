@@ -1,0 +1,29 @@
+{
+  "name": "reply_to_agent",
+  "description": "Send a reply to an agent \u2014 answers questions, approves/rejects write-locks, or sends any message.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "agent_id_or_prefix": {
+        "type": "string",
+        "description": "Agent ID or 6-char prefix (e.g. \"a3f2b1\")"
+      },
+      "message": {
+        "type": "string",
+        "description": "The reply text to send to the agent"
+      },
+      "attention_request_id": {
+        "type": "string",
+        "description": "If resolving a pending attention request, provide the attn_id from the Pending Requests list"
+      },
+      "reject": {
+        "type": "boolean",
+        "description": "Set to true to reject an attention request. Default: false (approve)"
+      }
+    },
+    "required": [
+      "agent_id_or_prefix",
+      "message"
+    ]
+  }
+}

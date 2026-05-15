@@ -25,7 +25,8 @@ import {
 } from './errors';
 import type { PoolSpec } from './pools';
 import { parseAnthropicSSE } from './streaming';
-import { applyAnthropicResponseFormat, transformMessagesForAnthropic } from './transforms';
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
+import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
 import { postAnthropicStream } from './transport';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
 
@@ -52,6 +53,8 @@ interface BuildBodyOptions {
   poolSpec: PoolSpec;
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
+  tools?: Array<Record<string, unknown>>;
+  toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
 }
@@ -66,6 +69,15 @@ function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>)
     if (target && typeof target === 'object') {
       (target as Record<string, unknown>).cache_control = { type: 'ephemeral' };
     }
+  }
+}
+
+function addToolCacheBreakpoint(body: Record<string, unknown>): void {
+  const tools = body.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return;
+  const last = tools[tools.length - 1];
+  if (last && typeof last === 'object') {
+    (last as Record<string, unknown>).cache_control = { type: 'ephemeral' };
   }
 }
 
@@ -84,8 +96,26 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
       cache_control: { type: 'ephemeral', scope: 'global' },
     });
   }
+  // dynamicSystem semantics, mirroring agents/providers/rose/claude_auth.py:
+  //   - No boundary inside → single uncached block (legacy "static prefix +
+  //     dynamic tail" pattern).
+  //   - Contains additional boundaries → each non-empty section is a stable
+  //     system block; mark each globally cached. Lets callers express multiple
+  //     cache layers (universal-static + per-user-stable) in one prompt.
   if (dynamicSystem) {
-    systemBlocks.push({ type: 'text', text: dynamicSystem });
+    if (dynamicSystem.includes(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)) {
+      for (const part of dynamicSystem.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)) {
+        const text = part.trim();
+        if (!text) continue;
+        systemBlocks.push({
+          type: 'text',
+          text,
+          cache_control: { type: 'ephemeral', scope: 'global' },
+        });
+      }
+    } else {
+      systemBlocks.push({ type: 'text', text: dynamicSystem });
+    }
   }
 
   addCacheBreakpoint(anthropicMessages);
@@ -101,8 +131,37 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     output_config: { effort: 'high' },
   };
 
-  applyAnthropicResponseFormat(body, opts.responseFormat);
+  // Detect whether tools were synthesized from response_format below — when
+  // they are, we MUST force tool_choice so the model emits a tool_use block
+  // (the supervisor's structured output) instead of free-form prose.
+  const cameFromResponseFormat = !opts.tools && opts.responseFormat?.json_schema !== undefined;
 
+  const nativeToolMode = applyAnthropicToolConfig(
+    body,
+    opts.responseFormat,
+    opts.tools,
+    opts.toolChoice
+  );
+
+  addToolCacheBreakpoint(body);
+
+  // Anthropic rejects `thinking` together with a forced (`any`/`tool`)
+  // tool_choice. Two resolutions, depending on which constraint matters more:
+  //   - Tools synthesized from response_format: structured output requires
+  //     the tool to fire. Drop thinking, keep tool_choice forced.
+  //   - Explicit tools with forced tool_choice from the caller: prefer
+  //     thinking, downgrade to auto.
+  const tc = body.tool_choice as Record<string, unknown> | undefined;
+  if (nativeToolMode && tc && (tc.type === 'any' || tc.type === 'tool') && 'thinking' in body) {
+    if (cameFromResponseFormat) {
+      delete body.thinking;
+    } else {
+      body.tool_choice = { type: 'auto' };
+    }
+  }
+
+  // Set effort AFTER applyAnthropicToolConfig (which may drop output_config
+  // for json_schema reasons) — effort is always valid regardless of tool mode.
   const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
   oc.effort = 'high';
   body.output_config = oc;
@@ -114,6 +173,8 @@ interface ClaudeAuthOptions {
   poolSpec: PoolSpec;
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
+  tools?: Array<Record<string, unknown>>;
+  toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
   claudeToken: string;
@@ -133,6 +194,8 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     poolSpec: opts.poolSpec,
     messages: opts.messages,
     responseFormat: opts.responseFormat,
+    tools: opts.tools,
+    toolChoice: opts.toolChoice,
     maxTokens: opts.maxTokens,
     temperature: opts.temperature,
   });

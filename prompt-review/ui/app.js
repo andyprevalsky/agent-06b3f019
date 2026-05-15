@@ -377,6 +377,10 @@ async function loadData() {
   for (const key of Object.keys(els.cols)) {
     colArticles[key] = document.querySelector(`.col-${key}`);
   }
+  // Default: collapse every agent section.
+  for (const row of DATA.rows) {
+    collapsedSections.add(row.agent || "shared");
+  }
   renderList();
   renderCurrent();
   renderProgress();
@@ -426,34 +430,174 @@ function renderProgress() {
   els.progress.textContent = `${completed} / ${total} reviewed · #${STATE.current_index + 1}`;
 }
 
+const AGENT_ORDER = [
+  "main_shared",
+  "main_plan",
+  "main_execute",
+  "planner",
+  "verifier",
+  "explore",
+  "browser",
+  "code",
+  "sms",
+  "voice",
+  "chat",
+  "shared",
+];
+const AGENT_LABELS = {
+  main_shared: "Main Agent — Shared",
+  main_plan: "Main Agent — PLAN",
+  main_execute: "Main Agent — EXECUTE",
+  planner: "Planner",
+  verifier: "Verifier",
+  explore: "Explore Sub-Agent",
+  browser: "Browser Sub-Agent",
+  code: "Code Sub-Agent",
+  sms: "SMS Supervisor",
+  voice: "Voice (VAPI)",
+  chat: "Chat (backend)",
+  shared: "Shared / Cross-cutting",
+};
+const CATEGORY_RANK = {
+  system_prompt: 0,
+  instruction_block: 1,
+  template: 2,
+  tool_description: 3,
+  tool_param_description: 4,
+};
+const SUBGROUP_OF_CATEGORY = {
+  system_prompt: "prompts",
+  instruction_block: "prompts",
+  template: "prompts",
+  tool_description: "tools",
+  tool_param_description: "tools",
+};
+const SUBGROUP_ORDER = ["prompts", "tools"];
+const SUBGROUP_LABELS = {
+  prompts: "System Prompts",
+  tools: "Tools",
+};
+const collapsedSections = new Set();
+
 function renderList() {
   const filter = (els.filter.value || "").trim().toLowerCase();
   els.list.innerHTML = "";
+
+  // Two-level grouping: agent -> subgroup (prompts/tools) -> entries
+  const groups = new Map();
   DATA.rows.forEach((row, i) => {
-    const reviewed = STATE.reviewed[row.id] || {};
-    const haystack = (row.id + " " + row.summary + " " + row.category).toLowerCase();
+    const haystack = (row.id + " " + row.summary + " " + row.category + " " + (row.agent || "")).toLowerCase();
     if (filter && !haystack.includes(filter)) return;
-    const li = document.createElement("li");
-    li.dataset.idx = i;
-    const hasEdits = reviewed.edited_text && reviewed.edited_text.trim();
-    li.className =
-      (i === STATE.current_index ? "active" : "") +
-      (reviewed.status === "completed" ? " completed" : "") +
-      (hasEdits ? " has-notes" : "");
-    const cat = document.createElement("span");
-    cat.className = "cat";
-    cat.textContent = row.category.replace(/_/g, " ").slice(0, 14);
-    const title = document.createElement("span");
-    title.textContent = row.id;
-    title.style.overflow = "hidden";
-    title.style.textOverflow = "ellipsis";
-    title.style.whiteSpace = "nowrap";
-    title.style.flex = "1";
-    li.appendChild(title);
-    li.appendChild(cat);
-    li.addEventListener("click", () => goTo(i));
-    els.list.appendChild(li);
+    const agent = row.agent || "shared";
+    const sub = SUBGROUP_OF_CATEGORY[row.category] || "prompts";
+    if (!groups.has(agent)) groups.set(agent, new Map());
+    const subgroups = groups.get(agent);
+    if (!subgroups.has(sub)) subgroups.set(sub, []);
+    subgroups.get(sub).push({ row, idx: i });
   });
+
+  for (const subgroups of groups.values()) {
+    for (const list of subgroups.values()) {
+      list.sort((a, b) => {
+        const ra = CATEGORY_RANK[a.row.category] ?? 99;
+        const rb = CATEGORY_RANK[b.row.category] ?? 99;
+        if (ra !== rb) return ra - rb;
+        return a.row.id.localeCompare(b.row.id);
+      });
+    }
+  }
+
+  const orderedAgents = [
+    ...AGENT_ORDER.filter((c) => groups.has(c)),
+    ...[...groups.keys()].filter((c) => !AGENT_ORDER.includes(c)),
+  ];
+
+  for (const agent of orderedAgents) {
+    const subgroups = groups.get(agent);
+    const label = AGENT_LABELS[agent] || agent.replace(/_/g, " ");
+
+    let totalEntries = 0;
+    let completedCount = 0;
+    for (const list of subgroups.values()) {
+      for (const { row } of list) {
+        totalEntries++;
+        const r = STATE.reviewed[row.id];
+        if (r && r.status === "completed") completedCount++;
+      }
+    }
+
+    const isCollapsed = collapsedSections.has(agent);
+
+    const header = document.createElement("li");
+    header.className = "section-header" + (isCollapsed ? " collapsed" : "");
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    caret.textContent = "▾";
+    const labelEl = document.createElement("span");
+    labelEl.className = "section-label";
+    labelEl.textContent = label;
+    const countEl = document.createElement("span");
+    countEl.className = "section-count";
+    countEl.textContent = `${completedCount}/${totalEntries}`;
+    header.appendChild(caret);
+    header.appendChild(labelEl);
+    header.appendChild(countEl);
+    header.addEventListener("click", () => {
+      if (collapsedSections.has(agent)) collapsedSections.delete(agent);
+      else collapsedSections.add(agent);
+      renderList();
+    });
+    els.list.appendChild(header);
+
+    if (isCollapsed) continue;
+
+    const orderedSubs = [
+      ...SUBGROUP_ORDER.filter((s) => subgroups.has(s)),
+      ...[...subgroups.keys()].filter((s) => !SUBGROUP_ORDER.includes(s)),
+    ];
+
+    for (const sub of orderedSubs) {
+      const entries = subgroups.get(sub);
+      const subLabel = SUBGROUP_LABELS[sub] || sub;
+      const subCompleted = entries.filter(({ row }) => {
+        const r = STATE.reviewed[row.id];
+        return r && r.status === "completed";
+      }).length;
+
+      const subHeader = document.createElement("li");
+      subHeader.className = "subsection-header";
+      const subLabelEl = document.createElement("span");
+      subLabelEl.className = "sub-label";
+      subLabelEl.textContent = subLabel;
+      const subCountEl = document.createElement("span");
+      subCountEl.className = "sub-count";
+      subCountEl.textContent = `${subCompleted}/${entries.length}`;
+      subHeader.appendChild(subLabelEl);
+      subHeader.appendChild(subCountEl);
+      els.list.appendChild(subHeader);
+
+      for (const { row, idx } of entries) {
+        const reviewed = STATE.reviewed[row.id] || {};
+        const li = document.createElement("li");
+        li.dataset.idx = idx;
+        const hasEdits = reviewed.edited_text && reviewed.edited_text.trim();
+        li.className =
+          "entry" +
+          (idx === STATE.current_index ? " active" : "") +
+          (reviewed.status === "completed" ? " completed" : "") +
+          (hasEdits ? " has-notes" : "");
+        const title = document.createElement("span");
+        title.textContent = row.id;
+        title.style.overflow = "hidden";
+        title.style.textOverflow = "ellipsis";
+        title.style.whiteSpace = "nowrap";
+        title.style.flex = "1";
+        li.appendChild(title);
+        li.addEventListener("click", () => goTo(idx));
+        els.list.appendChild(li);
+      }
+    }
+  }
 }
 
 function setColEmpty(col, msg) {
@@ -489,7 +633,8 @@ function renderCurrent() {
 
   els.rowId.textContent = row.id;
   els.rowSummary.textContent = row.summary;
-  els.rowPath.textContent = `${row.path} · ${row.category}`;
+  const agentLabel = AGENT_LABELS[row.agent] || row.agent || "shared";
+  els.rowPath.textContent = `${row.path} · ${row.category} · agent: ${agentLabel}`;
 
   // Helper: render a "rendered ✓" or "source ⚠" badge inline in a sub label.
   const sourceBadge = (s) => {

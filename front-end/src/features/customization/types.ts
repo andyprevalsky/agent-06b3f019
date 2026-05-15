@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 export interface CustomizationData {
   systemName: string;
   profilePicture: string | null;
@@ -9,4 +11,5 @@ export interface SystemCustomizationProps {
   onChange: (data: CustomizationData) => void;
   isLoading?: boolean;
   compact?: boolean;
+  promptReplacement?: ReactNode;
 }

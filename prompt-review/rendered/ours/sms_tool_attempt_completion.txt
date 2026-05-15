@@ -1,0 +1,16 @@
+{
+  "name": "attempt_completion",
+  "description": "Send the final SMS message to the user. Call this when you are done thinking and using tools.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "The SMS message to send to the user"
+      }
+    },
+    "required": [
+      "message"
+    ]
+  }
+}

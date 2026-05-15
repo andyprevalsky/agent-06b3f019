@@ -67,6 +67,8 @@ import { useMessageSending } from '@/features/terminal/hooks/useMessageSending';
 import { useTerminalAgents } from '@/features/terminal/hooks/useTerminalAgents';
 // eslint-disable-next-line import/first
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
+// eslint-disable-next-line import/first
+import { signOut } from '@/lib/supabase';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -537,6 +539,7 @@ describe('useTerminalAgents', () => {
     (ctxState.setSelectedAgentId as any).mockReset();
     authState.refreshAuthState.mockClear();
     authState.signOut.mockClear();
+    vi.mocked(signOut).mockResolvedValue(undefined);
     server.use(
       http.get(`${API_BASE}/agents/:agentId/ancestors`, () => HttpResponse.json({ ancestors: [] })),
       http.get(`${API_BASE}/agents`, () => HttpResponse.json({ agents: [] })),
@@ -602,6 +605,37 @@ describe('useTerminalAgents', () => {
     });
     expect(authState.refreshAuthState).toHaveBeenCalledWith('logout');
     expect(setCurrentView).toHaveBeenCalledWith('agents');
+    unmount();
+  });
+
+  it('handleLogout refreshes auth state before persisted signOut finishes', async () => {
+    let finishSignOut: (() => void) | null = null;
+    vi.mocked(signOut).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSignOut = resolve;
+        }),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+    );
+
+    let logoutResolved = false;
+    const logoutAct = act(async () => {
+      await result.current.handleLogout();
+      logoutResolved = true;
+    });
+
+    await waitFor(() => {
+      expect(authState.refreshAuthState).toHaveBeenCalledWith('logout');
+    });
+    expect(setCurrentView).toHaveBeenCalledWith('agents');
+    expect(logoutResolved).toBe(false);
+
+    finishSignOut?.();
+    await logoutAct;
+    expect(logoutResolved).toBe(true);
     unmount();
   });
 

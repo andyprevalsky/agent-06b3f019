@@ -5,6 +5,7 @@
  *     │                                                                       │
  *     ├── (type in name field) → update systemName                           │
  *     ├── (type in prompt field) → update customSystemPrompt                 │
+ *     ├── (promptReplacement provided) → render replacement instead of prompt │
  *     │                                                                       │
  *     └── (click upload) → [UPLOADING] → (success) → update profilePicture ──┘
  *                              │
@@ -153,12 +154,15 @@ export default function SystemCustomization({
   onChange,
   isLoading = false,
   compact = false,
+  promptReplacement,
 }: SystemCustomizationProps) {
   return (
     <div className={cn('space-y-6', compact && 'space-y-4')}>
       <NameField data={data} onChange={onChange} isLoading={isLoading} />
       <ProfilePictureField data={data} onChange={onChange} isLoading={isLoading} />
-      <PromptField data={data} onChange={onChange} isLoading={isLoading} compact={compact} />
+      {promptReplacement ?? (
+        <PromptField data={data} onChange={onChange} isLoading={isLoading} compact={compact} />
+      )}
     </div>
   );
 }
