@@ -36,6 +36,7 @@ import {
   useIntegrationHandlers,
   useAuth,
 } from '../hooks';
+import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 
 import IntegrationModals from './IntegrationModals';
 import IntegrationSections from './IntegrationSections';
@@ -54,6 +55,7 @@ export default function Integrations() {
   const messages = useMessagesSync(handlers, data.fetchIntegrations);
   const fileUpload = useFileUpload();
   const gmail = useGmailConnect(data.fetchIntegrations);
+  const plaid = usePlaidIntegration();
   const oauth = useOAuthRedirect(data.fetchIntegrations);
   const actions = useIntegrationActions({
     handleBrowserSync: browser.handleBrowserSync,
@@ -112,6 +114,7 @@ export default function Integrations() {
               messages={messages}
               gmail={gmail}
               actions={actions}
+              plaid={plaid}
             />
           )}
         </div>

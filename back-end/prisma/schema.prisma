@@ -397,6 +397,7 @@ model Integration {
   createdAt            DateTime                     @default(now())
   updatedAt            DateTime                     @updatedAt
   emailCredentials     EmailIntegrationCredential[]
+  plaidItems           PlaidItem[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -425,6 +426,61 @@ model EmailIntegrationCredential {
   @@unique([userId, provider, email])
   @@index([integrationId])
   @@index([userId, provider])
+}
+
+/// Plaid Item: one connected financial institution per user.
+/// Holds the encrypted long-lived access token issued by Plaid after
+/// successful Link exchange.
+model PlaidItem {
+  id                   String          @id @default(uuid())
+  userId               String
+  integrationId        String
+  plaidItemId          String          @unique
+  plaidInstitutionId   String?
+  institutionName      String?
+  /// Base64-encoded RSA-2048 + AES-256-GCM envelope wrapping the Plaid
+  /// access_token. Encrypted on the backend at write time; decrypted only
+  /// at the moment of a Plaid API call. See providers/plaidCredentials.ts.
+  encryptedAccessToken String
+  status               PlaidItemStatus @default(ACTIVE)
+  products             String[]        @default([])
+  cursor               String?
+  lastSyncAt           DateTime?
+  lastWebhookAt        DateTime?
+  errorCode            String?
+  errorMessage         String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  disconnectedAt       DateTime?
+  integration          Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  accounts             PlaidAccount[]
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([integrationId])
+}
+
+/// Plaid Account: per-account metadata exposed by Plaid for a given Item.
+/// Holds no balances or transactions; those are fetched on demand and not
+/// persisted by this table.
+model PlaidAccount {
+  id                 String    @id @default(uuid())
+  userId             String
+  plaidItemId        String
+  plaidAccountId     String    @unique
+  name               String
+  officialName       String?
+  mask               String?
+  type               String
+  subtype            String?
+  verificationStatus String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  disconnectedAt     DateTime?
+  plaidItem          PlaidItem @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([plaidItemId])
 }
 
 model RoseApiKey {
@@ -713,6 +769,13 @@ enum IntegrationStatus {
 enum EmailProvider {
   GMAIL
   YAHOO
+}
+
+enum PlaidItemStatus {
+  ACTIVE
+  DISCONNECTED
+  REQUIRES_REAUTH
+  ERROR
 }
 
 model SmsSession {

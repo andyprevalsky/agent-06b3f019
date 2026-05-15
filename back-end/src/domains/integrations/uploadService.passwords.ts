@@ -12,7 +12,7 @@ import {
   IntegrationStatus,
 } from './types';
 import { createLogger } from '../../providers/logger';
-import { RSA_PUBLIC_KEY_PEM } from './config';
+import { RSA_PUBLIC_KEY_PEM } from '../../providers/encryptionKeys';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');

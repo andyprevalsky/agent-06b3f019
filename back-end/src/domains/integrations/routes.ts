@@ -1,7 +1,7 @@
 /**
  * Integrations domain routes — main router + CRUD + mounts sub-routers.
  * Sub-routers: routes.upload.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
- * routes.compute.ts
+ * routes.compute.ts, routes.plaid.ts
  */
 
 import { type Response, Router } from 'express';
@@ -14,6 +14,7 @@ import browserRoutes from './routes.browser';
 import emailRoutes from './routes.email';
 import claudeRoutes from './routes.claude';
 import computeRoutes from './routes.compute';
+import plaidRoutes from './routes.plaid';
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.use(browserRoutes);
 router.use(emailRoutes);
 router.use(claudeRoutes);
 router.use(computeRoutes);
+router.use(plaidRoutes);
 
 // ---------------------------------------------------------------------------
 // CRUD routes

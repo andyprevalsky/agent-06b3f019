@@ -7,6 +7,7 @@
  */
 import { useState, useEffect, useRef } from 'react';
 import { Check, Loader2, ArrowRight, RefreshCw } from 'lucide-react';
+import { usePlaidLink, type PlaidLinkOnSuccessMetadata } from 'react-plaid-link';
 import AtlasPasswordModal from '../../../components/AtlasPasswordModal';
 import ApplePasswordsModal from '../../../components/ApplePasswordsModal';
 import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
@@ -14,6 +15,7 @@ import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import AgentPayModal from '../../../components/AgentPayModal';
 import type { BrowserInfo, BrowserType, Integration } from '../types';
 import { useOnboardingDataApi } from '../hooks';
+import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 
 // Browser icons
 import chromeIcon from '../../../assets/chrome-icon.png';
@@ -142,6 +144,12 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [connectedEmails, setConnectedEmails] = useState<string[]>([]);
   const [gmailLoading, setGmailLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // Plaid (Banking) state
+  const [plaidLoading, setPlaidLoading] = useState(false);
+  const [connectedBanks, setConnectedBanks] = useState<string[]>([]);
+  const [plaidLinkToken, setPlaidLinkToken] = useState<string | null>(null);
+  const [plaidError, setPlaidError] = useState<string | null>(null);
 
   // Browser sync state
   const [installedBrowsers, setInstalledBrowsers] = useState<BrowserInfo[]>([]);
@@ -323,6 +331,19 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         const settings = await onboardingDataApi.fetchUserSettings();
         if (settings !== null && settings.encryptedPaymentInformation) {
           setAgentPayConfigured(true);
+        }
+
+        // Hydrate connected banks (Plaid items)
+        try {
+          const plaidItems = await onboardingDataApi.fetchPlaidItems();
+          setConnectedBanks(
+            plaidItems
+              .filter((i) => i.status === 'ACTIVE')
+              .map((i) => i.institutionName ?? 'Connected institution')
+          );
+        } catch (err) {
+          // Plaid hydration failures are non-fatal during onboarding.
+          console.error('Failed to fetch Plaid items:', err);
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -588,6 +609,73 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       console.error('[LinkedIn] Failed to start sync agent:', err);
     } finally {
       setLinkedinSyncLoading(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Plaid (Banking) lifecycle
+  // ---------------------------------------------------------------------------
+
+  const handlePlaidSuccess = async (
+    publicToken: string,
+    metadata: PlaidLinkOnSuccessMetadata
+  ): Promise<void> => {
+    try {
+      await onboardingDataApi.exchangePlaidPublicToken({
+        publicToken,
+        institutionId: metadata.institution?.institution_id,
+        institutionName: metadata.institution?.name,
+      });
+      const items = await onboardingDataApi.fetchPlaidItems();
+      setConnectedBanks(
+        items
+          .filter((i) => i.status === 'ACTIVE')
+          .map((i) => i.institutionName ?? 'Connected institution')
+      );
+      setPlaidError(null);
+    } catch (err) {
+      setPlaidError(getErrorMessageOrFallback(err, 'Failed to connect bank'));
+    } finally {
+      setPlaidLoading(false);
+      setPlaidLinkToken(null);
+    }
+  };
+
+  const handlePlaidExit = (
+    err: { display_message?: string; error_message?: string } | null
+  ): void => {
+    if (err) {
+      setPlaidError(err.display_message ?? err.error_message ?? 'Plaid Link exited');
+    }
+    setPlaidLoading(false);
+    setPlaidLinkToken(null);
+  };
+
+  const plaidLink = usePlaidLink({
+    token: plaidLinkToken,
+    onSuccess: (publicToken: string, metadata: PlaidLinkOnSuccessMetadata): void => {
+      void handlePlaidSuccess(publicToken, metadata);
+    },
+    onExit: (err: { display_message?: string; error_message?: string } | null): void => {
+      handlePlaidExit(err);
+    },
+  });
+
+  useEffect(() => {
+    if (plaidLinkToken !== null && plaidLink.ready) {
+      plaidLink.open();
+    }
+  }, [plaidLinkToken, plaidLink.ready]);
+
+  const handlePlaidConnect = async (): Promise<void> => {
+    setPlaidError(null);
+    setPlaidLoading(true);
+    try {
+      const tokenResp = await onboardingDataApi.createPlaidLinkToken();
+      setPlaidLinkToken(tokenResp.link_token);
+    } catch (err) {
+      setPlaidError(getErrorMessageOrFallback(err, 'Failed to create Plaid link token'));
+      setPlaidLoading(false);
     }
   };
 
@@ -1311,6 +1399,73 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                   <RefreshCw className="w-4 h-4" />
                 )}
               </button>
+            </div>
+          </div>
+
+          {/* Banking (Plaid) */}
+          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
+            <div className="p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <defs>
+                      <linearGradient id="plaidBankingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#10b981" />
+                        <stop offset="100%" stopColor="#22c55e" />
+                      </linearGradient>
+                    </defs>
+                    <path
+                      d="M12 2L3 7v10l9 5 9-5V7l-9-5zm0 2.2L18.8 8 12 11.8 5.2 8 12 4.2zM5 9.5l6 3.4v7.3l-6-3.4V9.5zm14 0v7.3l-6 3.4v-7.3l6-3.4z"
+                      fill="url(#plaidBankingGradient)"
+                    />
+                  </svg>
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-foreground">Banking</div>
+                  <div className="text-xs text-muted-foreground">
+                    {connectedBanks.length > 0
+                      ? connectedBanks.join(', ')
+                      : 'Connect a bank account via Plaid'}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  void handlePlaidConnect();
+                }}
+                disabled={plaidLoading}
+                aria-label="Connect a bank via Plaid"
+                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
+                  connectedBanks.length > 0
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-foreground text-background hover:bg-foreground/90'
+                } disabled:opacity-60`}
+              >
+                {plaidLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : connectedBanks.length > 0 ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <RefreshCw className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+            {plaidError !== null && (
+              <div className="px-4 py-2 border-t border-border/50 text-xs text-destructive">
+                {plaidError}
+              </div>
+            )}
+            <div className="px-4 py-2 border-t border-border/50 text-[10px] text-muted-foreground flex items-center justify-end gap-1">
+              <span>Powered by</span>
+              <a
+                href="https://plaid.com"
+                target="_blank"
+                rel="noreferrer noopener"
+                className="font-medium underline-offset-2 hover:underline"
+              >
+                Plaid
+              </a>
             </div>
           </div>
         </div>

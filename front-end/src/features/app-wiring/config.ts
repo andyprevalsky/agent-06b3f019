@@ -10,6 +10,7 @@ import Terminal from '@/features/terminal';
 import ResearchBlog from '@/features/research-blog';
 import ResearchBlogPost from '@/features/research-blog-post';
 import Download from '@/features/download';
+import { PlaidOAuthRedirect } from '@/features/integrations';
 
 /**
  * Application route table.
@@ -24,6 +25,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/research', component: ResearchBlog },
   { path: '/research/:slug', component: ResearchBlogPost },
   { path: '/download', component: Download },
+  { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },
   { path: '*', component: NotFound, isCatchAll: true },
 ] as const;
 
