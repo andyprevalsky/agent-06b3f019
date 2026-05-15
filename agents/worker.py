@@ -55,7 +55,7 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agents_batch_activity,
 )
 from domains.wait_for.service import evaluate_condition_activity
-from domains.web_fetch.handler import web_fetch_activity
+from domains.web_fetch.handler import web_fetch_activity, web_fetch_download_activity
 from health_server import run_health_server, set_queue_metrics, set_worker_status
 
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -76,8 +76,10 @@ from helpers import (
     mark_finished,
     poll_new_messages,
     post_agent_message,
+    summarize_tool_result,
     update_agent_status,
 )
+from helpers.summarize import summarize_and_filter_links
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.llm import (
     call_planner_llm_activity,
@@ -880,6 +882,7 @@ async def main():
             # New event-driven tool activities
             web_search_activity,
             web_fetch_activity,
+            web_fetch_download_activity,
             save_tool_usage,
             read_message_history_activity,
             generate_message_activity,
@@ -903,6 +906,8 @@ async def main():
             update_agent_status,
             compress_context,
             generate_completion_summary,
+            summarize_tool_result,
+            summarize_and_filter_links,
             spawn_explore_agent_activity,
             _resolve_explore_attachments_activity,
             fetch_full_network_metadata,

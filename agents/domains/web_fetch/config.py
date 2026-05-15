@@ -1,20 +1,22 @@
 """Web fetch domain config — constants, limits, and MIME type mappings."""
 
-import re
-
-# ── Regex patterns for media/file detection ──
-
-IMAGE_EXTENSIONS = r"\.(?:png|jpg|jpeg|gif|svg|webp|ico|bmp|tiff|avif)"
-FILE_EXTENSIONS = r"\.(?:pdf|doc|docx|xls|xlsx|csv|zip|rar|ppt|pptx|txt|mp3|mp4|mov|avi)"
-RE_FLAGS = re.IGNORECASE
-
 # ── Download limits ──
 
 MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50 MB per file
 
-# ── Cost tracking ──
+# ── Firecrawl ──
 
-PARALLEL_AI_COST_CENTS = 0.5  # ~$0.005 per URL
+# Hard cap on the markdown payload we send to Haiku. Mirrors Claude Code's
+# MAX_MARKDOWN_LENGTH (~40k chars ≈ 10k tokens) — beyond this the Haiku call
+# pays diminishing returns and risks the "Prompt is too long" error on the
+# small model.
+MAX_MARKDOWN_LENGTH = 40_000
+
+# Per-call cost (Firecrawl Standard tier = $83/mo / 100k credits ≈ $0.00083).
+# Stored in cents for parity with other service-cost entries.
+FIRECRAWL_COST_CENTS = 0.083
+
+FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 120.0
 
 # ── MIME type mapping ──
 

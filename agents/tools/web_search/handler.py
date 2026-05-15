@@ -16,6 +16,7 @@ from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_
 from tools.web_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
     COST_CENTS_PER_QUERY,
+    DEFAULT_MAX_TOKENS,
     QUERY_DISPLAY_MAX_LENGTH,
     RETRY_BACKOFF_COEFFICIENT,
     RETRY_INITIAL_INTERVAL_SECONDS,
@@ -65,7 +66,7 @@ class WebSearchManager(ToolManager):
             Result dict with answer, sources, query, model.
         """
         query = tool_call.get("query", "")
-        max_tokens = tool_call.get("max_tokens", 1500)
+        max_tokens = tool_call.get("max_tokens", DEFAULT_MAX_TOKENS)
 
         start_time = _safe_time()
 
@@ -213,7 +214,7 @@ async def web_search(
 
 @activity.defn
 @traced("web_search_activity")
-async def web_search_activity(query: str, max_tokens: int = 1500) -> dict[str, Any]:
+async def web_search_activity(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
     Uses Parallel AI's search API for real-time web access.
@@ -222,7 +223,8 @@ async def web_search_activity(query: str, max_tokens: int = 1500) -> dict[str, A
 
     Args:
         query: Search query or question.
-        max_tokens: Maximum tokens for response (default: 1500).
+        max_tokens: Maximum tokens for response. Defaults to DEFAULT_MAX_TOKENS
+            (source-of-truth cap in tools/web_search/config.py).
 
     Returns:
         Dict with answer, sources, query, and provider.

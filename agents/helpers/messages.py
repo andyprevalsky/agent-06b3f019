@@ -12,6 +12,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.context_scope import filter_internal_subagent_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
@@ -530,12 +531,19 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
         new_messages = data.get('messages', [])
-        
+
+        # Drop sub-agent internal work-stream rows before crossing the activity
+        # boundary. Every downstream caller filters them anyway (see
+        # loop/context_utils.py and workflows/agent_workflow.py); doing it here
+        # keeps the Temporal payload under the 2 MB cap when sub-agents have
+        # produced large transcripts (e.g. post-DAG verifier polling from epoch).
+        new_messages = filter_internal_subagent_messages(new_messages)
+
         if new_messages:
             logger.info(
                 f"New messages found: agent_id={agent_id}, count={len(new_messages)}, roles={set(m['role'] for m in new_messages)}"
             )
-        
+
         return new_messages
         
     except Exception as e:

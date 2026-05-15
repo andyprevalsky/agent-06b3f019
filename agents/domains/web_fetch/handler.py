@@ -1,4 +1,23 @@
-"""Web fetch domain handler — tool entry point and Temporal activity."""
+"""Web fetch domain handler — tool entry point and Temporal activities.
+
+Three-activity flow (kept separate so claude/gpt token rotation signals can
+flow through the workflow rather than being swallowed inside one combined
+activity):
+
+  1. ``web_fetch_activity``           — Firecrawl scrape, returns
+                                        ``{markdown, links, metadata}``.
+  2. ``summarize_and_filter_links``    — Haiku call (structured output via
+                                        Pydantic ``WebFetchHaikuResponse``);
+                                        returns ``{summary, files_to_download}``.
+  3. ``web_fetch_download_activity``   — download Haiku-curated file URLs,
+                                        upload to Supabase, return file
+                                        pointers.
+
+Mirrors Claude Code's WebFetchTool pattern (small fast model on top of a
+fetch). PDFs and other binary files are downloaded as bytes, not inline-
+extracted by Firecrawl's ``parsers`` option — agents expect file_pointer
+attachments, not inlined text.
+"""
 
 import time
 from datetime import timedelta
@@ -8,10 +27,11 @@ import structlog
 from temporalio import activity
 from temporalio.common import RetryPolicy
 
-from domains.web_fetch.config import PARALLEL_AI_COST_CENTS
-from domains.web_fetch.service import fetch_and_extract
+from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH
+from domains.web_fetch.service import download_and_attach, scrape_url
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
+from helpers.summarize import summarize_and_filter_links
 from helpers.tracing import traced
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 
@@ -41,11 +61,31 @@ def _format_fetch_title(prefix: str, url: str, objective: str) -> str:
     return f"{prefix} {display_url}"
 
 
+def _format_attachment_note(file_pointers: List[Dict[str, Any]]) -> str:
+    """Mirror Claude Code's '[Binary content (mime, size) also saved to {path}]' note.
+
+    Appended to the Haiku summary so the parent agent sees the file_pointers
+    inline in the conversation and can pass `attachments=[original_filename]`
+    when spawning a sub-agent.
+    """
+    if not file_pointers:
+        return ""
+    lines = ["[Downloaded {} file(s):".format(len(file_pointers))]
+    for fp in file_pointers:
+        name = fp.get("original_filename") or fp.get("filename") or "file"
+        mime = fp.get("mime_type") or "application/octet-stream"
+        size = fp.get("size_bytes")
+        size_str = f", {size} bytes" if isinstance(size, int) else ""
+        lines.append(f" - {name} ({mime}{size_str})")
+    lines[-1] += "]"
+    return "\n\n" + "\n".join(lines)
+
+
 class WebFetchManager(ToolManager):
-    """Manager for web fetch operations using Parallel AI's extract capability."""
+    """Manager for the web_fetch tool: Firecrawl scrape + Haiku filter + file download."""
 
     tool_name = "web_fetch"
-    read_only = True  # Research phase tool
+    read_only = True  # Research-phase tool
 
     async def execute_tool(
         self,
@@ -54,6 +94,13 @@ class WebFetchManager(ToolManager):
         tool_call_id: str,
         agent_id: str,
         user_id: Optional[str] = None,
+        claude_token: Optional[str] = None,
+        claude_token_source: Optional[str] = None,
+        claude_token_pool_id: Optional[str] = None,
+        gpt_token: Optional[str] = None,
+        gpt_account_id: Optional[str] = None,
+        gpt_token_source: Optional[str] = None,
+        gpt_token_pool_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Execute web fetch and post events via handle_tool_event."""
         url = tool_call.get("url", "")
@@ -81,22 +128,12 @@ class WebFetchManager(ToolManager):
         )
 
         try:
-            logger.info(
-                "Calling web_fetch_activity",
-                url=url,
-                objective_len=len(objective),
-                download_files=tool_call.get("download_files"),
-            )
-            result = await execute_activity(
+            logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
+
+            # 1) Firecrawl scrape
+            scrape_result = await execute_activity(
                 web_fetch_activity,
-                args=[
-                    url,
-                    objective,
-                    tool_call.get("excerpts", True),
-                    tool_call.get("full_content", False),
-                    tool_call.get("download_files"),
-                    user_id,
-                ],
+                args=[url],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
@@ -105,6 +142,75 @@ class WebFetchManager(ToolManager):
                     maximum_interval=timedelta(seconds=10),
                 ),
             )
+            markdown: str = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
+            links: List[str] = scrape_result.get("links", []) if isinstance(scrape_result, dict) else []
+
+            # 2) Haiku filter — structured output via WebFetchHaikuResponse
+            haiku_result = await execute_activity(
+                summarize_and_filter_links,
+                args=[
+                    url,
+                    objective,
+                    markdown,
+                    links,
+                    MAX_MARKDOWN_LENGTH,
+                    "rose-labs/rose-1-mini",
+                    claude_token,
+                    claude_token_source,
+                    claude_token_pool_id,
+                    user_id,  # claude_token_user_id
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    user_id,  # gpt_token_user_id
+                    agent_id,
+                ],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            summary_text: str = haiku_result.get("summary", "") if isinstance(haiku_result, dict) else ""
+            files_to_download: List[str] = (
+                haiku_result.get("files_to_download", []) if isinstance(haiku_result, dict) else []
+            )
+
+            # 3) Download Haiku-curated files (no-op when list is empty)
+            file_pointers: List[Dict[str, Any]] = []
+            if files_to_download:
+                file_pointers = await execute_activity(
+                    web_fetch_download_activity,
+                    args=[files_to_download, user_id],
+                    start_to_close_timeout=timedelta(seconds=180),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+
+            # Assemble the tool-message body. Append the attachment note
+            # (Claude Code pattern) so the agent sees the files inline.
+            content_text = summary_text + _format_attachment_note(file_pointers)
+            result: Dict[str, Any] = {
+                "content": content_text,
+                "url": url,
+                "objective": objective,
+                "summarized": haiku_result.get("summarized", False) if isinstance(haiku_result, dict) else False,
+                "downloaded_files": file_pointers,
+                "links_discovered": len(links),
+                "links_downloaded": len(file_pointers),
+            }
+
+            # Cost-accounting LLM item for the Haiku call.
+            haiku_usage: Optional[Dict[str, Any]] = (
+                haiku_result.get("usage") if isinstance(haiku_result, dict) else None
+            )
+            summarizer_llm_item: Optional[Dict[str, Any]] = None
+            if isinstance(haiku_usage, dict) and haiku_usage:
+                summarizer_llm_item = {
+                    "tokens_in": haiku_usage.get("prompt_tokens", 0),
+                    "tokens_out": haiku_usage.get("completion_tokens", 0),
+                    "model": haiku_usage.get("actual_model", "rose-labs/rose-1-lite"),
+                    "provider": "Rose (summarize_web_fetch)",
+                    "cache_read_input_tokens": haiku_usage.get("cache_read_input_tokens", 0),
+                    "cache_creation_input_tokens": haiku_usage.get("cache_creation_input_tokens", 0),
+                }
 
             elapsed_time = _safe_time() - start_time
 
@@ -112,7 +218,7 @@ class WebFetchManager(ToolManager):
                 params=tool_call,
                 result=result,
                 time_elapsed=elapsed_time,
-                cost_cents=PARALLEL_AI_COST_CENTS,
+                cost_cents=FIRECRAWL_COST_CENTS,
             )
 
             await handle_tool_event(
@@ -129,12 +235,17 @@ class WebFetchManager(ToolManager):
                 user_id=user_id,
             )
 
+            usage_dict: Dict[str, Any] = {
+                "llm": [summarizer_llm_item] if summarizer_llm_item else [],
+                "service": [{"cost_cents": FIRECRAWL_COST_CENTS, "provider": "Firecrawl scrape"}],
+            }
+            # Surface raw Haiku usage so the workflow can route claude_token_error /
+            # claude_token_rotated / compute_token_used signals through _on_tokens
+            # for pool-token rotation.
             return {
                 "result": result,
-                "usage": {
-                    "llm": [],
-                    "service": [{"cost_cents": PARALLEL_AI_COST_CENTS, "provider": "Parallel AI Extract"}],
-                },
+                "usage": usage_dict,
+                "summarizer_rotation_signal": haiku_usage,
             }
 
         except Exception as e:
@@ -171,7 +282,7 @@ _manager: Optional[WebFetchManager] = None
 
 def get_manager() -> WebFetchManager:
     """Get or create web fetch manager singleton."""
-    global _manager
+    global _manager  # noqa: PLW0603
     if _manager is None:
         _manager = WebFetchManager()
     return _manager
@@ -198,32 +309,35 @@ async def web_fetch(
     )
 
 
-# ── Temporal activity ──
+# ── Temporal activities ──
 
 
 @activity.defn
 @traced("web_fetch_activity")
-async def web_fetch_activity(
-    url: str,
-    objective: str,
-    excerpts: bool = True,
-    full_content: bool = False,
-    download_files: Optional[List[str]] = None,
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Activity: Fetch and extract content from a URL with JavaScript rendering support.
+async def web_fetch_activity(url: str) -> Dict[str, Any]:
+    """Activity: Firecrawl scrape (JS rendering, main-content extraction).
 
-    Uses Parallel AI's extract API for content extraction from JS-rendered pages.
+    Returns ``{markdown, links, metadata}``. Raises on Firecrawl HTTP errors —
+    the caller surfaces the error to the agent rather than silently degrading.
     """
+    from domains.web_fetch.service import scrape_url
+
     try:
-        return await fetch_and_extract(
-            url=url,
-            objective=objective,
-            excerpts=excerpts,
-            full_content=full_content,
-            download_files=download_files,
-            user_id=user_id,
-        )
+        return await scrape_url(url)
     except Exception as e:
-        logger.error("Web fetch failed", error=str(e), url=url, objective=objective)
+        logger.error("Web fetch (Firecrawl) failed", error=str(e), url=url)
         raise
+
+
+@activity.defn
+@traced("web_fetch_download_activity")
+async def web_fetch_download_activity(
+    file_urls: List[str],
+    user_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Activity: download Haiku-curated file URLs and upload to Supabase storage.
+
+    Returns file_pointer dicts. Best-effort — individual download failures are
+    logged and skipped, not raised.
+    """
+    return await download_and_attach(file_urls=file_urls, user_id=user_id)

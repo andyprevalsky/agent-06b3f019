@@ -1556,6 +1556,9 @@ async def call_llm_structured_streaming(  # noqa: C901
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
     thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
     effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
+    deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
+    ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
+    idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
@@ -1678,6 +1681,14 @@ async def call_llm_structured_streaming(  # noqa: C901
                 return reasoning + "\n\n" + text_buffer
             return reasoning or text_buffer
 
+        rose_kwargs: Dict[str, Any] = {}
+        if deadline_s is not None:
+            rose_kwargs["deadline_s"] = deadline_s
+        if ttft_timeout_s is not None:
+            rose_kwargs["ttft_timeout_s"] = ttft_timeout_s
+        if idle_timeout_s is not None:
+            rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
+
         try:
             async for chunk in rose_client.complete(
                 pool=pool,
@@ -1694,6 +1705,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 call_site=call_site,
                 thinking=thinking,
                 effort=effort,
+                **rose_kwargs,
             ):
                 chunk_count += 1
 
@@ -4639,6 +4651,8 @@ async def call_planner_llm_activity(
             skip_cache_write=False,
             call_site="planner",
             effort="max",
+            deadline_s=220.0,
+            ttft_timeout_s=120.0,
         )
         llm_elapsed = time.perf_counter() - llm_start
         activity_elapsed = time.perf_counter() - activity_start

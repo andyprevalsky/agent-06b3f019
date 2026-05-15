@@ -32,14 +32,14 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 |-----|-------|-------------|
 | `basic` | chat-mode, spawn-sub-agents, parallel-tool-calls, message-person | Core agent capabilities |
 | `chat` | chat-mode | Chat mode only |
-| `approval` | message-person, family-office-angel-outreach | Tasks requiring approval handling |
+| `approval` | message-person, outreach-batch | Tasks requiring approval handling |
 | `browser` | browser-agent | Browser agent tasks |
 | `claude-code` | claude-code-agent, files-in-sub-agents | Claude Code sandbox tasks |
 | `attachment` | image-handling, files-in-sub-agents, agent-for-each | Tasks with file attachments |
-| `for-each` | agent-for-each, family-office-angel-outreach | Multi-agent for-each tasks |
-| `outreach` | family-office-angel-outreach | Personalized outreach at scale |
+| `for-each` | agent-for-each, outreach-batch | Multi-agent for-each tasks |
+| `outreach` | outreach-batch | Personalized outreach at scale |
 | `job-applications` | job-applications | Job application blitz with resumes |
-| `all` | Everything | All 12 tasks |
+| `all` | Everything | All tasks |
 
 ## Tasks
 
@@ -54,9 +54,8 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 | 7 | image-handling | 300s | 100c | — | rs.jpeg |
 | 8 | files-in-sub-agents | 600s | 300c | — | rs.jpeg |
 | 9 | agent-for-each | 600s | 500c | — | entities-12.csv |
-| 10 | family-office-angel-outreach | 600s | 1000c | prompt_user | vcs-and-angels.csv |
-| 11 | build-boxing-payment | 900s | 1000c | prompt_user | waivers PDFs |
-| 12 | job-applications | 900s | 1000c | prompt_user | 2x resume PDFs |
+| 10 | build-boxing-payment | 900s | 1000c | prompt_user | waivers PDFs |
+| 11 | job-applications | 900s | 1000c | prompt_user | 2x resume PDFs |
 
 ## How It Works
 
