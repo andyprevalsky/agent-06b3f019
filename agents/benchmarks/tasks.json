@@ -18,8 +18,8 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level General-Purpose Agent Spawning",
-    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent MUST use direct web_search only, MUST NOT use a browser agent, Claude Code, code sandbox, or additional sub-agents, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
-    "eval_prompt": "Agent spawned exactly 2 general-purpose agents (one for Tokyo, one for NYC) using spawn_general_purpose_agent. Each child used direct web_search instead of browser/code/sub-agents. Collected both population numbers and multiplied them. The final answer contains a numeric product of two population figures.",
+    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+    "eval_prompt": "Agent spawned exactly 2 general-purpose agents (one for Tokyo, one for NYC) using spawn_general_purpose_agent. Each child used explore-agent web research instead of browser/code detours. Collected both population numbers and multiplied them. The final answer contains a numeric product of two population figures.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent"],
@@ -42,11 +42,11 @@
   {
     "name": "parallel-tool-calls",
     "title": "Parallel Web Searches",
-    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. Call web_search directly at least three times, preferably in parallel: one search for each city covering cost of living, best neighborhoods, and weather. Synthesize the search results into a comparison table. Do NOT spawn sub-agents, use Claude Code, or use any code sandbox; just use web_search and present the results directly as text.",
-    "eval_prompt": "Agent called web_search directly at least 3 times for cost of living, neighborhoods, and weather across Austin, Denver, and Lisbon. Results are synthesized into a comparison table. No sub-agents were spawned.",
+    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
+    "eval_prompt": "Agent started in execute phase, used explore sub-agents for Austin, Denver, and Lisbon web research, and synthesized cost of living, neighborhoods, and weather into a comparison table. No browser agent, Claude Code, or code sandbox was used.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["web_search"],
+    "expected_tools": ["spawn_agent"],
     "tags": ["basic", "smoke"],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -55,10 +55,9 @@
     "approval_handling": null,
     "start_phase": "execute",
     "min_tool_counts": {
-      "web_search": 3
+      "spawn_agent": 3
     },
     "forbidden_tools": [
-      "spawn_agent",
       "spawn_general_purpose_agent",
       "spawn_general_purpose_agent_for_each",
       "spawn_browser_agent",

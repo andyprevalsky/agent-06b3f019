@@ -36,7 +36,6 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
-    "web_search",
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",

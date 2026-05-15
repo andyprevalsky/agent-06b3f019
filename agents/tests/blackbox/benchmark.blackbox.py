@@ -730,15 +730,17 @@ def test_tool_count_expectations_support_minimums_and_forbidden_tools():
     )
 
 
-def test_parallel_tool_calls_smoke_requires_direct_web_search():
-    """The parallel search smoke should not pass by farming the task to sub-agents."""
+def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
+    """The parallel search smoke should exercise execute-phase explore fanout."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("parallel-tool-calls")
 
     assert task.start_phase == "execute"
-    assert task.min_tool_counts == {"web_search": 3}
-    assert "spawn_agent" in task.forbidden_tools
+    assert task.expected_tools == ["spawn_agent"]
+    assert task.min_tool_counts == {"spawn_agent": 3}
+    assert "explore sub-agents" in task.prompt
+    assert "spawn_agent" not in task.forbidden_tools
     assert "spawn_general_purpose_agent" in task.forbidden_tools
 
 
@@ -752,6 +754,7 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
     assert task.expected_tool_counts["spawn_general_purpose_agent"] == 2
     assert task.expected_tool_counts["spawn_browser_agent"] == 0
     assert task.expected_tool_counts["spawn_claude_code_agent"] == 0
+    assert "explore-agent web research" in task.prompt
 
 
 async def run_all_tests():
@@ -790,6 +793,6 @@ async def run_all_tests():
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
-    r.record("parallel_tool_calls_direct_web_search", test_parallel_tool_calls_smoke_requires_direct_web_search)
+    r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
     return r.all_passed
