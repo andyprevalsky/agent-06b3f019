@@ -535,7 +535,7 @@ class AgentWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except Exception:
-                self.max_context_tokens = 100_000
+                self.max_context_tokens = 200_000
 
         # Update status
         with contextlib.suppress(Exception):
@@ -1412,24 +1412,6 @@ class AgentWorkflow:
             )
             return {"error": True, "message": error_msg}
 
-        # Enforce: during PLAN phase, spawn_agent only allows type="explore"
-        if tool_name == "spawn_agent" and self.current_phase == "PLAN" and tool_args.get("type") != "explore":
-            error_msg = (
-                "During PLAN phase, spawn_agent only supports type='explore'. "
-                "Call attempt_completion to transition to the EXECUTE phase, where you can spawn browser/code/general_purpose agents."
-            )
-            await self._handle_tool_event(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title="❌ Spawn Agent failed",
-                    message=error_msg,
-                    status=MessageStatus.ERROR,
-                ),
-                tool_call_id,
-                tool_name,
-            )
-            return {"error": True, "message": error_msg}
-
         # Semantic validation: validate tool args against Pydantic model_validators
         from utils.tool_schemas import TOOL_MODELS
 
@@ -1482,8 +1464,23 @@ class AgentWorkflow:
 
             if tool_name in NEW_SIGNATURE_TOOLS:
                 tool_call_dict = {"tool": tool_name, **tool_args}
-                if tool_name == "attempt_completion":
+                if tool_name in ("attempt_completion", "spawn_agent"):
                     tool_call_dict["_phase"] = self.current_phase
+
+                # web_fetch's WebFetchManager invokes summarize_tool_result on
+                # large bodies; pass auth so the summarizer can use claudeAuth
+                # ($0) instead of falling through OpenRouter waterfall.
+                extra_executor_kwargs: Dict[str, Any] = {}
+                if tool_name == "web_fetch":
+                    extra_executor_kwargs = {
+                        "claude_token": self._active_claude_token(),
+                        "claude_token_source": self._active_claude_source(),
+                        "claude_token_pool_id": self._active_claude_pool_id(),
+                        "gpt_token": self._active_gpt_token(),
+                        "gpt_account_id": self._active_gpt_account_id(),
+                        "gpt_token_source": self._active_gpt_source(),
+                        "gpt_token_pool_id": self._active_gpt_pool_id(),
+                    }
 
                 result = await executor(
                     execute_activity=workflow.execute_activity,
@@ -1491,14 +1488,38 @@ class AgentWorkflow:
                     tool_call_id=tool_call_id,
                     agent_id=self.agent_id,
                     user_id=self.user_id,
+                    **extra_executor_kwargs,
                 )
                 # Track usage if returned by tool (standardized format)
                 original_usage = {}
+                rotation_signal: Optional[Dict[str, Any]] = None
                 if isinstance(result, dict) and "usage" in result:
                     original_usage = result.get("usage", {})
                     await self._track_usage(original_usage, tool_name=tool_name)
+                    rotation_signal = result.get("summarizer_rotation_signal")
                     # Extract actual result for caller
                     result = result.get("result", result)
+
+                # Route rotation signals from the per-tool summarizer through
+                # _on_tokens so pool-token rotation kicks in on 401/429/stall
+                # the same way it would for the main LLM call.
+                if rotation_signal:
+                    try:
+                        await self._on_tokens(
+                            tokens_in_delta=rotation_signal.get("prompt_tokens", 0),
+                            tokens_out_delta=rotation_signal.get("completion_tokens", 0),
+                            actual_model=rotation_signal.get("actual_model", "unknown"),
+                            cache_read_input_tokens=rotation_signal.get("cache_read_input_tokens", 0),
+                            cache_creation_input_tokens=rotation_signal.get("cache_creation_input_tokens", 0),
+                            call_site=f"summarize_{tool_name}",
+                            claude_token_error=rotation_signal.get("claude_token_error"),
+                            claude_token_rotated=rotation_signal.get("claude_token_rotated", False),
+                            gpt_token_error=rotation_signal.get("gpt_token_error"),
+                            gpt_token_rotated=rotation_signal.get("gpt_token_rotated", False),
+                            compute_token_used=rotation_signal.get("compute_token_used"),
+                        )
+                    except Exception as e:
+                        workflow.logger.warning(f"_on_tokens failed for {tool_name} summarizer: {e}")
 
                 # Post downloaded files as ASSISTANT messages (like browser/code agents do)
                 # This makes FilePointers visible in the frontend and agent context
@@ -1970,15 +1991,17 @@ class AgentWorkflow:
                         )
 
             # Detect direct-token fallback: we had a selected token but Rose fell through to
-            # the waterfall. Only invalidate for permanent failures (auth errors, rate limits).
-            # Transient failures (stalls, server errors) keep the token for retry on next call.
+            # the waterfall. Rotate on auth/rate-limit (token is bad) and on stall (RoseClient
+            # already exhausted in-place TTFT-bumped retries on the same token, so the slot
+            # itself is unhappy — swap to a different one). 5xx still keeps the token: it's
+            # provider-side, retrying the same slot next call is the right call.
             if (
                 self.compute_token_provider == "claude"
                 and self.claude_max_token
                 and actual_model != "unknown"
                 and not actual_model.endswith("-claude")
             ):
-                if claude_token_error in ("auth_error", "rate_limit"):
+                if claude_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
                         f"marking {self.claude_max_token_source} token rate-limited and rotating"
@@ -2049,7 +2072,7 @@ class AgentWorkflow:
                 and actual_model != "unknown"
                 and not actual_model.endswith("-gpt")
             ):
-                if gpt_token_error in ("auth_error", "rate_limit"):
+                if gpt_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
                         f"marking {self.gpt_code_token_source} token rate-limited and rotating"

@@ -18,8 +18,8 @@
   {
     "name": "spawn-sub-agents",
     "title": "Multi-Level General-Purpose Agent Spawning",
-    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice — once per city. Each general-purpose agent should search the web for the population and return only the numeric value. After both agents complete, multiply the two populations together and report the final product.",
-    "eval_prompt": "Agent spawned exactly 2 general-purpose agents (one for Tokyo, one for NYC) using spawn_general_purpose_agent. Collected both population numbers and multiplied them. The final answer contains a numeric product of two population figures.",
+    "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+    "eval_prompt": "Agent spawned exactly 2 general-purpose agents (one for Tokyo, one for NYC) using spawn_general_purpose_agent. Each child used explore-agent web research instead of browser/code detours. Collected both population numbers and multiplied them. The final answer contains a numeric product of two population figures.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent"],
@@ -29,23 +29,40 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "web_search": 2
+    },
+    "expected_tool_counts": {
+      "spawn_general_purpose_agent": 2,
+      "spawn_browser_agent": 0,
+      "spawn_claude_code_agent": 0
+    }
   },
   {
     "name": "parallel-tool-calls",
     "title": "Parallel Web Searches",
-    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table. Do NOT use Claude Code or any code sandbox — just use web search and present the results directly as text.",
-    "eval_prompt": "Agent performed multiple web searches for cost of living, neighborhoods, and weather across Austin, Denver, and Lisbon. Results are synthesized into a comparison. At least 3 web_search calls were made.",
+    "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
+    "eval_prompt": "Agent started in execute phase, used explore sub-agents for Austin, Denver, and Lisbon web research, and synthesized cost of living, neighborhoods, and weather into a comparison table. No browser agent, Claude Code, or code sandbox was used.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["web_search"],
+    "expected_tools": ["spawn_agent"],
     "tags": ["basic", "smoke"],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan"
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 3
+    },
+    "forbidden_tools": [
+      "spawn_general_purpose_agent",
+      "spawn_general_purpose_agent_for_each",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ]
   },
   {
     "name": "message-person",
@@ -183,27 +200,11 @@
     "start_phase": "plan"
   },
   {
-    "name": "family-office-angel-outreach",
-    "title": "Family Office & Angel Outreach",
-    "prompt": "I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.\n\nEach message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.\n\nSince you are limited on the general-purpose agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.",
-    "eval_prompt": "Agent read the CSV attachment of ~700 angels, spawned general-purpose agents to research and manage outreach per person or chunk, and called message_person to send personalized emails from andy@roselabs.ai. Approval requests were triggered for outreach messages. Agent demonstrated recursive chunking of the contact list across general-purpose agents.",
-    "timeout_seconds": 600,
-    "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "explore", "message_person"],
-    "tags": ["attachment", "for-each", "approval", "outreach"],
-    "price_limit_cents": 1000,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": "vcs-and-angels.csv",
-    "approval_handling": "prompt_user",
-    "start_phase": "plan"
-  },
-  {
     "name": "outreach-batch",
     "title": "Outreach in Batch",
     "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_general_purpose_agent_for_each to spawn one general-purpose agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
     "eval_prompt": "Agent read the CSV attachment, spawned one general-purpose agent per row using spawn_general_purpose_agent_for_each, each general-purpose agent researched the person and sent a personalized cold email from a@roselabs.ai centered on ML research feedback. Emails are short, personable, avoid AI-sounding language, and attempt to find commonalities. Approval requests were triggered for each outreach message.",
-    "timeout_seconds": 1200,
+    "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent_for_each", "message_person"],
     "tags": ["attachment", "for-each", "approval", "outreach", "batch"],
@@ -261,8 +262,8 @@
   {
     "name": "load-test-sias",
     "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. Briefly show the arithmetic, then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + attempt_completion.",
-    "eval_prompt": "Agent issued a single spawn_general_purpose_agent_for_each tool call with type=for_each that fanned out exactly {n} general-purpose agents (one per integer ID 1..{n}). Each child computed value = ID*ID + ID*3 + 7 via reasoning only — no web_search, web_fetch, browser, code, or nested spawn_agent calls. Parent collected all {n} structured `value` outputs and reported the final sum. The expected sum for {n}=30 with this formula is 11060 (sum_{i=1..30} (i^2 + 3i + 7)); for other n, the LLM judge can validate by summing the formula. Pass requires: (a) exactly {n} general-purpose agents spawned, (b) every child returned a numeric value, (c) parent reported a single numeric sum.",
+    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "eval_prompt": "Agent issued a single spawn_general_purpose_agent_for_each tool call with type=for_each that fanned out exactly {n} general-purpose agents (one per integer ID 1..{n}). Each child computed value = ID*ID + ID*3 + 7 via reasoning only — no web_search, web_fetch, browser, code, or nested spawn_agent calls — emitting the arithmetic via send_message_to_user_execute_phase before attempt_completion. Parent collected all {n} structured `value` outputs and reported the final sum. The expected sum for {n}=30 with this formula is 11060 (sum_{i=1..30} (i^2 + 3i + 7)); for other n, the LLM judge can validate by summing the formula. Pass requires: (a) exactly {n} general-purpose agents spawned, (b) every child returned a numeric value, (c) parent reported a single numeric sum.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent_for_each"],

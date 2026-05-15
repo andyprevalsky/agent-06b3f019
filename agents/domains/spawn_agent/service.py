@@ -29,6 +29,7 @@ from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
+from utils.tool_schemas import EXPLORE_AGENT_TOOLS
 
 logger = structlog.get_logger()
 
@@ -71,6 +72,21 @@ def validate_spawn_params(tool_call: dict) -> None:
     if agent_type not in VALID_AGENT_TYPES:
         raise ValueError(
             f"spawn_agent type='{agent_type}' is invalid. Must be one of: {', '.join(sorted(VALID_AGENT_TYPES))}."
+        )
+
+    # PLAN-phase gate: only `explore` is legal during PLAN. The PLAN-loop
+    # response_model already narrows the schema to SpawnExploreAgentTool, but
+    # Anthropic's native tool calling doesn't enforce `const` constraints
+    # unless `strict: true` is set, and Sonnet has been observed emitting
+    # `type=general_purpose` against the const in PLAN. Bounce it here so the
+    # main-loop posts an ERROR tool_result and the agent re-plans instead of
+    # blocking on a non-explore child workflow that won't return before EXECUTE.
+    phase = (tool_call.get("_phase") or "").strip().upper()
+    if phase == "PLAN" and agent_type != "explore":
+        raise ValueError(
+            f"spawn_agent(type='{agent_type}') is not allowed during PLAN. Only type='explore' "
+            "may be spawned in PLAN. Call attempt_completion to transition to EXECUTE, then "
+            "spawn this agent (the planner's DAG will run it)."
         )
 
     if not tool_call.get("goal"):
@@ -203,11 +219,12 @@ async def spawn_explore_agent_activity(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     attachment_texts: Optional[List[str]] = None,
+    max_context_tokens: int = 200_000,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
     Uses run_agent with is_inside_temporal_activity=True and read-only tools
-    (web_search, web_fetch, grep, attempt_completion).
+    (web_search, web_fetch, grep, attempt_completion_with_result).
 
     Returns:
         Dict with status, accumulated_usage, tokens_in, tokens_out
@@ -299,12 +316,19 @@ async def spawn_explore_agent_activity(  # noqa: C901
             )
         elif tool_name == "web_fetch":
             manager = WebFetchManager()
+            # Pass auth so the per-tool summarizer uses claudeAuth ($0) rather
+            # than the OpenRouter waterfall (which may be out of credits).
             result = await manager.execute_tool(
                 execute_activity=tagged_execute_activity,
                 tool_call=tool_call_dict,
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                claude_token=claude_token,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
             )
         elif tool_name == "grep":
             manager = GrepManager()
@@ -365,13 +389,14 @@ async def spawn_explore_agent_activity(  # noqa: C901
         system_prompt=explore_system_prompt,
         verifier_prompt_generator=explore_verifier_prompt,
         model=model,
-        tools=["web_search", "web_fetch", "grep", "attempt_completion"],
+        tools=EXPLORE_AGENT_TOOLS,
         initial_context=[{"role": "USER", "text": initial_user_text}],
         task_id=task_id,
         is_inside_temporal_activity=True,
         execute_tool=explore_execute_tool,
         post_message=explore_post_message,
         max_iterations=EXPLORE_MAX_ITERATIONS,
+        max_context_tokens=max_context_tokens,
         skip_verification=True,
         skip_blueprint_query=True,
         skip_status_updates=True,

@@ -2326,7 +2326,9 @@ async def test_call_planner_llm_activity_happy_path():
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
     assert planner_body["model"] == "claude-sonnet-4-6"
     assert planner_body["stream"] is True
-    assert planner_body["output_config"]["effort"] == "max"
+    # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
+    # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
+    assert planner_body["output_config"]["effort"] == "xhigh"
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():

@@ -521,6 +521,13 @@ def apply_anthropic_tool_config(
                     body["tool_choice"] = {"type": "any"}
             else:
                 body["tool_choice"] = {"type": "auto"}
+            # Anthropic disables parallel tool use by default when tool_choice
+            # is `any` or `tool`. Keep parallel on so DAG-style fan-outs (multi
+            # web_search, multi web_fetch) still work — single-tool unions get
+            # at most one block anyway.
+            tc = body["tool_choice"]
+            if tc.get("type") in ("any", "tool"):
+                tc["disable_parallel_tool_use"] = False
             body.pop("output_config", None)
             body.pop("output_format", None)
             return True
@@ -558,7 +565,10 @@ def apply_anthropic_tool_config(
                 extracted = _extract_tools_from_response_format(response_format)
                 if extracted is not None:
                     body["tools"] = extracted["tools"]
-                    body["tool_choice"] = {"type": "any"}
+                    body["tool_choice"] = {
+                        "type": "any",
+                        "disable_parallel_tool_use": False,
+                    }
                     prev_effort = (body.get("output_config") or {}).get("effort")
                     body.pop("output_config", None)
                     body.pop("output_format", None)

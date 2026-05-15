@@ -275,7 +275,12 @@ async def parse_anthropic_sse(
                     message=err.get("message"),
                     error_type=err.get("type"),
                 )
-                continue
+                # Anthropic frequently returns HTTP 200 + opens SSE + emits
+                # an in-band error (`rate_limit_error`, `authentication_error`,
+                # etc.) instead of an HTTP error status. Raise a typed
+                # exception so claude_auth.py can apply the same rotation /
+                # transient-retry logic it already uses for HTTP 429/401.
+                raise _responses_error_to_exception(err, request_id)
     finally:
         await _close_quietly(response)
 

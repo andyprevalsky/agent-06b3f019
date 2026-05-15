@@ -10,4 +10,5 @@ from domains.web_fetch.handler import (  # noqa: F401
     get_manager,
     web_fetch,
     web_fetch_activity,
+    web_fetch_download_activity,
 )

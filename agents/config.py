@@ -115,6 +115,13 @@ class ParallelConfig:
 
 
 @dataclass
+class FirecrawlConfig:
+    """Firecrawl configuration for the web_fetch tool (scrape API)."""
+
+    api_key: str
+
+
+@dataclass
 class SupabaseConfig:
     """Supabase configuration for direct Realtime broadcasts."""
 
@@ -189,6 +196,7 @@ class AppConfig:
     gemini: GeminiConfig
     steel: SteelConfig
     parallel: ParallelConfig
+    firecrawl: FirecrawlConfig
     supabase: SupabaseConfig
     payment: PaymentConfig
     x402: X402Config
@@ -271,6 +279,10 @@ def load_config() -> AppConfig:
         api_key=os.getenv("PARRALLEL_API_KEY", ""),
     )
 
+    firecrawl = FirecrawlConfig(
+        api_key=os.getenv("FIRECRAWL_API_KEY", ""),
+    )
+
     environment = os.getenv("ENVIRONMENT", "production")
 
     supabase = SupabaseConfig(
@@ -321,6 +333,7 @@ def load_config() -> AppConfig:
         gemini=gemini,
         steel=steel,
         parallel=parallel,
+        firecrawl=firecrawl,
         supabase=supabase,
         payment=payment,
         x402=x402,

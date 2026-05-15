@@ -108,25 +108,110 @@ async def test_format_tool_stats_footer_sort_order():
 # -------------------- activity tests --------------------
 
 
-async def test_compress_context_happy():
-    """compress_context returns learnings from a mocked LLM."""
+def _build_test_context(n_pairs: int = 6):
+    """Build a context: SYSTEM + USER goal + n_pairs ASSISTANT/TOOL pairs."""
+    ctx = [
+        {"role": "SYSTEM", "text": "system prompt", "metadata": {}},
+        {"role": "USER", "text": "original goal", "metadata": {}},
+    ]
+    for i in range(n_pairs):
+        ctx.append({
+            "role": "ASSISTANT",
+            "text": f"assistant turn {i}",
+            "metadata": {"tool_calls": [{"tool_call_id": f"tc-{i}"}]},
+        })
+        ctx.append({
+            "role": "TOOL",
+            "text": f"tool result {i}",
+            "metadata": {"toolCallId": f"tc-{i}", "toolName": "web_search", "toolStatus": "FINISHED"},
+        })
+    return ctx
+
+
+async def test_compress_context_happy_head_tail_protected():
+    """compress_context preserves first SYSTEM + first USER + last 4 turns."""
     from helpers import summarize
     import helpers.llm as llm_mod
 
     async def fake_llm(messages, **kwargs):
-        assert kwargs["claude_token"] is None
-        assert kwargs["gpt_token"] is None
-        return {"content": "## Learnings\n- worked well", "usage": {"total_tokens": 100}}
+        return {"content": "Agent did things.", "usage": {"total_tokens": 100}}
+
+    ctx = _build_test_context(n_pairs=6)
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            out = await summarize.compress_context(
+                context=ctx, iteration_count=12, model="test-model",
+            )
+
+    assert out["success"] is True
+    new_ctx = out["context"]
+    assert new_ctx[0]["role"] == "SYSTEM" and new_ctx[0]["text"] == "system prompt"
+    assert new_ctx[1]["role"] == "USER" and new_ctx[1]["text"] == "original goal"
+    # Synthetic summary turn with the prefix
+    summary_turn = new_ctx[2]
+    assert summary_turn["role"] == "USER"
+    assert summary_turn["text"].startswith(summarize.COMPACTION_SUMMARY_PREFIX)
+    assert summary_turn["metadata"].get("compactionSummary") is True
+    # Last 4 turns of the original ctx preserved verbatim
+    assert new_ctx[-4:] == ctx[-4:]
+
+
+async def test_compress_context_no_orphan_tool_use():
+    """tool_use + tool_result pairs must both be inside or both outside summary."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def fake_llm(messages, **kwargs):
+        return {"content": "summary body", "usage": {}}
+
+    # 5 pairs = 12 messages (2 head + 10 pair messages). Tail=4 means last 4
+    # are kept. If they include a TOOL whose ASSISTANT is in the middle, the
+    # ASSISTANT must get pulled into the tail.
+    ctx = _build_test_context(n_pairs=5)
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
             out = await summarize.compress_context(
-                context=[{"role": "USER", "text": "do stuff"}],
-                iteration_count=5,
-                model="test-model",
+                context=ctx, iteration_count=10, model="m",
             )
-    assert "Learnings" in out["learnings"]
-    assert out["usage"]["total_tokens"] == 100
+
+    new_ctx = out["context"]
+    # Every TOOL.toolCallId in the new context must have a matching
+    # ASSISTANT.tool_calls entry somewhere in the new context.
+    declared = set()
+    for m in new_ctx:
+        meta = m.get("metadata") or {}
+        if m.get("role") == "ASSISTANT":
+            for tc in meta.get("tool_calls") or []:
+                declared.add(tc["tool_call_id"])
+    for m in new_ctx:
+        meta = m.get("metadata") or {}
+        if m.get("role") == "TOOL":
+            tc_id = meta.get("toolCallId")
+            if tc_id:
+                assert tc_id in declared, f"orphan TOOL {tc_id} in compacted context"
+
+
+async def test_compress_context_too_small_to_compact():
+    """compress_context returns context unchanged when below the min size."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    called = [0]
+
+    async def fake_llm(messages, **kwargs):
+        called[0] += 1
+        return {"content": "x", "usage": {}}
+
+    ctx = [{"role": "USER", "text": "hi", "metadata": {}}]
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            out = await summarize.compress_context(
+                context=ctx, iteration_count=1, model="m",
+            )
+    assert out["success"] is True
+    assert out["context"] == ctx
+    assert called[0] == 0  # LLM not invoked
 
 
 async def test_compress_context_forwards_compute_auth():
@@ -138,12 +223,12 @@ async def test_compress_context_forwards_compute_auth():
 
     async def fake_llm(messages, **kwargs):
         observed_kwargs.append(kwargs)
-        return {"content": "## Learnings\n- used direct auth", "usage": {"total_tokens": 10}}
+        return {"content": "summary", "usage": {"total_tokens": 10}}
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
             await summarize.compress_context(
-                context=[{"role": "USER", "text": "do stuff"}],
+                context=_build_test_context(n_pairs=4),
                 iteration_count=5,
                 model="test-model",
                 gpt_token="gpt-token",
@@ -163,7 +248,8 @@ async def test_compress_context_forwards_compute_auth():
     assert observed_kwargs[0]["user_id"] == "user-1"
 
 
-async def test_compress_context_on_error_returns_fallback():
+async def test_compress_context_on_llm_error_returns_failure():
+    """On LLM exception, return success=False with context=None (no clobber)."""
     from helpers import summarize
     import helpers.llm as llm_mod
 
@@ -173,12 +259,103 @@ async def test_compress_context_on_error_returns_fallback():
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", boom):
             out = await summarize.compress_context(
-                context=[{"role": "USER", "text": "x"}],
+                context=_build_test_context(n_pairs=5),
                 iteration_count=10,
                 model="m",
             )
-    assert "Context Reset After 10 Iterations" in out["learnings"]
-    assert out["usage"] == {}
+    assert out["success"] is False
+    assert out["context"] is None
+    assert "LLM down" in out.get("error", "")
+
+
+async def test_compress_context_empty_summary_is_failure():
+    """Empty LLM output is treated as failure, not a successful empty compaction."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def fake_llm(messages, **kwargs):
+        return {"content": "   ", "usage": {"total_tokens": 5}}
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            out = await summarize.compress_context(
+                context=_build_test_context(n_pairs=5),
+                iteration_count=10,
+                model="m",
+            )
+    assert out["success"] is False
+    assert out["context"] is None
+
+
+async def test_summarize_tool_result_below_threshold_unused():
+    """Below TOOL_SUMMARIZER_CHAR_THRESHOLD, caller should not invoke the summarizer.
+
+    (The threshold check lives in the caller — WebFetchManager — so this just
+    documents the constant value contract.)
+    """
+    from helpers import summarize
+    assert summarize.TOOL_SUMMARIZER_CHAR_THRESHOLD == 5_000
+
+
+async def test_summarize_tool_result_happy():
+    """summarize_tool_result returns LLM summary above threshold."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def fake_llm(messages, **kwargs):
+        return {"content": "concise summary", "usage": {"total_tokens": 200}}
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            out = await summarize.summarize_tool_result(
+                tool_name="web_fetch",
+                tool_result_text="x" * 6000,
+                parent_objective="learn things",
+                model="rose-labs/rose-1-lite",
+            )
+    assert out["summarized"] is True
+    assert out["summary"] == "concise summary"
+
+
+async def test_summarize_tool_result_llm_failure_truncates():
+    """On LLM failure, fall back to hard-cap truncation with marker."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def boom(*a, **kw):
+        raise RuntimeError("LLM dead")
+
+    big_text = "y" * 80_000
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", boom):
+            out = await summarize.summarize_tool_result(
+                tool_name="web_fetch",
+                tool_result_text=big_text,
+                parent_objective="goal",
+            )
+    assert out["summarized"] is False
+    assert len(out["summary"]) <= summarize.TOOL_RESULT_HARD_CAP_CHARS + 200
+    assert "truncated, original_len=80000" in out["summary"]
+
+
+async def test_summarize_tool_result_below_cap_passthrough_on_failure():
+    """Below the hard cap, failure preserves the original body."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def boom(*a, **kw):
+        raise RuntimeError("LLM dead")
+
+    body = "z" * 6000
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", boom):
+            out = await summarize.summarize_tool_result(
+                tool_name="web_fetch",
+                tool_result_text=body,
+                parent_objective="g",
+            )
+    assert out["summarized"] is False
+    assert out["summary"] == body
 
 
 async def test_generate_completion_summary_happy():
@@ -317,9 +494,16 @@ async def run_all_tests():
     await r.record_async("format_tool_stats_footer", test_format_tool_stats_footer)
     await r.record_async("format_tool_stats_footer_empty", test_format_tool_stats_footer_empty)
     await r.record_async("format_tool_stats_footer_sort_order", test_format_tool_stats_footer_sort_order)
-    await r.record_async("compress_context_happy", test_compress_context_happy)
+    await r.record_async("compress_context_happy_head_tail_protected", test_compress_context_happy_head_tail_protected)
+    await r.record_async("compress_context_no_orphan_tool_use", test_compress_context_no_orphan_tool_use)
+    await r.record_async("compress_context_too_small_to_compact", test_compress_context_too_small_to_compact)
     await r.record_async("compress_context_forwards_compute_auth", test_compress_context_forwards_compute_auth)
-    await r.record_async("compress_context_error_fallback", test_compress_context_on_error_returns_fallback)
+    await r.record_async("compress_context_on_llm_error_returns_failure", test_compress_context_on_llm_error_returns_failure)
+    await r.record_async("compress_context_empty_summary_is_failure", test_compress_context_empty_summary_is_failure)
+    await r.record_async("summarize_tool_result_below_threshold_unused", test_summarize_tool_result_below_threshold_unused)
+    await r.record_async("summarize_tool_result_happy", test_summarize_tool_result_happy)
+    await r.record_async("summarize_tool_result_llm_failure_truncates", test_summarize_tool_result_llm_failure_truncates)
+    await r.record_async("summarize_tool_result_below_cap_passthrough_on_failure", test_summarize_tool_result_below_cap_passthrough_on_failure)
     await r.record_async("generate_completion_summary_happy", test_generate_completion_summary_happy)
     await r.record_async(
         "generate_completion_summary_forwards_compute_auth",

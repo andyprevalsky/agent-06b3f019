@@ -5,6 +5,11 @@ waterfall); the only difference is which models are tried at each layer.
 
 Model contract (P1):
 
+    rose-1-mini:
+        claudeAuth = claude-haiku-4-5
+        gptAuth    = gpt-5.4
+        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3-flash-preview
+
     rose-1-lite:
         claudeAuth = claude-sonnet-4-6
         gptAuth    = gpt-5.4
@@ -30,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Tuple
 
-PoolName = Literal["rose-1-lite", "rose-1-ultra", "rose-1-browser-use"]
+PoolName = Literal["rose-1-mini", "rose-1-lite", "rose-1-ultra", "rose-1-browser-use"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,19 @@ class PoolSpec:
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
+    # Cheapest/fastest tier — used by background condensation passes
+    # (web_fetch Haiku filter, tool-result summarization). claudeAuth routes
+    # directly to Anthropic's Haiku 4.5; waterfall falls back to OpenRouter's
+    # cheapest fast model.
+    "rose-1-mini": PoolSpec(
+        name="rose-1-mini",
+        claude_auth_model="claude-haiku-4-5",
+        gpt_auth_model="gpt-5.4",
+        waterfall=(
+            "anthropic/claude-haiku-4.5",
+            "google/gemini-3-flash-preview",
+        ),
+    ),
     "rose-1-lite": PoolSpec(
         name="rose-1-lite",
         claude_auth_model="claude-sonnet-4-6",
