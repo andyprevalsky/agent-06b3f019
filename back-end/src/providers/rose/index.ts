@@ -8,6 +8,8 @@
 
 export { createStreamingCompletion } from './client';
 export { markCacheable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
+export { buildOpenAiResponseFormat, responseModel, zodToStrictJsonSchema } from './schema';
+export type { ZodResponseModel } from './schema';
 export type {
   CompletionChunk,
   CompletionMessage,

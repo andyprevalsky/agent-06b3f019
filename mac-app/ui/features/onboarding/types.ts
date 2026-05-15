@@ -22,6 +22,7 @@ export interface UserSettingsResponse {
   systemName?: string | null;
   profilePicture?: string | null;
   customSystemPrompt?: string | null;
+  voicePreferenceId?: string | null;
   onboardingCompletedAt?: string | null;
   encryptedPaymentInformation?: unknown;
 }

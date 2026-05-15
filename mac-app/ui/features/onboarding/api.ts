@@ -55,7 +55,10 @@ export const fetchCustomization = async (): Promise<CustomizationData | null> =>
   }
 };
 
-export const saveCustomization = async (customization: CustomizationData): Promise<void> => {
+export const saveCustomization = async (
+  customization: CustomizationData,
+  extras?: { voicePreferenceId?: string | null }
+): Promise<void> => {
   const token = requireToken();
   const response = await fetch(`${getBackendUrl()}/api/user-settings`, {
     method: 'PATCH',
@@ -80,6 +83,7 @@ export const saveCustomization = async (customization: CustomizationData): Promi
         customization.customSystemPrompt.length > 0
           ? customization.customSystemPrompt
           : null,
+      ...(extras !== undefined ? { voicePreferenceId: extras.voicePreferenceId ?? null } : {}),
     }),
   });
   if (!response.ok) {

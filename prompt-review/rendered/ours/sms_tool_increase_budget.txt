@@ -1,0 +1,21 @@
+{
+  "name": "increase_budget",
+  "description": "Increase an agent's cost limit. The amount is ADDED to the current limit.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "agent_id_or_prefix": {
+        "type": "string",
+        "description": "Agent ID or 6-char prefix"
+      },
+      "amount_dollars": {
+        "type": "number",
+        "description": "Amount in dollars to ADD to the current budget (e.g. 5.00 adds $5)"
+      }
+    },
+    "required": [
+      "agent_id_or_prefix",
+      "amount_dollars"
+    ]
+  }
+}

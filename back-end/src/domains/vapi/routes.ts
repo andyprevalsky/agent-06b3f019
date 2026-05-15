@@ -26,7 +26,8 @@ router.post(
   authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     try {
-      const { to, system_prompt, output_schema } = req.body as CreateCallRequest;
+      const { to, system_prompt, output_schema, idempotency_key, user_id } =
+        req.body as CreateCallRequest;
 
       // Validate input
       if (to === undefined || to === '') {
@@ -42,7 +43,13 @@ router.post(
         return;
       }
 
-      const result = await service.initiateCall({ to, system_prompt, output_schema });
+      const result = await service.initiateCall({
+        to,
+        system_prompt,
+        output_schema,
+        idempotency_key,
+        user_id,
+      });
       res.json(result);
     } catch (error) {
       if (error instanceof VapiNotConfiguredError) {

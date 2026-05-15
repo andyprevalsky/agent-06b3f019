@@ -11,7 +11,7 @@ import { useCallback, useEffect } from 'react';
 
 import type { useAuth } from '@/features/auth';
 import * as analytics from '@/lib/analytics';
-import { signOut, clearStoredSession } from '@/lib/supabase';
+import { signOut } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
 
 import type { Agent, TerminalView } from '../types';
@@ -42,14 +42,14 @@ export function useTerminalAuth({
 
   const handleLogout = useCallback(async () => {
     try {
-      await signOut();
-      clearStoredSession();
+      const persistenceClear = signOut();
       await auth.refreshAuthState('logout');
       setAgents([]);
       setSelectedAgentId(null);
       setMessageInput('');
       setCurrentView('agents');
       analytics.reset();
+      await persistenceClear;
     } catch (err: unknown) {
       console.error('[Auth] Logout failed', err);
       toast({ title: 'Error', description: 'Failed to log out', variant: 'destructive' });

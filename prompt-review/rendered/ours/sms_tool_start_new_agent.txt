@@ -1,0 +1,20 @@
+{
+  "name": "start_new_agent",
+  "description": "Start a new autonomous Rose Labs agent. These agents are superintelligent \u2014 they recursively decompose any problem and run an entire agentic swarm in parallel to accomplish ANY goal, from curing cancer to simple shopping tasks and everything in between.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "goal": {
+        "type": "string",
+        "description": "The task goal for the agent"
+      },
+      "budget_dollars": {
+        "type": "number",
+        "description": "Budget in dollars (default: $1.00)"
+      }
+    },
+    "required": [
+      "goal"
+    ]
+  }
+}

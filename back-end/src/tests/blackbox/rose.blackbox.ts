@@ -30,7 +30,10 @@
  *   npx tsx src/tests/blackbox/rose.blackbox.ts
  */
 
+import { z } from 'zod';
+
 import {
+  buildOpenAiResponseFormat,
   createStreamingCompletion,
   getPool,
   isRoseModel,
@@ -41,6 +44,7 @@ import {
   RoseInvalidRequest,
   RoseStallError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  responseModel,
   type CompletionChunk,
 } from '../../providers/rose';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
@@ -56,6 +60,7 @@ import {
   CODEX_API_URL,
   OPENROUTER_API_URL,
 } from '../../providers/rose/transport';
+import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -91,6 +96,42 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
       `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
     );
   }
+}
+
+function findLooseObjectSchemas(schema: unknown, path = '$'): string[] {
+  if (schema === null || typeof schema !== 'object') return [];
+
+  const node = schema as Record<string, unknown>;
+  const loose: string[] = [];
+  const type = node.type;
+  const isObjectSchema =
+    type === 'object' || (Array.isArray(type) && type.some((entry) => entry === 'object'));
+
+  if (isObjectSchema && node.additionalProperties !== false) {
+    loose.push(path);
+  }
+
+  const properties = node.properties;
+  if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+    for (const [key, child] of Object.entries(properties)) {
+      loose.push(...findLooseObjectSchemas(child, `${path}.properties.${key}`));
+    }
+  }
+
+  if (node.items !== undefined) {
+    loose.push(...findLooseObjectSchemas(node.items, `${path}.items`));
+  }
+
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branches = node[keyword];
+    if (Array.isArray(branches)) {
+      branches.forEach((branch, index) => {
+        loose.push(...findLooseObjectSchemas(branch, `${path}.${keyword}[${index}]`));
+      });
+    }
+  }
+
+  return loose;
 }
 
 // ==================== FETCH STUB ====================
@@ -528,6 +569,57 @@ async function testGptAuth_buildBodyAddsInputForSystemOnlyContext() {
   );
 }
 
+async function testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses() {
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [{ role: 'user', content: 'hi from sms' }],
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+    requestId: 'rid-sms-supervisor-schema',
+  });
+
+  const schema = (((body.text as Record<string, unknown>).format as Record<string, unknown>)
+    .schema ?? {}) as Record<string, unknown>;
+  const looseObjects = findLooseObjectSchemas(schema);
+
+  assertEqual(
+    looseObjects.join(', '),
+    '',
+    'SMS supervisor schema must not contain open object shapes rejected by Codex'
+  );
+}
+
+async function testSchema_zodResponseModelBuildsStrictOpenAiSchema() {
+  const model = responseModel(
+    'AgentAction',
+    z.object({
+      response: z.string(),
+      tool_calls: z.array(
+        z.discriminatedUnion('tool', [
+          z.object({
+            tool: z.literal('web_search'),
+            query: z.string(),
+          }),
+          z.object({
+            tool: z.literal('attempt_completion'),
+            message: z.string(),
+            note: z.string().nullable(),
+          }),
+        ])
+      ),
+    })
+  );
+
+  const format = buildOpenAiResponseFormat(model);
+  const schema = format.json_schema.schema;
+  const looseObjects = findLooseObjectSchemas(schema);
+
+  assertEqual(format.json_schema.name, 'AgentAction', 'response model name');
+  assertEqual(looseObjects.join(', '), '', 'Zod-derived object schemas are strict');
+  const toolCalls = (schema.properties as Record<string, Record<string, unknown>>).tool_calls;
+  const itemSchema = toolCalls.items as Record<string, unknown>;
+  assert(Array.isArray(itemSchema.anyOf), 'discriminated union maps to anyOf');
+}
+
 async function testStreaming_responsesFunctionCallItem() {
   const chunks: RoseStreamChunk[] = [];
   for await (const chunk of parseResponsesSSE(
@@ -579,6 +671,30 @@ async function testStreaming_responsesReasoningDeltaEvents() {
     .map((chunk) => chunk.data.text)
     .join('');
   assertEqual(reasoning, 'thinking deeper', 'Responses reasoning deltas routed');
+}
+
+async function testStreaming_responsesReasoningItemPreserved() {
+  const chunks = await collectRose(
+    parseResponsesSSE(
+      sseResponse([
+        'event: response.output_item.done',
+        'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"secret","summary":[{"text":"brief"}]}}',
+        '',
+        'event: response.output_text.delta',
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+        'data: [DONE]',
+        '',
+      ]).body!,
+      { actualModel: 'gpt-5.4-gpt', poolName: 'gpt-token', requestId: 'r-reasoning-item' }
+    )
+  );
+  const item = chunks.find((chunk) => chunk.kind === 'codex_reasoning_item');
+  assertEqual(item?.data.id, 'rs_1', 'reasoning item id preserved');
+  assertEqual(item?.data.encrypted_content, 'secret', 'encrypted reasoning preserved');
 }
 
 async function testStreaming_responsesFailedContextLengthIsInvalidRequest() {
@@ -1416,6 +1532,147 @@ async function testClient_usageChunkExposesCacheTokens() {
   }
 }
 
+async function testClient_responseModelBuildsCodexTextFormat() {
+  let capturedBody: Record<string, unknown> | null = null;
+  installFetchStub((url, init) => {
+    if (url === CODEX_API_URL) {
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse(RESPONSES_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'score it' }],
+      gpt_token: 'gpt-token',
+      response_model: responseModel(
+        'ScoreResponse',
+        z.object({
+          reasoning: z.string(),
+          score: z.number(),
+        })
+      ),
+    });
+    await collect(stream);
+
+    assert(capturedBody !== null, 'captured Codex request');
+    const format = ((capturedBody!.text as Record<string, unknown>).format ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const schema = format.schema as Record<string, unknown>;
+    assertEqual(format.name, 'ScoreResponse', 'response_model name reaches Codex text.format');
+    assertEqual(
+      JSON.stringify(schema.required),
+      JSON.stringify(['reasoning', 'score']),
+      'Zod fields become required strict schema fields'
+    );
+    assertEqual(schema.additionalProperties, false, 'top-level object closed');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_responseModelConflictsWithResponseFormat() {
+  let threw = false;
+  try {
+    await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      response_model: responseModel('ModelA', z.object({ ok: z.boolean() })),
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'Manual',
+          strict: true,
+          schema: { type: 'object', properties: {}, additionalProperties: false },
+        },
+      },
+    });
+  } catch (error) {
+    threw =
+      error instanceof Error && error.message.includes('either response_format or response_model');
+  }
+  assert(threw, 'response_model and response_format conflict rejected');
+}
+
+async function testClient_toolCallChunkPropagatesToCompletionChunk() {
+  installFetchStub((url) => {
+    if (url === CODEX_API_URL) {
+      return sseResponse([
+        'event: response.output_item.done',
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+        'data: [DONE]',
+        '',
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const chunks = await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'use the tool' }],
+        gpt_token: 'gpt-token',
+      })
+    );
+    const toolDelta = chunks.find((chunk) => chunk.choices[0]?.delta.tool_calls);
+    const toolCall = toolDelta?.choices[0]?.delta.tool_calls?.[0];
+    assertEqual(toolCall?.id, 'call_1', 'tool call id reaches CompletionChunk');
+    assertEqual(toolCall?.function.name, 'lookup', 'tool call name reaches CompletionChunk');
+    assertEqual(toolCall?.function.arguments, '{"q":"x"}', 'tool call args reach CompletionChunk');
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function testClient_codexReasoningItemPropagatesToCompletionChunk() {
+  installFetchStub((url) => {
+    if (url === CODEX_API_URL) {
+      return sseResponse([
+        'event: response.output_item.done',
+        'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"secret","summary":[]}}',
+        '',
+        'event: response.output_text.delta',
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
+        '',
+        'data: [DONE]',
+        '',
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const chunks = await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'answer with reasoning item' }],
+        gpt_token: 'gpt-token',
+      })
+    );
+    const itemChunk = chunks.find((chunk) => chunk.codex_reasoning_item);
+    assertEqual(itemChunk?.codex_reasoning_item?.id, 'rs_1', 'reasoning item id reaches client');
+    assertEqual(
+      itemChunk?.codex_reasoning_item?.encrypted_content,
+      'secret',
+      'encrypted reasoning reaches client'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
 async function testClient_midStreamErrorPropagatesAfterContent() {
   // Once content has streamed to the caller, a mid-stream failure on the
   // claudeAuth path MUST propagate directly — splicing in waterfall output
@@ -1858,6 +2115,14 @@ async function main(): Promise<void> {
       fn: testGptAuth_buildBodyAddsInputForSystemOnlyContext,
     },
     {
+      name: 'gptAuth / SMS supervisor schema is strict for Codex Responses',
+      fn: testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses,
+    },
+    {
+      name: 'schema / Zod response_model builds strict OpenAI schema',
+      fn: testSchema_zodResponseModelBuildsStrictOpenAiSchema,
+    },
+    {
       name: 'streaming / Responses failed context length is invalid request',
       fn: testStreaming_responsesFailedContextLengthIsInvalidRequest,
     },
@@ -1953,12 +2218,32 @@ async function main(): Promise<void> {
       fn: testStreaming_responsesReasoningDeltaEvents,
     },
     {
+      name: 'streaming / responses reasoning item preserved',
+      fn: testStreaming_responsesReasoningItemPreserved,
+    },
+    {
       name: 'client / reasoning chunk → CompletionChunk.delta.reasoning',
       fn: testClient_reasoningChunkRoutedToCompletionChunk,
     },
     {
       name: 'client / usage chunk exposes cache tokens',
       fn: testClient_usageChunkExposesCacheTokens,
+    },
+    {
+      name: 'client / response_model builds Codex text.format',
+      fn: testClient_responseModelBuildsCodexTextFormat,
+    },
+    {
+      name: 'client / response_model conflicts with response_format',
+      fn: testClient_responseModelConflictsWithResponseFormat,
+    },
+    {
+      name: 'client / tool_call chunk propagates to CompletionChunk',
+      fn: testClient_toolCallChunkPropagatesToCompletionChunk,
+    },
+    {
+      name: 'client / codex reasoning item propagates to CompletionChunk',
+      fn: testClient_codexReasoningItemPropagatesToCompletionChunk,
     },
     {
       name: 'client / consumer break does not trigger waterfall',

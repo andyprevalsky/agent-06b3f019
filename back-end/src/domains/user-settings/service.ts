@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS: UserSettingsResponse = {
   systemName: null,
   profilePicture: null,
   customSystemPrompt: null,
+  voicePreferenceId: null,
 };
 
 /** Map a Prisma user record to the response shape (GET includes phone + onboarding). */
@@ -41,6 +42,7 @@ function toGetResponse(user: {
   systemName: string | null;
   profilePicture: string | null;
   customSystemPrompt: string | null;
+  voicePreferenceId: string | null;
 }): UserSettingsResponse {
   return {
     name: user.name,
@@ -56,6 +58,7 @@ function toGetResponse(user: {
     systemName: user.systemName,
     profilePicture: user.profilePicture,
     customSystemPrompt: user.customSystemPrompt,
+    voicePreferenceId: user.voicePreferenceId,
   };
 }
 
@@ -72,6 +75,7 @@ function toMutationResponse(user: {
   systemName: string | null;
   profilePicture: string | null;
   customSystemPrompt: string | null;
+  voicePreferenceId: string | null;
 }): Omit<UserSettingsResponse, 'phone' | 'onboardingCompletedAt'> {
   return {
     name: user.name,
@@ -85,6 +89,7 @@ function toMutationResponse(user: {
     systemName: user.systemName,
     profilePicture: user.profilePicture,
     customSystemPrompt: user.customSystemPrompt,
+    voicePreferenceId: user.voicePreferenceId,
   };
 }
 

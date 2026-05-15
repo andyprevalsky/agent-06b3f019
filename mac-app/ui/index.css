@@ -26,6 +26,11 @@
       content: '...';
     }
   }
+
+  .voice-orb-canvas {
+    display: block;
+    background: transparent;
+  }
 }
 
 /* Rose - Luxury Hardware Design System

@@ -21,6 +21,7 @@ import toolUsageRouter from './domains/tool-usage/routes';
 import inviteCodesRouter from './domains/invite-codes/routes';
 import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
+import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
@@ -31,6 +32,10 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import {
+  setSupervisorFixtureOverride,
+  clearSupervisorFixtureOverride,
+} from './providers/smsSupervisor';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
@@ -211,7 +216,32 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
   app.use(captureTokenMiddleware);
   const captureRouter = installFetchCapture();
   app.use('/api/test/captures', captureRouter);
-  log.info('Fetch capture enabled for blackbox boundary tests');
+
+  // Per-user SMS supervisor LLM-response fixture. Lets blackbox tests swap the
+  // fixture between cases without rebooting the backend. POST { userId,
+  // fixture } registers; DELETE ?userId clears.
+  const fixtureRouter = express.Router();
+  fixtureRouter.post('/', express.json(), (req, res) => {
+    const { userId, fixture } = req.body as { userId?: unknown; fixture?: unknown };
+    if (typeof userId !== 'string' || typeof fixture !== 'string') {
+      res.status(400).json({ error: 'userId and fixture must be strings' });
+      return;
+    }
+    setSupervisorFixtureOverride(userId, fixture);
+    res.json({ ok: true });
+  });
+  fixtureRouter.delete('/', (req, res) => {
+    const userId = req.query.userId;
+    if (typeof userId !== 'string') {
+      res.status(400).json({ error: 'userId query param required' });
+      return;
+    }
+    clearSupervisorFixtureOverride(userId);
+    res.json({ ok: true });
+  });
+  app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
+
+  log.info('Fetch capture + supervisor fixture override enabled for blackbox tests');
 }
 
 // Health check endpoint (no auth required)
@@ -328,6 +358,7 @@ app.use('/api/invite-codes', inviteCodesRouter);
 app.use('/api/send-sms', sendSmsRouter);
 app.use('/api/imessage', imessageRouter);
 app.use('/api/vapi', vapiRouter);
+app.use('/api/voices', voicesRouter); // public — exposes ElevenLabs preview MP3 URLs
 app.use('/api/browser-session', browserSessionRouter);
 app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/codex-code-session', codexCodeRouter);

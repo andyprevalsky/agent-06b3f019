@@ -28,49 +28,69 @@ for arg in "$@"; do
   fi
 done
 
-# ── Use local Postgres when Conductor provides port info ──
+# ── Use local Postgres for blackbox tests ──
 # run.sh launches a per-workspace Postgres container on CONDUCTOR_PORT+5.
 # Mirror that here so the isolated test backend + test scripts both hit the
 # local DB instead of the remote Supabase pooler (avoids pgbouncer cross-
-# process visibility issues that cause flaky FK / 404 failures).
+# process visibility issues that cause flaky FK / 404 failures, AND avoids
+# DB-mismatch bugs where direct-prisma seed writes go to prod while the
+# backend reads from local — manifests as silent 403s, missing rows, etc).
 # Falls back to system Postgres (port 5432) when Docker is unavailable.
+#
+# We must run this whether or not CONDUCTOR_PORT/CONDUCTOR_WORKSPACE_NAME are
+# set in the caller's env, because back-end/.env's DATABASE_URL points at
+# prod Supabase by default; silently inheriting it for tests is a footgun.
+WORKSPACE_HINT="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(cd "$BACKEND_DIR/.." && pwd)")}"
+LOCAL_DB_PORT=""
 if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
-  LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 10))
-  DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-  DB_FOUND=false
+  LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
+fi
+DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
+DB_FOUND=false
 
-  # Try Docker container first
-  if docker info >/dev/null 2>&1; then
-    ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
-    if [[ -n "$ACTUAL_PORT" ]]; then
-      LOCAL_DB_PORT="$ACTUAL_PORT"
-    fi
-    if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
-      DB_FOUND=true
-      echo "Using local Postgres (Docker) at localhost:$LOCAL_DB_PORT"
-    fi
-  fi
-
-  # Fall back to system Postgres
-  if ! $DB_FOUND; then
-    SYSTEM_PG_PORT=5432
-    if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
-      LOCAL_DB_PORT="$SYSTEM_PG_PORT"
-      DB_FOUND=true
-      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+# Try Docker container first
+if docker info >/dev/null 2>&1; then
+  # Prefer the workspace-named container; fall back to the only running
+  # victoria-db-* container if there's exactly one (covers cases where the
+  # caller hasn't exported CONDUCTOR_WORKSPACE_NAME).
+  if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
+    CANDIDATES=$(docker ps --filter "name=^victoria-db-" --format "{{.Names}}")
+    CANDIDATE_COUNT=$(echo "$CANDIDATES" | grep -c . || true)
+    if [[ "$CANDIDATE_COUNT" == "1" ]]; then
+      DB_CONTAINER="$CANDIDATES"
     fi
   fi
 
-  if $DB_FOUND; then
-    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
-    export DATABASE_URL="$LOCAL_DB_URL"
-    export DIRECT_URL="$LOCAL_DB_URL"
-  else
-    echo "❌ No local Postgres available."
-    echo "   Either start Docker container: docker start $DB_CONTAINER"
-    echo "   Or install system Postgres: scripts/cloud-build.sh"
-    exit 1
+  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+  if [[ -n "$ACTUAL_PORT" ]]; then
+    LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
+  if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+    DB_FOUND=true
+    echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+  fi
+fi
+
+# Fall back to system Postgres
+if ! $DB_FOUND; then
+  SYSTEM_PG_PORT=5432
+  if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+    LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+    DB_FOUND=true
+    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+  fi
+fi
+
+if $DB_FOUND; then
+  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  export DATABASE_URL="$LOCAL_DB_URL"
+  export DIRECT_URL="$LOCAL_DB_URL"
+else
+  echo "❌ No local Postgres available. Blackbox tests require a local DB to"
+  echo "   avoid writing test fixtures into prod Supabase."
+  echo "   Either start Docker container: docker start $DB_CONTAINER"
+  echo "   Or install system Postgres: scripts/cloud-build.sh"
+  exit 1
 fi
 
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
@@ -132,6 +152,16 @@ fi
 
 export TEST_BASE_URL="http://localhost:$PORT"
 BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT_DIR/backend.log}}"
+
+# Deterministic SMS smoke fixtures for the isolated backend. These are only
+# consumed when BLACKBOX_TEST_CAPTURE_OUTBOUND=1, so production/development
+# behavior is unchanged.
+export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
+export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
+  export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"attempt_completion","arguments":{"message":"Blackbox SMS smoke reply"}}]}'
+fi
 
 cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"isolated-blackbox-backend","base_url":"$TEST_BASE_URL","port":$PORT,"artifact_dir":"$ARTIFACT_DIR","backend_log":"$BACKEND_LOG","runner_log":"$RUNNER_LOG","disable_gmail_sync":true}

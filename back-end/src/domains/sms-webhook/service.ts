@@ -208,30 +208,40 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
 // ---------------------------------------------------------------------------
 
 /* c8 ignore start -- routeToSupervisor delegates to handleSmsSupervisorMessage (excluded smsSupervisor module) */
-export function routeToSupervisor(
+export async function routeToSupervisor(
   userId: string,
   fromPhone: string,
   messageBody: string,
   requestStart: number
-): void {
+): Promise<void> {
+  // Atomically bump the per-user inbound counter and capture the new value as
+  // `mySeq`. The supervisor re-reads this value at attempt_completion time —
+  // if a newer SMS has bumped it past `mySeq`, this run discards its queued
+  // writes and stays silent. See providers/smsSupervisor/supervisorHandler.ts.
+  const mySeq = await repo.bumpInboundSeq(userId);
+
   log.info('Routing to SMS Supervisor', {
     userId,
     messageLength: messageBody.length,
+    mySeq,
   });
 
-  // Run async — don't block the webhook response
-  // The supervisor sends its response via Surge API
+  // Run async — don't block the webhook response.
+  // The supervisor sends its response via Surge API.
   const abortController = registerSupervisorRun(userId);
 
   handleSmsSupervisorMessage({
     userId,
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
+    mySeq,
     abortSignal: abortController.signal,
   })
     .then((result) => {
       log.info('Supervisor completed', {
         userId,
+        mySeq,
+        committed: result.committed,
         responseLength: result.responseText.length,
         toolsExecuted: result.toolsExecuted,
         totalDurationMs: Date.now() - requestStart,
@@ -242,6 +252,7 @@ export function routeToSupervisor(
       if (abortController.signal.aborted) {
         log.info('Supervisor aborted (session cleared)', {
           userId,
+          mySeq,
           durationMs: Date.now() - requestStart,
         });
         return;
@@ -249,17 +260,33 @@ export function routeToSupervisor(
 
       log.error('Supervisor failed', {
         userId,
+        mySeq,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
         durationMs: Date.now() - requestStart,
       });
 
-      // Send error SMS as fallback
-      sendSms(fromPhone, 'Sorry, something went wrong. Please try again.').catch((smsError) => {
-        log.error('Failed to send error SMS', {
-          error: smsError instanceof Error ? smsError.message : String(smsError),
+      // Send error SMS as fallback. Gate on the same seq the run captured:
+      // if a newer SMS arrived during our run, stay silent — the newer run
+      // is responsible for the user reply.
+      repo
+        .getInboundSeq(userId)
+        .then(async (currentSeq) => {
+          if ((currentSeq ?? 0) > mySeq) {
+            log.info('Error path: seq advanced, suppressing fallback SMS', {
+              userId,
+              mySeq,
+              currentSeq,
+            });
+            return;
+          }
+          await sendSms(fromPhone, 'Sorry, something went wrong. Please try again.');
+        })
+        .catch((smsError) => {
+          log.error('Failed to send error SMS', {
+            error: smsError instanceof Error ? smsError.message : String(smsError),
+          });
         });
-      });
     })
     .finally(() => {
       unregisterSupervisorRun(userId, abortController);
@@ -367,9 +394,11 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     return { ok: true };
   }
 
-  // MAIN PATH: Route through SMS Supervisor Agent
-  routeToSupervisor(user.userId, fromPhone, messageBody, requestStart);
+  // MAIN PATH: Route through SMS Supervisor Agent.
+  // Await long enough to atomically bump `lastInboundSeq` so the run captures
+  // the right `mySeq` before the next inbound SMS can race. The supervisor
+  // itself continues async — the webhook still returns 200 promptly.
+  await routeToSupervisor(user.userId, fromPhone, messageBody, requestStart);
 
-  // Return immediately (supervisor sends response async via Surge)
   return { ok: true };
 }

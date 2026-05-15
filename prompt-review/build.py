@@ -964,6 +964,7 @@ def main() -> int:
             "id": entry["id"],
             "path": entry["path"],
             "category": entry["category"],
+            "agent": entry.get("agent", "shared"),
             "summary": entry["summary"],
             "current": cur,
             "historical": {

@@ -250,6 +250,24 @@ export function installFetchCapture(): Router {
       captureToken: captureTokenStore.getStore() ?? null,
     };
 
+    if (
+      process.env.BLACKBOX_TEST_FAKE_SURGE === '1' &&
+      url.includes('api.surge.app') &&
+      url.includes('/messages')
+    ) {
+      const body = JSON.stringify({ id: `blackbox-surge-message-${id}` });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     try {
       const headersJson = JSON.stringify(fullHeaders);
 

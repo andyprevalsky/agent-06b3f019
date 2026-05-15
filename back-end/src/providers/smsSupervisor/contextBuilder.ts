@@ -10,7 +10,7 @@
 
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../database';
-import { CompletionMessage } from '../rose';
+import { CompletionMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../rose';
 import { createLogger } from '../logger';
 
 const log = createLogger('SmsContext');
@@ -95,7 +95,6 @@ interface UserProfileContext {
   state: string | null;
   postalCode: string | null;
   country: string | null;
-  customSystemPrompt: string | null;
   systemName: string | null;
 }
 
@@ -174,8 +173,7 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   const systemPrompt = assembleSystemPrompt({
     userContextSection,
     userName: user?.name || 'User',
-    userPhone: user?.phone || '',
-    customSystemPrompt: user?.customSystemPrompt || null,
+    assistantName: user?.systemName || 'Rose',
   });
 
   // DYNAMIC: hierarchy, attention requests, recent activity, current datetime —
@@ -310,7 +308,6 @@ async function fetchUserProfile(userId: string) {
       state: true,
       postalCode: true,
       country: true,
-      customSystemPrompt: true,
       systemName: true,
     },
   });
@@ -539,7 +536,9 @@ function formatUserContext(user: UserProfileContext | null): string {
     }
   }
 
-  if (user.systemName) parts.push(`Preferred system name: ${user.systemName}`);
+  // Note: user.systemName is interpolated into the universal-static prompt as
+  // `{USER_ASSIGNED_ASSISTANT_NAME}` at render time on the per-user-stable
+  // template path; re-stating it here would duplicate the value and drift.
 
   return parts.join('\n');
 }
@@ -566,78 +565,94 @@ function formatTimeAgo(date: Date): string {
  * letting prompt caching reuse it across SMSes within the 5-min window.
  * See providers/rose/cache.ts.
  */
-function assembleSystemPrompt(params: {
-  userContextSection: string;
-  userName: string;
-  userPhone: string;
-  customSystemPrompt: string | null;
-}): string {
-  const { userContextSection, userName, userPhone, customSystemPrompt } = params;
+/**
+ * Block 1 template — assistant identity, input format docs, response rules.
+ * Per-user-stable: interpolates `{USER_ASSIGNED_ASSISTANT_NAME}` (the user's
+ * preferred system name, defaults to "Rose") and `{USER_NAME}`. Cached as a
+ * single `ephemeral.global` block on the claudeAuth path; across messages from
+ * the same user this is byte-identical, so the Anthropic prefix cache reuses it.
+ *
+ * No per-SMS data (datetime, hierarchy, recent activity) goes here — that lives
+ * in the trailing user-role context message so it never invalidates the prefix.
+ */
+const STATIC_SUPERVISOR_PROMPT_TEMPLATE = `You are {USER_ASSIGNED_ASSISTANT_NAME}, a nurturer of metaphysical seeds. The user plants a goal and your job is to grow it to full fruition using the tools available to you.
 
-  let prompt = `You are Rose - a nurturer of metaphysical seeds. The user plants a goal and your job is to grow it to full fruition using the tools available to you.
+In this surface, you receive SMS messages from {USER_NAME} and orchestrate massive agent networks to accomplish user goals. Operate with the lowest energy expenditure possible. Each tool invocation has a real cost — some combination of human attention, money, social credibility, or latency. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward.
 
-In this surface, you receive SMS messages from ${userName} and route, dispatch, or reply through the agent network. Operate with the lowest energy expenditure possible. Each tool invocation consumes human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward. Never ask "how can I help?" - you ARE helping by executing.
+# Your Inputs
 
-USER: ${userName} (${userPhone})
+For every user message, you will receive a timestamp and a state of the agent network you are managing at that time. Treat the state block as ground truth for "right now"; older session turns may reflect stale state.
 
-${userContextSection}
+An example of the format of that state is as follows.
 
-# Tool Guidance
+Current state (as of 2026-05-06T12:00:00.000Z):
 
-**reply_to_agent**
-Send a reply to an agent, answers questions, approves/rejects write-locks, or sends any message. For pending attention requests (in Pending Requests), include the attn_id. For agent questions visible in Recent Activity, provide the agent prefix and your reply.
+# Agent Hierarchy
+[a1b2c3] Book boxing class - running
+  [d4e5f6] Check class availability - waiting for approval
 
-**kill_agent**
-Stop an agent and all its sub-agents. Use the 6-character prefix or full ID.
+# Pending Requests
+- attn_123 from [d4e5f6]: Approve payment for monthly membership
 
-**increase_budget**
-Add dollars to an agent's cost limit. If the agent was cost-limited, it will automatically resume.
+# Recent Activity
+- [a1b2c3] Sent message to user (2m ago): "Found a 6pm Tuesday class, want me to book it?"
+- [d4e5f6] Completion summary (just now): "Booked Tuesday 6pm class, confirmation #4421."
 
-**start_new_agent**
-Spawns an autonomous agent that decomposes the goal into sub-tasks and executes them in parallel via the agent network. Use when the request requires multi-step work or sub-agent delegation. If web_search results are insufficient for the user's request, escalate to start_new_agent.
+Agent Hierarchy
+- 6-character agent IDs along with their task description.
+- Indentation dictates the hierarchy of tasks — indented agents are spawned from their parent agent at the previous indentation level.
 
-**web_search**
-Search the web for real-time information. Use this for any factual claim, current data, or information lookup; do not rely on your own knowledge for facts. If the search results are insufficient, escalate to start_new_agent.
+Pending Requests
+- Open requests from agents — write-lock approvals or clarifying questions. Approvals include a shortcode the user can text to approve.
 
-**attempt_completion**
-Send the final SMS message to the user. This is the only way to reply. Call this when you are done thinking and using tools.
+Recent Activity
+- Messages your agents have sent to the user and their completion summaries.
 
 # How to Respond
 
 Think step by step. Use tools as needed to gather information or take actions. When you are done, call attempt_completion with the SMS text to send to the user.
 
+Parallelize as many tool calls per turn as reasonable so you respond quickly with grounded, accurate answers.
+
 - Use the agent ID prefix [XXXXXX] when referring to specific agents
-- For write lock approvals, remind the user they can reply "Approve XXXXX" with the shortcode
+- If your reply does not address a pending write-lock approval shown in the state block, briefly mention its shortcode (e.g. "Approve 7K2F9 when ready")
 - Be conversational but concise, this is texting, not email
 - If the user's message is ambiguous about which agent, ask for clarification
-- When starting a new agent, confirm the goal before launching unless the user gave a clear task
 - The trace URL for any agent is: https://roselabs.ai?agent-id={full_agent_id}
-- Each user turn is preceded by a "Current state:" message with up-to-date hierarchy, pending requests, recent activity, and the current datetime. Treat that as the source of truth for "right now"; older session turns may reflect stale state.
+- Calling attempt_completion both sends your SMS and commits every write-tool call you made this turn. There is no separate commit step and no retraction after you call it.
 
-# Response Format
-
-You MUST respond with valid JSON:
-{
-  "reasoning": "your internal thought process (not shown to user)",
-  "tool_calls": [
-    {"tool": "tool_name", "arguments": {...}}
-  ]
-}
-
-tool_calls should contain the tools you want to execute this turn.
-When you have your answer ready, include {"tool": "attempt_completion", "arguments": {"message": "your SMS text"}} in tool_calls.
-You may call other tools and attempt_completion in the same turn.
 Only call tools when the user's intent is clear. Don't guess.`;
 
-  if (customSystemPrompt) {
-    prompt += `\n\n# User's Custom Instructions\n\n${customSystemPrompt}`;
-  }
+/**
+ * Cache layout produced here, on the Anthropic claudeAuth path:
+ *
+ *   Block 1 — STATIC_SUPERVISOR_PROMPT_TEMPLATE rendered with the user's name
+ *             and preferred assistant name. Per-user-stable, cached `ephemeral.global`.
+ *   Block 2 — formatUserContext() output (name / phone / address). Per-user-stable,
+ *             cached `ephemeral.global`.
+ *   Then the supervisor handler appends a user-role message with per-SMS env state.
+ *
+ * Mechanism: we emit `BLOCK1{BOUNDARY}BLOCK2` here; `markCacheable()` in the
+ * caller appends ONE trailing boundary. The resulting two boundaries are
+ * recognized by `transforms.ts` → `claudeAuth.ts` → multi-block cache logic
+ * which marks each non-empty section globally cacheable. See
+ * agents/providers/rose/claude_auth.py:_build_system_blocks for the source pattern.
+ */
+function assembleSystemPrompt(params: {
+  userContextSection: string;
+  userName: string;
+  assistantName: string;
+}): string {
+  const { userContextSection, userName, assistantName } = params;
 
-  // Note: no trailing boundary sentinel here — the call site wraps this
-  // entire prompt in `markCacheable()` to mark it as the cache-stable static
-  // prefix. See supervisorHandler.ts.
+  const block1 = STATIC_SUPERVISOR_PROMPT_TEMPLATE.replace(
+    /\{USER_ASSIGNED_ASSISTANT_NAME\}/g,
+    assistantName
+  ).replace(/\{USER_NAME\}/g, userName);
 
-  return prompt;
+  const block2 = userContextSection.trim();
+
+  return block2 ? `${block1}${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}${block2}` : block1;
 }
 
 /**
