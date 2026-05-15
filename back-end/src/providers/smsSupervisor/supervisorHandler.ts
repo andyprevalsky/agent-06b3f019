@@ -83,8 +83,23 @@ interface SessionMessage {
 export interface SmsSupervisorResult {
   responseText: string;
   toolsExecuted: string[];
-  /** True iff the run reached commit (seq gate passed and writes were flushed + SMS sent). */
+  /** True iff the run reached the commit gate and sent/persisted a user-facing reply. */
   committed: boolean;
+}
+
+export function buildToolFailureMessage(
+  failures: readonly ToolResult[],
+  stage: 'execute' | 'commit'
+): string {
+  const failedTools = failures
+    .filter((result) => !result.success)
+    .map((result) => `${result.tool}: ${result.error || result.result || 'failed'}`);
+  const details = failedTools.length > 0 ? failedTools.join('; ') : 'unknown failure';
+  const prefix =
+    stage === 'commit'
+      ? 'I tried to finish that, but one or more actions failed while applying the changes'
+      : 'I tried to finish that, but one or more actions failed';
+  return `${prefix}: ${details}. Please try again or open Rose to check the current state.`;
 }
 
 /**
@@ -203,8 +218,37 @@ export async function handleSmsSupervisorMessage(config: {
       });
     }
 
+    const failedToolResults = toolResults.filter((result) => !result.success);
+
     // attempt_completion ends the run; the gated commit happens below.
     if (completionCall) {
+      if (failedToolResults.length > 0) {
+        log.warn('[SmsSupervisor] attempt_completion ignored because tool dispatch failed', {
+          round,
+          failures: failedToolResults.map((result) => ({
+            tool: result.tool,
+            error: result.error,
+          })),
+        });
+
+        const toolResultSummary = toolResults
+          .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
+          .join('\n');
+
+        messages.push({
+          role: 'assistant',
+          content: JSON.stringify({
+            reasoning: llmResponse.reasoning,
+            tool_calls: llmResponse.tool_calls,
+          }),
+        });
+        messages.push({
+          role: 'user',
+          content: `Tool results:\n${toolResultSummary}\n\nAt least one tool failed. Do not claim the action completed. Correct the tool call, use another tool, or call attempt_completion with a failure message for the user.`,
+        });
+        continue;
+      }
+
       const completionMessage = completionCall.arguments?.message;
       finalResponse = typeof completionMessage === 'string' ? completionMessage : '';
       log.info('[SmsSupervisor] attempt_completion received', {
@@ -299,12 +343,24 @@ export async function handleSmsSupervisorMessage(config: {
     if (pendingWrites.length > 0) {
       const commitStart = Date.now();
       const commitResults = await commitPendingWrites(pendingWrites, userId);
+      const failedCommitResults = commitResults.filter((result) => !result.success);
       log.info('[SmsSupervisor] Pending writes committed', {
         userId,
         count: pendingWrites.length,
         successes: commitResults.filter((r) => r.success).length,
+        failures: failedCommitResults.length,
         durationMs: Date.now() - commitStart,
       });
+      if (failedCommitResults.length > 0) {
+        log.error('[SmsSupervisor] Pending write commit failures will be reported to user', {
+          userId,
+          failures: failedCommitResults.map((result) => ({
+            tool: result.tool,
+            error: result.error,
+          })),
+        });
+        finalResponse = buildToolFailureMessage(failedCommitResults, 'commit');
+      }
     }
 
     // Send the SMS.
