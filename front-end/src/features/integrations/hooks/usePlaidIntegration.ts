@@ -1,0 +1,65 @@
+/**
+ * STATE MACHINE: usePlaidIntegration
+ *
+ *   Orchestrates the Plaid feature's `usePlaidConnect` + `usePlaidItems` hooks
+ *   into a single object the IntegrationSections card consumes.
+ *
+ *   [LOADING] --first fetch--> [LOADED]
+ *     --connect()--> [CONNECTING] --success--> [LOADED + new item]
+ *     --disconnect(id)--> [DISCONNECTING(id)] --success--> [LOADED - item]
+ */
+
+import { useCallback, useState } from 'react';
+
+import { usePlaidConnect, usePlaidItems } from '@/features/plaid';
+import type { PlaidItem } from '@/features/plaid';
+
+export function usePlaidIntegration(): {
+  items: PlaidItem[];
+  itemsLoading: boolean;
+  connectLoading: boolean;
+  disconnectingItemId: string | null;
+  error: string | null;
+  onConnect: () => void;
+  onDisconnect: (itemId: string) => void;
+} {
+  const items = usePlaidItems();
+  const [disconnectingItemId, setDisconnectingItemId] = useState<string | null>(null);
+
+  const connect = usePlaidConnect({
+    onConnected: () => {
+      void items.refresh();
+    },
+    onDisconnected: () => {
+      setDisconnectingItemId(null);
+      void items.refresh();
+    },
+  });
+
+  const onConnect = useCallback(() => {
+    void connect.connect();
+  }, [connect]);
+
+  const onDisconnect = useCallback(
+    (itemId: string) => {
+      setDisconnectingItemId(itemId);
+      void connect.disconnect(itemId);
+    },
+    [connect],
+  );
+
+  const connectLoading =
+    connect.state === 'fetching_link_token' ||
+    connect.state === 'link_open' ||
+    connect.state === 'exchanging';
+
+  return {
+    items: items.items,
+    itemsLoading: items.loading,
+    connectLoading,
+    disconnectingItemId,
+    error: items.error ?? connect.error,
+    onConnect,
+    onDisconnect,
+  };
+}

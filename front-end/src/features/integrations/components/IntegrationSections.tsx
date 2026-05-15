@@ -13,12 +13,14 @@ import type { useComputeSync } from '../hooks/useComputeSync';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
+import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';
 import MessagesSyncSection from './MessagesSyncSection';
 import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
+import { PlaidSection } from '@/features/plaid';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -35,6 +37,7 @@ interface IntegrationSectionsProps {
   messages: ReturnType<typeof useMessagesSync>;
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
+  plaid: ReturnType<typeof usePlaidIntegration>;
 }
 
 function ComputeIntegrationSection({
@@ -80,6 +83,7 @@ export default function IntegrationSections({
   messages,
   gmail,
   actions,
+  plaid,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -133,6 +137,20 @@ export default function IntegrationSections({
           data={data}
           compute={compute}
           actions={actions}
+        />
+      )}
+
+      {isFullySignedIn && (
+        <PlaidSection
+          expanded={accordion.plaidExpanded}
+          onToggle={() => accordion.toggleSection('plaid')}
+          items={plaid.items}
+          itemsLoading={plaid.itemsLoading}
+          connectLoading={plaid.connectLoading}
+          disconnectingItemId={plaid.disconnectingItemId}
+          error={plaid.error}
+          onConnect={plaid.onConnect}
+          onDisconnect={plaid.onDisconnect}
         />
       )}
 

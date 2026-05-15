@@ -69,6 +69,7 @@
     "node-cron": "^3.0.3",
     "openai": "^4.63.0",
     "p-limit": "^7.2.0",
+    "plaid": "^42.2.0",
     "playwright": "^1.56.1",
     "prisma": "^5.20.0",
     "steel-sdk": "^0.16.0",
