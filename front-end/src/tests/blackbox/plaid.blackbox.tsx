@@ -7,7 +7,7 @@
  *   - usePlaidConnect error surfaces
  *   - disconnect path
  *   - tenant-shape: list-items happy path, empty, error
- *   - Powered by Plaid attribution
+ *   - Plaid attribution is not rendered as an extra card row
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -235,14 +235,12 @@ describe('PlaidSection (rendering)', () => {
     });
   });
 
-  it('renders the "Powered by Plaid" attribution', async () => {
+  it('does not render an extra "Powered by Plaid" attribution row', async () => {
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => {
-      expect(screen.getByRole('link', { name: /plaid/i })).toHaveAttribute(
-        'href',
-        'https://plaid.com',
-      );
+      expect(screen.getByText(/connect a bank or financial account/i)).toBeInTheDocument();
     });
+    expect(screen.queryByRole('link', { name: /plaid/i })).not.toBeInTheDocument();
   });
 
   it('renders connected item rows when items exist', async () => {

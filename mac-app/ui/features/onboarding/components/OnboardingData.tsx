@@ -1456,17 +1456,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {plaidError}
               </div>
             )}
-            <div className="px-4 py-2 border-t border-border/50 text-[10px] text-muted-foreground flex items-center justify-end gap-1">
-              <span>Powered by</span>
-              <a
-                href="https://plaid.com"
-                target="_blank"
-                rel="noreferrer noopener"
-                className="font-medium underline-offset-2 hover:underline"
-              >
-                Plaid
-              </a>
-            </div>
           </div>
         </div>
 

@@ -17,6 +17,34 @@ import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 
+const ROSE_SITE_ORIGIN = 'https://roselabs.ai';
+
+const isElectronApp = (): boolean =>
+  typeof window !== 'undefined' && (window as { api?: unknown }).api !== undefined;
+
+const openExternalFromElectron = (path: string): boolean => {
+  if (!isElectronApp()) return false;
+  const api = (window as { api?: { openExternal?: (url: string) => Promise<void> } }).api;
+  const url = new URL(path, ROSE_SITE_ORIGIN).toString();
+  if (api?.openExternal !== undefined) {
+    void api.openExternal(url);
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+  return true;
+};
+
+const goToLandingSection = (targetId: string, earlyAccess: boolean): void => {
+  if (window.location.pathname === '/') {
+    document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+
+  const path = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+  if (openExternalFromElectron(path)) return;
+  window.location.href = path;
+};
+
 const NaviFooter = () => {
   const [contactModalOpen, setContactModalOpen] = useState(false);
   const earlyAccess = isEarlyAccessEnabled();
@@ -49,11 +77,7 @@ const NaviFooter = () => {
               <li>
                 <button
                   onClick={() => {
-                    if (window.location.pathname === '/') {
-                      document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' });
-                    } else {
-                      window.location.href = '/#features';
-                    }
+                    goToLandingSection('features', false);
                   }}
                   className="hover:text-primary-foreground transition-colors text-left"
                 >
@@ -64,13 +88,7 @@ const NaviFooter = () => {
                 <button
                   onClick={() => {
                     const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-                    if (window.location.pathname === '/') {
-                      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
-                    } else {
-                      window.location.href = earlyAccess
-                        ? `/?earlyaccess#${targetId}`
-                        : `/#${targetId}`;
-                    }
+                    goToLandingSection(targetId, earlyAccess);
                   }}
                   className="hover:text-primary-foreground transition-colors text-left"
                 >
@@ -84,9 +102,16 @@ const NaviFooter = () => {
             <h4 className="font-semibold mb-4">Company</h4>
             <ul className="space-y-2 text-primary-foreground/70">
               <li>
-                <Link to="/about" className="hover:text-primary-foreground transition-colors">
+                <a
+                  href="/about"
+                  onClick={(event) => {
+                    if (!openExternalFromElectron('/about')) return;
+                    event.preventDefault();
+                  }}
+                  className="hover:text-primary-foreground transition-colors"
+                >
                   About
-                </Link>
+                </a>
               </li>
               <li>
                 <Link to="/privacy" className="hover:text-primary-foreground transition-colors">

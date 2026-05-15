@@ -12,6 +12,7 @@
 
 import { useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
+import { getBackendUrl } from '../config';
 import VoiceOrb from './VoiceOrb';
 
 const ELEVENLABS_LIBRARY_URL = 'https://elevenlabs.io/app/voice-library';
@@ -65,12 +66,22 @@ const findPresetIndex = (voiceId: string): number => {
 // Preset samples are pre-generated MP3s shipped in mac-app/public/voice-samples/.
 // Custom voices fall through to the backend, which fetches the ElevenLabs
 // auto-generated preview_url for whatever voice ID the user pasted.
-const presetSamplePath = (voiceId: string): string =>
-  `/voice-samples/${encodeURIComponent(voiceId)}.mp3`;
+export const resolvePresetSamplePath = (
+  voiceId: string,
+  baseUrl: string = import.meta.env.BASE_URL
+): string => {
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return `${normalizedBase}voice-samples/${encodeURIComponent(voiceId)}.mp3`;
+};
+
+export const resolveCustomPreviewApiUrl = (
+  voiceId: string,
+  backendUrl: string = getBackendUrl()
+): string => `${backendUrl}/api/voices/${encodeURIComponent(voiceId)}/preview`;
 
 async function fetchCustomPreviewUrl(voiceId: string): Promise<string | null> {
   try {
-    const response = await fetch(`/api/voices/${encodeURIComponent(voiceId)}/preview`);
+    const response = await fetch(resolveCustomPreviewApiUrl(voiceId));
     if (!response.ok) return null;
     const body = (await response.json()) as { url?: string };
     return typeof body.url === 'string' ? body.url : null;
@@ -80,7 +91,7 @@ async function fetchCustomPreviewUrl(voiceId: string): Promise<string | null> {
 }
 
 async function resolvePreviewUrl(voiceId: string, isCustom: boolean): Promise<string | null> {
-  if (!isCustom) return presetSamplePath(voiceId);
+  if (!isCustom) return resolvePresetSamplePath(voiceId);
   return fetchCustomPreviewUrl(voiceId);
 }
 

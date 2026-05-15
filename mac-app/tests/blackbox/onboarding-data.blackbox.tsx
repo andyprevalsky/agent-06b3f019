@@ -355,10 +355,7 @@ describe('OnboardingData', () => {
 
       expect(screen.getByText('Banking')).toBeInTheDocument();
       expect(screen.getByText(/Connect a bank account via Plaid/i)).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: /plaid/i })).toHaveAttribute(
-        'href',
-        'https://plaid.com'
-      );
+      expect(screen.queryByRole('link', { name: /plaid/i })).not.toBeInTheDocument();
     });
 
     it('hydrates connected banks from /api/integrations/plaid/items', async () => {
