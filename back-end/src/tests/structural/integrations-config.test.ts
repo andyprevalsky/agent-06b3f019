@@ -52,12 +52,35 @@ function testRenderConfigPreservesProductionShape() {
     /key:\s*GMAIL_WEB_CLIENT_SECRET[\s\S]*?sync:\s*false/.test(renderYaml),
     'render.yaml must not commit Gmail OAuth secrets'
   );
+  assert(
+    /key:\s*PLAID_ENV[\s\S]*?value:\s*production/.test(renderYaml),
+    'render.yaml must run Plaid against production in the production backend'
+  );
+}
+
+function testPlaidProductionProductsMatchApprovedAccess() {
+  const plaidSource = fs.readFileSync(path.join(backendDir, 'src/providers/plaid.ts'), 'utf8');
+  const productionProductsMatch = plaidSource.match(
+    /PLAID_PRODUCTION_PRODUCTS:\s*Products\[\]\s*=\s*\[([\s\S]*?)\];/
+  );
+  assert(productionProductsMatch, 'Plaid provider must declare production products explicitly');
+  const productionProducts = productionProductsMatch[1];
+
+  assert(
+    !productionProducts.includes('Products.Auth'),
+    'Production Plaid Link must not request Auth until the product is approved'
+  );
+  assert(
+    !productionProducts.includes('Products.Identity'),
+    'Production Plaid Link must not request Identity until the product is approved'
+  );
 }
 
 function main() {
   testProductionRequiresPublicBackendUrl();
   testBackendBaseUrlUsesProductionEnv();
   testRenderConfigPreservesProductionShape();
+  testPlaidProductionProductsMatchApprovedAccess();
 }
 
 try {

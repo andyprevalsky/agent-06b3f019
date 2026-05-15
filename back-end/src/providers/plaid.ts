@@ -76,20 +76,31 @@ export function resetPlaidClientForTests(): void {
 }
 
 /**
- * The set of Plaid products Rose Labs requests at Link creation time.
- * Matches the products requested on the production application:
- * transactions, auth, balance, identity, investments, liabilities.
- * Income and statements are added on the application/product application
- * track; statements are pulled via a separate `Plaid Statements` endpoint
- * after Link, so they are not requested as a Link product here.
+ * Broad product set used outside production. Sandbox can create Link tokens for
+ * all of these, which keeps local coverage representative of the intended
+ * integration surface.
  */
-export const PLAID_DEFAULT_PRODUCTS: Products[] = [
+export const PLAID_SANDBOX_PRODUCTS: Products[] = [
   Products.Auth,
   Products.Transactions,
   Products.Identity,
   Products.Investments,
   Products.Liabilities,
 ];
+
+/**
+ * Products currently enabled on the Plaid production account. Requesting
+ * Auth/Identity before Plaid approves them causes /link/token/create to fail
+ * with INVALID_PRODUCT, so they must stay out of the production Link token.
+ */
+export const PLAID_PRODUCTION_PRODUCTS: Products[] = [
+  Products.Transactions,
+  Products.Investments,
+  Products.Liabilities,
+];
+
+export const PLAID_DEFAULT_PRODUCTS: Products[] =
+  PLAID_ENV === 'production' ? PLAID_PRODUCTION_PRODUCTS : PLAID_SANDBOX_PRODUCTS;
 
 /**
  * Optional products: requested as `optional_products` in Link so that a
