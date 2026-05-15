@@ -47,6 +47,20 @@ def _safe_time() -> float:
 logger = structlog.get_logger()
 
 
+def _truncate_display(value: str, max_len: int = 100) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
+
+
+def _format_fetch_title(prefix: str, url: str, objective: str) -> str:
+    display_url = _truncate_display(url, 80) if url else "URL"
+    display_objective = _truncate_display(objective, 70)
+    if display_objective:
+        return f"{prefix} {display_url} for {display_objective}"
+    return f"{prefix} {display_url}"
+
+
 def _format_attachment_note(file_pointers: List[Dict[str, Any]]) -> str:
     """Mirror Claude Code's '[Binary content (mime, size) also saved to {path}]' note.
 
@@ -93,14 +107,17 @@ class WebFetchManager(ToolManager):
         objective = tool_call.get("objective", "")
 
         start_time = _safe_time()
-        display_objective = objective if len(objective) <= 100 else objective[:97] + "..."
+        display_objective = _truncate_display(objective)
+        progress_title = _format_fetch_title("Fetching", url, objective)
+        completed_title = _format_fetch_title("Fetched", url, objective)
+        failed_title = _format_fetch_title("\u274c Web fetch failed for", url, objective)
 
         # Pre-execution status
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="Fetching web content",
-                message=f"Fetching {url}: {display_objective}",
+                title=progress_title,
+                message=f"Extracting from {url}: {display_objective}",
                 status=MessageStatus.IN_PROGRESS,
             ),
             agent_id=agent_id,
@@ -207,7 +224,7 @@ class WebFetchManager(ToolManager):
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="Web fetch completed",
+                    title=completed_title,
                     message=message,
                     status=MessageStatus.FINISHED,
                 ),
@@ -244,7 +261,7 @@ class WebFetchManager(ToolManager):
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="❌ Web fetch failed",
+                    title=failed_title,
                     message=error_message,
                     status=MessageStatus.ERROR,
                 ),

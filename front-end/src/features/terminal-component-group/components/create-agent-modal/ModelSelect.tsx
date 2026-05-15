@@ -28,9 +28,7 @@ export function ModelSelect({ models, selectedModel, onChange }: ModelSelectProp
   const triggerLabel = `${activeModel?.provider || 'Unknown'}/${activeModel?.name || 'Select model...'}`;
 
   const filtered = models.filter(
-    (m) =>
-      search === '' ||
-      `${m.provider}/${m.name}`.toLowerCase().includes(search.toLowerCase()),
+    (m) => search === '' || `${m.provider}/${m.name}`.toLowerCase().includes(search.toLowerCase()),
   );
 
   return (
@@ -54,11 +52,7 @@ export function ModelSelect({ models, selectedModel, onChange }: ModelSelectProp
           style={{ width: 'var(--radix-popover-trigger-width)' }}
         >
           <Command className="bg-transparent">
-            <CommandInput
-              placeholder="Search models..."
-              value={search}
-              onValueChange={setSearch}
-            />
+            <CommandInput placeholder="Search models..." value={search} onValueChange={setSearch} />
             <CommandList className="max-h-64">
               <CommandEmpty>No model found.</CommandEmpty>
               <CommandGroup>

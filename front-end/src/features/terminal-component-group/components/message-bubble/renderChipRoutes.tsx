@@ -27,6 +27,7 @@ export function renderChipRoutes({ props, routing }: Args): ReactElement | null 
     compact = false,
     onSubmitFeedback,
     planCharCount,
+    planStreamStartedAtMs,
   } = props;
 
   if (routing.isToolApproval) {
@@ -43,6 +44,7 @@ export function renderChipRoutes({ props, routing }: Args): ReactElement | null 
         shouldType={shouldType}
         onTypingComplete={onTypingComplete}
         planCharCount={planCharCount}
+        planStreamStartedAtMs={planStreamStartedAtMs}
       />
     );
   }

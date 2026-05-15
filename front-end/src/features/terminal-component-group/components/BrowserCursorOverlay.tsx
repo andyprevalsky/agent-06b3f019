@@ -131,9 +131,7 @@ function useCursorPosition(taskId: string, messages: Message[]): CursorPosition 
     if (messageId === lastProcessedMessageRef.current) return;
     lastProcessedMessageRef.current = messageId;
 
-    const coords = latestWithCoords.metadata?.auxiliary?.coordinates as
-      | CursorPosition
-      | undefined;
+    const coords = latestWithCoords.metadata?.auxiliary?.coordinates as CursorPosition | undefined;
     if (coords?.x !== undefined && coords?.y !== undefined) {
       setCursorPos({ x: coords.x, y: coords.y });
     }

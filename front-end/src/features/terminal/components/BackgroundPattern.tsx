@@ -75,16 +75,48 @@ function PatternDefs({ patternOffset }: { patternOffset: { x: number; y: number 
         height="143"
         patternUnits="userSpaceOnUse"
       >
-        <rect x="0" y="0" width="143" height="143" fill="transparent" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
-        <path d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
-        <path d="M 143,-11 Q 143,0 154,0 Q 143,0 143,11 Q 143,0 132,0 Q 143,0 143,-11 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
-        <path d="M 0,132 Q 0,143 11,143 Q 0,143 0,154 Q 0,143 -11,143 Q 0,143 0,132 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
-        <path d="M 143,132 Q 143,143 154,143 Q 143,143 143,154 Q 143,143 132,143 Q 143,143 143,132 Z" fill="rgb(229, 231, 235)" className="dark:fill-gray-800" />
+        <rect
+          x="0"
+          y="0"
+          width="143"
+          height="143"
+          fill="transparent"
+          stroke="rgb(229, 231, 235)"
+          strokeWidth="1"
+          className="dark:stroke-gray-800"
+        />
+        <path
+          d="M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z"
+          fill="rgb(229, 231, 235)"
+          className="dark:fill-gray-800"
+        />
+        <path
+          d="M 143,-11 Q 143,0 154,0 Q 143,0 143,11 Q 143,0 132,0 Q 143,0 143,-11 Z"
+          fill="rgb(229, 231, 235)"
+          className="dark:fill-gray-800"
+        />
+        <path
+          d="M 0,132 Q 0,143 11,143 Q 0,143 0,154 Q 0,143 -11,143 Q 0,143 0,132 Z"
+          fill="rgb(229, 231, 235)"
+          className="dark:fill-gray-800"
+        />
+        <path
+          d="M 143,132 Q 143,143 154,143 Q 143,143 143,154 Q 143,143 132,143 Q 143,143 143,132 Z"
+          fill="rgb(229, 231, 235)"
+          className="dark:fill-gray-800"
+        />
       </pattern>
 
       <mask id="large-tile-mask">
         <rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />
-        <rect x="50%" y="40%" width="426.8" height="426.8" style={{ transform: 'translate(-213.4px, -213.4px)' }} fill="black" />
+        <rect
+          x="50%"
+          y="40%"
+          width="426.8"
+          height="426.8"
+          style={{ transform: 'translate(-213.4px, -213.4px)' }}
+          fill="black"
+        />
       </mask>
     </defs>
   );
@@ -92,7 +124,13 @@ function PatternDefs({ patternOffset }: { patternOffset: { x: number; y: number 
 
 // ── Colored tile rects from the animation state ─────────────────────────
 
-function AnimatedTilesOverlay({ tileColors, colorPalette }: { tileColors: Map<string, number>; colorPalette: Array<{ hex: string }> }) {
+function AnimatedTilesOverlay({
+  tileColors,
+  colorPalette,
+}: {
+  tileColors: Map<string, number>;
+  colorPalette: Array<{ hex: string }>;
+}) {
   return (
     <>
       {Array.from(tileColors.entries()).map(([key, colorId]) => {
@@ -112,7 +150,16 @@ function AnimatedTilesOverlay({ tileColors, colorPalette }: { tileColors: Map<st
         const x = gridOriginX + col * tileSize;
         const y = gridOriginY + row * tileSize;
 
-        return <rect key={key} x={x} y={y} width={tileSize} height={tileSize} fill={colorId === 0 ? 'transparent' : color.hex} />;
+        return (
+          <rect
+            key={key}
+            x={x}
+            y={y}
+            width={tileSize}
+            height={tileSize}
+            fill={colorId === 0 ? 'transparent' : color.hex}
+          />
+        );
       })}
     </>
   );
@@ -121,29 +168,85 @@ function AnimatedTilesOverlay({ tileColors, colorPalette }: { tileColors: Map<st
 // ── Full-size grid + large tile border ──────────────────────────────────
 
 function SmallTilesBackground() {
-  return <rect x="-5000" y="-5000" width="10000" height="10000" fill="url(#grid-pattern)" mask="url(#large-tile-mask)" />;
+  return (
+    <rect
+      x="-5000"
+      y="-5000"
+      width="10000"
+      height="10000"
+      fill="url(#grid-pattern)"
+      mask="url(#large-tile-mask)"
+    />
+  );
 }
 
 function LargeTileBorder() {
   return (
-    <rect x="50%" y="40%" width="429" height="429" style={{ transform: 'translate(-214.5px, -214.5px)' }} fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" />
+    <rect
+      x="50%"
+      y="40%"
+      width="429"
+      height="429"
+      style={{ transform: 'translate(-214.5px, -214.5px)' }}
+      fill="none"
+      stroke="rgb(229, 231, 235)"
+      strokeWidth="1"
+      className="dark:stroke-gray-800"
+    />
   );
 }
 
 // ── Corner diamonds + circles ───────────────────────────────────────────
 
-const DIAMOND_PATH = 'M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z';
+const DIAMOND_PATH =
+  'M 0.5,-12 L 0.5,-6 C 0.5,-4 2,-2 4,-1 L 6,-0.5 L 12,-0.5 L 12,0.5 L 6,0.5 L 4,1 C 2,2 0.5,4 0.5,6 L 0.5,12 L -0.5,12 L -0.5,6 C -0.5,4 -2,2 -4,1 L -6,0.5 L -12,0.5 L -12,-0.5 L -6,-0.5 L -4,-1 C -2,-2 -0.5,-4 -0.5,-6 L -0.5,-12 Z';
 const SMALL_DIAMOND_PATH = 'M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z';
 
 function LargeTileCorners() {
   return (
     <>
-      <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
-      <path d={DIAMOND_PATH} fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }} />
-      <circle cx="0" cy="0" r="25" fill="none" stroke="rgb(229, 231, 235)" strokeWidth="1" className="dark:stroke-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
-      <path d={DIAMOND_PATH} fill="url(#rose-gradient)" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }} />
-      <path d={SMALL_DIAMOND_PATH} fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }} />
-      <path d={SMALL_DIAMOND_PATH} fill="rgb(229, 231, 235)" className="dark:fill-gray-800" style={{ transform: 'translate(calc(50% + 214.5px), calc(40% + 214.5px))' }} />
+      <circle
+        cx="0"
+        cy="0"
+        r="25"
+        fill="none"
+        stroke="rgb(229, 231, 235)"
+        strokeWidth="1"
+        className="dark:stroke-gray-800"
+        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }}
+      />
+      <path
+        d={DIAMOND_PATH}
+        fill="url(#rose-gradient)"
+        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% - 214.5px))' }}
+      />
+      <circle
+        cx="0"
+        cy="0"
+        r="25"
+        fill="none"
+        stroke="rgb(229, 231, 235)"
+        strokeWidth="1"
+        className="dark:stroke-gray-800"
+        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }}
+      />
+      <path
+        d={DIAMOND_PATH}
+        fill="url(#rose-gradient)"
+        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% - 214.5px))' }}
+      />
+      <path
+        d={SMALL_DIAMOND_PATH}
+        fill="rgb(229, 231, 235)"
+        className="dark:fill-gray-800"
+        style={{ transform: 'translate(calc(50% - 214.5px), calc(40% + 214.5px))' }}
+      />
+      <path
+        d={SMALL_DIAMOND_PATH}
+        fill="rgb(229, 231, 235)"
+        className="dark:fill-gray-800"
+        style={{ transform: 'translate(calc(50% + 214.5px), calc(40% + 214.5px))' }}
+      />
     </>
   );
 }

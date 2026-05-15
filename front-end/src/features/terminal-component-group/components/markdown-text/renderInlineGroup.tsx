@@ -6,11 +6,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
-import {
-  BASE_DELAY_SECONDS,
-  FADE_DURATION_SECONDS,
-  type WordItem,
-} from './types';
+import { BASE_DELAY_SECONDS, FADE_DURATION_SECONDS, type WordItem } from './types';
 
 export interface WordIndexRef {
   value: number;
@@ -34,9 +30,7 @@ function wrapInlineFormatting(
   animate: boolean,
   delay: number,
 ): React.ReactNode {
-  let content: React.ReactNode = (
-    <React.Fragment key={groupKey}>{wordSpans}</React.Fragment>
-  );
+  let content: React.ReactNode = <React.Fragment key={groupKey}>{wordSpans}</React.Fragment>;
 
   if (firstItem.isCode) {
     if (firstItem.blockType !== 'pre' && animate) {

@@ -146,6 +146,7 @@ class ToolEvent:
     sequence: Optional[int] = None  # Ordering for chunks
     done: Optional[bool] = None  # True if final chunk
     sub_agent_id: Optional[str] = None  # For routing (browser agent)
+    llm_started_at_ms: Optional[int] = None  # LLM request start epoch ms, before first token
 
     # For USAGE events - list of usage items
     tool_name: Optional[str] = None

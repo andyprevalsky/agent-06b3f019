@@ -197,9 +197,7 @@ describe('api.ts', () => {
     });
 
     it('throws default error when server returns no error field', async () => {
-      server.use(
-        http.post(`${API_BASE}/agents`, () => HttpResponse.json({}, { status: 500 })),
-      );
+      server.use(http.post(`${API_BASE}/agents`, () => HttpResponse.json({}, { status: 500 })));
       await expect(createAgent({ goal: 'bad' })).rejects.toThrow('Failed to create agent');
     });
   });
@@ -397,8 +395,9 @@ describe('api.ts', () => {
 
     it('startAgent falls back to default on unparseable error body', async () => {
       server.use(
-        http.post(`${API_BASE}/agents/:agentId/start-agent`, () =>
-          new HttpResponse('not json', { status: 500 }),
+        http.post(
+          `${API_BASE}/agents/:agentId/start-agent`,
+          () => new HttpResponse('not json', { status: 500 }),
         ),
       );
       await expect(startAgent('a')).rejects.toThrow('Failed to start agent');
@@ -454,9 +453,7 @@ describe('api.ts', () => {
     });
 
     it('throws on failure', async () => {
-      server.use(
-        http.get(`${API_BASE}/tools`, () => HttpResponse.json({}, { status: 500 })),
-      );
+      server.use(http.get(`${API_BASE}/tools`, () => HttpResponse.json({}, { status: 500 })));
       await expect(getTools()).rejects.toThrow('Failed to fetch tools');
     });
   });
@@ -594,8 +591,9 @@ describe('api.ts', () => {
 
     it('respondToAttentionRequest falls back to default on unparseable error', async () => {
       server.use(
-        http.post(`${API_BASE}/attention-requests/:id/respond`, () =>
-          new HttpResponse('oops', { status: 500 }),
+        http.post(
+          `${API_BASE}/attention-requests/:id/respond`,
+          () => new HttpResponse('oops', { status: 500 }),
         ),
       );
       await expect(respondToAttentionRequest('r1', 'yes')).rejects.toThrow(
@@ -654,9 +652,7 @@ describe('api.ts', () => {
 
     it('getMyInviteCode throws on failure', async () => {
       server.use(
-        http.get(`${API_BASE}/invite-codes/my-code`, () =>
-          HttpResponse.json({}, { status: 500 }),
-        ),
+        http.get(`${API_BASE}/invite-codes/my-code`, () => HttpResponse.json({}, { status: 500 })),
       );
       await expect(getMyInviteCode()).rejects.toThrow('Failed to fetch invite code');
     });
@@ -677,9 +673,7 @@ describe('api.ts', () => {
 
     it('useInviteCode throws default on empty error body', async () => {
       server.use(
-        http.post(`${API_BASE}/invite-codes/use`, () =>
-          HttpResponse.json({}, { status: 500 }),
-        ),
+        http.post(`${API_BASE}/invite-codes/use`, () => HttpResponse.json({}, { status: 500 })),
       );
       await expect(useInviteCode(1)).rejects.toThrow('Failed to use invite code');
     });
@@ -690,9 +684,7 @@ describe('api.ts', () => {
 
     it('checkNeedsInviteCode throws on failure', async () => {
       server.use(
-        http.get(`${API_BASE}/invite-codes/check`, () =>
-          HttpResponse.json({}, { status: 500 }),
-        ),
+        http.get(`${API_BASE}/invite-codes/check`, () => HttpResponse.json({}, { status: 500 })),
       );
       await expect(checkNeedsInviteCode()).rejects.toThrow('Failed to check invite code status');
     });
@@ -728,9 +720,7 @@ describe('api.ts', () => {
     });
 
     it('throws on failure', async () => {
-      server.use(
-        http.get(`${API_BASE}/people`, () => HttpResponse.json({}, { status: 500 })),
-      );
+      server.use(http.get(`${API_BASE}/people`, () => HttpResponse.json({}, { status: 500 })));
       await expect(getPeople()).rejects.toThrow('Failed to fetch people');
     });
   });
@@ -754,13 +744,12 @@ describe('api.ts', () => {
 
     it('signalSignupCompleted falls back to default on unparseable error', async () => {
       server.use(
-        http.post(`${API_BASE}/agents/:agentId/signal/signup_completed`, () =>
-          new HttpResponse('oops', { status: 500 }),
+        http.post(
+          `${API_BASE}/agents/:agentId/signal/signup_completed`,
+          () => new HttpResponse('oops', { status: 500 }),
         ),
       );
-      await expect(signalSignupCompleted('a')).rejects.toThrow(
-        'Failed to signal signup completed',
-      );
+      await expect(signalSignupCompleted('a')).rejects.toThrow('Failed to signal signup completed');
     });
 
     it('signalSignupDismissed resolves on success', async () => {
@@ -818,9 +807,7 @@ describe('api.ts', () => {
     });
 
     it('fetchTreeState throws on failure', async () => {
-      server.use(
-        http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({}, { status: 500 })),
-      );
+      server.use(http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({}, { status: 500 })));
       await expect(fetchTreeState('b')).rejects.toThrow('Failed to fetch tree state');
     });
 
@@ -869,9 +856,7 @@ describe('api.ts', () => {
 
     it('findBlueprintByGoal throws on non-404 failure', async () => {
       server.use(
-        http.get(`${API_BASE}/blueprints/by-goal`, () =>
-          HttpResponse.json({}, { status: 500 }),
-        ),
+        http.get(`${API_BASE}/blueprints/by-goal`, () => HttpResponse.json({}, { status: 500 })),
       );
       await expect(findBlueprintByGoal('g')).rejects.toThrow('Failed to find blueprint');
     });

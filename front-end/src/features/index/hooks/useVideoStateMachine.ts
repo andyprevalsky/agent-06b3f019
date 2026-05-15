@@ -69,9 +69,10 @@ export function useVideoStateMachine(cfg: VideoStateMachineConfig): void {
     const schedule = () => {
       if (scheduled) return;
       scheduled = true;
-      const rvfc = typeof v.requestVideoFrameCallback === 'function'
-        ? v.requestVideoFrameCallback.bind(v)
-        : null;
+      const rvfc =
+        typeof v.requestVideoFrameCallback === 'function'
+          ? v.requestVideoFrameCallback.bind(v)
+          : null;
       if (rvfc) {
         vfcId = rvfc((_now, meta) => {
           scheduled = false;

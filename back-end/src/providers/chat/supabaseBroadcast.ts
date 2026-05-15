@@ -29,7 +29,8 @@ export async function broadcastAssistantStream(
   done: boolean = false,
   sequence: number = 0,
   isClaude: boolean = false,
-  isGpt: boolean = false
+  isGpt: boolean = false,
+  llmStartedAtMs?: number
 ): Promise<void> {
   log.info('[Broadcast] ASSISTANT_STREAM', {
     agentId,
@@ -39,6 +40,7 @@ export async function broadcastAssistantStream(
     sequence,
     isClaude,
     isGpt,
+    llmStartedAtMs,
   });
   const payload: Record<string, unknown> = {
     agentId: agentId,
@@ -49,6 +51,7 @@ export async function broadcastAssistantStream(
   };
   payload.is_claude = isClaude;
   payload.is_gpt = isGpt;
+  if (llmStartedAtMs !== undefined) payload.llm_started_at_ms = llmStartedAtMs;
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'ASSISTANT_STREAM',
@@ -75,7 +78,8 @@ export async function broadcastToolEvent(
   title: string,
   charCount: number = 0,
   isClaude: boolean = false,
-  isGpt: boolean = false
+  isGpt: boolean = false,
+  llmStartedAtMs?: number
 ): Promise<void> {
   log.info('[Broadcast] TOOL_STREAM', {
     agentId,
@@ -87,21 +91,24 @@ export async function broadcastToolEvent(
     charCount,
     isClaude,
     isGpt,
+    llmStartedAtMs,
   });
+  const payload: Record<string, unknown> = {
+    agentId: agentId,
+    stream_id: streamId,
+    tool_call_id: toolCallId,
+    tool_name: toolName,
+    status: status,
+    title: title,
+    char_count: charCount,
+    is_claude: isClaude,
+    is_gpt: isGpt,
+  };
+  if (llmStartedAtMs !== undefined) payload.llm_started_at_ms = llmStartedAtMs;
   await broadcast({
     topic: `agent:${agentId}`,
     event: 'TOOL_STREAM',
-    payload: {
-      agentId: agentId,
-      stream_id: streamId,
-      tool_call_id: toolCallId,
-      tool_name: toolName,
-      status: status,
-      title: title,
-      char_count: charCount,
-      is_claude: isClaude,
-      is_gpt: isGpt,
-    },
+    payload,
   });
 }
 

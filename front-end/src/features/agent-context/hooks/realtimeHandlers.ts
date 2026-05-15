@@ -170,6 +170,8 @@ export function handleAssistantStream(
         done: chunk.done,
         timeoutId,
         subAgentId: chunk.subAgentId ?? existing?.subAgentId,
+        startedAtMs: chunk.llm_started_at_ms ?? existing?.startedAtMs ?? Date.now(),
+        llmStartedAtMs: chunk.llm_started_at_ms ?? existing?.llmStartedAtMs,
         isClaude: chunk.is_claude ?? existing?.isClaude ?? false,
         isGpt: chunk.is_gpt ?? existing?.isGpt ?? false,
       });
@@ -186,11 +188,16 @@ export function handlePlanStream(
 ) {
   if (plan.agentId !== selectedAgentId) return;
 
-  setStreamingPlan({
-    stream_id: plan.stream_id,
-    tool_call_id: plan.tool_call_id,
-    title: plan.title,
-    char_count: plan.char_count ?? 0,
+  setStreamingPlan((prev) => {
+    const isSamePlan = prev?.tool_call_id === plan.tool_call_id;
+    return {
+      stream_id: plan.stream_id,
+      tool_call_id: plan.tool_call_id,
+      title: plan.title,
+      char_count: plan.char_count ?? 0,
+      startedAtMs:
+        plan.llm_started_at_ms ?? (isSamePlan ? prev?.startedAtMs : undefined) ?? Date.now(),
+    };
   });
 }
 
@@ -218,12 +225,18 @@ export function handleToolStream(
 
   setStreamingTools((prev) => {
     const newMap = new Map(prev);
+    if (tool.status === 'FINISHED' || tool.status === 'ERROR') {
+      newMap.delete(tool.tool_call_id);
+      return newMap;
+    }
+
     newMap.set(tool.tool_call_id, {
       stream_id: tool.stream_id,
       tool_call_id: tool.tool_call_id,
       tool_name: tool.tool_name,
       title: tool.title,
       charCount: tool.char_count ?? prev.get(tool.tool_call_id)?.charCount ?? 0,
+      startedAtMs: tool.llm_started_at_ms ?? prev.get(tool.tool_call_id)?.startedAtMs ?? Date.now(),
       isClaude: tool.is_claude ?? prev.get(tool.tool_call_id)?.isClaude ?? false,
       isGpt: tool.is_gpt ?? prev.get(tool.tool_call_id)?.isGpt ?? false,
     });

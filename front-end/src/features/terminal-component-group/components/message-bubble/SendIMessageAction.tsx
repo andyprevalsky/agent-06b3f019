@@ -17,9 +17,7 @@ export function SendIMessageAction({ actionMetadata }: SendIMessageActionProps) 
 
   return (
     <div className="rounded-md border border-dashed border-primary/40 bg-primary/5 p-3 space-y-2">
-      <p className="text-xs text-muted-foreground">
-        Send this via your Mac to unblock the agent.
-      </p>
+      <p className="text-xs text-muted-foreground">Send this via your Mac to unblock the agent.</p>
       <div className="text-xs text-muted-foreground space-y-1">
         {meta.to && (
           <p>

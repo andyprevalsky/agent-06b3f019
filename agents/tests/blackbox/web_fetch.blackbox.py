@@ -242,8 +242,11 @@ async def test_handler_execute_tool_happy_path():
     from domains.web_fetch.handler import WebFetchManager
 
     captured = []
+    calls = []
 
     async def fake_execute_activity(fn, args=None, **kwargs):
+        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args})
+        # Activity name is post_agent_message for handle_tool_event; web_fetch_activity for work
         name = getattr(fn, "__name__", "")
         captured.append(name)
         if name == "web_fetch_activity":
@@ -282,6 +285,14 @@ async def test_handler_execute_tool_happy_path():
     # Service cost line attributed to Firecrawl
     assert out["usage"]["service"][0]["provider"] == "Firecrawl scrape"
 
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[0] == "Fetching https://example.com/a for download the PDF"
+    assert tool_titles[-1] == "Fetched https://example.com/a for download the PDF"
+
 
 async def test_handler_skips_download_when_haiku_returns_no_files():
     """When the Haiku filter returns an empty files_to_download list, the download activity is not invoked."""
@@ -319,7 +330,10 @@ async def test_handler_execute_tool_activity_error_reraises():
     """When the Firecrawl activity raises, the manager re-raises after posting the error event."""
     from domains.web_fetch.handler import WebFetchManager
 
+    calls = []
+
     async def fake_execute_activity(fn, args=None, **kwargs):
+        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args})
         name = getattr(fn, "__name__", "")
         if name == "web_fetch_activity":
             raise RuntimeError("firecrawl 402")
@@ -338,6 +352,13 @@ async def test_handler_execute_tool_activity_error_reraises():
     except RuntimeError as e:
         raised = "firecrawl 402" in str(e)
     assert raised
+
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[-1] == "\u274c Web fetch failed for https://example.com/bad for x"
 
 
 # =========================================================================

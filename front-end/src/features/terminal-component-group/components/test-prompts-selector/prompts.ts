@@ -110,7 +110,8 @@ Return to me:
   },
   {
     title: 'Test Files in General-Purpose Agents',
-    description: 'Tests file_pointer output schema with general-purpose agents creating color variants',
+    description:
+      'Tests file_pointer output schema with general-purpose agents creating color variants',
     prompt:
       'turn this file into 4 different color variants, yellow, red, blue, green, use a spawn_general_purpose_agent for each one, no claude code agents in main agent, instruct each general-purpose agent to use claude code to do the color transformation',
     attachmentUrls: ['/test-assets/rs.jpeg'],
@@ -118,7 +119,8 @@ Return to me:
   {
     title: 'Test Files in Browser Agent',
     description: 'Tests browser agent file upload with TinyPNG',
-    prompt: 'upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked',
+    prompt:
+      'upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked',
     attachmentUrls: ['/test-assets/rs.jpeg'],
   },
   {

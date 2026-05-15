@@ -69,10 +69,7 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
             onGenerate={handleGenerate}
           />
 
-          <ReasoningEffortSelect
-            value={form.reasoningEffort}
-            onChange={form.setReasoningEffort}
-          />
+          <ReasoningEffortSelect value={form.reasoningEffort} onChange={form.setReasoningEffort} />
 
           <ModelSelect
             models={models}

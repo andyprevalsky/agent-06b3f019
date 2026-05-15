@@ -37,9 +37,7 @@ describe('ApplePasswordsModal', () => {
   });
 
   it('renders the header, steps, and upload prompt when open', () => {
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />);
     expect(screen.getByText('Import Apple Passwords')).toBeInTheDocument();
     expect(screen.getByText(/click to upload/i)).toBeInTheDocument();
     expect(screen.getByText(/csv file only/i)).toBeInTheDocument();
@@ -48,9 +46,7 @@ describe('ApplePasswordsModal', () => {
   });
 
   it('rejects a non-CSV file and shows an error', async () => {
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />);
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const txtFile = new File(['hello'], 'not-a-csv.txt', { type: 'text/plain' });
     // Use fireEvent.change since userEvent.upload enforces the `accept` attribute
@@ -67,9 +63,7 @@ describe('ApplePasswordsModal', () => {
   it('accepts a CSV file, enables the Import button, and calls onSync on success', async () => {
     const onSync = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={onClose} onSync={onSync} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={onClose} onSync={onSync} />);
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const csv = new File(['a,b,c'], 'passwords.csv', { type: 'text/csv' });
     const user = userEvent.setup();
@@ -87,9 +81,7 @@ describe('ApplePasswordsModal', () => {
 
   it('shows an error when onSync rejects', async () => {
     const onSync = vi.fn().mockRejectedValue(new Error('Server says no'));
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={onSync} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={onSync} />);
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const csv = new File(['x'], 'p.csv', { type: 'text/csv' });
     const user = userEvent.setup();
@@ -103,9 +95,7 @@ describe('ApplePasswordsModal', () => {
 
   it('falls back to generic error message when rejection is a non-Error', async () => {
     const onSync = vi.fn().mockRejectedValue('nope');
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={onSync} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={onSync} />);
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     const csv = new File(['x'], 'p.csv', { type: 'text/csv' });
     const user = userEvent.setup();
@@ -118,9 +108,7 @@ describe('ApplePasswordsModal', () => {
 
   it('cancel button calls onClose', async () => {
     const onClose = vi.fn();
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={onClose} onSync={vi.fn()} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={onClose} onSync={vi.fn()} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: /cancel/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -144,17 +132,13 @@ describe('ApplePasswordsModal', () => {
     // the disabled button — there's no way to trigger handleSync without first
     // picking a file. The meaningful assertion is the gate itself: the button
     // MUST start disabled when no file is present.
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />);
     const importBtn = screen.getByRole('button', { name: /import passwords/i });
     expect(importBtn).toBeDisabled();
   });
 
   it('clicking the export image opens the lightbox; clicking the lightbox closes it', async () => {
-    renderWithProviders(
-      <ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />,
-    );
+    renderWithProviders(<ApplePasswordsModal isOpen={true} onClose={vi.fn()} onSync={vi.fn()} />);
     const user = userEvent.setup();
     // The image has alt text
     const img = screen.getByAltText(/passwords app showing file menu with export option/i);
@@ -344,9 +328,9 @@ describe('AtlasPasswordModal', () => {
     );
     const user = userEvent.setup();
     // Scope the query to this render's container to avoid any stale DOM
-    const openKeychainBtn = Array.from(
-      container.querySelectorAll('button'),
-    ).find((b) => /open keychain/i.test(b.textContent || '')) as HTMLButtonElement;
+    const openKeychainBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      /open keychain/i.test(b.textContent || ''),
+    ) as HTMLButtonElement;
     expect(openKeychainBtn).toBeTruthy();
     await user.click(openKeychainBtn);
     await waitFor(() => {

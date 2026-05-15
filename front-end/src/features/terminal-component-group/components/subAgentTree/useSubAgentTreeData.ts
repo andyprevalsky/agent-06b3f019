@@ -66,9 +66,7 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
     () =>
       rootNodes.map((node) => {
         const { text } = extractEmoji(node.goal);
-        return text.length > GOAL_MAX_CHARS
-          ? text.slice(0, GOAL_MAX_CHARS - 3) + '...'
-          : text;
+        return text.length > GOAL_MAX_CHARS ? text.slice(0, GOAL_MAX_CHARS - 3) + '...' : text;
       }),
     [rootNodes],
   );

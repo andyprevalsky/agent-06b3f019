@@ -148,6 +148,14 @@ function isLastAttentionBlocking(last: Message | undefined, isChatMode: boolean)
   return isQuestion === true || toolApproval === true;
 }
 
+function isLastToolInProgress(last: Message | undefined): boolean {
+  return (
+    last?.role === 'TOOL' &&
+    last.metadata?.toolStatus === 'IN_PROGRESS' &&
+    !last.metadata?.isUserAttentionMessage
+  );
+}
+
 function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
   const { showThinkingIndicator, agent, filteredMessages, isChatMode, hasStreamingBubbles } = opts;
   if (!showThinkingIndicator) return false;
@@ -160,7 +168,10 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
     agent.status !== 'OUT_OF_CREDITS' &&
     agent.status !== 'COST_LIMIT_REACHED';
   if (!isAgentActive) return false;
-  if (hasStreamingBubbles) return true;
+
+  const last = filteredMessages[filteredMessages.length - 1];
+  if (isLastToolInProgress(last)) return false;
+  if (isLastAttentionBlocking(last, isChatMode)) return false;
 
   const hasInProgressTool = filteredMessages.some(
     (m) =>
@@ -170,8 +181,7 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
   );
   if (hasInProgressTool) return false;
 
-  const last = filteredMessages[filteredMessages.length - 1];
-  if (isLastAttentionBlocking(last, isChatMode)) return false;
+  if (hasStreamingBubbles) return true;
 
   return true;
 }
@@ -255,7 +265,7 @@ export interface MessageListState {
   filteredMessages: Message[];
   streaming: FilteredStreamingState;
   animation: MessageAnimationState;
-  animatedCharCount: number;
+  animatedTokenCount: number;
   thinkingVisible: boolean;
   handleSendMessage: (text: string) => void;
 }
@@ -278,7 +288,7 @@ export function useMessageListState({
     streamingTools: ctx.streamingTools,
   });
 
-  const animatedCharCount = useAnimatedCounter(streaming.charCount, 0.3);
+  const animatedTokenCount = useAnimatedCounter(Math.round(streaming.charCount / 4), 0.3);
 
   const animation = useMessageAnimationBuffer({
     subAgentId,
@@ -313,7 +323,7 @@ export function useMessageListState({
     filteredMessages,
     streaming,
     animation,
-    animatedCharCount,
+    animatedTokenCount,
     thinkingVisible,
     handleSendMessage,
   };

@@ -102,20 +102,29 @@ export function useMessageSending({
           setCurrentView('agents');
           setSelectedAgentIdContext(newAgent.agent_id);
           setMessageInput('');
-          toast({ title: 'Agent created', description: 'Your new agent has been created and is starting' });
+          toast({
+            title: 'Agent created',
+            description: 'Your new agent has been created and is starting',
+          });
           return;
         }
 
         const responded = await checkAndRespondToAttention(selectedAgentId, messageInput);
         if (responded) {
-          toast({ title: 'Response sent', description: 'The agent will continue with your response' });
+          toast({
+            title: 'Response sent',
+            description: 'The agent will continue with your response',
+          });
           setMessageInput('');
           return;
         }
 
         if (agentDetail?.status === 'PAUSED') {
           await resumeAgent(selectedAgentId);
-          toast({ title: 'Agent resuming', description: 'The agent will continue with your message' });
+          toast({
+            title: 'Agent resuming',
+            description: 'The agent will continue with your message',
+          });
         }
 
         await postMessage(selectedAgentId, messageInput, attachments);
@@ -137,15 +146,28 @@ export function useMessageSending({
       }
     },
     [
-      messageInput, selectedAgentId, selectedModel, canSubmitGoals, clientSource,
-      pendingPriceLimitCents, agentDetail, loadAgents, setCurrentView,
-      setSelectedAgentIdContext, setLoginModalOpen, setIsLoadingNetwork, toast,
+      messageInput,
+      selectedAgentId,
+      selectedModel,
+      canSubmitGoals,
+      clientSource,
+      pendingPriceLimitCents,
+      agentDetail,
+      loadAgents,
+      setCurrentView,
+      setSelectedAgentIdContext,
+      setLoginModalOpen,
+      setIsLoadingNetwork,
+      toast,
     ],
   );
 
   // Auto-submit after login
   useEffect(() => {
-    if (!isFullySignedIn) { autoSubmitRef.current = false; return; }
+    if (!isFullySignedIn) {
+      autoSubmitRef.current = false;
+      return;
+    }
     if (!pendingSubmitRef.current || !messageInputRef.current.trim()) return;
     if (isSendingMessage || autoSubmitRef.current) return;
 
@@ -153,14 +175,20 @@ export function useMessageSending({
     autoSubmitRef.current = true;
     void handleSendMessage()
       .catch((e) => console.error('[Auth] Auto-submit failed', e))
-      .finally(() => { autoSubmitRef.current = false; });
+      .finally(() => {
+        autoSubmitRef.current = false;
+      });
   }, [isFullySignedIn, isSendingMessage, handleSendMessage]);
 
   return {
-    messageInput, setMessageInput,
-    isSendingMessage, setIsSendingMessage,
-    selectedModel, setSelectedModel,
-    pendingPriceLimitCents, setPendingPriceLimitCents,
+    messageInput,
+    setMessageInput,
+    isSendingMessage,
+    setIsSendingMessage,
+    selectedModel,
+    setSelectedModel,
+    pendingPriceLimitCents,
+    setPendingPriceLimitCents,
     handleSendMessage,
   };
 }

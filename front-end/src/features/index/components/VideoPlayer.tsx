@@ -90,7 +90,10 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
     const shouldLoadVideo = useDeferredVideoLoad(priority);
     useVideoAutoplay(videoRef, shouldLoadVideo, autoPlay, onLoad, onFirstFrame);
 
-    const finalClassName = useMemo(() => `${className} object-${objectFit}`, [className, objectFit]);
+    const finalClassName = useMemo(
+      () => `${className} object-${objectFit}`,
+      [className, objectFit],
+    );
 
     if (!shouldLoadVideo && fallbackContent) {
       return renderFallback(fallbackContent, finalClassName, style);

@@ -829,11 +829,16 @@ describe('realtimeHandlers', () => {
         tool_call_id: 'tc1',
         title: 'Plan',
         char_count: 10,
+        llm_started_at_ms: 1700000000000,
       } as any,
       'me',
       s.setStreamingPlan as any,
     );
-    expect(s.state.streamingPlan).toMatchObject({ title: 'Plan', char_count: 10 });
+    expect(s.state.streamingPlan).toMatchObject({
+      title: 'Plan',
+      char_count: 10,
+      startedAtMs: 1700000000000,
+    });
   });
 
   it('handlePlanStream: ignores wrong agent', () => {
@@ -894,6 +899,7 @@ describe('realtimeHandlers', () => {
         tool_name: 'foo',
         title: 't',
         char_count: 75,
+        llm_started_at_ms: 1700000000000,
         is_claude: true,
       } as any,
       'me',
@@ -901,7 +907,26 @@ describe('realtimeHandlers', () => {
     );
     expect(s.state.streamingTools.get('tc1')?.tool_name).toBe('foo');
     expect(s.state.streamingTools.get('tc1')?.charCount).toBe(75);
+    expect(s.state.streamingTools.get('tc1')?.startedAtMs).toBe(1700000000000);
     expect(s.state.streamingTools.get('tc1')?.isClaude).toBe(true);
+  });
+
+  it('handleToolStream: clears matching ephemeral tool on FINISHED status', () => {
+    const s = mkSetters();
+    s.state.streamingTools.set('tc1', { tool_call_id: 'tc1', tool_name: 'web_search' } as any);
+    handleToolStream(
+      {
+        agentId: 'me',
+        stream_id: 's1',
+        tool_call_id: 'tc1',
+        tool_name: 'web_search',
+        title: 'Finished web_search',
+        status: 'FINISHED',
+      } as any,
+      'me',
+      s.setStreamingTools as any,
+    );
+    expect(s.state.streamingTools.has('tc1')).toBe(false);
   });
 
   it('cleanupSubscription: resets refs and clears bubbles', () => {

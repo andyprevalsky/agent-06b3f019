@@ -18,7 +18,8 @@ export function useTypedTopSpacing(
       const circleEl = circleRef.current;
       const arrowEl = arrowBtnRef.current;
       if (!circleEl || !arrowEl) return;
-      const distance = arrowEl.getBoundingClientRect().top - circleEl.getBoundingClientRect().bottom;
+      const distance =
+        arrowEl.getBoundingClientRect().top - circleEl.getBoundingClientRect().bottom;
       if (!isFinite(distance)) return;
       setTypedTopSpacing(Math.max(12, Math.round(distance / 3)));
     };
@@ -50,10 +51,9 @@ export function useSectionVisible(sectionRef: RefObject<HTMLElement>): boolean {
   useEffect(() => {
     const el = sectionRef.current;
     if (!el) return;
-    const io = new IntersectionObserver(
-      ([entry]) => setVisible(entry.isIntersecting),
-      { threshold: [0, 0.01] },
-    );
+    const io = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), {
+      threshold: [0, 0.01],
+    });
     io.observe(el);
     return () => io.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps

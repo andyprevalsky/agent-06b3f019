@@ -15,6 +15,12 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
+import {
+  detectActionFromPartialJson,
+  extractCompleteStringField,
+  extractPartialStringField,
+  formatWebSearchStreamTitle,
+} from './routerJsonStream';
 
 const log = createLogger('RouterLLM');
 
@@ -255,70 +261,14 @@ async function buildMultimodalContentFromFile(
   return content;
 }
 
-// ============================================
-// Extract partial string content from JSON stream
-// Unlike the old regex approach, this can extract content BEFORE the closing quote
-// ============================================
-function extractPartialStringField(json: string, fieldName: string): string | null {
-  // Find the field pattern: "fieldName": "
-  const fieldPattern = `"${fieldName}"\\s*:\\s*"`;
-  const fieldRegex = new RegExp(fieldPattern);
-  const match = json.match(fieldRegex);
+export function getWebSearchStreamTitleFromPartialRouterJson(json: string): string | null {
+  const action = detectActionFromPartialJson(json);
+  if (action !== 'web_search') return null;
 
-  if (!match || match.index === undefined) {
-    return null;
-  }
+  const query = extractCompleteStringField(json, 'query')?.trim();
+  if (!query) return null;
 
-  // Start position is right after the opening quote
-  const startPos = match.index + match[0].length;
-
-  // Extract everything after the opening quote, handling escape sequences
-  let result = '';
-  let i = startPos;
-
-  while (i < json.length) {
-    const char = json[i];
-
-    if (char === '\\' && i + 1 < json.length) {
-      // Handle escape sequences
-      const nextChar = json[i + 1];
-      switch (nextChar) {
-        case '"':
-          result += '"';
-          break;
-        case '\\':
-          result += '\\';
-          break;
-        case 'n':
-          result += '\n';
-          break;
-        case 'r':
-          result += '\r';
-          break;
-        case 't':
-          result += '\t';
-          break;
-        case 'b':
-          result += '\b';
-          break;
-        case 'f':
-          result += '\f';
-          break;
-        default:
-          result += nextChar;
-          break;
-      }
-      i += 2;
-    } else if (char === '"') {
-      // End of string - we got the complete field
-      break;
-    } else {
-      result += char;
-      i++;
-    }
-  }
-
-  return result || null;
+  return formatWebSearchStreamTitle(query);
 }
 
 // ============================================
@@ -337,14 +287,6 @@ function extractStreamableReasoning(
   // Fall back to reasoning field from JSON
   const jsonReasoning = extractPartialStringField(accumulatedJson, 'reasoning');
   return jsonReasoning?.trim() || null;
-}
-
-// ============================================
-// Detect action from partial JSON stream
-// ============================================
-function detectActionFromPartialJson(json: string): string | null {
-  const match = json.match(/"action"\s*:\s*"([^"]+)"/);
-  return match ? match[1] : null;
 }
 
 // ============================================
@@ -420,6 +362,8 @@ export async function callRouterLlm(params: {
     messageCount: openaiMessages.length,
   });
 
+  await broadcastAssistantStream(params.agentId, streamId, '', false, 0, false, false, startTime);
+
   // Create streaming completion via Supabase completions endpoint
   const stream = await createStreamingCompletion({
     model: params.model,
@@ -446,7 +390,7 @@ export async function callRouterLlm(params: {
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
-  let sequence = 0;
+  let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
   let webSearchToolCallId: string | undefined;
@@ -524,15 +468,16 @@ export async function callRouterLlm(params: {
           false,
           sequence++,
           isClaude,
-          isGpt
+          isGpt,
+          startTime
         );
       }
     }
 
-    // Detect web_search action early and emit TOOL_STREAM IN_PROGRESS
+    // Detect web_search once the streamed JSON includes the complete query.
     if (!webSearchDetected) {
-      const action = detectActionFromPartialJson(accumulatedJson);
-      if (action === 'web_search') {
+      const webSearchStreamTitle = getWebSearchStreamTitleFromPartialRouterJson(accumulatedJson);
+      if (webSearchStreamTitle) {
         webSearchDetected = true;
         webSearchToolCallId = uuidv4();
         log.info('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
@@ -544,10 +489,11 @@ export async function callRouterLlm(params: {
           webSearchToolCallId,
           'web_search',
           'IN_PROGRESS',
-          '🔍 Searching the web',
+          webSearchStreamTitle,
           accumulatedReasoning.length + accumulatedJson.length,
           isClaude,
-          isGpt
+          isGpt,
+          startTime
         );
       }
     }
@@ -575,7 +521,16 @@ export async function callRouterLlm(params: {
   const fullJson = accumulatedJson;
 
   // Broadcast final "done" signal for reasoning stream
-  await broadcastAssistantStream(params.agentId, streamId, '', true, sequence, isClaude, isGpt);
+  await broadcastAssistantStream(
+    params.agentId,
+    streamId,
+    '',
+    true,
+    sequence,
+    isClaude,
+    isGpt,
+    startTime
+  );
 
   const streamDuration = Date.now() - startTime;
   log.info('[RouterLLM] Streaming complete', {

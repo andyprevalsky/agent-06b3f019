@@ -37,9 +37,7 @@ export interface SendSmsMetadata {
  * Narrow a request's metadata field to the iMessage-send variant when
  * `onSuccess === 'sendSmsThroughIMessage'` and `to`/`message` are present.
  */
-export function getSendSmsMetadata(
-  metadata: AttentionRequest['metadata'],
-): SendSmsMetadata | null {
+export function getSendSmsMetadata(metadata: AttentionRequest['metadata']): SendSmsMetadata | null {
   if (!metadata || typeof metadata !== 'object') return null;
   const onSuccess = (metadata as Record<string, unknown>).onSuccess;
   const to = (metadata as Record<string, unknown>).to;

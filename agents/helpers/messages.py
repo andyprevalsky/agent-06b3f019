@@ -41,6 +41,7 @@ async def stream_assistant_chunk(
     sub_agent_id: str = None,
     is_claude: bool = False,
     is_gpt: bool = False,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -57,6 +58,7 @@ async def stream_assistant_chunk(
         sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
+        llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
         config = load_config()
@@ -82,6 +84,8 @@ async def stream_assistant_chunk(
             record["is_claude"] = True
         if is_gpt:
             record["is_gpt"] = True
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
 
         payload = {
             "messages": [{
@@ -124,6 +128,7 @@ async def stream_plan_event(
     tool_call_id: str,
     title: str,
     char_count: int = 0,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Broadcast plan streaming state DIRECTLY to Supabase Realtime (no DB insert).
@@ -138,6 +143,7 @@ async def stream_plan_event(
         tool_call_id: The tool_call_id that will be used for the final set_plan
         title: The plan title (or "Generating Plan" initially)
         char_count: Current character count of plan content being generated
+        llm_started_at_ms: Epoch ms when the planner LLM request started
     """
     try:
 
@@ -145,18 +151,22 @@ async def stream_plan_event(
 
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
 
+        record = {
+            "agentId": agent_id,
+            "stream_id": stream_id,
+            "tool_call_id": tool_call_id,
+            "title": title,
+            "char_count": char_count,
+        }
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
+
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
                 "event": "PLAN_STREAM",
                 "payload": {
-                    "record": {
-                        "agentId": agent_id,
-                        "stream_id": stream_id,
-                        "tool_call_id": tool_call_id,
-                        "title": title,
-                        "char_count": char_count,
-                    }
+                    "record": record
                 },
                 "private": _is_production
             }]
@@ -192,6 +202,7 @@ async def stream_tool_event(
     char_count: int = 0,
     is_claude: bool = False,
     is_gpt: bool = False,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Broadcast early tool detection as TOOL_STREAM event (ephemeral, no DB insert).
@@ -210,6 +221,7 @@ async def stream_tool_event(
         char_count: Current raw character count streamed while forming the tool call
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
+        llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
         config = load_config()
@@ -230,6 +242,8 @@ async def stream_tool_event(
             record["is_claude"] = True
         if is_gpt:
             record["is_gpt"] = True
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
 
         payload = {
             "messages": [{

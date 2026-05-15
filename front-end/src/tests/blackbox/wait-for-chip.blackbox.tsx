@@ -163,10 +163,11 @@ describe('WaitForChip — condition mode', () => {
                 },
                 {
                   title: 'Search the web',
-                  status: 'FINISHED',
+                  status: 'IN_PROGRESS',
                   toolName: 'web_search',
+                  toolCallId: 'tc-search',
                   timestamp: '2026-01-01T00:00:01Z',
-                  message: 'looked it up',
+                  message: '',
                 },
               ],
             },
@@ -183,18 +184,197 @@ describe('WaitForChip — condition mode', () => {
     expect(screen.getByText('live')).toBeInTheDocument();
     // While exploring, the header shows the most recent non-thinking action
     // (here: "Search the web") rather than the static goal.
-    expect(screen.getByText(/Exploring - Search the web/)).toBeInTheDocument();
+    expect(screen.getByText('Exploring')).toBeInTheDocument();
+    expect(screen.getAllByText('Search the web').length).toBeGreaterThan(0);
     expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
+    expect(screen.getByTestId('explore-active-tool-icon')).toBeInTheDocument();
 
     // Click the inline chip to expand it
-    await u.click(screen.getByText(/Exploring - Search the web/));
+    await u.click(screen.getByText('Exploring'));
     // After expansion the full goal is also visible
     expect(screen.getByText('Check if inbox has the order confirmation email')).toBeInTheDocument();
 
     // Click a step with content to expand it (target the step row, not header)
-    const stepRows = screen.getAllByText('Search the web');
-    await u.click(stepRows[stepRows.length - 1]);
-    expect(screen.getByText('looked it up')).toBeInTheDocument();
+    expect(screen.getAllByText('Search the web').length).toBeGreaterThan(0);
+  });
+
+  it('shows post-tool thinking immediately after the last tool FINISHED even before tokens stream', () => {
+    render(
+      <WaitForChip
+        title="Waiting"
+        message=""
+        status="IN_PROGRESS"
+        checks={[
+          {
+            title: 'running',
+            status: 'IN_PROGRESS',
+            timestamp: new Date().toISOString(),
+            explore: {
+              title: 'Checking mailbox',
+              fullGoal: 'Check if inbox has the order confirmation email',
+              message: 'exploring',
+              status: 'IN_PROGRESS',
+              steps: [
+                {
+                  title: 'Search the web',
+                  status: 'FINISHED',
+                  toolName: 'web_search',
+                  toolCallId: 'tc-search',
+                  timestamp: new Date(Date.now() - 2_000).toISOString(),
+                  message: 'looked it up',
+                },
+              ],
+            },
+          },
+        ]}
+        metadata={{
+          waitForMode: 'condition',
+          condition: 'email arrives',
+          checkIntervalSeconds: 10,
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Exploring')).toBeInTheDocument();
+    expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
+  });
+
+  it('starts the explore thinking carousel from zero even when the llm call is already streaming', () => {
+    render(
+      <WaitForChip
+        title="Waiting"
+        message=""
+        status="IN_PROGRESS"
+        checks={[
+          {
+            title: 'running',
+            status: 'IN_PROGRESS',
+            timestamp: new Date().toISOString(),
+            explore: {
+              title: 'Checking mailbox',
+              fullGoal: 'Check if inbox has the order confirmation email',
+              message: 'exploring',
+              status: 'IN_PROGRESS',
+              steps: [
+                {
+                  title: 'Search the web for order confirmation email',
+                  status: 'FINISHED',
+                  toolName: 'web_search',
+                  toolCallId: 'tc-search',
+                  timestamp: new Date(Date.now() - 1_000).toISOString(),
+                  message: 'looked it up',
+                },
+              ],
+            },
+          },
+        ]}
+        thinkingStreamStartedAtMs={Date.now() - 5_000}
+        thinkingStreamTokenCount={500}
+        metadata={{
+          waitForMode: 'condition',
+          condition: 'email arrives',
+          checkIntervalSeconds: 10,
+        }}
+      />,
+    );
+
+    expect(document.body.textContent).toMatch(/0\.0s·0 tokens/);
+  });
+
+  it('renders finished inline explore with state-only header and result body', async () => {
+    const u = userEvent.setup();
+    render(
+      <WaitForChip
+        title="Waiting"
+        message=""
+        status="FINISHED"
+        checks={[
+          {
+            title: 'finished',
+            status: 'FINISHED',
+            timestamp: new Date().toISOString(),
+            conditionMet: true,
+            explore: {
+              title: 'Checking mailbox',
+              fullGoal: 'Check if inbox has the order confirmation email',
+              message:
+                'The production deployment is ready. Status: READY. URL: https://roselabs.ai',
+              status: 'FINISHED',
+              steps: [
+                {
+                  title: 'Search the web for production deployment status',
+                  status: 'FINISHED',
+                  toolName: 'web_search',
+                  timestamp: '2026-01-01T00:00:01Z',
+                  message:
+                    '**Params Passed:**\n\n- **query**: Vercel production deployment status roselabs.ai\n\n**Result:**\n\nDeployment status READY',
+                },
+              ],
+            },
+          },
+        ]}
+        metadata={{
+          waitForMode: 'condition',
+          condition: 'email arrives',
+          conditionMet: true,
+        }}
+      />,
+    );
+
+    await u.click(screen.getByText('Waited for email arrives'));
+
+    expect(screen.getByText('Explored')).toBeInTheDocument();
+    expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
+    expect(document.body.textContent).toContain('The production deployment is ready');
+  });
+
+  it('renders failed inline explore with state-only header and error result body', async () => {
+    const u = userEvent.setup();
+    render(
+      <WaitForChip
+        title="Failed waiting for deploy ready"
+        message=""
+        status="ERROR"
+        checks={[
+          {
+            title: 'failed',
+            status: 'ERROR',
+            timestamp: new Date().toISOString(),
+            conditionMet: false,
+            explore: {
+              title: 'Checking deployment',
+              fullGoal: 'Check whether the production deployment finished',
+              message:
+                'Activity task failed: web_search_activity failed: Parallel AI search returned HTTP 429 Too Many Requests',
+              status: 'ERROR',
+              steps: [
+                {
+                  title: 'Search the web for production deployment status',
+                  status: 'ERROR',
+                  toolName: 'web_search',
+                  timestamp: '2026-01-01T00:00:01Z',
+                  message:
+                    '**Params Passed:**\n\n- **query**: Vercel production deployment status roselabs.ai\n\n**Error:**\n\nParallel AI search returned HTTP 429 Too Many Requests',
+                },
+              ],
+            },
+          },
+        ]}
+        metadata={{
+          waitForMode: 'condition',
+          condition: 'deploy ready',
+          conditionMet: false,
+        }}
+      />,
+    );
+
+    await u.click(screen.getByText('Failed waiting for deploy ready'));
+
+    expect(screen.getByText('Explore Failed')).toBeInTheDocument();
+    expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
+    expect(document.body.textContent).toContain(
+      'Parallel AI search returned HTTP 429 Too Many Requests',
+    );
   });
 
   it('renders ERROR status with title fallback', () => {

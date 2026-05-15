@@ -25,6 +25,8 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
     onOpenAuthModal,
     exploreStepHistory,
     waitForChecks,
+    thinkingStreamTokenCount,
+    thinkingStreamStartedAtMs,
     hideSubAgentTreeHeader,
   } = props;
 
@@ -43,6 +45,8 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
       <ExploreBubble
         message={message}
         exploreStepHistory={exploreStepHistory}
+        thinkingStreamTokenCount={thinkingStreamTokenCount}
+        thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
         onTypingComplete={onTypingComplete}
       />
     );
@@ -53,6 +57,8 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
       <WaitForBubble
         message={message}
         waitForChecks={waitForChecks}
+        thinkingStreamTokenCount={thinkingStreamTokenCount}
+        thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
         onTypingComplete={onTypingComplete}
       />
     );

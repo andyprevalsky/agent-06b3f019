@@ -23,8 +23,7 @@ export function buildDripContainerStyle(
       dripStyles.backgroundColorsScalar > 0
         ? `rgba(255, 255, 255, ${dripStyles.bgOpacity})`
         : 'transparent',
-    borderColor:
-      !isDragOver && dripStyles.borderColorScalar > 0 ? dripStyles.borderRgb : undefined,
+    borderColor: !isDragOver && dripStyles.borderColorScalar > 0 ? dripStyles.borderRgb : undefined,
     boxShadow:
       dripStyles.shadowIntensity > 0
         ? `0 8px 32px rgba(0, 0, 0, ${dripStyles.shadowIntensity}), 0 0 ${dripStyles.glow}px rgba(126, 87, 194, ${dripStyles.glowOpacity}), inset 0 1px 1px rgba(255,255,255,${dripStyles.bgOpacity * 0.5})`
