@@ -156,6 +156,89 @@ export const sendPasswordIntegrationRequest = async (request: string): Promise<v
   }
 };
 
+// ---------------------------------------------------------------------------
+// Plaid (Banking integration)
+// ---------------------------------------------------------------------------
+
+export interface PlaidLinkTokenResponse {
+  link_token: string;
+  expiration: string;
+  request_id: string;
+}
+
+export interface PlaidExchangeInput {
+  publicToken: string;
+  institutionId?: string;
+  institutionName?: string;
+}
+
+export interface PlaidIntegrationItemAccount {
+  id: string;
+  plaidAccountId: string;
+  name: string;
+  mask: string | null;
+  type: string;
+  subtype: string | null;
+}
+
+export interface PlaidIntegrationItem {
+  id: string;
+  plaidItemId: string;
+  institutionId: string | null;
+  institutionName: string | null;
+  status: 'ACTIVE' | 'DISCONNECTED' | 'REQUIRES_REAUTH' | 'ERROR';
+  accounts: PlaidIntegrationItemAccount[];
+}
+
+export const createPlaidLinkToken = async (): Promise<PlaidLinkTokenResponse> => {
+  const token = requireToken();
+  const response = await fetch(`${getBackendUrl()}/api/integrations/plaid/link-token`, {
+    method: 'POST',
+    headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(err?.error ?? 'Failed to create Plaid link token');
+  }
+  return (await response.json()) as PlaidLinkTokenResponse;
+};
+
+export const exchangePlaidPublicToken = async (
+  input: PlaidExchangeInput,
+): Promise<{ item: PlaidIntegrationItem }> => {
+  const token = requireToken();
+  const response = await fetch(
+    `${getBackendUrl()}/api/integrations/plaid/exchange-public-token`,
+    {
+      method: 'POST',
+      headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        public_token: input.publicToken,
+        institution_id: input.institutionId,
+        institution_name: input.institutionName,
+      }),
+    },
+  );
+  if (!response.ok) {
+    const err = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(err?.error ?? 'Failed to exchange Plaid public token');
+  }
+  return (await response.json()) as { item: PlaidIntegrationItem };
+};
+
+export const fetchPlaidItems = async (): Promise<PlaidIntegrationItem[]> => {
+  const token = maybeToken();
+  if (token === null) return [];
+  const response = await fetch(`${getBackendUrl()}/api/integrations/plaid/items`, {
+    headers: authHeader(token),
+  });
+  if (!response.ok) return [];
+  const data = (await response.json().catch(() => null)) as
+    | { items?: PlaidIntegrationItem[] }
+    | null;
+  return data?.items ?? [];
+};
+
 export const spawnLinkedInSyncAgent = async (): Promise<void> => {
   const backendUrl = getBackendUrl();
   const token = requireToken();

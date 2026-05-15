@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import React from 'react';
@@ -22,6 +22,21 @@ import { renderWithProviders } from './test-wrapper';
 import { PlaidSection } from '@/features/plaid';
 import type { PlaidItem } from '@/features/plaid';
 import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
+
+/**
+ * The CTA row in PlaidSection has no button text (uses an icon-only
+ * SyncItemButton). Find it by locating the row's identifying text and
+ * traversing up to the row container, then grabbing the button inside.
+ */
+function clickConnectRowButton(): Promise<void> {
+  const label = screen.getByText(/connect (a bank|another account)/i);
+  const row = label.closest('div.flex.items-center.justify-between') as HTMLElement | null;
+  if (row === null) {
+    throw new Error('Could not locate Plaid connect row');
+  }
+  const button = within(row).getByRole('button');
+  return userEvent.click(button);
+}
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -278,7 +293,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(calls).toBe(1));
   });
 
@@ -294,7 +309,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
   });
 
@@ -320,7 +335,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(exchanged).toBe(true));
@@ -339,7 +354,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() =>
       expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBe('link-oauth-token'),
     );
@@ -361,7 +376,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull());
@@ -379,7 +394,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireExit();
     await waitFor(() => expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull());
@@ -393,7 +408,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(screen.getByText(/plaid client unavailable/i)).toBeInTheDocument());
   });
 
@@ -412,7 +427,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-bad-token');
     await waitFor(() => expect(screen.getByText(/bad token/i)).toBeInTheDocument());
@@ -430,7 +445,7 @@ describe('PlaidSection (connect flow)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
     await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /connect/i }));
+    await clickConnectRowButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireExit({ display_message: 'Institution authentication failed' });
     await waitFor(() =>

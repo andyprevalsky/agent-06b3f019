@@ -10,10 +10,11 @@
  *       --done--> [CONNECTED, items - 1] (or [DISCONNECTED] if last item)
  */
 
-import { Loader2, Plus, Trash2 } from 'lucide-react';
+import { Loader2, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 import SectionToggleButton from '@/features/integrations/components/SectionToggleButton';
+import SyncItemButton from '@/features/integrations/components/SyncItemButton';
 import type { PlaidItem } from '../types';
 
 interface PlaidSectionProps {
@@ -98,14 +99,12 @@ function ConnectRow({
   return (
     <div className="px-4 py-3 flex items-center justify-between border-t border-border/50">
       <div className="flex items-center gap-3">
-        <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center">
-          <Plus className="w-3.5 h-3.5" />
-        </div>
-        <span className="text-sm">{hasItems ? 'Connect another account' : 'Connect a bank or financial account'}</span>
+        <PlaidIcon />
+        <span className="text-sm">
+          {hasItems ? 'Connect another account' : 'Connect a bank or financial account'}
+        </span>
       </div>
-      <Button size="sm" onClick={onConnect} disabled={loading} className="h-8 px-3">
-        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Connect'}
-      </Button>
+      <SyncItemButton isLoading={loading} isSynced={hasItems} onClick={onConnect} />
     </div>
   );
 }

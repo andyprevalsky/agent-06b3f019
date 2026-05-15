@@ -2,8 +2,11 @@ import { useState, useEffect } from 'react';
 import { sendOTP, verifyOTP } from '@/features/auth/api';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
+  createPlaidLinkToken,
+  exchangePlaidPublicToken,
   fetchCustomization,
   fetchIntegrations,
+  fetchPlaidItems,
   fetchUserSettings,
   saveCustomization,
   sendPasswordIntegrationRequest,
@@ -26,6 +29,9 @@ const ONBOARDING_DATA_API: {
   uploadApplePasswords: typeof uploadApplePasswords;
   sendPasswordIntegrationRequest: typeof sendPasswordIntegrationRequest;
   spawnLinkedInSyncAgent: typeof spawnLinkedInSyncAgent;
+  createPlaidLinkToken: typeof createPlaidLinkToken;
+  exchangePlaidPublicToken: typeof exchangePlaidPublicToken;
+  fetchPlaidItems: typeof fetchPlaidItems;
 } = {
   fetchIntegrations,
   fetchUserSettings,
@@ -33,6 +39,9 @@ const ONBOARDING_DATA_API: {
   uploadApplePasswords,
   sendPasswordIntegrationRequest,
   spawnLinkedInSyncAgent,
+  createPlaidLinkToken,
+  exchangePlaidPublicToken,
+  fetchPlaidItems,
 };
 
 export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION_API =>

@@ -9,6 +9,57 @@ import { renderWithProviders } from './test-wrapper';
 import OnboardingData from '../../ui/features/onboarding/components/OnboardingData';
 import type { BrowserInfo } from '../../shared/types/ipc';
 
+// ---------------------------------------------------------------------------
+// react-plaid-link mock — controllable handle for tests that need the Banking
+// flow. The real SDK opens an iframe, which jsdom can't render.
+// ---------------------------------------------------------------------------
+interface PlaidLinkController {
+  fireSuccess: (publicToken: string) => void;
+  fireExit: (err?: { display_message?: string; error_message?: string }) => void;
+  opened: boolean;
+  lastToken: string | null;
+}
+const plaidLink: PlaidLinkController = {
+  fireSuccess: () => {},
+  fireExit: () => {},
+  opened: false,
+  lastToken: null,
+};
+vi.mock('react-plaid-link', () => ({
+  usePlaidLink: (opts: {
+    token: string | null;
+    onSuccess: (
+      publicToken: string,
+      metadata: {
+        institution: { institution_id: string; name: string } | null;
+        accounts: Array<{ id: string; name: string; mask: string | null; type: string; subtype: string | null }>;
+        link_session_id: string;
+      },
+    ) => void;
+    onExit: (err: { display_message?: string; error_message?: string } | null) => void;
+  }) => {
+    plaidLink.lastToken = opts.token;
+    plaidLink.fireSuccess = (publicToken: string): void => {
+      opts.onSuccess(publicToken, {
+        institution: { institution_id: 'ins_109508', name: 'First Platypus Bank' },
+        accounts: [
+          { id: 'acct-1', name: 'Plaid Checking', mask: '0000', type: 'depository', subtype: 'checking' },
+        ],
+        link_session_id: 'sess-onboarding-1',
+      });
+    };
+    plaidLink.fireExit = (err) => opts.onExit(err ?? null);
+    return {
+      open: () => {
+        plaidLink.opened = true;
+      },
+      ready: opts.token !== null,
+      exit: () => {},
+      error: null,
+    };
+  },
+}));
+
 /**
  * Blackbox coverage for the onboarding data step. This is intentionally broad:
  * it renders through the real component boundary, real API helpers, MSW backend
@@ -149,7 +200,8 @@ function installBackendMocks(): void {
     http.post(`${API_BASE}/integrations/passwords/request`, () =>
       HttpResponse.json({ success: true })
     ),
-    http.post(`${API_BASE}/agents`, () => HttpResponse.json({ id: 'linkedin-agent-1' }))
+    http.post(`${API_BASE}/agents`, () => HttpResponse.json({ id: 'linkedin-agent-1' })),
+    http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] }))
   );
 }
 
@@ -157,6 +209,8 @@ beforeEach(() => {
   localStorage.clear();
   primeSession();
   installBackendMocks();
+  plaidLink.opened = false;
+  plaidLink.lastToken = null;
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -278,6 +332,193 @@ describe('OnboardingData', () => {
     await user.click(rowAction(socials, 'LinkedIn'));
     await waitFor(() => {
       expect(screen.getByText('LinkedIn')).toBeInTheDocument();
+    });
+  });
+
+  describe('Banking (Plaid)', () => {
+    it('renders the Banking card with default CTA copy', async () => {
+      installOnboardingApiMocks();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      expect(screen.getByText('Banking')).toBeInTheDocument();
+      expect(screen.getByText(/Connect a bank account via Plaid/i)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /plaid/i })).toHaveAttribute(
+        'href',
+        'https://plaid.com',
+      );
+    });
+
+    it('hydrates connected banks from /api/integrations/plaid/items', async () => {
+      server.use(
+        http.get(`${API_BASE}/integrations/plaid/items`, () =>
+          HttpResponse.json({
+            items: [
+              {
+                id: 'item-1',
+                plaidItemId: 'plaid_item_1',
+                institutionId: 'ins_chase',
+                institutionName: 'Chase',
+                status: 'ACTIVE',
+                accounts: [],
+              },
+            ],
+          }),
+        ),
+      );
+      installOnboardingApiMocks();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+      await waitFor(() => expect(screen.getByText('Chase')).toBeInTheDocument());
+    });
+
+    it('clicking the Banking sync button requests a link token and opens Plaid Link', async () => {
+      let linkTokenRequests = 0;
+      server.use(
+        http.post(`${API_BASE}/integrations/plaid/link-token`, () => {
+          linkTokenRequests += 1;
+          return HttpResponse.json({
+            link_token: 'link-onboarding-1',
+            expiration: '2026-05-12T21:00:00Z',
+            request_id: 'req-1',
+          });
+        }),
+      );
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      const bankingButton = within(section('Banking')).getByRole('button');
+      await user.click(bankingButton);
+
+      await waitFor(() => expect(linkTokenRequests).toBe(1));
+      await waitFor(() => expect(plaidLink.opened).toBe(true));
+    });
+
+    it('on Plaid Link success, exchanges the public token and shows the green check', async () => {
+      let exchanged = false;
+      let plaidItems: Array<{
+        id: string;
+        plaidItemId: string;
+        institutionId: string | null;
+        institutionName: string | null;
+        status: string;
+        accounts: unknown[];
+      }> = [];
+      server.use(
+        http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
+          HttpResponse.json({
+            link_token: 'link-onboarding-2',
+            expiration: '2026-05-12T21:00:00Z',
+            request_id: 'req-2',
+          }),
+        ),
+        http.post(`${API_BASE}/integrations/plaid/exchange-public-token`, () => {
+          exchanged = true;
+          plaidItems = [
+            {
+              id: 'item-x',
+              plaidItemId: 'plaid_item_x',
+              institutionId: 'ins_109508',
+              institutionName: 'First Platypus Bank',
+              status: 'ACTIVE',
+              accounts: [],
+            },
+          ];
+          return HttpResponse.json({ item: plaidItems[0] });
+        }),
+        http.get(`${API_BASE}/integrations/plaid/items`, () =>
+          HttpResponse.json({ items: plaidItems }),
+        ),
+      );
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      const bankingButton = within(section('Banking')).getByRole('button');
+      await user.click(bankingButton);
+
+      await waitFor(() => expect(plaidLink.opened).toBe(true));
+      plaidLink.fireSuccess('public-sandbox-onboarding');
+      await waitFor(() => expect(exchanged).toBe(true));
+      await waitFor(() =>
+        expect(screen.getByText('First Platypus Bank')).toBeInTheDocument(),
+      );
+    });
+
+    it('surfaces an error if exchange fails after Plaid Link success', async () => {
+      server.use(
+        http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
+          HttpResponse.json({
+            link_token: 'link-onboarding-3',
+            expiration: '2026-05-12T21:00:00Z',
+            request_id: 'req-3',
+          }),
+        ),
+        http.post(`${API_BASE}/integrations/plaid/exchange-public-token`, () =>
+          HttpResponse.json({ error: 'INVALID_PUBLIC_TOKEN' }, { status: 502 }),
+        ),
+      );
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      const bankingButton = within(section('Banking')).getByRole('button');
+      await user.click(bankingButton);
+      await waitFor(() => expect(plaidLink.opened).toBe(true));
+      plaidLink.fireSuccess('public-bad-token');
+
+      await waitFor(() =>
+        expect(within(section('Banking')).getByText(/INVALID_PUBLIC_TOKEN/i)).toBeInTheDocument(),
+      );
+    });
+
+    it('shows an error if link-token creation fails', async () => {
+      server.use(
+        http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
+          HttpResponse.json({ error: 'Plaid unavailable' }, { status: 502 }),
+        ),
+      );
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      const bankingButton = within(section('Banking')).getByRole('button');
+      await user.click(bankingButton);
+
+      await waitFor(() =>
+        expect(within(section('Banking')).getByText(/plaid unavailable/i)).toBeInTheDocument(),
+      );
+      expect(plaidLink.opened).toBe(false);
+    });
+
+    it('surfaces a Plaid Link onExit display_message', async () => {
+      server.use(
+        http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
+          HttpResponse.json({
+            link_token: 'link-onboarding-4',
+            expiration: '2026-05-12T21:00:00Z',
+            request_id: 'req-4',
+          }),
+        ),
+      );
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderWithProviders(<OnboardingData onComplete={() => {}} />);
+      await screen.findByText('Connect your Data');
+
+      const bankingButton = within(section('Banking')).getByRole('button');
+      await user.click(bankingButton);
+      await waitFor(() => expect(plaidLink.opened).toBe(true));
+
+      plaidLink.fireExit({ display_message: 'Bank session aborted' });
+      await waitFor(() =>
+        expect(within(section('Banking')).getByText(/bank session aborted/i)).toBeInTheDocument(),
+      );
     });
   });
 });
