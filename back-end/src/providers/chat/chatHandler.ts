@@ -163,6 +163,9 @@ export async function handleChatMessage(config: {
       toolCallId,
       wasDetectedEarly: !!webSearchToolCallId,
     });
+    const displayQuery =
+      decision.query.length > 80 ? `${decision.query.slice(0, 77)}...` : decision.query;
+    const searchTitle = `🔍 Searching the web for ${displayQuery}`;
 
     // Insert ASSISTANT message with router's reasoning BEFORE tool execution
     // This matches worker behavior where ASSISTANT message comes before tools
@@ -180,7 +183,7 @@ export async function handleChatMessage(config: {
         toolCallId,
         'web_search',
         'IN_PROGRESS',
-        '🔍 Searching the web'
+        searchTitle
       );
     }
 
@@ -191,7 +194,7 @@ export async function handleChatMessage(config: {
       role: 'TOOL',
       text: '',
       metadata: {
-        title: '🔍 Searching the web',
+        title: searchTitle,
         toolName: 'web_search',
         toolCallId,
         toolStatus: 'IN_PROGRESS',
@@ -208,7 +211,7 @@ export async function handleChatMessage(config: {
       role: 'TOOL',
       text: `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`,
       metadata: {
-        title: 'Web search completed',
+        title: `Web search completed for ${displayQuery}`,
         toolName: 'web_search',
         toolCallId,
         toolStatus: 'FINISHED',

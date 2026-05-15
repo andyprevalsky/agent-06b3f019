@@ -99,7 +99,7 @@ export function MessageList({
   const scrollEndRef = useRef<HTMLDivElement>(null);
 
   const state = useMessageListState({ ctx, subAgentId, showThinkingIndicator, scrollEndRef });
-  const { filtered, filteredMessages, streaming, animation, animatedCharCount, thinkingVisible } =
+  const { filtered, filteredMessages, streaming, animation, animatedTokenCount, thinkingVisible } =
     state;
 
   const chatActionsVisible = useMemo(
@@ -141,7 +141,7 @@ export function MessageList({
       waitForCheckMap={filtered.waitForCheckMap}
       streaming={streaming}
       animation={animation}
-      animatedCharCount={animatedCharCount}
+      animatedTokenCount={animatedTokenCount}
       onAddCredits={onAddCredits}
       onIncreaseCostLimit={onIncreaseCostLimit}
       onNavigateToAgent={onNavigateToAgent}

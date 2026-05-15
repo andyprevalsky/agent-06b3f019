@@ -29,10 +29,7 @@ interface SchemaChipProps {
   tooltipPosition?: 'top' | 'bottom';
 }
 
-function computeTooltipStyle(
-  rect: DOMRect,
-  tooltipPosition: 'top' | 'bottom',
-): CSSProperties {
+function computeTooltipStyle(rect: DOMRect, tooltipPosition: 'top' | 'bottom'): CSSProperties {
   const style: CSSProperties = {
     position: 'fixed',
     width: TOOLTIP_WIDTH,

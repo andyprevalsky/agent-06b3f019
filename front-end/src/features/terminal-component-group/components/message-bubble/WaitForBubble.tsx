@@ -11,10 +11,18 @@ type WaitForChipMetadata = ComponentProps<typeof WaitForChip>['metadata'];
 interface WaitForBubbleProps {
   message: Message;
   waitForChecks?: WaitForCheck[];
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
   onTypingComplete?: () => void;
 }
 
-export function WaitForBubble({ message, waitForChecks, onTypingComplete }: WaitForBubbleProps) {
+export function WaitForBubble({
+  message,
+  waitForChecks,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
+  onTypingComplete,
+}: WaitForBubbleProps) {
   const metadata = message.metadata;
   const toolStatus = (metadata?.toolStatus as string) || 'IN_PROGRESS';
   const checkHistory = waitForChecks || [];
@@ -26,6 +34,8 @@ export function WaitForBubble({ message, waitForChecks, onTypingComplete }: Wait
       checks={checkHistory}
       metadata={metadata as unknown as WaitForChipMetadata}
       startTimestamp={message.timestamp}
+      thinkingStreamTokenCount={thinkingStreamTokenCount}
+      thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
       onTypingComplete={onTypingComplete}
     />
   );

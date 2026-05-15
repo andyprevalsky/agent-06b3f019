@@ -19,6 +19,8 @@ export interface WaitForConditionChipProps {
   completedChecks: number;
   checkIntervalSeconds?: number;
   totalChecksCompleted?: number;
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
 }
 
 function useNextCheckCountdown(params: {
@@ -93,14 +95,21 @@ function CheckStatusIcon({
   checkFailed: boolean;
 }) {
   if (checkPassed) return <CheckCircle className="h-3 w-3 flex-shrink-0 text-emerald-400/70" />;
-  if (isError || checkFailed)
-    return <XCircle className="h-3 w-3 flex-shrink-0 text-red-400/50" />;
-  return (
-    <span className="h-3 w-3 flex-shrink-0 rounded-full border border-muted-foreground/30" />
-  );
+  if (isError || checkFailed) return <XCircle className="h-3 w-3 flex-shrink-0 text-red-400/50" />;
+  return <span className="h-3 w-3 flex-shrink-0 rounded-full border border-muted-foreground/30" />;
 }
 
-function CheckHistoryRow({ check, index }: { check: WaitForCheck; index: number }) {
+function CheckHistoryRow({
+  check,
+  index,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
+}: {
+  check: WaitForCheck;
+  index: number;
+  thinkingStreamTokenCount: number;
+  thinkingStreamStartedAtMs?: number;
+}) {
   const isError = check.status === 'ERROR';
   const checkPassed = check.conditionMet === true;
   const checkFailed = check.conditionMet === false;
@@ -117,12 +126,27 @@ function CheckHistoryRow({ check, index }: { check: WaitForCheck; index: number 
         </span>
       </div>
 
-      {check.explore && <InlineExploreChip explore={check.explore} isLive={false} />}
+      {check.explore && (
+        <InlineExploreChip
+          explore={check.explore}
+          isLive={false}
+          thinkingStreamTokenCount={thinkingStreamTokenCount}
+          thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+        />
+      )}
     </div>
   );
 }
 
-function CheckHistory({ pastChecks }: { pastChecks: WaitForCheck[] }) {
+function CheckHistory({
+  pastChecks,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
+}: {
+  pastChecks: WaitForCheck[];
+  thinkingStreamTokenCount: number;
+  thinkingStreamStartedAtMs?: number;
+}) {
   return (
     <div className="border-t border-border/40">
       <div className="px-3 pt-2 pb-1">
@@ -133,7 +157,13 @@ function CheckHistory({ pastChecks }: { pastChecks: WaitForCheck[] }) {
 
       <div className="max-h-[400px] overflow-y-auto">
         {pastChecks.map((check, i) => (
-          <CheckHistoryRow key={`check-${check.timestamp}-${i}`} check={check} index={i} />
+          <CheckHistoryRow
+            key={`check-${check.timestamp}-${i}`}
+            check={check}
+            index={i}
+            thinkingStreamTokenCount={thinkingStreamTokenCount}
+            thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+          />
         ))}
       </div>
     </div>
@@ -217,9 +247,13 @@ function ConditionHeader({
 function LiveCheckSection({
   liveCheck,
   showCheckHistory,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
 }: {
   liveCheck: WaitForCheck;
   showCheckHistory: boolean;
+  thinkingStreamTokenCount: number;
+  thinkingStreamStartedAtMs?: number;
 }) {
   if (!liveCheck.explore) return null;
   return (
@@ -231,7 +265,12 @@ function LiveCheckSection({
           </span>
         </div>
       )}
-      <InlineExploreChip explore={liveCheck.explore} isLive={true} />
+      <InlineExploreChip
+        explore={liveCheck.explore}
+        isLive={true}
+        thinkingStreamTokenCount={thinkingStreamTokenCount}
+        thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+      />
     </>
   );
 }
@@ -261,6 +300,8 @@ export function WaitForConditionChip({
   completedChecks,
   checkIntervalSeconds,
   totalChecksCompleted,
+  thinkingStreamTokenCount = 0,
+  thinkingStreamStartedAtMs,
 }: WaitForConditionChipProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const nextCheckIn = useNextCheckCountdown({
@@ -298,10 +339,21 @@ export function WaitForConditionChip({
             onToggle={toggleExpanded}
           />
 
-          {showCheckHistory && <CheckHistory pastChecks={pastChecks} />}
+          {showCheckHistory && (
+            <CheckHistory
+              pastChecks={pastChecks}
+              thinkingStreamTokenCount={thinkingStreamTokenCount}
+              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+            />
+          )}
 
           {liveCheck && (
-            <LiveCheckSection liveCheck={liveCheck} showCheckHistory={showCheckHistory} />
+            <LiveCheckSection
+              liveCheck={liveCheck}
+              showCheckHistory={showCheckHistory}
+              thinkingStreamTokenCount={thinkingStreamTokenCount}
+              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+            />
           )}
         </div>
       </div>

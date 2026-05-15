@@ -708,6 +708,7 @@ describe('extractAssistantStreamPayload', () => {
       done: false,
       sequence: 1,
       is_gpt: true,
+      llm_started_at_ms: 1700000000000,
     };
     expect(extractAssistantStreamPayload(wrap(record))).toEqual(record);
   });
@@ -752,6 +753,8 @@ describe('extractPlanStreamPayload', () => {
       stream_id: 's',
       tool_call_id: 'tc',
       title: 'Creating Plan',
+      char_count: 120,
+      llm_started_at_ms: 1700000000000,
     };
     expect(extractPlanStreamPayload(wrap(record))).toEqual(record);
   });
@@ -791,7 +794,9 @@ describe('extractToolStreamPayload', () => {
       tool_call_id: 'tc',
       tool_name: 'web_search',
       title: 'Starting web_search...',
+      status: 'IN_PROGRESS',
       char_count: 180,
+      llm_started_at_ms: 1700000000000,
       is_claude: true,
     };
     expect(extractToolStreamPayload(wrap(record))).toEqual(record);

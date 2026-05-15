@@ -11,6 +11,8 @@
  *   [EXPANDED] header + check history + live explore
  *
  * Explore chips within checks are independently expandable.
+ * Live embedded explore chips receive active stream timing/counts so their
+ * carousel can include the elapsed-time + spring-counted token item.
  *
  * EFFECTIVE STATUS (condition mode):
  *   The backend emits per-check FINISHED events (conditionMet=false) followed by
@@ -50,6 +52,8 @@ interface WaitForChipProps {
     };
   };
   startTimestamp?: string;
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
   onTypingComplete?: () => void;
 }
 
@@ -68,6 +72,8 @@ const WaitForChip = memo(function WaitForChip({
   status,
   checks,
   metadata,
+  thinkingStreamTokenCount = 0,
+  thinkingStreamStartedAtMs,
   onTypingComplete,
 }: WaitForChipProps) {
   useFireTypingComplete(onTypingComplete);
@@ -115,6 +121,8 @@ const WaitForChip = memo(function WaitForChip({
       completedChecks={completedChecks}
       checkIntervalSeconds={metadata?.checkIntervalSeconds}
       totalChecksCompleted={metadata?.data?.checks_completed}
+      thinkingStreamTokenCount={thinkingStreamTokenCount}
+      thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
     />
   );
 });

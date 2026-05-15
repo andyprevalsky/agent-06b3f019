@@ -98,4 +98,5 @@ async def handle_tool_event(
             done=event.done or False,
             sequence=event.sequence or 0,
             sub_agent_id=sub_agent_id or event.sub_agent_id,
+            llm_started_at_ms=event.llm_started_at_ms,
         )

@@ -526,6 +526,26 @@ async def run_agent(  # noqa: C901
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
+                llm_started_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                start_event = ToolEvent(
+                    type=EventType.STREAM_MESSAGE,
+                    stream_id=stream_id,
+                    delta="",
+                    done=False,
+                    sequence=sequence[0],
+                    sub_agent_id=task_id,
+                    llm_started_at_ms=llm_started_at_ms,
+                )
+                await handle_tool_event(
+                    event=start_event,
+                    agent_id=agent_id,
+                    tool_call_id=stream_id,
+                    tool_name="llm_call",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
+                    sub_agent_id=task_id,
+                )
+                sequence[0] += 1
 
                 async def on_chunk(text_so_far: str, token_count_chunk: int):  # noqa: B023
                     # Heartbeat so Temporal knows the activity is alive during long LLM calls
@@ -545,6 +565,7 @@ async def run_agent(  # noqa: C901
                             done=False,
                             sequence=sequence[0],  # noqa: B023
                             sub_agent_id=task_id,
+                            llm_started_at_ms=llm_started_at_ms,
                         )
                         await handle_tool_event(
                             event=stream_event,
@@ -625,6 +646,7 @@ async def run_agent(  # noqa: C901
                         done=True,
                         sequence=sequence[0],
                         sub_agent_id=task_id,
+                        llm_started_at_ms=llm_started_at_ms,
                     )
                     await handle_tool_event(
                         event=final_event,

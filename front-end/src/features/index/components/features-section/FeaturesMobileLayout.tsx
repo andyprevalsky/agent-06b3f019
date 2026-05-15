@@ -26,8 +26,7 @@ const STICKY_VARS: CustomCSSProperties = { '--features-sticky-top': '96px' };
 
 const MEDIA_BOX_STYLE: CSSProperties = {
   width: 'min(420px, calc(100vw - 24px))',
-  height:
-    'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)',
+  height: 'clamp(240px, calc((100vh - var(--features-sticky-top, 96px) - 72px) * 0.5), 380px)',
 };
 
 /**
@@ -55,10 +54,7 @@ export default function FeaturesMobileLayout({
 
   return (
     <div className="lg:hidden min-h-[600vh] relative">
-      <div
-        className="sticky top-24 z-20 flex flex-col items-center space-y-6"
-        style={STICKY_VARS}
-      >
+      <div className="sticky top-24 z-20 flex flex-col items-center space-y-6" style={STICKY_VARS}>
         <div className="flex items-center justify-center relative" style={MEDIA_BOX_STYLE}>
           <div className="w-full h-full rounded-2xl overflow-hidden bg-transparent relative">
             <FeatureVideoStage activeIndex={activeFeature} />

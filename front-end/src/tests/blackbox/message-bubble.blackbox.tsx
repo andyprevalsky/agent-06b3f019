@@ -437,6 +437,50 @@ describe('MessageBubble', () => {
     expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
   });
 
+  it('renders finished explore agent with state-only header and result body', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'The production deployment is ready. Status: READY. URL: https://roselabs.ai',
+      metadata: {
+        toolCallId: 'tc-14-finished',
+        toolName: 'spawn_agent',
+        title: 'Explore foo',
+        fullGoal: 'Explore foo in detail',
+        toolStatus: 'FINISHED',
+        agentType: 'explore',
+        taskId: 'task-1-finished',
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+
+    await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
+    expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
+    expect(document.body.textContent).toContain('The production deployment is ready');
+  });
+
+  it('renders failed explore agent with state-only header and error result body', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'Activity task failed: web_search_activity failed: Parallel AI search returned HTTP 429 Too Many Requests',
+      metadata: {
+        toolCallId: 'tc-14-error',
+        toolName: 'spawn_agent',
+        title: 'Check deploy status',
+        fullGoal: 'Check whether the production deployment finished',
+        toolStatus: 'ERROR',
+        agentType: 'explore',
+        taskId: 'task-1-error',
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+
+    await waitFor(() => expect(screen.getByText('Explore Failed')).toBeInTheDocument());
+    expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
+    expect(document.body.textContent).toContain(
+      'Parallel AI search returned HTTP 429 Too Many Requests',
+    );
+  });
+
   it('renders Claude Code tool message as ClaudeCodeChip', async () => {
     const msg = baseMessage({
       role: 'TOOL',

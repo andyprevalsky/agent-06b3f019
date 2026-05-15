@@ -33,6 +33,90 @@ function isInternalLivenessTool(message: Message): boolean {
   return message.role === 'TOOL' && message.metadata?.toolName === 'agent_init';
 }
 
+function stripWrappingQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function extractMarkdownParam(text: string, name: string): string | undefined {
+  const match = text.match(new RegExp(`^- \\*\\*${name}\\*\\*:\\s*(.+)$`, 'im'));
+  return match?.[1] ? stripWrappingQuotes(match[1]) : undefined;
+}
+
+function extractLineValue(text: string, label: string): string | undefined {
+  const match = text.match(new RegExp(`^${label}:\\s*(.+)$`, 'im'));
+  return match?.[1] ? stripWrappingQuotes(match[1]) : undefined;
+}
+
+function formatWebSearchTitle(
+  rawTitle: string,
+  status: ExploreStep['status'],
+  query: string | undefined,
+): string {
+  if (!query) return rawTitle;
+  if (
+    rawTitle !== 'Searching the web' &&
+    rawTitle !== 'Web search completed' &&
+    rawTitle !== '❌ Web search failed'
+  ) {
+    return rawTitle;
+  }
+
+  if (status === 'ERROR') return `Web search failed for ${query}`;
+  if (status === 'FINISHED') return `Searched the web for ${query}`;
+  return `Searching the web for ${query}`;
+}
+
+function formatWebFetchTitle(
+  rawTitle: string,
+  status: ExploreStep['status'],
+  text: string,
+): string {
+  if (
+    rawTitle !== 'Fetching web content' &&
+    rawTitle !== 'Web fetch complete' &&
+    rawTitle !== '❌ Web fetch failed'
+  ) {
+    return rawTitle;
+  }
+
+  const activeMatch = text.match(/^Extracting from\s+([^:]+):\s*(.+)$/im);
+  const url = activeMatch?.[1]?.trim() || extractMarkdownParam(text, 'url');
+  const objective = activeMatch?.[2]?.trim() || extractMarkdownParam(text, 'objective');
+  if (!url && !objective) return rawTitle;
+
+  const target = [url, objective ? `for ${objective}` : ''].filter(Boolean).join(' ');
+  if (status === 'ERROR') return `Web fetch failed for ${target}`;
+  if (status === 'FINISHED') return `Fetched ${target}`;
+  return `Fetching ${target}`;
+}
+
+function deriveExploreStepTitle(m: Message, status: ExploreStep['status']): string {
+  const rawTitle = ((m.metadata?.title as string) || '').trim();
+  const text = m.text || '';
+  const toolName = (m.metadata?.toolName as string) || '';
+
+  if (toolName === 'web_search') {
+    const query =
+      typeof m.metadata?.query === 'string'
+        ? m.metadata.query
+        : extractLineValue(text, 'Query') || extractMarkdownParam(text, 'query');
+    return formatWebSearchTitle(rawTitle, status, query);
+  }
+
+  if (toolName === 'web_fetch') {
+    return formatWebFetchTitle(rawTitle, status, text);
+  }
+
+  return rawTitle;
+}
+
 function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   const raw = new Map<string, Message[]>();
   for (const m of messages) {
@@ -116,15 +200,17 @@ function compressSetPlans(tools: Message[]): Message[] {
 
 function buildExploreStep(m: Message): ExploreStep {
   const status = (m.metadata?.toolStatus as string) || 'IN_PROGRESS';
-  const title = (m.metadata?.title as string) || '';
+  const normalizedStatus = status as ExploreStep['status'];
+  const title = deriveExploreStepTitle(m, normalizedStatus);
   const isThinking = m.metadata?.toolName === 'spawn_agent' && title === 'Explore agent thinking';
   const message = status === 'IN_PROGRESS' && !isThinking ? '' : m.text || '';
   return {
     title,
-    status: status as ExploreStep['status'],
+    status: normalizedStatus,
     timestamp: m.timestamp,
     message,
     toolName: (m.metadata?.toolName as string) || '',
+    toolCallId: (m.metadata?.toolCallId as string) || undefined,
   };
 }
 

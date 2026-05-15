@@ -47,9 +47,7 @@ export interface PendingWriteLockApproval {
 }
 
 /** Find the in-progress write-permission attention request, if any. */
-export function usePendingWriteLockApproval(
-  messages: Message[],
-): PendingWriteLockApproval | null {
+export function usePendingWriteLockApproval(messages: Message[]): PendingWriteLockApproval | null {
   return useMemo(() => {
     const approvalMessage = messages.find((m) => {
       const meta = getMeta(m);

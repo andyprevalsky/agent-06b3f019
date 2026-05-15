@@ -10,8 +10,7 @@ export function useSafariDetection(): boolean {
 
   useEffect(() => {
     const ua = navigator.userAgent.toLowerCase();
-    const detected =
-      ua.includes('safari') && !ua.includes('chrome') && !ua.includes('firefox');
+    const detected = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('firefox');
     setIsSafari(detected);
   }, []);
 

@@ -124,7 +124,7 @@ async def test_web_search_ddgs_no_api_key():
 def _mock_execute(calls: list, *, result: dict | None = None, raises: bool = False):
     async def mock(activity_fn, *args, **kwargs):
         name = getattr(activity_fn, "__name__", "")
-        calls.append({"activity": name, "kwargs": kwargs})
+        calls.append({"activity": name, "args": args, "kwargs": kwargs})
         if name == "web_search_activity":
             if raises:
                 raise RuntimeError("parallel offline")
@@ -150,6 +150,10 @@ async def test_manager_execute_tool_happy():
     )
     assert out["result"]["answer"] == "a"
     assert out["usage"]["service"][0]["provider"] == "Parallel AI Search"
+    posted = [c for c in calls if c["activity"] == "post_agent_message"]
+    assert posted
+    first_metadata = posted[0]["kwargs"]["args"][3]
+    assert first_metadata["title"] == "Searching the web for AI trends"
 
 
 async def test_manager_execute_tool_raises_on_error():

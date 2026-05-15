@@ -109,9 +109,7 @@ describe('NetworkView', () => {
   });
 
   it('renders ERROR state when the fetch fails', async () => {
-    server.use(
-      http.get(`${API_BASE}/people`, () => new HttpResponse(null, { status: 500 })),
-    );
+    server.use(http.get(`${API_BASE}/people`, () => new HttpResponse(null, { status: 500 })));
     renderWithProviders(<NetworkView />);
     await waitFor(() => {
       expect(screen.getByText(/Error:/)).toBeInTheDocument();
@@ -193,8 +191,12 @@ describe('NetworkView', () => {
     const user = userEvent.setup();
     // Next page button is the second pagination button; find by chevron-right icon sibling.
     const buttons = screen.getAllByRole('button');
-    const prevBtn = buttons.find((b) => b.querySelector('.lucide-chevron-left')) as HTMLButtonElement;
-    const nextBtn = buttons.find((b) => b.querySelector('.lucide-chevron-right')) as HTMLButtonElement;
+    const prevBtn = buttons.find((b) =>
+      b.querySelector('.lucide-chevron-left'),
+    ) as HTMLButtonElement;
+    const nextBtn = buttons.find((b) =>
+      b.querySelector('.lucide-chevron-right'),
+    ) as HTMLButtonElement;
 
     // Prev is disabled on page 1
     expect(prevBtn).toBeDisabled();

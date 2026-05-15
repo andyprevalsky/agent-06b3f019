@@ -18,11 +18,7 @@ const BLOCK_TAGS: ReadonlySet<string> = new Set([
   'pre',
 ]);
 
-function pushText(
-  text: string,
-  formatting: Partial<WordItem>,
-  out: WordItem[],
-): void {
+function pushText(text: string, formatting: Partial<WordItem>, out: WordItem[]): void {
   if (text.trim().length === 0) {
     out.push({ word: text, isWord: false, ...formatting });
     return;

@@ -58,9 +58,7 @@ vi.mock('@/components/ThinkingAnimation', () => ({
 // The MarkdownText component in AttentionInbox is heavy (react-markdown +
 // remark plugins) and not the subject of these tests — stub to plain text.
 vi.mock('@/features/terminal-component-group/components/MarkdownText', () => ({
-  MarkdownText: ({ text }: { text: string }) => (
-    <div data-testid="markdown-text">{text}</div>
-  ),
+  MarkdownText: ({ text }: { text: string }) => <div data-testid="markdown-text">{text}</div>,
 }));
 
 // Polyfill Element.prototype.scrollIntoView (used by cmdk inside the Popover)
@@ -138,9 +136,7 @@ function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
 
 function withAgentCtx(messages: Message[], children: React.ReactNode) {
   return (
-    <AgentContext.Provider value={makeMockAgentContext(messages)}>
-      {children}
-    </AgentContext.Provider>
+    <AgentContext.Provider value={makeMockAgentContext(messages)}>{children}</AgentContext.Provider>
   );
 }
 
@@ -201,9 +197,7 @@ describe('QueryInput (blackbox)', () => {
   it('Cmd+Enter submits (handleSubmitWithAttachments path)', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />);
 
     const textarea = screen.getByPlaceholderText('Type your message...');
     textarea.focus();
@@ -214,9 +208,7 @@ describe('QueryInput (blackbox)', () => {
   it('plain Enter does NOT submit (multi-line textarea behavior)', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />);
 
     const textarea = screen.getByPlaceholderText('Type your message...');
     textarea.focus();
@@ -233,9 +225,7 @@ describe('QueryInput (blackbox)', () => {
   it('clicking the send button invokes onSubmit', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} value="query" onSubmit={onSubmit} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} value="query" onSubmit={onSubmit} />);
     // Submit button is the only button whose icon renders inside a LiquidWhiteButton,
     // but we can target by the SVG arrow's parent button more loosely — use
     // the very last <button> in the form (ArrowUp icon).
@@ -248,9 +238,7 @@ describe('QueryInput (blackbox)', () => {
   it('when canSubmit=false renders Stop button wired to onPause', async () => {
     const onPause = vi.fn();
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} canSubmit={false} onPause={onPause} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} canSubmit={false} onPause={onPause} />);
     const buttons = screen.getAllByRole('button');
     await user.click(buttons[buttons.length - 1]);
     expect(onPause).toHaveBeenCalled();
@@ -266,23 +254,17 @@ describe('QueryInput (blackbox)', () => {
   });
 
   it('renders cost-limit chip with default pending limit when no agent', () => {
-    renderWithProviders(
-      <QueryInput {...defaultProps} pendingPriceLimitCents={250} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={250} />);
     expect(screen.getByText('0.00 / 2.50')).toBeInTheDocument();
   });
 
   it('clicking cost chip (no agent) enters edit mode and shows an input', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} pendingPriceLimitCents={100} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00');
     await user.click(chip.closest('button')!);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement | null;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
   });
 
@@ -297,9 +279,7 @@ describe('QueryInput (blackbox)', () => {
     // clicking opens the input
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
     await user.click(chip);
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement | null;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
   });
 
@@ -317,24 +297,18 @@ describe('QueryInput (blackbox)', () => {
   });
 
   it('context percentage badge shows numeric value', () => {
-    renderWithProviders(
-      <QueryInput {...defaultProps} contextPercentage={42} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} contextPercentage={42} />);
     expect(screen.getByText('42%')).toBeInTheDocument();
   });
 
   it('shows "rose-labs/rose-1-ultra" in the model-selector when selectedModel switches', () => {
-    renderWithProviders(
-      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-ultra" />);
     expect(screen.getByText('rose-labs/rose-1-ultra')).toBeInTheDocument();
   });
 
   it('shows COMPLETED agent still renders (paperclip still present)', () => {
     const agent = makeAgentDetail({ status: 'COMPLETED' });
-    const { container } = renderWithProviders(
-      <QueryInput {...defaultProps} agentDetail={agent} />,
-    );
+    const { container } = renderWithProviders(<QueryInput {...defaultProps} agentDetail={agent} />);
     // Target the paperclip button specifically: the <Paperclip> lucide icon
     // (class lucide-paperclip) is unique to the attachment trigger.
     const paperclipIcon = container.querySelector('svg.lucide-paperclip');
@@ -357,13 +331,9 @@ describe('QueryInput (blackbox)', () => {
 
     // Model picker shows both model options with their descriptions
     await waitFor(() => {
-      expect(
-        screen.getByText('Fast and cost-effective for everyday tasks'),
-      ).toBeInTheDocument();
+      expect(screen.getByText('Fast and cost-effective for everyday tasks')).toBeInTheDocument();
     });
-    expect(
-      screen.getByText('Most capable for complex reasoning'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
   });
 
   it('selecting an unknown-provider model fallbacks to provider description', async () => {
@@ -406,9 +376,7 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} />);
 
     // The hidden file input is the only <input type="file">
-    const fileInput = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement;
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     expect(fileInput).toBeTruthy();
     const spy = vi.spyOn(fileInput, 'click');
 
@@ -424,9 +392,7 @@ describe('QueryInput (blackbox)', () => {
 
   it('tooltip toggle button next to rose-1-lite is clickable', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-lite" />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} selectedModel="rose-labs/rose-1-lite" />);
     // The info-circle tooltip button renders an inline svg with stroke path
     // for the "i" info icon — target by the svg path d attribute.
     const infoSvg = document.querySelector('svg path[d*="M13 16h-1v-4h-1"]');
@@ -439,9 +405,7 @@ describe('QueryInput (blackbox)', () => {
   it('drag over + drag leave cycle toggles the drop overlay class', async () => {
     const { container } = renderWithProviders(<QueryInput {...defaultProps} />);
     // The outer wrap is the first div under max-w-4xl — trigger drag events on its child
-    const dragWrapper = container.querySelector(
-      '[class*="rounded-xl"]',
-    ) as HTMLElement;
+    const dragWrapper = container.querySelector('[class*="rounded-xl"]') as HTMLElement;
     expect(dragWrapper).toBeTruthy();
 
     // Use fireEvent.dragOver / dragLeave — they sidestep jsdom's missing DragEvent
@@ -471,9 +435,7 @@ describe('QueryInput (blackbox)', () => {
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
     await user.click(chip);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     expect(input).not.toBeNull();
 
     // Update value + press Enter to save
@@ -488,15 +450,11 @@ describe('QueryInput (blackbox)', () => {
 
   it('price-limit input sanitizes to digits + one decimal only', async () => {
     const user = userEvent.setup();
-    renderWithProviders(
-      <QueryInput {...defaultProps} pendingPriceLimitCents={100} />,
-    );
+    renderWithProviders(<QueryInput {...defaultProps} pendingPriceLimitCents={100} />);
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
     await user.click(chip);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
     await user.type(input, '1.2.3abc');
     // Should end up with only digits and one decimal point
@@ -534,19 +492,13 @@ describe('QueryInput (blackbox)', () => {
     const onAgentUpdate = vi.fn();
     const user = userEvent.setup();
     renderWithProviders(
-      <QueryInput
-        {...defaultProps}
-        agentDetail={agent}
-        onAgentUpdate={onAgentUpdate}
-      />,
+      <QueryInput {...defaultProps} agentDetail={agent} onAgentUpdate={onAgentUpdate} />,
     );
 
     const chip = screen.getByText('0.50 / 5.00').closest('button')!;
     await user.click(chip);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
     await user.type(input, '8.00');
     await user.keyboard('{Enter}');
@@ -563,18 +515,14 @@ describe('QueryInput (blackbox)', () => {
     const chip = screen.getByText('5.00 / 10.00').closest('button')!;
     await user.click(chip);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input);
     await user.type(input, '1.00'); // Below tree cost of 5.00
     await user.keyboard('{Enter}');
 
     // Input is still showing (not saved)
     await waitFor(() => {
-      const still = document.querySelector(
-        'input[placeholder="1.00"]',
-      ) as HTMLInputElement;
+      const still = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
       expect(still).not.toBeNull();
     });
   });
@@ -592,9 +540,7 @@ describe('QueryInput (blackbox)', () => {
     const chip = screen.getByText('0.00 / 1.00').closest('button')!;
     await user.click(chip);
 
-    const input = document.querySelector(
-      'input[placeholder="1.00"]',
-    ) as HTMLInputElement;
+    const input = document.querySelector('input[placeholder="1.00"]') as HTMLInputElement;
     await user.clear(input); // empty -> NaN
     await user.keyboard('{Enter}');
 
@@ -606,9 +552,7 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} />);
 
     const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
-    const fileInput = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement;
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     await user.upload(fileInput, file);
 
     await waitFor(() => {
@@ -627,9 +571,7 @@ describe('QueryInput (blackbox)', () => {
       type: 'application/octet-stream',
     });
 
-    const fileInput = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement;
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     await user.upload(fileInput, big);
 
     // No attachment chip should be added
@@ -713,9 +655,7 @@ describe('AttentionInbox (blackbox)', () => {
     await waitFor(() => {
       expect(screen.getByText(/Congrats/)).toBeInTheDocument();
     });
-    expect(
-      screen.getByText(/All your agents are unblocked/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/All your agents are unblocked/i)).toBeInTheDocument();
   });
 
   it('opening the inbox shows the first unanswered request (Accept/Skip/Reject)', async () => {
@@ -905,9 +845,7 @@ describe('AttentionInbox (blackbox)', () => {
     await user.click(screen.getAllByRole('button')[0]);
 
     await waitFor(() => {
-      const img = document.querySelector(
-        'img[src="https://example.com/cat.png"]',
-      );
+      const img = document.querySelector('img[src="https://example.com/cat.png"]');
       expect(img).toBeTruthy();
     });
   });
@@ -1695,9 +1633,7 @@ describe('BrowserViewPanel (blackbox)', () => {
         />,
       ),
     );
-    expect(
-      screen.getByText(/You can interact with the browser/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/You can interact with the browser/i)).toBeInTheDocument();
   });
 
   it('clicking fullscreen toggle calls onFullscreenToggle(true)', async () => {
@@ -1878,9 +1814,7 @@ describe('BrowserViewPanel (blackbox)', () => {
     );
 
     await act(async () => {
-      window.dispatchEvent(
-        new MessageEvent('message', { data: 'browserbase-disconnected' }),
-      );
+      window.dispatchEvent(new MessageEvent('message', { data: 'browserbase-disconnected' }));
     });
 
     await waitFor(() => {

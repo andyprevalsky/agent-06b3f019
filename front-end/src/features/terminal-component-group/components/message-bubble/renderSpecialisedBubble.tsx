@@ -17,10 +17,7 @@ interface Args {
   routing: MessageRouting;
 }
 
-export function renderSpecialisedBubble({
-  props,
-  routing,
-}: Args): ReactElement | null | undefined {
+export function renderSpecialisedBubble({ props, routing }: Args): ReactElement | null | undefined {
   const agent = renderAgentRoutes({ props, routing });
   if (agent !== undefined) return agent;
   return renderChipRoutes({ props, routing });

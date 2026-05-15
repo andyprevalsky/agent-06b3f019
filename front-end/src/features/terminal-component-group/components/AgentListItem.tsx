@@ -168,11 +168,7 @@ export default function AgentListItem({
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
-            <StatusIndicator
-              agent={agent}
-              isResuming={isResuming}
-              onPlayClick={handlePlayClick}
-            />
+            <StatusIndicator agent={agent} isResuming={isResuming} onPlayClick={handlePlayClick} />
           </div>
         </div>
       </div>

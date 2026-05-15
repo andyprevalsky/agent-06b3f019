@@ -7,10 +7,13 @@ export interface StreamingBubble {
   done: boolean;
   timeoutId?: number;
   subAgentId?: string;
+  startedAtMs?: number;
   /** True when the streaming model is Claude (Anthropic) */
   isClaude?: boolean;
   /** True when the streaming model is direct GPT/Codex */
   isGpt?: boolean;
+  /** LLM request start timestamp from the stream producer */
+  llmStartedAtMs?: number;
 }
 
 export interface StreamingPlan {
@@ -18,6 +21,7 @@ export interface StreamingPlan {
   tool_call_id: string;
   title: string;
   char_count?: number;
+  startedAtMs?: number;
   subAgentId?: string;
 }
 
@@ -36,6 +40,7 @@ export interface StreamingTool {
   title: string;
   charCount?: number;
   subAgentId?: string;
+  startedAtMs?: number;
   /** True when the streaming model is Claude (Anthropic) */
   isClaude?: boolean;
   /** True when the streaming model is direct GPT/Codex */

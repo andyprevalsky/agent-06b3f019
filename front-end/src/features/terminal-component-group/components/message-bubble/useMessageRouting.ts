@@ -39,7 +39,7 @@ export function useMessageRouting(message: Message): MessageRouting {
   const isUserAttentionMessage = Boolean(isTool && metadata?.isUserAttentionMessage);
   const isToolApproval = Boolean(
     isTool &&
-      (metadata?.requestUserApproval as { toolApproval?: unknown } | undefined)?.toolApproval,
+    (metadata?.requestUserApproval as { toolApproval?: unknown } | undefined)?.toolApproval,
   );
   const isSignupRequest = Boolean(isTool && metadata?.requestUserSignup);
   const isSubAgentTool = Boolean(
@@ -53,12 +53,10 @@ export function useMessageRouting(message: Message): MessageRouting {
   const isClaudeCodeToolMessage = isTool && metadata?.toolName === 'spawn_claude_code_agent';
   const isCompletionSummary = isTool && metadata?.isFinalSummary === true;
 
-  const isClaudeCodeInProgress =
-    isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
+  const isClaudeCodeInProgress = isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
   const isClaudeCodeStarted =
     isClaudeCodeToolMessage && metadata?.action_type === 'claude_code_started';
-  const isClaudeCodeComplete =
-    isClaudeCodeToolMessage && metadata?.action_type === 'task_complete';
+  const isClaudeCodeComplete = isClaudeCodeToolMessage && metadata?.action_type === 'task_complete';
   const isClaudeCodeChipMessage = Boolean(
     isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete,
   );

@@ -1,3 +1,5 @@
+import type { ToolStatus } from './message-metadata';
+
 // -----------------------------------------------------------------------------
 // ASSISTANT_STREAM Event - LLM streaming chunks
 // -----------------------------------------------------------------------------
@@ -21,6 +23,8 @@ export interface AssistantStreamPayload {
   sequence: number;
   /** Routes to sub-agent's MessageList (e.g., browser panel) */
   subAgentId?: string;
+  /** Epoch ms when the LLM request started, before first token */
+  llm_started_at_ms?: number;
   /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
   is_claude?: boolean;
   /** True when the streaming model is direct GPT/Codex - used for thinking animation theming */
@@ -48,6 +52,8 @@ export interface PlanStreamPayload {
   title: string;
   /** Current character count of plan content being generated */
   char_count?: number;
+  /** Epoch ms when the planner LLM request started, before first token */
+  llm_started_at_ms?: number;
 }
 
 // -----------------------------------------------------------------------------
@@ -72,8 +78,12 @@ export interface ToolStreamPayload {
   tool_name: string;
   /** Display title (e.g., "Starting web_search...") */
   title: string;
+  /** Current status when broadcaster includes tool execution state */
+  status?: ToolStatus;
   /** Current raw character count streamed while forming the tool call */
   char_count?: number;
+  /** Epoch ms when the LLM request started, before first token */
+  llm_started_at_ms?: number;
   /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
   is_claude?: boolean;
   /** True when the streaming model is direct GPT/Codex - used for thinking animation theming */

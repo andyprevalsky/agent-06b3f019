@@ -54,8 +54,14 @@ export default function AttentionInbox({
     });
   }, []);
 
-  const { loading, actionRequestId, handleRespond, handleSkip, handleReject, handleSendViaIMessage } =
-    useAttentionActions({ requests, responses, clearResponse, refetch, setIsOpen });
+  const {
+    loading,
+    actionRequestId,
+    handleRespond,
+    handleSkip,
+    handleReject,
+    handleSendViaIMessage,
+  } = useAttentionActions({ requests, responses, clearResponse, refetch, setIsOpen });
 
   useAttentionKeyboardShortcuts({
     isOpen,

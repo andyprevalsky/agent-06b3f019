@@ -27,10 +27,7 @@ export default function PriceLimitRow({ agent, edit }: PriceLimitRowProps) {
       <div className="flex justify-between items-center text-sm">
         <span className="text-muted-foreground">Price Limit</span>
         {!edit.isEditing ? (
-          <button
-            onClick={edit.startEdit}
-            className="font-mono hover:underline text-primary"
-          >
+          <button onClick={edit.startEdit} className="font-mono hover:underline text-primary">
             ${priceLimitDollars}
           </button>
         ) : (

@@ -5,6 +5,7 @@
  *   - initDevLogging   — patches console methods in dev
  *   - initAmplitude    — configures analytics with session replay
  *   - initViewportHeight — writes --vh CSS var and installs listeners
+ *   - initViewportScale — writes --app-rem-scale for compact desktop windows
  *
  * We mock analytics and the session-replay plugin so we can assert behaviour
  * without touching real Amplitude.
@@ -36,6 +37,10 @@ vi.mock('@/features/app-wiring/config', () => ({
   SESSION_REPLAY_SAMPLE_RATE: 1,
   IS_DEV: true,
   VH_REMEASURE_DELAY_MS: 50,
+  VIEWPORT_SCALE_MIN_WIDTH: 768,
+  VIEWPORT_SCALE_DESIGN_WIDTH: 1440,
+  VIEWPORT_SCALE_DESIGN_HEIGHT: 900,
+  VIEWPORT_SCALE_MIN: 0.7,
 }));
 
 import * as analytics from '@/lib/analytics';
@@ -45,6 +50,8 @@ import {
   initDevLogging,
   initAmplitude,
   initViewportHeight,
+  computeViewportScale,
+  initViewportScale,
 } from '@/features/app-wiring/hooks';
 
 describe('app-wiring/hooks', () => {
@@ -56,6 +63,7 @@ describe('app-wiring/hooks', () => {
     innerHeight: window.innerHeight,
     visualViewport: Object.getOwnPropertyDescriptor(window, 'visualViewport'),
     hidden: Object.getOwnPropertyDescriptor(Document.prototype, 'hidden'),
+    innerWidth: window.innerWidth,
   };
 
   beforeEach(() => {
@@ -78,6 +86,11 @@ describe('app-wiring/hooks', () => {
       configurable: true,
       writable: true,
     });
+    Object.defineProperty(window, 'innerWidth', {
+      value: originals.innerWidth,
+      configurable: true,
+      writable: true,
+    });
     if (originals.visualViewport) {
       Object.defineProperty(window, 'visualViewport', originals.visualViewport);
     } else {
@@ -88,6 +101,7 @@ describe('app-wiring/hooks', () => {
       Object.defineProperty(Document.prototype, 'hidden', originals.hidden);
     }
     document.documentElement.style.removeProperty('--vh');
+    document.documentElement.style.removeProperty('--app-rem-scale');
   });
 
   describe('initDevLogging', () => {
@@ -121,6 +135,10 @@ describe('app-wiring/hooks', () => {
         SESSION_REPLAY_SAMPLE_RATE: 1,
         IS_DEV: false,
         VH_REMEASURE_DELAY_MS: 50,
+        VIEWPORT_SCALE_MIN_WIDTH: 768,
+        VIEWPORT_SCALE_DESIGN_WIDTH: 1440,
+        VIEWPORT_SCALE_DESIGN_HEIGHT: 900,
+        VIEWPORT_SCALE_MIN: 0.7,
       }));
       const { initDevLogging: initProd } = await import('@/features/app-wiring/hooks');
       const originalLog = console.log;
@@ -215,6 +233,66 @@ describe('app-wiring/hooks', () => {
       document.dispatchEvent(new Event('visibilitychange'));
       vi.advanceTimersByTime(100);
       expect(document.documentElement.style.getPropertyValue('--vh')).toBe('5px');
+      vi.useRealTimers();
+    });
+  });
+
+  describe('computeViewportScale', () => {
+    it('does not scale mobile-width layouts', () => {
+      expect(computeViewportScale(390, 844)).toBe(1);
+    });
+
+    it('keeps full-size desktop layouts at 1', () => {
+      expect(computeViewportScale(1440, 900)).toBe(1);
+      expect(computeViewportScale(1728, 1117)).toBe(1);
+    });
+
+    it('scales compact desktop windows using the tighter viewport dimension', () => {
+      expect(computeViewportScale(1440, 810)).toBe(0.9);
+      expect(computeViewportScale(1280, 900)).toBe(0.889);
+    });
+
+    it('allows compact desktops to scale down toward repeated browser zoom-out levels', () => {
+      expect(computeViewportScale(1152, 900)).toBe(0.8);
+      expect(computeViewportScale(1024, 640)).toBe(0.711);
+    });
+
+    it('never scales compact desktops below the configured minimum', () => {
+      expect(computeViewportScale(900, 500)).toBe(0.7);
+    });
+  });
+
+  describe('initViewportScale', () => {
+    it('sets --app-rem-scale from the current viewport', () => {
+      Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 810, configurable: true });
+      initViewportScale();
+      expect(document.documentElement.style.getPropertyValue('--app-rem-scale')).toBe('0.9');
+    });
+
+    it('updates --app-rem-scale on resize', () => {
+      Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true });
+      initViewportScale();
+      expect(document.documentElement.style.getPropertyValue('--app-rem-scale')).toBe('1');
+
+      Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true });
+      window.dispatchEvent(new Event('resize'));
+      expect(document.documentElement.style.getPropertyValue('--app-rem-scale')).toBe('0.889');
+    });
+
+    it('updates --app-rem-scale after orientationchange delay', () => {
+      vi.useFakeTimers();
+      Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true });
+      initViewportScale();
+
+      Object.defineProperty(window, 'innerHeight', { value: 810, configurable: true });
+      window.dispatchEvent(new Event('orientationchange'));
+      expect(document.documentElement.style.getPropertyValue('--app-rem-scale')).toBe('1');
+
+      vi.advanceTimersByTime(100);
+      expect(document.documentElement.style.getPropertyValue('--app-rem-scale')).toBe('0.9');
       vi.useRealTimers();
     });
   });

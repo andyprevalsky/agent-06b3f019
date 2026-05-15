@@ -20,10 +20,12 @@ function makeHandlers(overrides: Record<string, unknown> = {}) {
   const base = {
     browserCookies: {
       isAvailable: true,
-      getInstalledBrowsers: vi.fn(async (): Promise<BrowserInfo[]> => [
-        { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
-        { type: 'atlas', name: 'Atlas', isInstalled: true, needsManualPassword: true },
-      ]),
+      getInstalledBrowsers: vi.fn(
+        async (): Promise<BrowserInfo[]> => [
+          { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
+          { type: 'atlas', name: 'Atlas', isInstalled: true, needsManualPassword: true },
+        ],
+      ),
       syncBrowser: vi.fn(async () => {}),
       syncBrowserPasswords: vi.fn(async () => ({ success: true })),
       storeAtlasPassword: vi.fn(async () => ({ success: true })),

@@ -1,6 +1,7 @@
 """Blackbox tests for loop/dag_executor.py domain."""
 
 import asyncio
+import inspect
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -386,6 +387,71 @@ async def test_execute_dag_tool_task_succeeds():
     assert dag.tasks[0].state.value == "COMPLETED"
 
 
+async def test_execute_dag_tool_llm_activity_args_match_signature():
+    """DAG cache warm + param population pass the current call_llm_activity argument contract."""
+    from helpers.llm import call_llm_activity
+
+    plan_data = {
+        "tasks": [{"goal": "Do search", "tool_name": "web_search"}],
+        "dependencies": {},
+    }
+    calls = []
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data,
+        execute_activity_calls=calls,
+        claude_token="claude-access",
+        claude_token_source="user",
+        claude_token_pool_id="pool-1",
+        gpt_token="gpt-access",
+        gpt_account_id="acct-1",
+        gpt_token_source="compute",
+        gpt_token_pool_id="gpt-pool-1",
+    )
+
+    assert result["status"] == "completed"
+
+    llm_calls = [c for c in calls if c["fn"] == "call_llm_activity"]
+    assert len(llm_calls) == 2
+
+    max_positional = len(
+        [
+            p
+            for p in inspect.signature(call_llm_activity).parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+    )
+    assert all(len(c["args"]) <= max_positional for c in llm_calls)
+
+    cache_args = llm_calls[0]["args"]
+    assert cache_args[8] == "dag_cache_warm"
+    assert cache_args[13] == ""
+    assert cache_args[14] == "user"
+    assert cache_args[15] == "pool-1"
+    assert cache_args[16] == "user-1"
+    assert cache_args[17] == "gpt-access"
+    assert cache_args[18] == "acct-1"
+    assert cache_args[19] == "compute"
+    assert cache_args[20] == "gpt-pool-1"
+    assert cache_args[21] == "user-1"
+    assert cache_args[22] == "user-1"
+
+    param_args = llm_calls[1]["args"]
+    assert param_args[8] == "dag_param_populator"
+    assert param_args[11] == "web_search"
+    assert param_args[12] is True
+    assert param_args[13] == ""
+    assert param_args[14] == "user"
+    assert param_args[15] == "pool-1"
+    assert param_args[16] == "user-1"
+    assert param_args[17] == "gpt-access"
+    assert param_args[18] == "acct-1"
+    assert param_args[19] == "compute"
+    assert param_args[20] == "gpt-pool-1"
+    assert param_args[21] == "user-1"
+    assert param_args[22] == "user-1"
+
+
 async def test_execute_dag_alias_resolution_spawn_explore():
     """execute_dag resolves spawn_explore_agent alias to spawn_agent and applies type override."""
     plan_data = {
@@ -541,6 +607,10 @@ async def run_all_tests():
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
+    await r.record_async(
+        "execute_dag_tool_llm_activity_args_match_signature",
+        test_execute_dag_tool_llm_activity_args_match_signature,
+    )
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
     await r.record_async("execute_dag_wait_for_emits_early_wait_chip", test_execute_dag_wait_for_emits_early_wait_chip)
     await r.record_async(

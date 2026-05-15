@@ -48,7 +48,12 @@ interface RingGeometry {
   color: string;
 }
 
-function computeGeometry(isCollapsed: boolean, credits: number, loading: boolean, isEmpty: boolean): RingGeometry {
+function computeGeometry(
+  isCollapsed: boolean,
+  credits: number,
+  loading: boolean,
+  isEmpty: boolean,
+): RingGeometry {
   const size = isCollapsed ? 40 : 32;
   const strokeWidth = 3;
   const radius = (size - strokeWidth) / 2;
@@ -65,7 +70,14 @@ function computeGeometry(isCollapsed: boolean, credits: number, loading: boolean
   };
 }
 
-function CreditRing({ size, radius, strokeWidth, circumference, strokeDashoffset, color }: RingGeometry) {
+function CreditRing({
+  size,
+  radius,
+  strokeWidth,
+  circumference,
+  strokeDashoffset,
+  color,
+}: RingGeometry) {
   return (
     <>
       <svg className="absolute" width={size} height={size}>

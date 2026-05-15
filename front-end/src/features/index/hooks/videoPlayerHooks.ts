@@ -17,8 +17,7 @@ export function useBrowserDetection(): BrowserDetection {
 
   useEffect(() => {
     const ua = navigator.userAgent.toLowerCase();
-    const safari =
-      ua.includes('safari') && !ua.includes('chrome') && !ua.includes('firefox');
+    const safari = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('firefox');
     const ios = /iphone|ipad|ipod/.test(ua);
     setIsSafari(safari);
     setIsIOS(ios);

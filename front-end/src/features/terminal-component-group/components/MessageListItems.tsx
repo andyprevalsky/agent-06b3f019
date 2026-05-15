@@ -3,7 +3,8 @@
  *
  * Pure presentational map that renders one MessageBubble per filtered message.
  * Receives pre-computed metadata (step history, wait-for checks, plan char
- * count) from MessageList so this component stays focused on render.
+ * count, stream count) from MessageList so this component stays focused on
+ * render.
  */
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -21,6 +22,9 @@ interface MessageListItemsProps {
   exploreStepMap: Map<string, ExploreStep[]>;
   waitForCheckMap: Map<string, WaitForCheck[]>;
   streamingPlanCharCount?: number;
+  streamingPlanStartedAtMs?: number;
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
 }
 
 function resolvePlanCharCount(
@@ -44,30 +48,42 @@ export function MessageListItems({
   exploreStepMap,
   waitForCheckMap,
   streamingPlanCharCount,
+  streamingPlanStartedAtMs,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
 }: MessageListItemsProps) {
   return (
     <>
-      {filteredMessages.map((message) => (
-        <div
-          key={message.message_id}
-          data-message-id={message.message_id}
-          data-message-role={message.role}
-        >
-          <MessageBubble
-            message={message}
-            shouldType={message.message_id === currentAnimatingId}
-            onTypingComplete={onAnimationComplete}
-            onNavigateToAgent={onNavigateToAgent}
-            agentId={selectedAgentId || undefined}
-            onSendMessage={selectedAgentId ? onSendMessage : undefined}
-            compact={compact}
-            onSubmitFeedback={onSubmitFeedback}
-            exploreStepHistory={exploreStepMap.get(message.message_id)}
-            waitForChecks={waitForCheckMap.get(message.message_id)}
-            planCharCount={resolvePlanCharCount(message, streamingPlanCharCount)}
-          />
-        </div>
-      ))}
+      {filteredMessages.map((message) => {
+        const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
+
+        return (
+          <div
+            key={message.message_id}
+            data-message-id={message.message_id}
+            data-message-role={message.role}
+          >
+            <MessageBubble
+              message={message}
+              shouldType={message.message_id === currentAnimatingId}
+              onTypingComplete={onAnimationComplete}
+              onNavigateToAgent={onNavigateToAgent}
+              agentId={selectedAgentId || undefined}
+              onSendMessage={selectedAgentId ? onSendMessage : undefined}
+              compact={compact}
+              onSubmitFeedback={onSubmitFeedback}
+              exploreStepHistory={exploreStepMap.get(message.message_id)}
+              waitForChecks={waitForCheckMap.get(message.message_id)}
+              planCharCount={planCharCount}
+              planStreamStartedAtMs={
+                planCharCount !== undefined ? streamingPlanStartedAtMs : undefined
+              }
+              thinkingStreamTokenCount={thinkingStreamTokenCount}
+              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+            />
+          </div>
+        );
+      })}
     </>
   );
 }

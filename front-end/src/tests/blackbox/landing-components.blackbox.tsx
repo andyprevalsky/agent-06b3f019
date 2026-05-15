@@ -94,7 +94,12 @@ const MARKERS_FIXTURE = {
 function installStaticAssetFetch() {
   const originalFetch = global.fetch;
   const stubbedFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
     if (url.endsWith('navi-features-markers.json') || url.includes('navi-features-markers.json')) {
       return new Response(JSON.stringify(MARKERS_FIXTURE), {
         status: 200,
@@ -514,16 +519,17 @@ describe('FeaturesSection', () => {
     restoreFetch = installStaticAssetFetch();
     Element.prototype.scrollIntoView = () => {};
     // Ensure predictable matchMedia
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    }) as any;
+    window.matchMedia = (query: string) =>
+      ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }) as any;
   });
 
   afterEach(() => {
@@ -956,9 +962,7 @@ describe('features/index/hooks', () => {
 
     it('handleSubmit surfaces default error message when fetch rejects', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      server.use(
-        http.post(`${API_BASE}/waitlist`, () => HttpResponse.error()),
-      );
+      server.use(http.post(`${API_BASE}/waitlist`, () => HttpResponse.error()));
       const { result } = renderHook(() => useWaitlistForm());
       act(() => {
         result.current.handleInputChange('email')({

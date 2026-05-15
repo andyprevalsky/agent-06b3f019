@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import structlog
@@ -92,6 +93,7 @@ async def execute_reasoning(
     last_text = [""]
     is_claude = [False]
     is_gpt = [False]
+    llm_started_at_ms = [None]
 
     def on_model_detected(actual_model: str) -> None:
         is_claude[0] = actual_model.endswith("-claude")
@@ -112,10 +114,12 @@ async def execute_reasoning(
                     sequence=sequence[0],
                     is_claude=is_claude[0],
                     is_gpt=is_gpt[0],
+                    llm_started_at_ms=llm_started_at_ms[0],
                 )
                 sequence[0] += 1
             last_text[0] = text_so_far
 
+    llm_started_at_ms[0] = int(time.time() * 1000)
     result, usage, _ = await call_llm_structured_streaming(
         messages=messages,
         model=model,
@@ -150,6 +154,7 @@ async def execute_reasoning(
                 sequence=sequence[0],
                 is_claude=is_claude[0],
                 is_gpt=is_gpt[0],
+                llm_started_at_ms=llm_started_at_ms[0],
             )
         except Exception as e:
             logger.warning(f"Final stream chunk failed (non-fatal): {e}")

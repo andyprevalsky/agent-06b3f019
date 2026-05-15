@@ -9,23 +9,29 @@ import ExploreAgentBubble from '../ExploreAgentBubble';
 interface ExploreBubbleProps {
   message: Message;
   exploreStepHistory?: ExploreStep[];
+  thinkingStreamTokenCount?: number;
+  thinkingStreamStartedAtMs?: number;
   onTypingComplete?: () => void;
 }
 
-export function ExploreBubble({ message, exploreStepHistory, onTypingComplete }: ExploreBubbleProps) {
+export function ExploreBubble({
+  message,
+  exploreStepHistory,
+  thinkingStreamTokenCount,
+  thinkingStreamStartedAtMs,
+  onTypingComplete,
+}: ExploreBubbleProps) {
   const metadata = message.metadata;
   const toolStatus = (metadata?.toolStatus as string) || 'IN_PROGRESS';
-  const stepHistory: ExploreStep[] =
-    exploreStepHistory ||
-    [
-      {
-        title: (metadata?.title as string) || '',
-        status: toolStatus,
-        timestamp: message.timestamp,
-        message: message.text || '',
-        toolName: (metadata?.toolName as string) || '',
-      },
-    ];
+  const stepHistory: ExploreStep[] = exploreStepHistory || [
+    {
+      title: (metadata?.title as string) || '',
+      status: toolStatus,
+      timestamp: message.timestamp,
+      message: message.text || '',
+      toolName: (metadata?.toolName as string) || '',
+    },
+  ];
 
   return (
     <ExploreAgentBubble
@@ -34,6 +40,8 @@ export function ExploreBubble({ message, exploreStepHistory, onTypingComplete }:
       message={message.text || ''}
       status={toolStatus as 'IN_PROGRESS' | 'FINISHED' | 'ERROR'}
       stepHistory={stepHistory}
+      thinkingStreamTokenCount={thinkingStreamTokenCount}
+      thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
       onTypingComplete={onTypingComplete}
     />
   );

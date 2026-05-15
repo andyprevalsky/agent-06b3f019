@@ -146,9 +146,7 @@ const SignupPromptBubble = memo(function SignupPromptBubble({
           />
         </div>
 
-        {isWaiting && isAnonymous && (
-          <WaitingActions agentId={agentId} onSignup={handleSignup} />
-        )}
+        {isWaiting && isAnonymous && <WaitingActions agentId={agentId} onSignup={handleSignup} />}
 
         {!isWaiting && (
           <div className="text-xs text-muted-foreground">

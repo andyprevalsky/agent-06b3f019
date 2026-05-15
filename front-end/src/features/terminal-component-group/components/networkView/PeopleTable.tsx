@@ -52,9 +52,7 @@ function EmptyStateRow({ debouncedSearch }: { debouncedSearch: string }) {
       <td colSpan={8} className="px-4 py-12 text-center">
         <div className="space-y-2">
           <p className="text-muted-foreground">
-            {debouncedSearch
-              ? 'No contacts match your search'
-              : 'No people in your network yet'}
+            {debouncedSearch ? 'No contacts match your search' : 'No people in your network yet'}
           </p>
           {!debouncedSearch && (
             <p className="text-sm text-muted-foreground/70">
@@ -118,7 +116,14 @@ function TableBody({
     );
   }
   if (showEmptyState) return <EmptyStateRow debouncedSearch={debouncedSearch} />;
-  if (hasData) return <>{people.map((p) => <PersonRow key={p.id} person={p} />)}</>;
+  if (hasData)
+    return (
+      <>
+        {people.map((p) => (
+          <PersonRow key={p.id} person={p} />
+        ))}
+      </>
+    );
   return null;
 }
 
@@ -138,13 +143,7 @@ export function PeopleTable({
         <thead className="sticky top-0 backdrop-blur-md border-b border-border/50 dark:border-navi-light-light-black/50 z-10">
           <tr>
             {COLUMNS.map(([key, label]) => (
-              <HeaderCell
-                key={key}
-                columnKey={key}
-                label={label}
-                sort={sort}
-                onSort={onSort}
-              />
+              <HeaderCell key={key} columnKey={key} label={label} sort={sort} onSort={onSort} />
             ))}
           </tr>
         </thead>
