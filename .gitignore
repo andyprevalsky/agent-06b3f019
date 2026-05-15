@@ -78,6 +78,12 @@ coverage/
 .vscode/settings.json
 agents/navi-worker-log*.txt
 agents/benchmarks/runs/*.json
+agents/benchmarks/runs/*_diagnostics/
+agents/scripts/replay_planner.py
+agents/scripts/repro_*.py
+back-end/scripts/cleanup-trash-credentials.ts
+back-end/scripts/enable-specific-pool-tokens.ts
+back-end/scripts/probe-*.ts
 back-end/jobs/
 moltbot/
 .test-logs/
