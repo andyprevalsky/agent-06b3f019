@@ -40,7 +40,7 @@ interface PresetVoice {
 
 // Hue values are CSS hue-rotate offsets applied to the warm-toned orb video.
 // 0 leaves the source colors (peach/yellow), ~190 shifts to blue, ~100 to
-// green, ~270 to purple. The orb video source is /voice-orb.mp4.
+// green, ~270 to purple. The orb video source is resolved from Vite's public base.
 const PRESET_VOICES: readonly PresetVoice[] = [
   { label: 'Rose', voiceId: '6fZce9LFNG3iEITDfqZZ', hue: 0 },
   { label: 'Seraph', voiceId: 'J2FGlQG8Gd7x8uEDt2H8', hue: 190 },

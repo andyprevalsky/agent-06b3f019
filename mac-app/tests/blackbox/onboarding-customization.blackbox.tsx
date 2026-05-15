@@ -19,6 +19,7 @@ import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import OnboardingCustomization from '../../ui/features/onboarding/components/OnboardingCustomization';
+import { resolveVoiceOrbSrc } from '../../ui/features/onboarding/components/VoiceOrb';
 
 const API_BASE = 'http://localhost:3001/api';
 const SESSION_KEY = 'rose-session';
@@ -60,8 +61,8 @@ beforeEach(() => {
       async play(): Promise<void> {}
     }
   );
-  // jsdom doesn't implement HTMLMediaElement.play; stub it so <video> mounts
-  // (the new VoiceOrb is a looping <video src="/voice-orb.mp4">).
+  // jsdom doesn't implement HTMLMediaElement.play; stub it so the looping
+  // VoiceOrb video mounts.
   Object.defineProperty(HTMLMediaElement.prototype, 'play', {
     configurable: true,
     value: async function play(): Promise<void> {},
@@ -80,6 +81,9 @@ beforeEach(() => {
     ),
     http.get(`${API_BASE}/voices/:voiceId/preview`, () =>
       HttpResponse.json({ url: 'https://example.com/preview.mp3' })
+    ),
+    http.get('/api/voices/:voiceId/preview', () =>
+      HttpResponse.json({ url: 'https://example.com/preview.mp3' })
     )
   );
 });
@@ -91,6 +95,12 @@ afterEach(() => {
 });
 
 describe('OnboardingCustomization', () => {
+  it('resolves the orb video against Vite base paths so file:// production builds can load it', () => {
+    expect(resolveVoiceOrbSrc('/')).toBe('/voice-orb.mp4');
+    expect(resolveVoiceOrbSrc('./')).toBe('./voice-orb.mp4');
+    expect(resolveVoiceOrbSrc('/nested/app')).toBe('/nested/app/voice-orb.mp4');
+  });
+
   it('renders the new title, name field, and 4-slot voice carousel without profile picture or personality prompt', async () => {
     renderWithProviders(<OnboardingCustomization onComplete={() => {}} />);
 
