@@ -624,3 +624,11 @@
 {"task": "claude-code-agent", "duration_seconds": 91.4, "cost_cents": 0.0, "timestamp": "2026-05-11T21:00:04.755994+00:00", "agent_id": "cc5b4f0e-1833-4f3c-8598-27df650802e5"}
 {"task": "spawn-sub-agents", "duration_seconds": 216.9, "cost_cents": 0.0, "timestamp": "2026-05-11T21:00:04.755994+00:00", "agent_id": "67283c3b-f53a-4c6c-b2ed-ef8024bad5b2"}
 {"task": "parallel-tool-calls", "duration_seconds": 222.2, "cost_cents": 9.0, "timestamp": "2026-05-11T21:00:04.755994+00:00", "agent_id": "723d9b7a-ceff-4dc7-9d87-b417d7b0b225"}
+{"task": "chat-mode", "duration_seconds": 5.9, "cost_cents": 0.0, "timestamp": "2026-05-14T22:01:12.831008+00:00", "agent_id": "62d9aa38-f82f-49be-bdc7-eb2736b24ece"}
+{"task": "browser-smoke", "duration_seconds": 46.1, "cost_cents": 0.0, "timestamp": "2026-05-14T22:01:12.831008+00:00", "agent_id": "28a5b395-5975-45ea-8c0d-a0c3c07fe149"}
+{"task": "claude-code-agent", "duration_seconds": 76.2, "cost_cents": 0.0, "timestamp": "2026-05-14T22:01:12.831008+00:00", "agent_id": "354fe6b2-9152-4f7a-8063-eccf6764e9a0"}
+{"task": "spawn-sub-agents", "duration_seconds": 241.9, "cost_cents": 4.0, "timestamp": "2026-05-14T22:01:12.831008+00:00", "agent_id": "5a9272d6-4894-45c5-af2d-5be6af01b3c0"}
+{"task": "chat-mode", "duration_seconds": 5.9, "cost_cents": 0.0, "timestamp": "2026-05-14T22:16:47.581049+00:00", "agent_id": "79457a7c-56a3-475f-b587-7f3e035ae93c"}
+{"task": "browser-smoke", "duration_seconds": 46.0, "cost_cents": 0.0, "timestamp": "2026-05-14T22:16:47.581049+00:00", "agent_id": "071ed084-0af4-4eef-87bd-de023013e1c2"}
+{"task": "claude-code-agent", "duration_seconds": 91.3, "cost_cents": 0.0, "timestamp": "2026-05-14T22:16:47.581049+00:00", "agent_id": "cfee1463-3a11-4ee7-a999-10b37539041b"}
+{"task": "spawn-sub-agents", "duration_seconds": 261.7, "cost_cents": 1.0, "timestamp": "2026-05-14T22:16:47.581049+00:00", "agent_id": "74293fbb-e987-4ced-883f-56922ec94cc4"}
