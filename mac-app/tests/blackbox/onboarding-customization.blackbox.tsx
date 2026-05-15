@@ -20,6 +20,10 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import OnboardingCustomization from '../../ui/features/onboarding/components/OnboardingCustomization';
 import { resolveVoiceOrbSrc } from '../../ui/features/onboarding/components/VoiceOrb';
+import {
+  resolveCustomPreviewApiUrl,
+  resolvePresetSamplePath,
+} from '../../ui/features/onboarding/components/VoiceSelector';
 
 const API_BASE = 'http://localhost:3001/api';
 const SESSION_KEY = 'rose-session';
@@ -99,6 +103,18 @@ describe('OnboardingCustomization', () => {
     expect(resolveVoiceOrbSrc('/')).toBe('/voice-orb.mp4');
     expect(resolveVoiceOrbSrc('./')).toBe('./voice-orb.mp4');
     expect(resolveVoiceOrbSrc('/nested/app')).toBe('/nested/app/voice-orb.mp4');
+  });
+
+  it('resolves voice preview audio against production-safe asset and API URLs', () => {
+    expect(resolvePresetSamplePath('voice id/with space', './')).toBe(
+      './voice-samples/voice%20id%2Fwith%20space.mp3'
+    );
+    expect(resolvePresetSamplePath('voice-id', '/nested/app')).toBe(
+      '/nested/app/voice-samples/voice-id.mp3'
+    );
+    expect(resolveCustomPreviewApiUrl('custom/id', 'https://api.example.test')).toBe(
+      'https://api.example.test/api/voices/custom%2Fid/preview'
+    );
   });
 
   it('renders the new title, name field, and 4-slot voice carousel without profile picture or personality prompt', async () => {

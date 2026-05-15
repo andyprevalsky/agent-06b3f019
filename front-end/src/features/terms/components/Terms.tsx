@@ -7,6 +7,7 @@
  */
 
 import { Fragment } from 'react';
+import { Link } from 'react-router-dom';
 
 import NaviHeader from '@/components/NaviHeader';
 import NaviFooter from '@/components/NaviFooter';
@@ -25,9 +26,9 @@ function SectionDivider() {
 
 function SiteLink() {
   return (
-    <a href="/" className={LINK_CLASSES}>
+    <Link to="/" className={LINK_CLASSES}>
       https://roselabs.ai
-    </a>
+    </Link>
   );
 }
 
@@ -123,9 +124,9 @@ function SmsPrivacyBlock() {
   return (
     <p className="text-muted-foreground">
       For information on how we handle your data, please see our{' '}
-      <a href="/privacy" className={LINK_CLASSES}>
+      <Link to="/privacy" className={LINK_CLASSES}>
         Privacy Policy
-      </a>
+      </Link>
       .
     </p>
   );

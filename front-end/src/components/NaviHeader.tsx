@@ -19,11 +19,39 @@
  * [OPEN] <-- contactModalOpen: true
  */
 
-import { Button } from '@/components/ui/button';
 import { isEarlyAccessEnabled } from '@/lib/utils';
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
 import { LoginButton } from '@/features/auth';
+
+const ROSE_SITE_ORIGIN = 'https://roselabs.ai';
+
+const isElectronApp = (): boolean =>
+  typeof window !== 'undefined' && (window as { api?: unknown }).api !== undefined;
+
+const openExternalFromElectron = (path: string): boolean => {
+  if (!isElectronApp()) return false;
+  const api = (window as { api?: { openExternal?: (url: string) => Promise<void> } }).api;
+  const url = new URL(path, ROSE_SITE_ORIGIN).toString();
+  if (api?.openExternal !== undefined) {
+    void api.openExternal(url);
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+  return true;
+};
+
+const goToLandingSection = (targetId: string, earlyAccess: boolean): void => {
+  if (window.location.pathname === '/') {
+    document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+
+  const path = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
+  if (openExternalFromElectron(path)) return;
+  window.location.href = path;
+};
 
 const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);
@@ -61,7 +89,7 @@ const NaviHeader = () => {
       className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/50"
     >
       <div className="container mx-auto px-6 h-16 flex items-center justify-between">
-        <a href="/" className="flex items-center space-x-3 hover:opacity-80 transition-opacity">
+        <Link to="/" className="flex items-center space-x-3 hover:opacity-80 transition-opacity">
           <div
             className="w-8 h-8 rounded-lg"
             style={{
@@ -70,16 +98,12 @@ const NaviHeader = () => {
             }}
           ></div>
           <span className="text-xl font-semibold tracking-tight">Rose</span>
-        </a>
+        </Link>
 
         <nav className="hidden md:flex items-center space-x-8">
           <button
             onClick={() => {
-              if (window.location.pathname === '/') {
-                document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' });
-              } else {
-                window.location.href = '/#features';
-              }
+              goToLandingSection('features', false);
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -88,11 +112,7 @@ const NaviHeader = () => {
           <button
             onClick={() => {
               const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-              if (window.location.pathname === '/') {
-                document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
-              } else {
-                window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
-              }
+              goToLandingSection(targetId, earlyAccess);
             }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
@@ -100,12 +120,20 @@ const NaviHeader = () => {
           </button>
           <a
             href="/research"
+            onClick={(event) => {
+              if (!openExternalFromElectron('/research')) return;
+              event.preventDefault();
+            }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
             Research
           </a>
           <a
             href="/about"
+            onClick={(event) => {
+              if (!openExternalFromElectron('/about')) return;
+              event.preventDefault();
+            }}
             className="text-muted-foreground hover:text-foreground transition-colors"
           >
             About
@@ -120,11 +148,7 @@ const NaviHeader = () => {
             }`}
             onClick={() => {
               const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-              if (window.location.pathname === '/') {
-                document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' });
-              } else {
-                window.location.href = earlyAccess ? `/?earlyaccess#${targetId}` : `/#${targetId}`;
-              }
+              goToLandingSection(targetId, earlyAccess);
             }}
           >
             <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>

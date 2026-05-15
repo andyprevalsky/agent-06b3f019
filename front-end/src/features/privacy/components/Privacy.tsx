@@ -7,6 +7,7 @@
  */
 
 import { Fragment } from 'react';
+import { Link } from 'react-router-dom';
 
 import NaviHeader from '@/components/NaviHeader';
 import NaviFooter from '@/components/NaviFooter';
@@ -66,9 +67,9 @@ function PolicyUpdatesSection({ section }: { readonly section: PrivacySection })
       {section.paragraph ? <p className="text-muted-foreground mb-2">{section.paragraph}</p> : null}
       <p className="text-muted-foreground">
         The latest version will always be available at{' '}
-        <a href="/" className={LINK_CLASSES}>
+        <Link to="/" className={LINK_CLASSES}>
           www.roselabs.ai
-        </a>{' '}
+        </Link>{' '}
         with the date of last revision.
       </p>
     </section>
@@ -115,9 +116,9 @@ const Privacy = () => {
                 <p className="text-lg leading-relaxed">{PRIVACY_INTRO}</p>
                 <p className="mt-4 text-muted-foreground">
                   Visit{' '}
-                  <a href="/" className={LINK_CLASSES}>
+                  <Link to="/" className={LINK_CLASSES}>
                     www.roselabs.ai
-                  </a>{' '}
+                  </Link>{' '}
                   to learn more about our service.
                 </p>
               </div>
