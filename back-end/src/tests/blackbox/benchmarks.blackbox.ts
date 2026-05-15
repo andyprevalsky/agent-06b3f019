@@ -146,7 +146,6 @@ const KNOWN_TASK_NAMES = [
   'image-handling',
   'files-in-sub-agents',
   'agent-for-each',
-  'family-office-angel-outreach',
   'build-boxing-payment',
   'job-applications',
   'cache-coverage',

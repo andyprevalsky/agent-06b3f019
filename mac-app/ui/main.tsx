@@ -9,7 +9,10 @@ import '@/index.css';
 import React from 'react';
 import type { BrowserType } from '../shared/types/ipc';
 import { getElectronApi } from './lib/electron-api';
+import { initViewportScale } from './lib/viewport-scale';
 import QuickQueryListener from './features/quick-query-listener';
+
+initViewportScale();
 
 // Electron-specific integration handlers
 const electronHandlers = {

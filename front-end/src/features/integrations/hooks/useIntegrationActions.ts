@@ -77,11 +77,7 @@ export function useIntegrationActions(handlers: SyncHandlers) {
         setError,
         'Failed to sync Claude Code credentials',
       ),
-      onGptCodeSync: wrapAction(
-        h.handleGptCodeSync,
-        setError,
-        'Failed to sync GPT credentials',
-      ),
+      onGptCodeSync: wrapAction(h.handleGptCodeSync, setError, 'Failed to sync GPT credentials'),
       onIMessageSync: wrapAction(h.handleIMessageSync, setError, 'Failed to sync iMessage'),
       onLinkedInSync: wrapAction(h.handleLinkedInSync, setError, 'Failed to start LinkedIn sync'),
       onGmailConnect: wrapAction(() => h.handleEmailConnect('gmail'), setError, 'Unknown error'),

@@ -1,5 +1,16 @@
-import { ChevronDown, FileText, ArrowDown, AlertCircle } from 'lucide-react';
+/**
+ * STATE MACHINE: PlanChipHeader
+ *
+ * [STATIC] toolStatus !== IN_PROGRESS -> icon + title only
+ * [STREAMING] toolStatus === IN_PROGRESS -> shimmer title + X.Ys · ↓ X tokens
+ *
+ * The elapsed timer starts from the planner LLM request start timestamp when
+ * provided by PLAN_STREAM.
+ */
+
+import { ChevronDown, FileText, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { StreamingMetric } from '../StreamingMetric';
 
 interface PlanChipHeaderProps {
   title: string;
@@ -7,8 +18,9 @@ interface PlanChipHeaderProps {
   isExpanded: boolean;
   isError: boolean;
   isStreaming: boolean;
-  charCount: number;
-  animatedCharCount: number;
+  tokenCount: number;
+  animatedTokenCount: number;
+  streamStartedAtMs?: number;
   onToggle: () => void;
 }
 
@@ -18,8 +30,9 @@ export function PlanChipHeader({
   isExpanded,
   isError,
   isStreaming,
-  charCount,
-  animatedCharCount,
+  tokenCount,
+  animatedTokenCount,
+  streamStartedAtMs,
   onToggle,
 }: PlanChipHeaderProps) {
   return (
@@ -49,11 +62,14 @@ export function PlanChipHeader({
           {title}
         </span>
 
-        {isStreaming && charCount > 0 && (
-          <span className="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
-            <ArrowDown className="w-3 h-3" />
-            <span className="tabular-nums">{animatedCharCount.toLocaleString()}</span>
-          </span>
+        {isStreaming && (
+          <StreamingMetric
+            startedAtMs={streamStartedAtMs}
+            tokenCount={tokenCount}
+            animatedTokenCount={animatedTokenCount}
+            className="ml-auto text-xs"
+            iconClassName="h-3 w-3"
+          />
         )}
       </div>
 

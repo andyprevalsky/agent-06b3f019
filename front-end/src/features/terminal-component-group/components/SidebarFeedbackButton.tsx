@@ -84,9 +84,7 @@ function FeedbackPanel({
     >
       <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-lg border border-gray-200 dark:border-zinc-700 p-3 w-72">
         {sent ? (
-          <p className="text-sm text-green-600 dark:text-green-400">
-            Thank you for your feedback!
-          </p>
+          <p className="text-sm text-green-600 dark:text-green-400">Thank you for your feedback!</p>
         ) : (
           <div className="flex flex-col gap-2">
             <input
@@ -102,7 +100,12 @@ function FeedbackPanel({
                 if (e.key === 'Escape') onClose();
               }}
             />
-            <Button size="sm" onClick={onSubmit} disabled={sending || !input.trim()} className="w-full">
+            <Button
+              size="sm"
+              onClick={onSubmit}
+              disabled={sending || !input.trim()}
+              className="w-full"
+            >
               {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Submit'}
             </Button>
           </div>

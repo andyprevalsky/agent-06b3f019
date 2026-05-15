@@ -115,8 +115,7 @@ export function useAttentionActions({
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
-      mutate: () =>
-        rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined),
+      mutate: () => rejectAttentionRequest(requestId, responses[requestId]?.trim() || undefined),
       successToast: {
         title: 'Action rejected',
         description: 'The agent will skip this action and continue',

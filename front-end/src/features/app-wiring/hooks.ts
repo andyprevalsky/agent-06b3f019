@@ -13,6 +13,10 @@ import {
   SESSION_REPLAY_SAMPLE_RATE,
   IS_DEV,
   VH_REMEASURE_DELAY_MS,
+  VIEWPORT_SCALE_DESIGN_HEIGHT,
+  VIEWPORT_SCALE_DESIGN_WIDTH,
+  VIEWPORT_SCALE_MIN,
+  VIEWPORT_SCALE_MIN_WIDTH,
 } from './config';
 
 /**
@@ -87,4 +91,31 @@ export function initViewportHeight(): void {
       if (!document.hidden) delayedSetVH();
     });
   }
+}
+
+function clampViewportScale(scale: number): number {
+  return Math.min(1, Math.max(VIEWPORT_SCALE_MIN, scale));
+}
+
+export function computeViewportScale(width: number, height: number): number {
+  if (width < VIEWPORT_SCALE_MIN_WIDTH) return 1;
+
+  const widthScale = width / VIEWPORT_SCALE_DESIGN_WIDTH;
+  const heightScale = height / VIEWPORT_SCALE_DESIGN_HEIGHT;
+  return Number(clampViewportScale(Math.min(widthScale, heightScale)).toFixed(3));
+}
+
+/** Scales rem-based UI for compact desktop windows without changing viewport dimensions. */
+export function initViewportScale(): void {
+  const setViewportScale = () => {
+    const scale = computeViewportScale(window.innerWidth, window.innerHeight);
+    document.documentElement.style.setProperty('--app-rem-scale', String(scale));
+  };
+
+  setViewportScale();
+
+  window.addEventListener('resize', setViewportScale);
+  window.addEventListener('orientationchange', () => {
+    setTimeout(setViewportScale, VH_REMEASURE_DELAY_MS);
+  });
 }

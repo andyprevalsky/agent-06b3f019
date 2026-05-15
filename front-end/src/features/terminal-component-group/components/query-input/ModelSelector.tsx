@@ -21,12 +21,7 @@
 import { useState, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import {
-  Command,
-  CommandGroup,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
+import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ROSE_MODEL_IDS, ROSE_MODEL_DESCRIPTIONS } from '../../config';
@@ -47,7 +42,9 @@ export function ModelSelector({
 }: ModelSelectorProps) {
   const [showPicker, setShowPicker] = useState(false);
   const selectedInfo = availableModels.find((m) => m.id === selectedModel);
-  const selectedName = selectedInfo ? `${selectedInfo.provider}/${selectedInfo.name}` : selectedModel;
+  const selectedName = selectedInfo
+    ? `${selectedInfo.provider}/${selectedInfo.name}`
+    : selectedModel;
   const isRoseModel =
     selectedModel === ROSE_MODEL_IDS.lite || selectedModel === ROSE_MODEL_IDS.ultra;
 

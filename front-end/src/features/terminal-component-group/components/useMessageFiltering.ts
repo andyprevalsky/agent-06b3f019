@@ -64,6 +64,7 @@ export interface FilteredStreamingState {
   attention: StreamingAttention | null;
   tools: Map<string, StreamingTool>;
   charCount: number;
+  streamStartedAtMs?: number;
   isClaude: boolean;
   isGpt: boolean;
 }
@@ -97,20 +98,28 @@ export function useFilteredStreaming({
         : null;
 
     let charCount = 0;
+    let streamStartedAtMs: number | undefined;
     let isClaude = false;
     let isGpt = false;
     bubbles.forEach((b) => {
       charCount += b.text.length;
+      if (b.startedAtMs)
+        streamStartedAtMs = Math.min(streamStartedAtMs ?? b.startedAtMs, b.startedAtMs);
       if (b.isClaude) isClaude = true;
       if (b.isGpt) isGpt = true;
     });
     tools.forEach((t) => {
       charCount += t.charCount ?? 0;
+      if (t.startedAtMs)
+        streamStartedAtMs = Math.min(streamStartedAtMs ?? t.startedAtMs, t.startedAtMs);
       if (t.isClaude) isClaude = true;
       if (t.isGpt) isGpt = true;
     });
+    if (plan?.startedAtMs) {
+      streamStartedAtMs = Math.min(streamStartedAtMs ?? plan.startedAtMs, plan.startedAtMs);
+    }
 
-    return { bubbles, plan, attention, tools, charCount, isClaude, isGpt };
+    return { bubbles, plan, attention, tools, charCount, streamStartedAtMs, isClaude, isGpt };
   }, [target, streamingBubbles, streamingPlan, streamingAttention, streamingTools]);
 }
 

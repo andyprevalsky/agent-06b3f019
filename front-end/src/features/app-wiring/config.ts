@@ -38,6 +38,16 @@ export const SESSION_REPLAY_SAMPLE_RATE = 1;
 /** Delay (ms) before re-measuring viewport height after orientation/focus events. */
 export const VH_REMEASURE_DELAY_MS = 100;
 
+/** Minimum desktop width before adaptive rem scaling is enabled. */
+export const VIEWPORT_SCALE_MIN_WIDTH = 768;
+
+/** Design dimensions where the app renders at its default 16px root rem. */
+export const VIEWPORT_SCALE_DESIGN_WIDTH = 1440;
+export const VIEWPORT_SCALE_DESIGN_HEIGHT = 900;
+
+/** Smallest root rem scale for compact desktop windows. Mirrors repeated browser zoom-out. */
+export const VIEWPORT_SCALE_MIN = 0.7;
+
 /** Dev log endpoint path (appended to VITE_BACKEND_API_URL). */
 export const DEV_LOG_ENDPOINT = '/api/dev/log';
 

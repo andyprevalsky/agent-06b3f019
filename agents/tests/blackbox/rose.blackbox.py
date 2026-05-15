@@ -95,13 +95,16 @@ def test_is_rose_model_variants():
 
 
 def test_pool_for_model_fuzzy():
+    assert pool_for_model("rose-labs/rose-1-mini") == "rose-1-mini"
     assert pool_for_model("rose-labs/rose-1-lite") == "rose-1-lite"
     assert pool_for_model("rose-labs/rose-1-ultra") == "rose-1-ultra"
     assert pool_for_model("rose") == "rose-1-lite"
+    assert pool_for_model("rose-mini") == "rose-1-mini"
     assert pool_for_model("rose-ultra") == "rose-1-ultra"
     # Fuzzy fallback for unknown rose-labs/* strings
     assert pool_for_model("rose-labs/something-ultra-new") == "rose-1-ultra"
-    assert pool_for_model("rose-labs/something-mini") == "rose-1-lite"
+    assert pool_for_model("rose-labs/something-mini") == "rose-1-mini"
+    assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
 
@@ -1493,6 +1496,56 @@ async def test_parse_anthropic_sse_thinking_delta_counts_as_emitted():
     assert reasoning[0].data["text"] == "let me think"
 
 
+async def test_parse_anthropic_sse_in_band_rate_limit_raises():
+    lines = _ev(
+        "message_start",
+        {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+    )
+    lines += _ev(
+        "error",
+        {
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "Rate limited"},
+        },
+    )
+    raised = None
+    try:
+        await _drain(
+            parse_anthropic_sse(
+                _FakeStream(lines),
+                actual_model="claude-test",
+                pool_name="claude-token",
+                request_id="r-rl",
+            )
+        )
+    except RoseRateLimitError as exc:
+        raised = exc
+    assert isinstance(raised, RoseRateLimitError)
+
+
+async def test_parse_anthropic_sse_in_band_auth_error_raises():
+    lines = _ev(
+        "error",
+        {
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "bad token"},
+        },
+    )
+    raised = None
+    try:
+        await _drain(
+            parse_anthropic_sse(
+                _FakeStream(lines),
+                actual_model="claude-test",
+                pool_name="claude-token",
+                request_id="r-auth",
+            )
+        )
+    except RoseAuthError as exc:
+        raised = exc
+    assert isinstance(raised, RoseAuthError)
+
+
 async def test_parse_anthropic_sse_skips_event_lines_and_bad_json():
     lines = [
         "event: ignored",
@@ -2336,6 +2389,58 @@ async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     assert metadata.data["claude_token_error"] == "stall"
 
 
+async def test_client_direct_auth_stall_falls_through_immediately():
+    """Single TTFT stall falls through to waterfall on first attempt with
+    claude_token_error=='stall' so the workflow's rotation gate fires.
+
+    The escalating stall-retry ladder (20→40→60s TTFT) was removed because
+    Anthropic batches 150k responses with a single long TTFB; retries just
+    killed connections before the model flushed. The new 45s TTFT covers
+    cold-start jitter on its own.
+    """
+    attempts: list[float] = []
+
+    async def always_stalls(**kwargs):
+        attempts.append(kwargs.get("ttft_timeout_s"))
+        await asyncio.sleep(1.0)  # never produces a chunk
+        yield StreamChunk(kind="metadata", data={"actual_model": "claude-x-claude"})
+
+    async def waterfall_ok(**kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-lite"})
+        yield StreamChunk(kind="content", data={"text": "fallback"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "fallback-model",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    with (
+        patch("providers.rose.client._try_claude_auth", always_stalls),
+        patch("providers.rose.client.waterfall_complete", waterfall_ok),
+    ):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=claude_auth_from_token("ct"),
+                call_site="test-stall-fallthrough",
+                ttft_timeout_s=0.01,
+                idle_timeout_s=0.5,
+            )
+        )
+
+    assert len(attempts) == 1, f"expected single attempt (no retry ladder), got {len(attempts)}"
+    metadata = next(c for c in chunks if c.kind == "metadata")
+    assert metadata.data["claude_token_error"] == "stall"
+    assert any(c.kind == "content" and c.data.get("text") == "fallback" for c in chunks)
+
+
 async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
     """If Claude direct auth fails, a separate supplied GPT auth is not fallback.
 
@@ -3052,6 +3157,219 @@ def test_build_anthropic_body_cache_structure_from_real_prompt():
         assert False, "Expected last message content to be list with cache_control"
 
 
+def test_build_anthropic_body_native_tools_force_any_with_parallel():
+    """When native tools are passed with tool_choice='any', the body must
+    force tool_use AND keep parallel tool calls enabled. Anthropic's default
+    flips disable_parallel_tool_use=True under tool_choice=any/tool, which
+    would silently break DAG fan-outs (multi web_search, multi web_fetch)."""
+    spec = get_pool("rose-1-lite")
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "do X and Y in parallel"},
+        ],
+        tools=[
+            {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+            {"name": "web_fetch", "description": "fetch", "input_schema": {"type": "object", "properties": {}}},
+        ],
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+    assert body["tool_choice"]["type"] == "any"
+    assert body["tool_choice"]["disable_parallel_tool_use"] is False, (
+        "tool_choice=any must explicitly keep parallel tool use enabled; "
+        "Anthropic's default flips it to True under forced choice"
+    )
+    # And thinking must be dropped — Anthropic rejects thinking + forced choice
+    assert "thinking" not in body, (
+        "thinking block must be dropped when tool_choice is forced (any/tool); "
+        "Anthropic rejects the combo and the structured-output parser cannot "
+        "recover from a text-only response"
+    )
+
+
+def test_build_anthropic_body_never_sets_thinking_by_default():
+    """`thinking` is an anti-pattern: never set it by default. Adaptive thinking
+    400s on claude-haiku-4-5 ('adaptive thinking is not supported on this model'),
+    hangs Anthropic streams on Opus with effort=max, and is rejected with forced
+    tool_choice. A caller that genuinely needs thinking can pass it explicitly."""
+    spec = get_pool("rose-1-lite")
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=[
+            {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+        ],
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+    assert body["tool_choice"]["type"] == "auto"
+    assert "thinking" not in body, "thinking must never be set by default"
+    # auto path doesn't touch disable_parallel_tool_use (Anthropic default = false)
+    assert "disable_parallel_tool_use" not in body["tool_choice"]
+
+
+def test_build_anthropic_body_honors_explicit_thinking():
+    """If a caller explicitly passes `thinking`, honor it. We only forbid the
+    default-on behavior — explicit opt-in is fine."""
+    spec = get_pool("rose-1-lite")
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=[
+            {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+        ],
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+        thinking={"type": "enabled", "budget_tokens": 4000},
+    )
+    assert body.get("thinking") == {"type": "enabled", "budget_tokens": 4000}
+
+
+def test_build_anthropic_body_response_format_only_forces_any_with_parallel():
+    """The response_format-only path (no explicit tools) must also synthesize
+    tools, force tool_choice=any, and keep parallel enabled. This is the
+    documented MEMORY.md `response_format` workaround — it must not regress."""
+    spec = get_pool("rose-1-lite")
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "AgentAction",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "response": {"type": "string"},
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool": {"const": "web_search"},
+                                        "query": {"type": "string"},
+                                    },
+                                    "required": ["tool", "query"],
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool": {"const": "attempt_completion"},
+                                    },
+                                    "required": ["tool"],
+                                },
+                            ],
+                        },
+                    },
+                },
+            },
+        },
+    }
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "search"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=response_format,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+    assert isinstance(body.get("tools"), list) and len(body["tools"]) == 2
+    assert body["tool_choice"]["type"] == "any"
+    assert body["tool_choice"]["disable_parallel_tool_use"] is False
+    assert "thinking" not in body  # forced choice → thinking dropped
+
+
+async def test_rose_client_synthesizes_force_any_for_response_model():
+    """End-to-end: when rose_client.complete is given a response_model with
+    a tool_calls union (AgentAction shape) and a claude_auth context, it must
+    set claude_auth_tool_choice='any'. Captures the regression where the old
+    `tool_requires_forced_choice` gate left it None and Anthropic emitted
+    prose instead of tool_use blocks (the family-office wedge)."""
+    from pydantic import BaseModel
+    from typing import Literal
+
+    from providers.rose.client import RoseClient
+    from providers.rose.types import ClaudeAuthContext
+
+    class _WebFetchTool(BaseModel):
+        tool: Literal["web_fetch"]
+        url: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _ExploreAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_WebFetchTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_try_claude_auth(**kwargs):
+        captured["tools"] = kwargs.get("tools")
+        captured["tool_choice"] = kwargs.get("tool_choice")
+        captured["response_format"] = kwargs.get("response_format")
+        if False:
+            yield None
+        raise RuntimeError("short-circuit after capturing")
+
+    import providers.rose.client as client_mod
+
+    original = client_mod._try_claude_auth
+    client_mod._try_claude_auth = _fake_try_claude_auth
+    try:
+        client = RoseClient()
+        auth = ClaudeAuthContext(
+            token="test-token",
+            source="test",
+            user_id="u1",
+            pool_token_id="p1",
+            mark_rate_limited=None,
+            fetch_fresh=None,
+            max_rotations=0,
+        )
+        try:
+            async for _ in client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                response_model=_ExploreAction,
+                claude_auth=auth,
+            ):
+                pass
+        except Exception:
+            pass
+    finally:
+        client_mod._try_claude_auth = original
+
+    assert captured.get("tool_choice") == "any", (
+        f"Expected claude_auth_tool_choice='any' for AgentAction-shape "
+        f"response_model, got {captured.get('tool_choice')!r}. This is the "
+        f"regression that caused family-office's 467s explore wedge."
+    )
+    assert captured.get("response_format") is None, (
+        "When tools are synthesized from response_model, response_format must "
+        "be suppressed so claude_auth.py uses the explicit tools path."
+    )
+    tool_names = {t["name"] for t in (captured.get("tools") or [])}
+    assert tool_names == {"web_fetch", "attempt_completion"}
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -3148,6 +3466,8 @@ async def run_all_tests():
     await r.record_async("anth_sse_empty_stalls", test_parse_anthropic_sse_empty_stream_raises_stall)
     await r.record_async("anth_sse_thinking_emitted", test_parse_anthropic_sse_thinking_delta_counts_as_emitted)
     await r.record_async("anth_sse_skip_bad_json", test_parse_anthropic_sse_skips_event_lines_and_bad_json)
+    await r.record_async("anth_sse_in_band_rate_limit_raises", test_parse_anthropic_sse_in_band_rate_limit_raises)
+    await r.record_async("anth_sse_in_band_auth_error_raises", test_parse_anthropic_sse_in_band_auth_error_raises)
 
     await r.record_async("openai_sse_content_finish", test_parse_openai_sse_content_and_finish_reason)
     await r.record_async("openai_sse_tool_call_assembly", test_parse_openai_sse_tool_call_assembly_across_deltas)
@@ -3201,6 +3521,10 @@ async def run_all_tests():
         "client_direct_auth_ttft_fallthrough",
         test_client_direct_auth_ttft_falls_through_before_first_chunk,
     )
+    await r.record_async(
+        "client_direct_auth_stall_falls_through",
+        test_client_direct_auth_stall_falls_through_immediately,
+    )
     await r.record_async("client_no_supplied_gpt_fallback", test_client_does_not_use_supplied_gpt_auth_as_fallback)
     await r.record_async(
         "client_compute_rotates_across_providers",
@@ -3238,6 +3562,26 @@ async def run_all_tests():
     )
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)
     r.record("cache_structure_real_prompt", test_build_anthropic_body_cache_structure_from_real_prompt)
+    r.record(
+        "anthropic_body_native_tools_force_any_with_parallel",
+        test_build_anthropic_body_native_tools_force_any_with_parallel,
+    )
+    r.record(
+        "anthropic_body_never_sets_thinking_by_default",
+        test_build_anthropic_body_never_sets_thinking_by_default,
+    )
+    r.record(
+        "anthropic_body_honors_explicit_thinking",
+        test_build_anthropic_body_honors_explicit_thinking,
+    )
+    r.record(
+        "anthropic_body_response_format_only_forces_any_with_parallel",
+        test_build_anthropic_body_response_format_only_forces_any_with_parallel,
+    )
+    await r.record_async(
+        "rose_client_synthesizes_force_any_for_response_model",
+        test_rose_client_synthesizes_force_any_for_response_model,
+    )
 
     teardown_mock()
     return r.summary()

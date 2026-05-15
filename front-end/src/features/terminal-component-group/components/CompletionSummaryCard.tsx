@@ -35,13 +35,29 @@ interface CompletionSummaryCardProps {
   className?: string;
 }
 
+function humanizeKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function formatValue(value: OutputField['value']): string {
   if (isFilePointer(value)) return value.original_filename;
   if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
     return value.map((fp) => (fp as FilePointer).original_filename).join(', ');
   }
-  if (Array.isArray(value)) return value.join(', ');
-  if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((item, index) => {
+        const formatted = formatNestedValue(item);
+        return isRecord(item) ? `${index + 1}. ${formatted}` : formatted;
+      })
+      .join('\n\n');
+  }
+  if (isRecord(value)) return formatRecord(value);
+  if (value === null || value === undefined) return '';
   return String(value);
 }
 
@@ -51,11 +67,39 @@ function isFilePointerValue(value: OutputField['value']): boolean {
   return false;
 }
 
+function formatNestedValue(value: unknown): string {
+  if (isFilePointer(value)) return value.original_filename;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '';
+    if (value.every((item) => !isRecord(item) && !Array.isArray(item))) {
+      return value
+        .map((item) => formatNestedValue(item))
+        .filter(Boolean)
+        .join(', ');
+    }
+    return value
+      .map((item, index) => {
+        const formatted = formatNestedValue(item);
+        return isRecord(item) ? `${index + 1}. ${formatted}` : formatted;
+      })
+      .join('\n');
+  }
+  if (isRecord(value)) return formatRecord(value);
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function formatRecord(record: Record<string, unknown>): string {
+  return Object.entries(record)
+    .map(([key, value]) => {
+      const formatted = formatNestedValue(value);
+      return formatted ? `${humanizeKey(key)}: ${formatted}` : humanizeKey(key);
+    })
+    .join('\n');
+}
+
 function getToolDisplayName(toolName: string): string {
-  return (
-    TOOL_DISPLAY_NAMES[toolName] ||
-    toolName.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-  );
+  return TOOL_DISPLAY_NAMES[toolName] || humanizeKey(toolName);
 }
 
 function HeaderRow({ error }: { error: boolean }) {
@@ -86,12 +130,7 @@ function HeaderRow({ error }: { error: boolean }) {
             stroke="currentColor"
             viewBox="0 0 24 24"
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M5 13l4 4L19 7"
-            />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
           </svg>
           <span className="text-sm font-medium text-foreground">Task Complete</span>
         </>
@@ -117,7 +156,110 @@ function OutputValue({ value }: OutputValueProps) {
       </div>
     );
   }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-muted-foreground">No output</span>;
+    if (value.every((item) => !isRecord(item) && !Array.isArray(item))) {
+      return <>{formatValue(value)}</>;
+    }
+    return (
+      <div className="space-y-3">
+        {value.map((item, index) => (
+          <StructuredValueBlock key={index} value={item} ordinal={index + 1} />
+        ))}
+      </div>
+    );
+  }
+  if (isRecord(value)) {
+    return <StructuredValueBlock value={value} />;
+  }
   return <>{formatValue(value)}</>;
+}
+
+function StructuredValueBlock({ value, ordinal }: { value: unknown; ordinal?: number }) {
+  if (Array.isArray(value)) {
+    return (
+      <ul className="list-disc pl-4 space-y-1">
+        {value.map((item, index) => (
+          <li key={index}>
+            <StructuredInlineValue value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (!isRecord(value)) return <StructuredInlineValue value={value} />;
+
+  const titleEntry = findTitleEntry(value);
+  const detailEntries = Object.entries(value).filter(([key]) => key !== titleEntry?.[0]);
+
+  return (
+    <div className="rounded-md border border-border/50 bg-background/35 px-2.5 py-2 space-y-2">
+      {titleEntry ? (
+        <div className="text-sm font-semibold text-foreground">
+          {ordinal !== undefined ? `${ordinal}. ` : ''}
+          {formatNestedValue(titleEntry[1])}
+        </div>
+      ) : ordinal !== undefined ? (
+        <div className="text-sm font-semibold text-foreground">Item {ordinal}</div>
+      ) : null}
+      <div className="space-y-1.5">
+        {detailEntries.map(([key, nestedValue]) => (
+          <StructuredField key={key} label={humanizeKey(key)} value={nestedValue} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function findTitleEntry(record: Record<string, unknown>): [string, unknown] | undefined {
+  const preferredKeys = ['section_label', 'title', 'name', 'label', 'heading'];
+  for (const key of preferredKeys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return [key, value];
+  }
+  return undefined;
+}
+
+function StructuredField({ label, value }: { label: string; value: unknown }) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    return (
+      <div>
+        <div className="text-[10px] text-muted-foreground mb-1">{label}</div>
+        <ul className="list-disc pl-4 space-y-1">
+          {value.map((item, index) => (
+            <li key={index} className="text-sm font-normal text-foreground/90">
+              <StructuredInlineValue value={item} />
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  if (isRecord(value)) {
+    return (
+      <div>
+        <div className="text-[10px] text-muted-foreground mb-1">{label}</div>
+        <StructuredValueBlock value={value} />
+      </div>
+    );
+  }
+
+  const formatted = formatNestedValue(value);
+  if (!formatted) return null;
+  return (
+    <div>
+      <span className="text-[10px] text-muted-foreground">{label}: </span>
+      <span className="text-sm font-normal text-foreground/90">{formatted}</span>
+    </div>
+  );
+}
+
+function StructuredInlineValue({ value }: { value: unknown }) {
+  if (isRecord(value) || Array.isArray(value)) return <StructuredValueBlock value={value} />;
+  return <>{formatNestedValue(value)}</>;
 }
 
 interface OutputRowProps {

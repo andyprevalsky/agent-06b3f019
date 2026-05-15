@@ -83,6 +83,9 @@ export function validateAssistantStreamPayload(payload: unknown): string | null 
   if (typeof p.done !== 'boolean') return `Missing or invalid 'done' (got ${typeof p.done})`;
   if (typeof p.sequence !== 'number')
     return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
+  if (p.llm_started_at_ms !== undefined && typeof p.llm_started_at_ms !== 'number') {
+    return `Invalid 'llm_started_at_ms' type (got ${typeof p.llm_started_at_ms})`;
+  }
   return null;
 }
 
@@ -102,6 +105,12 @@ export function validatePlanStreamPayload(payload: unknown): string | null {
   if (typeof p.tool_call_id !== 'string')
     return `Missing or invalid 'tool_call_id' (got ${typeof p.tool_call_id})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
+  if (p.char_count !== undefined && typeof p.char_count !== 'number') {
+    return `Invalid 'char_count' type (got ${typeof p.char_count})`;
+  }
+  if (p.llm_started_at_ms !== undefined && typeof p.llm_started_at_ms !== 'number') {
+    return `Invalid 'llm_started_at_ms' type (got ${typeof p.llm_started_at_ms})`;
+  }
   return null;
 }
 
@@ -123,8 +132,17 @@ export function validateToolStreamPayload(payload: unknown): string | null {
   if (typeof p.tool_name !== 'string')
     return `Missing or invalid 'tool_name' (got ${typeof p.tool_name})`;
   if (typeof p.title !== 'string') return `Missing or invalid 'title' (got ${typeof p.title})`;
+  if (
+    p.status !== undefined &&
+    !['IN_PROGRESS', 'FINISHED', 'ERROR'].includes(p.status as string)
+  ) {
+    return `Invalid 'status' value (got ${String(p.status)})`;
+  }
   if (p.char_count !== undefined && typeof p.char_count !== 'number') {
     return `Invalid 'char_count' type (got ${typeof p.char_count})`;
+  }
+  if (p.llm_started_at_ms !== undefined && typeof p.llm_started_at_ms !== 'number') {
+    return `Invalid 'llm_started_at_ms' type (got ${typeof p.llm_started_at_ms})`;
   }
   if (p.is_claude !== undefined && typeof p.is_claude !== 'boolean') {
     return `Invalid 'is_claude' type (got ${typeof p.is_claude})`;

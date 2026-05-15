@@ -141,8 +141,7 @@ function finishCurrentBlock(s: RenderState, isNextListItem: boolean): void {
 
 function handleWhitespaceItem(s: RenderState, item: WordItem, index: number): void {
   const first = s.inlineGroup[0];
-  const keepInGroup =
-    !!first && ((first.isCode && first.blockType !== 'pre') || first.isLink);
+  const keepInGroup = !!first && ((first.isCode && first.blockType !== 'pre') || first.isLink);
 
   if (keepInGroup) {
     s.inlineGroup.push(item);
@@ -167,9 +166,7 @@ function maybeSwitchListType(s: RenderState, item: WordItem): void {
 
 function handleWordItem(s: RenderState, item: WordItem): void {
   const shouldStartNewBlock =
-    !!item.blockType &&
-    item.blockIndex !== s.currentBlockIndex &&
-    s.currentBlock.length > 0;
+    !!item.blockType && item.blockIndex !== s.currentBlockIndex && s.currentBlock.length > 0;
 
   if (shouldStartNewBlock) finishCurrentBlock(s, item.blockType === 'li');
 

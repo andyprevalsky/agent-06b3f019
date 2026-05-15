@@ -46,8 +46,7 @@ function FailureSummary({ failureContext }: { failureContext: FailureContext }) 
   return (
     <>
       <div>
-        <span className="font-medium text-red-500">Progress:</span>{' '}
-        <span>{progress_estimate}</span>
+        <span className="font-medium text-red-500">Progress:</span> <span>{progress_estimate}</span>
       </div>
 
       {verifier_reasoning && (
@@ -93,7 +92,9 @@ function PlanBlock({ plan }: { plan: string[] }) {
             • {goal}
           </li>
         ))}
-        {plan.length > 3 && <li className="text-muted-foreground">...and {plan.length - 3} more</li>}
+        {plan.length > 3 && (
+          <li className="text-muted-foreground">...and {plan.length - 3} more</li>
+        )}
       </ul>
     </LabeledBlock>
   );

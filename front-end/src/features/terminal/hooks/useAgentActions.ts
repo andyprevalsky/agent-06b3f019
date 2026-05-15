@@ -118,7 +118,10 @@ export function useAgentActions({
       try {
         const blueprint = await findBlueprintByGoal(agentDetail.goal);
         if (blueprint) {
-          await submitBlueprintFeedback(blueprint.id, { ...feedback, agentId: agentDetail.agent_id });
+          await submitBlueprintFeedback(blueprint.id, {
+            ...feedback,
+            agentId: agentDetail.agent_id,
+          });
         } else {
           console.warn('No blueprint found for feedback');
         }

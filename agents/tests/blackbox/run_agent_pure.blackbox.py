@@ -9,8 +9,8 @@ from _test_utils import (
 
 
 def test_estimate_tokens():
-    """_estimate_tokens counts roughly len(text) // 4."""
-    from loop.run_agent import _estimate_tokens
+    """_estimate_tokens applies the chars/4 × safety-multiplier heuristic."""
+    from loop.run_agent import ESTIMATE_SAFETY_MULTIPLIER, _estimate_tokens
 
     context = [
         {"text": "Hello world this is a test message", "metadata": {}},
@@ -19,15 +19,14 @@ def test_estimate_tokens():
 
     result = _estimate_tokens(context)
 
-    # Total chars = 34 + 38 + 1 (newline join) = 73, // 4 = 18
     total_text = "\n".join([m["text"] for m in context])
-    expected = len(total_text) // 4
+    expected = int((len(total_text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
     assert result == expected
 
 
 def test_estimate_tokens_excludes_subagent():
     """Messages with subAgentId in metadata are excluded from token count."""
-    from loop.run_agent import _estimate_tokens
+    from loop.run_agent import ESTIMATE_SAFETY_MULTIPLIER, _estimate_tokens
 
     context = [
         {"text": "Regular message", "metadata": {}},
@@ -39,7 +38,7 @@ def test_estimate_tokens_excludes_subagent():
 
     # Only the two regular messages should count
     total_text = "\n".join(["Regular message", "Another regular message"])
-    expected = len(total_text) // 4
+    expected = int((len(total_text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
     assert result == expected
 
 

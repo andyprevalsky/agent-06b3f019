@@ -30,6 +30,12 @@ export interface MessageBubbleProps {
   onSubmitFeedback?: (feedback: FeedbackData) => Promise<void>;
   /** Streaming plan char count (for set_plan IN_PROGRESS PlanChip) */
   planCharCount?: number;
+  /** Planner LLM request start timestamp for set_plan IN_PROGRESS PlanChip */
+  planStreamStartedAtMs?: number;
+  /** Streaming token estimate for in-progress explore thinking carousel item */
+  thinkingStreamTokenCount?: number;
+  /** Local timestamp from the first observed LLM stream event */
+  thinkingStreamStartedAtMs?: number;
   /** Explore agent step history (passed from MessageList grouping) */
   exploreStepHistory?: ExploreStep[];
   /** Wait_for check history (passed from MessageList grouping) */

@@ -12,6 +12,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.context_scope import filter_internal_subagent_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
@@ -40,6 +41,7 @@ async def stream_assistant_chunk(
     sub_agent_id: str = None,
     is_claude: bool = False,
     is_gpt: bool = False,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -56,6 +58,7 @@ async def stream_assistant_chunk(
         sub_agent_id: Optional sub-agent ID (e.g., browser task_id) for routing to specific MessageList
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
+        llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
         config = load_config()
@@ -81,6 +84,8 @@ async def stream_assistant_chunk(
             record["is_claude"] = True
         if is_gpt:
             record["is_gpt"] = True
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
 
         payload = {
             "messages": [{
@@ -123,6 +128,7 @@ async def stream_plan_event(
     tool_call_id: str,
     title: str,
     char_count: int = 0,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Broadcast plan streaming state DIRECTLY to Supabase Realtime (no DB insert).
@@ -137,6 +143,7 @@ async def stream_plan_event(
         tool_call_id: The tool_call_id that will be used for the final set_plan
         title: The plan title (or "Generating Plan" initially)
         char_count: Current character count of plan content being generated
+        llm_started_at_ms: Epoch ms when the planner LLM request started
     """
     try:
 
@@ -144,18 +151,22 @@ async def stream_plan_event(
 
         broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
 
+        record = {
+            "agentId": agent_id,
+            "stream_id": stream_id,
+            "tool_call_id": tool_call_id,
+            "title": title,
+            "char_count": char_count,
+        }
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
+
         payload = {
             "messages": [{
                 "topic": f"agent:{agent_id}",
                 "event": "PLAN_STREAM",
                 "payload": {
-                    "record": {
-                        "agentId": agent_id,
-                        "stream_id": stream_id,
-                        "tool_call_id": tool_call_id,
-                        "title": title,
-                        "char_count": char_count,
-                    }
+                    "record": record
                 },
                 "private": _is_production
             }]
@@ -191,6 +202,7 @@ async def stream_tool_event(
     char_count: int = 0,
     is_claude: bool = False,
     is_gpt: bool = False,
+    llm_started_at_ms: int | None = None,
 ) -> None:
     """
     Broadcast early tool detection as TOOL_STREAM event (ephemeral, no DB insert).
@@ -209,6 +221,7 @@ async def stream_tool_event(
         char_count: Current raw character count streamed while forming the tool call
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
+        llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
         config = load_config()
@@ -229,6 +242,8 @@ async def stream_tool_event(
             record["is_claude"] = True
         if is_gpt:
             record["is_gpt"] = True
+        if llm_started_at_ms is not None:
+            record["llm_started_at_ms"] = llm_started_at_ms
 
         payload = {
             "messages": [{
@@ -516,12 +531,19 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
         new_messages = data.get('messages', [])
-        
+
+        # Drop sub-agent internal work-stream rows before crossing the activity
+        # boundary. Every downstream caller filters them anyway (see
+        # loop/context_utils.py and workflows/agent_workflow.py); doing it here
+        # keeps the Temporal payload under the 2 MB cap when sub-agents have
+        # produced large transcripts (e.g. post-DAG verifier polling from epoch).
+        new_messages = filter_internal_subagent_messages(new_messages)
+
         if new_messages:
             logger.info(
                 f"New messages found: agent_id={agent_id}, count={len(new_messages)}, roles={set(m['role'] for m in new_messages)}"
             )
-        
+
         return new_messages
         
     except Exception as e:

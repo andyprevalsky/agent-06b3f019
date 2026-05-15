@@ -60,11 +60,7 @@ export default function PreOrderCard({
                 poster={posterSrc}
               >
                 {inView && <source src={videoSrc} type="video/webm" />}
-                <img
-                  src={posterSrc}
-                  alt={altText}
-                  className="w-full h-full object-cover"
-                />
+                <img src={posterSrc} alt={altText} className="w-full h-full object-cover" />
               </video>
             </div>
             <h3 className="text-2xl font-semibold mb-2">{title}</h3>

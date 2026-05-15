@@ -113,9 +113,9 @@ function displayText(agentDetail: AgentDetail | null | undefined, pendingCents: 
   if (!agentDetail) return `0.00 / ${(pendingCents / 100).toFixed(2)}`;
   const cost = ((agentDetail.tree_cost_cents || 0) / 100).toFixed(2);
   if (agentDetail.parent_agent_id) return cost;
-  const limit = (
-    (agentDetail.price_limit_cents || DEFAULT_AGENT_PRICE_LIMIT_CENTS) / 100
-  ).toFixed(2);
+  const limit = ((agentDetail.price_limit_cents || DEFAULT_AGENT_PRICE_LIMIT_CENTS) / 100).toFixed(
+    2,
+  );
   return `${cost} / ${limit}`;
 }
 

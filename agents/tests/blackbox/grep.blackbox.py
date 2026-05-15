@@ -214,7 +214,7 @@ async def test_execute_grep_happy():
     activity_result = {"matches": [], "total_matches": 0, "truncated": False}
 
     async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
-        calls.append({"activity": getattr(activity_fn, "__name__", "fn")})
+        calls.append({"activity": getattr(activity_fn, "__name__", "fn"), "args": args})
         if getattr(activity_fn, "__name__", "") == "grep_activity":
             return activity_result
         return None
@@ -230,6 +230,13 @@ async def test_execute_grep_happy():
     assert out["usage"] == {"llm": [], "service": []}
     # IN_PROGRESS + activity + FINISHED = 3
     assert any(c["activity"] == "grep_activity" for c in calls)
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[0] == 'Searching messages for "foo"'
+    assert tool_titles[-1] == 'Searched messages for "foo"'
 
 
 async def test_execute_grep_empty_pattern_path():
@@ -253,7 +260,10 @@ async def test_execute_grep_empty_pattern_path():
 async def test_execute_grep_error_reraises():
     from domains.grep.service import execute_grep
 
+    calls = []
+
     async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        calls.append({"activity": getattr(activity_fn, "__name__", "fn"), "args": args})
         name = getattr(activity_fn, "__name__", "")
         if name == "grep_activity":
             raise RuntimeError("backend down")
@@ -269,6 +279,12 @@ async def test_execute_grep_error_reraises():
         raise AssertionError("should have raised")
     except RuntimeError as e:
         assert "backend down" in str(e)
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[-1] == 'Grep failed searching messages for "x" (selected person)'
 
 
 async def test_manager_execute_tool():

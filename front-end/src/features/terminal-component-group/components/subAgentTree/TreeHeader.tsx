@@ -12,7 +12,13 @@ interface TreeHeaderProps {
  * Header line showing cluster-level status (circle + title + agent count).
  * Used by both full and collapsed views when `hideHeader` is false.
  */
-export function TreeHeader({ circle, title, totalAgents, allTerminal, anyFailed }: TreeHeaderProps) {
+export function TreeHeader({
+  circle,
+  title,
+  totalAgents,
+  allTerminal,
+  anyFailed,
+}: TreeHeaderProps) {
   return (
     <div
       className={cn(

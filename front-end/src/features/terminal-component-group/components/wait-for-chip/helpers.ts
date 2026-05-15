@@ -41,5 +41,7 @@ export function getExploreStepIcon(toolName?: string) {
 
 /** Check if a step is a thinking step (matches ExploreAgentBubble pattern) */
 export function isThinkingStep(step: ExploreStep): boolean {
-  return step.toolName === 'spawn_agent' && (step.title === 'Explore agent thinking' || !step.title);
+  return (
+    step.toolName === 'spawn_agent' && (step.title === 'Explore agent thinking' || !step.title)
+  );
 }

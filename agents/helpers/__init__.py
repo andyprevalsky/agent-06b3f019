@@ -11,7 +11,7 @@ from .llm import call_llm, call_llm_activity, check_progress
 from .messages import poll_new_messages, post_agent_message, stream_assistant_chunk
 from .model_info import get_model_context_window
 from .model_pricing import fetch_model_pricing
-from .summarize import compress_context, generate_completion_summary
+from .summarize import compress_context, generate_completion_summary, summarize_tool_result
 from .update_status import update_agent_status
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "update_agent_status",
     "compress_context",
     "generate_completion_summary",
+    "summarize_tool_result",
     "get_model_context_window",
     "mark_finished",
     "fetch_agent_config",

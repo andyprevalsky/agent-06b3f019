@@ -344,16 +344,132 @@ describe('MessageList', () => {
     renderList(ctx);
     // Only ONE explore chip should render for taskId=task-X — confirm by the
     // single thinking-icon header marker.
-    await waitFor(() =>
-      expect(screen.getAllByTestId('explore-thinking-icon')).toHaveLength(1),
-    );
-    // While exploring, the header surfaces the most recent non-thinking action
-    // title ("Searching") instead of the static goal.
-    expect(screen.getByText(/Exploring - Searching/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByTestId('explore-thinking-icon')).toHaveLength(1));
+    // While exploring after the last tool finished, the header moves straight
+    // into the post-tool thinking metric before assistant tokens arrive.
+    expect(screen.getByText('Exploring')).toBeInTheDocument();
+    expect(document.body.textContent).toContain('0 tokens');
+    expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
     // The web_search step does NOT render as a separate chip — it's collapsed
-    // into the explore bubble (it only appears in the header here, not as its
-    // own row in the message list).
+    // into the explore bubble.
     expect(screen.queryByTestId('tool-row-explore-step-1')).not.toBeInTheDocument();
+  });
+
+  it('derives active explore web-search titles from message content when metadata is generic', async () => {
+    const now = Date.now();
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('e-init-query', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(now).toISOString(),
+          metadata: {
+            toolCallId: 'explore-init-query',
+            toolName: 'spawn_agent',
+            title: 'Explore cities',
+            toolStatus: 'IN_PROGRESS',
+            agentType: 'explore',
+            taskId: 'task-query',
+          },
+        }),
+        msg('e-step-query', {
+          role: 'TOOL',
+          text: 'Query: "best cities to live in your 20s 2024 ranking credible source"',
+          timestamp: new Date(now + 1000).toISOString(),
+          metadata: {
+            toolCallId: 'explore-step-query',
+            toolName: 'web_search',
+            title: 'Searching the web',
+            toolStatus: 'IN_PROGRESS',
+            agentType: 'explore',
+            taskId: 'task-query',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Searching the web for best cities to live in your 20s/),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/^Searching the web$/)).not.toBeInTheDocument();
+  });
+
+  it('uses terminal explore tool results for grouped finished and failed states', async () => {
+    const now = Date.now();
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('finished-init', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(now).toISOString(),
+          metadata: {
+            toolCallId: 'finished-spawn',
+            toolName: 'spawn_agent',
+            title: 'Check deployment',
+            toolStatus: 'IN_PROGRESS',
+            agentType: 'explore',
+            taskId: 'finished-task',
+            fullGoal: 'Check whether the production deployment finished',
+          },
+        }),
+        msg('finished-step', {
+          role: 'TOOL',
+          text: '**Result:** Deployment status READY',
+          timestamp: new Date(now + 1000).toISOString(),
+          metadata: {
+            toolCallId: 'finished-web-search',
+            toolName: 'web_search',
+            title: 'Web search completed',
+            toolStatus: 'FINISHED',
+            agentType: 'explore',
+            taskId: 'finished-task',
+          },
+        }),
+        msg('finished-final', {
+          role: 'TOOL',
+          text: 'The production deployment is ready. Status: READY. URL: https://roselabs.ai',
+          timestamp: new Date(now + 2000).toISOString(),
+          metadata: {
+            toolCallId: 'finished-spawn',
+            toolName: 'spawn_agent',
+            title: 'Check deployment',
+            toolStatus: 'FINISHED',
+            agentType: 'explore',
+            taskId: 'finished-task',
+            fullGoal: 'Check whether the production deployment finished',
+          },
+        }),
+        msg('failed-final', {
+          role: 'TOOL',
+          text: 'Activity task failed: web_search_activity failed: Parallel AI search returned HTTP 429 Too Many Requests',
+          timestamp: new Date(now + 3000).toISOString(),
+          metadata: {
+            toolCallId: 'failed-spawn',
+            toolName: 'spawn_agent',
+            title: 'Check deployment',
+            toolStatus: 'ERROR',
+            agentType: 'explore',
+            taskId: 'failed-task',
+            fullGoal: 'Check whether the production deployment finished',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
+    expect(screen.getByText('Explore Failed')).toBeInTheDocument();
+    expect(document.body.textContent).toContain('The production deployment is ready');
+    expect(document.body.textContent).toContain(
+      'Parallel AI search returned HTTP 429 Too Many Requests',
+    );
+    expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
   });
 
   it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {
@@ -573,6 +689,54 @@ describe('MessageList', () => {
     );
   });
 
+  it('renders main thinking stream as elapsed time plus token download count', async () => {
+    const startedAtMs = Date.now() - 2200;
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'sb-1',
+          {
+            text: 'thinking with enough content to estimate tokens',
+            sequence: 1,
+            done: false,
+            startedAtMs,
+          },
+        ],
+      ]),
+    });
+    renderList(ctx);
+    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(document.body.textContent).toMatch(/\d+\.\ds·\d+ tokens/);
+    expect(document.querySelector('.lucide-arrow-down')).not.toBeNull();
+  });
+
+  it('renders main blue thinking metrics from llm start before first token arrives', async () => {
+    const startedAtMs = Date.now() - 900;
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'sb-1',
+          {
+            text: '',
+            sequence: 0,
+            done: false,
+            startedAtMs,
+          },
+        ],
+      ]),
+    });
+    renderList(ctx);
+    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(screen.getByTestId('thinking-animation')).toHaveAttribute('data-has-gradient', 'false');
+    expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
+  });
+
   it('does not render status banners inside a sub-agent panel', () => {
     const ctx = makeAgentCtx({
       agent: makeAgent({ status: 'PAUSED' }),
@@ -606,6 +770,28 @@ describe('MessageList', () => {
     const matches = screen.queryAllByText('Thinking');
     // Only acceptable 'Thinking' would be from thought tool card — we have no such tool.
     expect(matches.length).toBe(0);
+  });
+
+  it('hides main thinking when the last message is IN_PROGRESS tool even if a stream is open', async () => {
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([['sb-1', { text: 'still streaming', sequence: 1, done: false }]]),
+      messages: [
+        msg('t1', {
+          role: 'TOOL',
+          text: '',
+          metadata: {
+            toolCallId: 'w1',
+            toolName: 'web_search',
+            title: 'Searching',
+            toolStatus: 'IN_PROGRESS',
+          },
+        }),
+      ],
+    });
+    renderList(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
   });
 
   it('merges general-purpose agent tree messages sharing busId into single render', async () => {

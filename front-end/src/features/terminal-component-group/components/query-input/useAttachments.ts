@@ -199,9 +199,7 @@ async function uploadOne(file: File, setAttachments: SetAttachments): Promise<vo
   setAttachments((prev) => [...prev, pending]);
   try {
     const filePointer = await uploadAttachment(file, (progress) => {
-      setAttachments((prev) =>
-        prev.map((a) => (a.id === pending.id ? { ...a, progress } : a)),
-      );
+      setAttachments((prev) => prev.map((a) => (a.id === pending.id ? { ...a, progress } : a)));
     });
     setAttachments((prev) =>
       prev.map((a) =>

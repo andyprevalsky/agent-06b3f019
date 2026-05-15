@@ -419,10 +419,23 @@ async def test_verifier_score_1_returns_completed():
         ("attempt_completion", {"_verification_pending": True}, "tc-ac-1")
     ]
 
+    # Orphan-tool guard: the returned context must contain a FINISHED tool_result
+    # row for the attempt_completion tool_call_id. Without this, downstream LLM
+    # calls (e.g. completion_summary) serialize the assistant's function_call
+    # without a paired function_call_output and 400 on the Codex Responses API.
+    returned_ctx = result["context"]
+    finished_for_tc = [
+        msg for msg in returned_ctx
+        if msg.get("role") == "TOOL"
+        and (msg.get("metadata") or {}).get("toolCallId") == "tc-ac-1"
+        and (msg.get("metadata") or {}).get("toolStatus") == "FINISHED"
+    ]
+    assert finished_for_tc, "Expected FINISHED tool_result for attempt_completion in returned context"
+
 
 async def test_estimate_tokens():
-    """_estimate_tokens counts roughly len(text) // 4."""
-    from loop.run_agent import _estimate_tokens
+    """_estimate_tokens applies the chars/4 × safety-multiplier heuristic."""
+    from loop.run_agent import ESTIMATE_SAFETY_MULTIPLIER, _estimate_tokens
 
     context = [
         {"text": "Hello world this is a test message", "metadata": {}},
@@ -432,19 +445,24 @@ async def test_estimate_tokens():
     result = _estimate_tokens(context)
 
     total_text = "\n".join([m["text"] for m in context])
-    expected = len(total_text) // 4
+    expected = int((len(total_text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
     assert result == expected
 
 
-async def test_compress_context_calls_execute_activity_and_returns_single_system_message():
-    """_compress_context calls execute_activity with compress_context activity, returns [SYSTEM msg]."""
+async def test_compress_context_returns_new_context_on_success():
+    """_compress_context returns (new_context, True) when activity succeeds."""
     from loop.run_agent import _compress_context
 
     captured_args = []
+    new_context = [{"role": "USER", "text": "summarized"}]
 
     async def mock_execute_activity(fn, args=None, **kwargs):
         captured_args.append((fn, args, kwargs))
-        return {"learnings": "key insights", "usage": {"prompt_tokens": 3, "completion_tokens": 2}}
+        return {
+            "context": new_context,
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            "success": True,
+        }
 
     tokens_recorded = []
 
@@ -452,16 +470,15 @@ async def test_compress_context_calls_execute_activity_and_returns_single_system
         tokens_recorded.append((in_, out_, model, kwargs))
 
     context = [{"role": "USER", "text": "hi"}]
-    result = await _compress_context(
+    result_ctx, success = await _compress_context(
         mock_execute_activity,
         context,
         "rose-lite",
         on_tokens=on_tokens,
     )
 
-    assert len(result) == 1
-    assert result[0]["role"] == "SYSTEM"
-    assert result[0]["text"] == "key insights"
+    assert success is True
+    assert result_ctx == new_context
     assert captured_args[0][1] == [
         context,
         len(context),
@@ -490,7 +507,7 @@ async def test_compress_context_forwards_compute_token_context():
 
     async def mock_execute_activity(fn, args=None, **kwargs):
         captured_args.append((fn, args, kwargs))
-        return {"learnings": "compressed", "usage": {}}
+        return {"context": [{"role": "USER", "text": "ok"}], "usage": {}, "success": True}
 
     await _compress_context(
         mock_execute_activity,
@@ -521,16 +538,30 @@ async def test_compress_context_forwards_compute_token_context():
     ]
 
 
-async def test_compress_context_handles_string_return():
-    """_compress_context handles legacy string return (no usage)."""
+async def test_compress_context_failure_preserves_original():
+    """On activity failure (success=False), return (original_context, False) — no clobber."""
     from loop.run_agent import _compress_context
 
     async def mock_execute_activity(*args, **kwargs):
-        return "plain string learnings"
+        return {"context": None, "usage": {}, "success": False, "error": "boom"}
 
-    result = await _compress_context(mock_execute_activity, [{"role": "USER", "text": "x"}], "rose-lite")
-    assert len(result) == 1
-    assert result[0]["text"] == "plain string learnings"
+    original = [{"role": "USER", "text": "x"}]
+    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-lite")
+    assert success is False
+    assert result_ctx is original
+
+
+async def test_compress_context_activity_exception_preserves_original():
+    """When the activity itself raises, _compress_context returns (original, False)."""
+    from loop.run_agent import _compress_context
+
+    async def mock_execute_activity(*args, **kwargs):
+        raise RuntimeError("temporal exploded")
+
+    original = [{"role": "USER", "text": "x"}]
+    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-lite")
+    assert success is False
+    assert result_ctx is original
 
 
 async def test_run_verifier_posts_in_progress_and_finished():
@@ -649,9 +680,10 @@ async def run_all_tests():
     await r.record_async("verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops)
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
     await r.record_async("estimate_tokens", test_estimate_tokens)
-    await r.record_async("compress_context_calls_execute_activity_and_returns_single_system_message", test_compress_context_calls_execute_activity_and_returns_single_system_message)
+    await r.record_async("compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success)
     await r.record_async("compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context)
-    await r.record_async("compress_context_handles_string_return", test_compress_context_handles_string_return)
+    await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
+    await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)
     await r.record_async("run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished)
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)

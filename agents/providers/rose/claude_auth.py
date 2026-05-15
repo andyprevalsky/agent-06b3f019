@@ -147,6 +147,20 @@ def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[
     return blocks
 
 
+def _normalize_reasoning_effort(effort: Optional[str]) -> str:
+    """Map our internal effort sentinel to Anthropic's accepted values.
+
+    Anthropic accepts low / medium / high / xhigh / max for output_config.effort.
+    The literal "max" value is accepted by the API but causes the response stream
+    to hang without emitting a first chunk (~160s, then TTFT timeout). xhigh is
+    the highest reliably-streaming level — mirror gpt_auth which also routes
+    our "max" sentinel to "xhigh" as the de-facto top tier.
+    """
+    if effort == "max":
+        return "xhigh"
+    return effort or "high"
+
+
 def build_anthropic_body(
     *,
     pool_spec: PoolSpec,
@@ -190,9 +204,16 @@ def build_anthropic_body(
     if not skip_cache_write and anthropic_messages:
         _add_cache_breakpoint(anthropic_messages)
 
-    body["thinking"] = thinking or {"type": "adaptive"}
+    # Anti-pattern: never default to adaptive thinking. It (a) 400s on
+    # claude-haiku-4-5 ("adaptive thinking is not supported on this model"),
+    # (b) hangs Anthropic streams on Opus when "max" effort is set, and (c) is
+    # incompatible with forced tool_choice on every Pydantic-schema caller —
+    # the cleanup at the bottom of this function used to pop it back off
+    # specifically because of that. Just don't set it. If a caller ever has a
+    # real reason to enable thinking, they can pass it explicitly.
+    if thinking is not None:
+        body["thinking"] = thinking
     body["temperature"] = 1
-    body.setdefault("output_config", {})["effort"] = effort or "high"
 
     # Resolve native tools: prefer explicit tools; fall back to extracting
     # from response_format (the Pydantic-schema → anyOf → native-tools path).
@@ -200,10 +221,6 @@ def build_anthropic_body(
     # deterministic across retries/rotations.
     native_tools = tools
     came_from_response_format = False
-    force_structured_native_tool = any(
-        isinstance(tool, dict) and tool.get("__rose_force_tool_choice")
-        for tool in (native_tools or [])
-    )
     if native_tools is None and response_format is not None:
         extracted = _extract_tools_from_response_format(response_format)
         if extracted is not None:
@@ -228,24 +245,16 @@ def build_anthropic_body(
 
     _add_tool_cache_breakpoint(body)
 
-    # Anthropic rejects thinking with forced tool_choice (type=any/tool).
-    # Two resolutions, depending on which constraint is load-bearing:
-    #   - Structured output (tools synthesized from response_format): the model
-    #     MUST call the tool. Drop thinking, keep tool_choice forced.
-    #   - Real tool list with forced tool_choice: keeping thinking matters
-    #     more than forcing the call; downgrade to auto.
-    tc = body.get("tool_choice", {})
-    if isinstance(tc, dict) and tc.get("type") in ("any", "tool") and "thinking" in body:
-        if came_from_response_format or force_structured_native_tool:
-            body.pop("thinking", None)
-        else:
-            body["tool_choice"] = {"type": "auto"}
-
-    # Set effort AFTER apply_anthropic_tool_config (which may pop output_config
-    # for json_schema reasons) — effort is always valid regardless of tool mode.
-    oc = body.get("output_config") or {}
-    oc["effort"] = effort or "high"
-    body["output_config"] = oc
+    # Same anti-pattern as thinking above: `output_config.effort` is opt-in.
+    # claude-haiku-4-5 400s with "This model does not support the effort
+    # parameter" on every call when we default-set it (25× observed in one
+    # outreach-batch run). Callers that genuinely need a high-effort reasoning
+    # budget (e.g. planner_llm sets effort="max") still get it; everyone else
+    # gets Anthropic's defaults instead of a hardcoded "high".
+    if effort is not None:
+        oc = body.get("output_config") or {}
+        oc["effort"] = _normalize_reasoning_effort(effort)
+        body["output_config"] = oc
 
     def _h(obj: Any) -> str:
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]
@@ -389,15 +398,52 @@ async def _attempt_with_token(
                 status = response.status_code
 
                 if status == 200:
-                    async for chunk in parse_anthropic_sse(
-                        response,
-                        actual_model=actual_model,
-                        pool_name="claude-token",
-                        request_id=request_id,
-                        idle_timeout_s=idle_timeout_s,
-                    ):
-                        yield chunk
-                    return
+                    try:
+                        async for chunk in parse_anthropic_sse(
+                            response,
+                            actual_model=actual_model,
+                            pool_name="claude-token",
+                            request_id=request_id,
+                            idle_timeout_s=idle_timeout_s,
+                        ):
+                            yield chunk
+                        return
+                    except RoseRateLimitError as exc:
+                        # HTTP 200 + in-band rate_limit_error from SSE.
+                        # Mirror the HTTP 429 path: transient → backoff
+                        # retry on same token; persistent (usage-window
+                        # signal or far-future reset) → rotate.
+                        msg = str(exc)
+                        rate_limited_until = _extract_rate_limited_until(response, msg)
+                        if _should_rotate_429_without_retry(msg, rate_limited_until):
+                            raise _RotateToken(
+                                "rate_limit",
+                                status=429,
+                                rate_limited_until=rate_limited_until,
+                            )
+                        if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                            await asyncio.sleep(_backoff_for_429(response, attempt))
+                            continue
+                        raise _RotateToken(
+                            "rate_limit",
+                            status=429,
+                            rate_limited_until=rate_limited_until,
+                        )
+                    except RoseAuthError as exc:
+                        # HTTP 200 + in-band authentication_error/permission_error.
+                        # Mirror the HTTP 401/403 path: rotate immediately.
+                        msg = str(exc)
+                        rate_limited_until = _extract_rate_limited_until(response, msg)
+                        reason = (
+                            "rate_limit"
+                            if rate_limited_until or _looks_like_rate_limit(msg)
+                            else "auth_error"
+                        )
+                        raise _RotateToken(
+                            reason,
+                            status=401,
+                            rate_limited_until=rate_limited_until,
+                        )
 
                 error_body = get_error_body(response)
 

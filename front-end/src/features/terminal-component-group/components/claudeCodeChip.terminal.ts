@@ -10,10 +10,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { fetchClaudeCodeSession } from '../hooks';
-import {
-  CLAUDE_CODE_WS_MAX_RETRIES,
-  CLAUDE_CODE_WS_RETRY_DELAYS,
-} from '../config';
+import { CLAUDE_CODE_WS_MAX_RETRIES, CLAUDE_CODE_WS_RETRY_DELAYS } from '../config';
 import { type ChipState, type WsMessage } from '../types';
 
 const TERMINAL_THEME = {

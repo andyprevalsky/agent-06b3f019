@@ -47,12 +47,27 @@ from loop.context_utils import poll_and_update_context
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
 from utils.prompts import format_required_output_schema_user_message
-from utils.tool_schemas import create_agent_action_model
+from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
 
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
+
+# Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
+# Reserve room for output + a safety buffer before the model's hard limit, so
+# the next LLM call still fits inside the window even after the trigger fires.
+EFFECTIVE_OUTPUT_RESERVATION = 20_000  # matches MAX_OUTPUT_TOKENS_FOR_SUMMARY
+AUTOCOMPACT_BUFFER_TOKENS = 13_000  # matches Claude Code's AUTOCOMPACT_BUFFER
+
+# _estimate_tokens is a chars-÷-4 heuristic that under-counts JSON-heavy tool
+# results (observed 308k actual Anthropic tokens reported as <80k). Multiply
+# by this safety factor so the trigger fires before we hit the real ceiling.
+ESTIMATE_SAFETY_MULTIPLIER = 1.4
+
+# Compactor circuit-breaker: stop attempting compaction after this many
+# consecutive failures so a broken compactor doesn't loop forever.
+MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 
 @traced("run_agent")
@@ -96,8 +111,7 @@ async def run_agent(  # noqa: C901
     build_messages: Optional[Callable[[List[Dict], str], List[Dict]]] = None,
     # Limits
     max_iterations: int = 200,
-    max_context_tokens: int = 100_000,
-    context_threshold_percentage: float = 0.8,
+    max_context_tokens: int = 200_000,
     reasoning_max_tokens: int = 256,
     # State tracking (for continue_as_new)
     iteration_offset: int = 0,
@@ -163,6 +177,7 @@ async def run_agent(  # noqa: C901
     no_tool_count = 0  # Track consecutive iterations with no tool calls
     consecutive_llm_failures = 0  # Track consecutive LLM call failures for early exit
     consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
+    compactor_failures = 0  # Circuit-breaker: skip compaction after 3 consecutive failures
     recent_verifier_scores: List[float] = []  # Track last N scores for trend feedback
     recent_call_hashes: Deque[str] = deque(maxlen=6)  # Track last N tool-call signatures for repetition detection
     same_call_streak = 0  # Consecutive iterations where all tool calls were identical
@@ -207,12 +222,14 @@ async def run_agent(  # noqa: C901
             user_id=user_id,
         )
 
-    # Create dynamic action model for structured output
-    # Use custom response_model if provided (e.g., browser agent), otherwise create from tools
+    # Create dynamic action model for structured output. Custom response_model
+    # wins (e.g., browser agent). During PLAN we narrow spawn_agent to the
+    # explore-only variant via PLAN_TOOL_MODELS so the LLM can't pick an
+    # invalid `type` — runtime validation was burning 4 retries per error.
     AgentAction = (
         response_model
         if response_model
-        else create_agent_action_model(tools)
+        else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
     )
 
     def _log_cache_summary(status: str):
@@ -224,6 +241,84 @@ async def run_agent(  # noqa: C901
                 f"💾 Cache summary [{status}]: read={cache_read_total} write={cache_write_total} uncached={tokens_in} "
                 f"hit={hit_pct}% iterations={iteration} agent={agent_id}"
             )
+
+    def _plan_fsm_line(state: str) -> str:
+        """One-line PLAN FSM state label injected into tool results."""
+        if state == "PLAN":
+            return (
+                "FSM_STATE: current=PLAN; purpose=\"clarify the user's goal; if already clear, call set_plan\"; "
+                "enabled_tools=send_message_to_user,spawn_agent,set_plan; transitions=set_plan->SET_PLAN."
+            )
+        if state == "SET_PLAN":
+            return (
+                "FSM_STATE: current=SET_PLAN; purpose=\"Route between asking the user a question or starting execution\"; "
+                "enabled_tools=send_message_to_user,attempt_completion; disabled_tools=spawn_agent; "
+                "transitions=send_message_to_user->ASK_QUESTION,attempt_completion->EXIT(EXECUTE)."
+            )
+        if state == "ASK_QUESTION":
+            return (
+                "FSM_STATE: current=ASK_QUESTION; purpose=\"Ask any questions needed before entering the EXECUTE phase\"; "
+                "enabled_tools=send_message_to_user,attempt_completion,spawn_agent; "
+                "transitions=attempt_completion->EXIT(EXECUTE),spawn_agent->PLAN."
+            )
+        return "FSM_STATE: current=EXIT(EXECUTE); terminal=true."
+
+    def _next_plan_fsm_state(state: str, tool_name: str, status: str) -> str:
+        """Advance the PLAN FSM using the transition table in PLAN_PHASE_PROMPT."""
+        if status not in ("FINISHED", "ERROR"):
+            return state
+        if tool_name == "set_plan" and status == "FINISHED":
+            return "SET_PLAN"
+        if tool_name == "send_message_to_user" and status == "FINISHED":
+            return "ASK_QUESTION"
+        if tool_name == "spawn_agent" and status == "FINISHED":
+            return "PLAN"
+        if tool_name == "attempt_completion" and status == "FINISHED":
+            return "EXIT(EXECUTE)"
+        return state
+
+    def _context_with_plan_fsm_labels(raw_context: List[Dict]) -> List[Dict]:
+        """Return a copy of context with PLAN FSM labels appended to terminal tool results."""
+        if not is_plan_loop:
+            return raw_context
+
+        def _parse_ts(msg: Dict) -> float:
+            value = msg.get("timestamp")
+            if not value:
+                return 0.0
+            try:
+                if isinstance(value, datetime):
+                    parsed = value
+                else:
+                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                return parsed.timestamp()
+            except Exception:
+                return 0.0
+
+        state = "PLAN"
+        labelled_by_id: Dict[int, str] = {}
+        for msg in sorted(raw_context, key=_parse_ts):
+            metadata = msg.get("metadata", {}) or {}
+            if msg.get("role") != "TOOL":
+                continue
+            tool_name = metadata.get("toolName", "")
+            status = metadata.get("toolStatus", "")
+            state = _next_plan_fsm_state(state, tool_name, status)
+            if status in ("FINISHED", "ERROR"):
+                labelled_by_id[id(msg)] = _plan_fsm_line(state)
+
+        labelled_context: List[Dict] = []
+        for msg in raw_context:
+            fsm_line = labelled_by_id.get(id(msg))
+            if not fsm_line:
+                labelled_context.append(msg)
+                continue
+            copied = dict(msg)
+            text = copied.get("text") or ""
+            if "FSM_STATE:" not in text:
+                copied["text"] = f"{text}\n\n{fsm_line}" if text else fsm_line
+            labelled_context.append(copied)
+        return labelled_context
 
     logger.info(
         "run_agent starting",
@@ -306,12 +401,26 @@ async def run_agent(  # noqa: C901
                 except Exception as e:
                     logger.warning(f"Blueprint query failed (non-fatal): {e}")
 
-        # 5. Check context size - compress if needed
+        # 5. Check context size - compress if needed.
+        #
+        # Buffer-based trigger (mirrors Claude Code's autoCompact.ts):
+        #   effective_window   = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
+        #   compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
+        # For Sonnet 200k → effective=180k → trigger=167k.
+        effective_window = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
+        compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
         context_tokens = _estimate_tokens(context)
-        threshold = int(max_context_tokens * context_threshold_percentage)
 
-        if context_tokens >= threshold:
-            logger.info(f"Context overflow: {context_tokens} >= {threshold}")
+        if (
+            context_tokens >= compaction_trigger
+            and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+        ):
+            logger.info(
+                "Context overflow",
+                context_tokens=context_tokens,
+                trigger=compaction_trigger,
+                effective_window=effective_window,
+            )
             compression_claude_token = get_claude_token() if get_claude_token else claude_token
             compression_claude_token_source = get_claude_token_source() if get_claude_token_source else None
             compression_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
@@ -319,7 +428,7 @@ async def run_agent(  # noqa: C901
             compression_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
             compression_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
             compression_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
-            compressed = await _compress_context(
+            compressed, success = await _compress_context(
                 execute_activity=execute_activity,
                 context=context,
                 model=model,
@@ -335,12 +444,20 @@ async def run_agent(  # noqa: C901
                 gpt_token_pool_id=compression_gpt_token_pool_id,
             )
 
-            if on_context_overflow:
-                # Workflow: will call continue_as_new (never returns)
-                await on_context_overflow(compressed)
-
-            # Activity: just use compressed context
-            context = compressed
+            if success:
+                compactor_failures = 0
+                if on_context_overflow:
+                    # Workflow: will call continue_as_new (never returns)
+                    await on_context_overflow(compressed)
+                # Activity: just use compressed context
+                context = compressed
+            else:
+                compactor_failures += 1
+                logger.warning(
+                    "Compaction failed; keeping original context",
+                    failures=compactor_failures,
+                    limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
+                )
 
         # 6. Build system prompt (calls API for fresh shared memory each iteration)
         current_system_prompt = await system_prompt()
@@ -354,8 +471,10 @@ async def run_agent(  # noqa: C901
 
         # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
+        llm_context = _context_with_plan_fsm_labels(context)
+
         if build_messages:
-            messages = build_messages(context, current_system_prompt)
+            messages = build_messages(llm_context, current_system_prompt)
             if schema_preamble:
                 messages = inject_llm_only_user_preamble(messages, schema_preamble)
         elif not is_inside_temporal_activity:
@@ -364,7 +483,7 @@ async def run_agent(  # noqa: C901
             # The resolve activity populates _file_cache (shared in-process memory).
             # call_llm_activity reads from _pending_llm_context + _file_cache.
             pre_resolved_ids = None
-            file_pointer_dicts = extract_file_pointer_dicts(context)
+            file_pointer_dicts = extract_file_pointer_dicts(llm_context)
             if file_pointer_dicts:
                 try:
                     resolved_list = await execute_activity(
@@ -378,7 +497,7 @@ async def run_agent(  # noqa: C901
                     logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
             # Store context in shared memory — call_llm_activity will build messages inside
             _pending_llm_context[agent_id] = (
-                context,
+                llm_context,
                 current_system_prompt,
                 pre_resolved_ids,
                 user_id,
@@ -386,7 +505,7 @@ async def run_agent(  # noqa: C901
             messages = None  # Signals to use shared state path below
         else:
             messages = await build_llm_messages(
-                context,
+                llm_context,
                 current_system_prompt,
                 llm_only_user_preamble=schema_preamble,
                 user_id=user_id,
@@ -407,6 +526,26 @@ async def run_agent(  # noqa: C901
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
+                llm_started_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                start_event = ToolEvent(
+                    type=EventType.STREAM_MESSAGE,
+                    stream_id=stream_id,
+                    delta="",
+                    done=False,
+                    sequence=sequence[0],
+                    sub_agent_id=task_id,
+                    llm_started_at_ms=llm_started_at_ms,
+                )
+                await handle_tool_event(
+                    event=start_event,
+                    agent_id=agent_id,
+                    tool_call_id=stream_id,
+                    tool_name="llm_call",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
+                    sub_agent_id=task_id,
+                )
+                sequence[0] += 1
 
                 async def on_chunk(text_so_far: str, token_count_chunk: int):  # noqa: B023
                     # Heartbeat so Temporal knows the activity is alive during long LLM calls
@@ -426,6 +565,7 @@ async def run_agent(  # noqa: C901
                             done=False,
                             sequence=sequence[0],  # noqa: B023
                             sub_agent_id=task_id,
+                            llm_started_at_ms=llm_started_at_ms,
                         )
                         await handle_tool_event(
                             event=stream_event,
@@ -506,6 +646,7 @@ async def run_agent(  # noqa: C901
                         done=True,
                         sequence=sequence[0],
                         sub_agent_id=task_id,
+                        llm_started_at_ms=llm_started_at_ms,
                     )
                     await handle_tool_event(
                         event=final_event,
@@ -1193,6 +1334,38 @@ async def run_agent(  # noqa: C901
                 if len(recent_verifier_scores) > 5:
                     recent_verifier_scores.pop(0)
 
+                # The verifier posted IN_PROGRESS + FINISHED tool_result rows to
+                # the DB for this attempt_completion call. Without a refresh, the
+                # locally-returned context still only contains the handler's
+                # IN_PROGRESS row — and any downstream LLM call serializing
+                # context as a Codex Responses API conversation sees an orphan
+                # function_call (no matching function_call_output), which 400s
+                # with "No tool output found for function call <id>". Pull the
+                # verifier's FINISHED row back into context here so the pair is
+                # closed on every exit path below.
+                if poll_messages:
+                    last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+                elif tool_call_id and not any(
+                    msg.get("role") == "TOOL"
+                    and (msg.get("metadata") or {}).get("toolCallId") == tool_call_id
+                    and (msg.get("metadata") or {}).get("toolStatus") == "FINISHED"
+                    for msg in context
+                ):
+                    context.append(
+                        {
+                            "role": "TOOL",
+                            "text": v_reasoning or "",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "metadata": {
+                                "toolCallId": tool_call_id,
+                                "toolName": "attempt_completion",
+                                "toolStatus": "FINISHED",
+                                "title": f"⚖️ Progress: {score * 100:.0f}%",
+                                "verifierMessage": True,
+                            },
+                        }
+                    )
+
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
@@ -1250,13 +1423,17 @@ async def run_agent(  # noqa: C901
                     "message": f"LLM returned no tool calls {no_tool_count} consecutive times",
                 }
 
+            available = ", ".join(tools) if tools else "(none registered)"
             if is_plan_loop:
                 nudge = (
-                    "You MUST call tools to make progress. Available tools: set_plan, attempt_completion, spawn_agent (explore), send_message_to_user. "
+                    f"You MUST call tools to make progress. Available tools: {available}. "
                     "Start by calling set_plan with your execution plan, then call attempt_completion."
                 )
             else:
-                nudge = "You MUST call tools to make progress. Review the plan and call the appropriate tool to continue execution."
+                nudge = (
+                    f"You MUST call tools to make progress. Available tools: {available}. "
+                    "Call one of the listed tools — do not respond with text only."
+                )
             context.append(
                 {
                     "role": "SYSTEM",
@@ -1373,13 +1550,15 @@ async def run_agent(  # noqa: C901
 
 
 def _estimate_tokens(context: List[Dict]) -> int:
-    """Rough token estimation: ~4 chars per token.
+    """Rough token estimation: ~4 chars per token × safety multiplier.
 
     Excludes sub-agent internal messages (tagged with subAgentId) since
-    these are filtered out before sending to the LLM.
+    these are filtered out before sending to the LLM. The chars/4 heuristic
+    severely under-counts JSON-heavy content (observed 308k actual Anthropic
+    tokens reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
     """
     text = "\n".join([m.get("text", "") for m in context if not (m.get("metadata") or {}).get("subAgentId")])
-    return len(text) // 4
+    return int((len(text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
 
 
 async def _compress_context(
@@ -1396,32 +1575,44 @@ async def _compress_context(
     gpt_account_id: Optional[str] = None,
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
-) -> List[Dict]:
-    """Compress context using LLM."""
-    result = await execute_activity(
-        compress_context,
-        args=[
-            context,
-            len(context),
-            model,
-            claude_token,
-            claude_token_source,
-            claude_token_pool_id,
-            user_id,
-            gpt_token,
-            gpt_account_id,
-            gpt_token_source,
-            gpt_token_pool_id,
-            user_id,
-            agent_id,
-        ],
-        start_to_close_timeout=timedelta(seconds=60),
-        retry_policy=RetryPolicy(maximum_attempts=3),
-    )
+) -> Tuple[List[Dict], bool]:
+    """Compress context using the head/tail-protected compactor.
 
-    # Unpack result (compress_context returns {"learnings": str, "usage": dict})
-    learnings = result.get("learnings", "") if isinstance(result, dict) else result
-    usage = result.get("usage", {}) if isinstance(result, dict) else {}
+    Returns (new_context, success). On any failure (activity raised, LLM
+    error, output empty) returns (original_context, False) — caller is
+    responsible for circuit-breaking after repeated failures.
+    """
+    try:
+        result = await execute_activity(
+            compress_context,
+            args=[
+                context,
+                len(context),
+                model,
+                claude_token,
+                claude_token_source,
+                claude_token_pool_id,
+                user_id,
+                gpt_token,
+                gpt_account_id,
+                gpt_token_source,
+                gpt_token_pool_id,
+                user_id,
+                agent_id,
+            ],
+            start_to_close_timeout=timedelta(seconds=180),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+    except Exception as e:
+        logger.warning(f"Compactor activity raised: {e}")
+        return context, False
+
+    if not isinstance(result, dict):
+        return context, False
+
+    success = bool(result.get("success", False))
+    new_context = result.get("context") if success else None
+    usage = result.get("usage") or {}
 
     # Route cost through on_tokens for proper tracking
     if on_tokens and usage:
@@ -1445,7 +1636,10 @@ async def _compress_context(
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")
 
-    return [{"role": "SYSTEM", "text": learnings, "timestamp": datetime.now(timezone.utc).isoformat()}]
+    if not success or not new_context:
+        return context, False
+
+    return new_context, True
 
 
 async def _run_verifier(

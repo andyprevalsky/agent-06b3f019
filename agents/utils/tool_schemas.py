@@ -261,38 +261,19 @@ class WebSearchTool(BaseModel):
 
 
 class WebFetchTool(BaseModel):
-    """Fetch and extract content from a URL with JavaScript rendering."""
+    """Fetch a URL with JavaScript rendering; a small fast model filters the page to your objective."""
 
     tool: Literal["web_fetch"]
-    url: str = Field(description="A fully-formed valid URL to fetch and extract content from.")
-    objective: str = Field(description="What content to focus on extracting from the page.")
-    excerpts: bool = Field(
-        default=True,
+    url: str = Field(description="A fully-formed valid URL to fetch.")
+    objective: str = Field(
         description=(
-            "Set to True for objective-focused excerpts. Mutually exclusive with full_content; "
-            "if both are set, full_content wins and this field is reset to False during validation."
+            "What you need from this page. The page is rendered, then a small "
+            "fast model produces an objective-focused summary AND picks which "
+            "of the page's links to download. If you need files (PDFs, CSVs, "
+            "etc.), say so explicitly in the objective, e.g. 'extract the "
+            "membership PDFs', 'download the spec sheet'."
         ),
     )
-    full_content: bool = Field(
-        default=False,
-        description="Set to True for complete page content. Wins over excerpts when both are set.",
-    )
-    download_files: Optional[List[str]] = Field(
-        default=None,
-        description=(
-            "File extensions to auto-download from the page. Discovered URLs matching these "
-            "extensions are downloaded and returned as file pointers."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def check_fetch_mode(self) -> "WebFetchTool":
-        # full_content wins when both are set - instead of crashing the whole
-        # AgentAction parse (which used to fail with 7 union errors and abort
-        # the agent's iteration), silently resolve to full_content mode.
-        if self.full_content and self.excerpts:
-            self.excerpts = False
-        return self
 
 
 class GrepTool(BaseModel):
@@ -511,6 +492,50 @@ class SpawnAgentTool(BaseModel):
         return self
 
 
+class SpawnExploreAgentTool(BaseModel):
+    """Spawn a read-only explore agent to gather information during PLAN.
+
+    Narrowed variant of SpawnAgentTool: during PLAN only explore agents are
+    permitted. Schema-level narrowing is cheaper than a runtime rejection
+    loop — the LLM cannot pick an invalid `type` and we drop ~600 tokens of
+    per-type field guidance the model would otherwise have to reason past.
+    """
+
+    tool: Literal["spawn_agent"]
+    type: Literal["explore"] = Field(
+        default="explore",
+        description=(
+            "Must be 'explore'. PLAN is read-only: only explore agents are "
+            "legal here. To spawn anything else, finish PLAN with "
+            "attempt_completion first."
+        ),
+    )
+    goal: str = Field(
+        description=(
+            "The self-contained task/prompt and description for the spawned agent. "
+            "Spawned agents have no access to ANY of your context by default. "
+            "The goal and attachments parameters are their ONLY source of information. "
+            "Include all relevant pieces of information. "
+            f"{SELF_CONTAINED_GOAL_RULE.strip()}"
+        )
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional when the spawned agent needs files from the current context. "
+            "Use exact `original_filename` values from file_pointer objects."
+        ),
+    )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Optional. Applicable keys are 'network' and 'recent_communications'. "
+            "Missing keys default to true (context flows through to the agent). "
+            "Set a key to false only when that context is clearly unnecessary."
+        ),
+    )
+
+
 # ============================================================================
 # Plan Phase Tools
 # ============================================================================
@@ -613,6 +638,13 @@ TOOL_MODELS: ToolRegistry = {
     "call_phone_number": CallPhoneNumberTool,
     # Local data search
     "grep": GrepTool,
+}
+
+# Phase-specific override registry. PLAN narrows spawn_agent to the explore-only
+# variant; everything else inherits from TOOL_MODELS.
+PLAN_TOOL_MODELS: ToolRegistry = {
+    **TOOL_MODELS,
+    "spawn_agent": SpawnExploreAgentTool,
 }
 
 # Tools available inside the explore agent (subset of read-only tools)

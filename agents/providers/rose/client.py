@@ -49,7 +49,6 @@ from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
-    tool_requires_forced_choice,
 )
 from providers.rose.types import (
     ChunkKind,
@@ -63,15 +62,24 @@ from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
 
-_DEFAULT_DEADLINE_S = 120.0
-_DEFAULT_TTFT_TIMEOUT_S = 20.0
-# Per-chunk idle timeout *after* the first productive chunk. The overall
-# deadline (120s) is too coarse to catch mid-stream stalls fast enough — a
-# single hung sub-agent LLM call burns the full deadline before raising, and
-# the retry burns another deadline. 60s allows long thinking pauses while
-# still recovering from peer disconnects / silent half-closes inside the
-# activity budget.
-_DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 60.0
+# Wall-clock cap for the whole streaming call. Sits just under the 180s
+# Temporal start_to_close for call_llm_activity (PLAN/EXECUTE). Raw-wire
+# repros show 150k Anthropic contexts completing at 91-113s; 170s gives
+# headroom without bleeding into the activity-kill window.
+_DEFAULT_DEADLINE_S = 170.0
+# TTFT: Anthropic 150k cache-warm contexts TTFB at 6-15s; 45s was sufficient
+# there. But Codex Responses API on gpt-5.5 with large explore-agent contexts
+# (network metadata + 200-contact rollup + tool results) regularly TTFBs at
+# 30-60s, and the 45s ceiling was firing as a spurious stall on healthy calls.
+# Observed in outreach-batch: 10 explore_agent gpt calls hit the 45s TTFT,
+# then rotated to claude and succeeded in ~9s — burning ~450s per run on a
+# threshold mismatched to the actual provider. 90s tolerates Codex cold-start
+# while still catching genuine half-closed connections.
+_DEFAULT_TTFT_TIMEOUT_S = 90.0
+# Per-chunk idle *after* the first productive chunk. Anthropic batches large
+# 150k responses with 26-30s silences between bursts; 120s clears those
+# while still catching half-closed connections.
+_DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 
 # Errors from claude_auth that mean "try the waterfall next" — as long as
@@ -83,6 +91,14 @@ _FALL_THROUGH_ERRORS = (
     RoseAuthError,
     RoseRateLimitError,
 )
+
+# Stall-retry budget for direct-auth attempts. Empty: the new 45s TTFT
+# already covers cold-start jitter, and 150k Anthropic batched responses
+# need the full deadline window — not three escalating retries that each
+# kill the connection right before the model's flush burst arrives.
+# A real stall still falls through to rotation/waterfall on the first
+# attempt (see classify_*_token_error below).
+_STALL_TTFT_MULTIPLIERS: tuple[float, ...] = ()
 
 
 def _is_synthetic_output_toolset(tools: Optional[List[Dict[str, Any]]]) -> bool:
@@ -244,7 +260,13 @@ class RoseClient:
             # native tools only for real tool-call models.
             if not _is_synthetic_output_toolset(direct_auth_tools):
                 claude_auth_tools = direct_auth_tools
-            if claude_auth_tools and any(tool_requires_forced_choice(tool) for tool in claude_auth_tools):
+            if claude_auth_tools:
+                # response_model is the explicit signal that "tool_calls is the
+                # only legal response shape." `auto` lets Anthropic emit prose
+                # instead — when it does, the streaming parser shoves text into
+                # the JSON envelope slot and json.loads explodes (Expecting
+                # value: line 1 column 1). Mirror gpt_auth (just below): force
+                # `any` whenever native tools are populated.
                 claude_auth_tool_choice = "any"
         if gpt_auth is not None:
             # Plain structured-output models are better enforced by the
@@ -275,10 +297,15 @@ class RoseClient:
         remaining = lambda: deadline_s - (time.monotonic() - started)
         last_heartbeat = started
 
-        async def _guarded(source: AsyncIterator[StreamChunk]) -> AsyncIterator[StreamChunk]:
+        async def _guarded(
+            source: AsyncIterator[StreamChunk],
+            *,
+            ttft_override: Optional[float] = None,
+        ) -> AsyncIterator[StreamChunk]:
             """Wrap an upstream generator with deadline + TTFT + idle checks.
 
-            - Before the first productive chunk: enforce `ttft_timeout_s` and
+            - Before the first productive chunk: enforce `ttft_timeout_s` (or
+              `ttft_override` when set, used by the stall-retry path) and
               raise `RoseStallError` so the caller can fall through to the
               waterfall.
             - After the first productive chunk: enforce `idle_timeout_s` (if
@@ -288,6 +315,7 @@ class RoseClient:
               caps total time.
             """
             nonlocal last_heartbeat
+            ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
@@ -301,7 +329,7 @@ class RoseClient:
                     # a finite value catches silent half-closes faster.
                     progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
                 else:
-                    progress_timeout = ttft_timeout_s
+                    progress_timeout = ttft_budget
                 try:
                     chunk = await asyncio.wait_for(it.__anext__(), timeout=min(r, progress_timeout))
                 except asyncio.TimeoutError as exc:
@@ -309,7 +337,7 @@ class RoseClient:
                         raise RoseDeadlineError(
                             f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
                         ) from exc
-                    raise RoseStallError(f"rose.complete TTFT exceeded {ttft_timeout_s}s") from exc
+                    raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s") from exc
                 except StopAsyncIteration:
                     return
                 if chunk.kind in productive_kinds:
@@ -372,126 +400,166 @@ class RoseClient:
             direct_rotations = 0
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
-                attempt_auth = _single_attempt_auth(direct_auth)
-                try:
-                    if direct_auth.token_type == "claude":
-                        source = _try_claude_auth(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            tools=claude_auth_tools,
-                            tool_choice=claude_auth_tool_choice,
-                            response_format=None if claude_auth_tools else openrouter_response_format,
-                            max_tokens=max_tokens,
-                            skip_cache_write=skip_cache_write,
-                            auth=cast(ClaudeAuthContext, attempt_auth),
-                            request_id=rid,
-                            agent_id=agent_id,
-                            call_site=call_site,
-                            thinking=thinking,
-                            effort=effort,
-                            ttft_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
-                        )
-                    else:
-                        source = _try_gpt_auth(
-                            pool_spec=pool_spec,
-                            messages=messages,
-                            tools=gpt_auth_tools,
-                            tool_choice=gpt_auth_tool_choice,
-                            response_format=None if gpt_auth_tools else openrouter_response_format,
-                            temperature=temperature,
-                            effort=effort,
-                            auth=cast(GptAuthContext, attempt_auth),
-                            request_id=rid,
-                            agent_id=agent_id,
-                            call_site=call_site,
-                            ttft_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
-                        )
-
-                    direct_yielded_any = False
+                # Per-token stall-retry: bump TTFT and re-attempt with the
+                # same token before classifying as a fall-through. Cold pool
+                # slots often clear on attempt 2 with a wider window.
+                stall_retry_idx = 0
+                ft_to_handle: Optional[_FallThrough] = None
+                while True:
+                    attempt_auth = _single_attempt_auth(direct_auth)
+                    current_ttft_s = (
+                        ttft_timeout_s * _STALL_TTFT_MULTIPLIERS[stall_retry_idx - 1]
+                        if stall_retry_idx > 0
+                        else ttft_timeout_s
+                    )
                     try:
-                        async for chunk in _guarded(source):
-                            direct_yielded_any = True
-                            if chunk.kind == "metadata" and chunk.data.get("actual_model"):
-                                _seen_actual_model = chunk.data["actual_model"]
-                            elif chunk.kind == "usage":
-                                token_used = _compute_token_payload(direct_auth)
-                                usage_data = {
-                                    **chunk.data,
-                                    "compute_token_used": token_used,
-                                    "compute_token_rotated": direct_rotations > 0,
-                                }
-                                if direct_auth.token_type == "claude":
-                                    usage_data["claude_token_rotated"] = direct_rotations > 0
-                                else:
-                                    usage_data["gpt_token_rotated"] = direct_rotations > 0
-                                chunk = StreamChunk(kind="usage", data=usage_data)
-                                _emit_llm_cache(chunk.data)
-                            yield chunk
-                    except RoseStallError as exc:
-                        if not direct_yielded_any:
-                            raise _FallThrough() from exc
-                        raise
-                    logger.info(
-                        "rose.complete.direct_auth.done",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        token_type=direct_auth.token_type,
-                        rotations=direct_rotations,
-                        elapsed_s=round(time.monotonic() - started, 3),
-                    )
-                    return
-                except _FallThrough as ft:
-                    cause = ft.__cause__
-                    if direct_auth.token_type == "claude":
-                        token_error = (
-                            classify_claude_token_error(cause)
-                            if isinstance(cause, RoseError)
-                            else "server_error"
-                        )
-                        claude_token_error = token_error
-                    else:
-                        token_error = (
-                            classify_gpt_token_error(cause)
-                            if isinstance(cause, RoseError)
-                            else "server_error"
-                        )
-                        gpt_token_error = token_error
-                    direct_token_errors[direct_auth.token_type] = token_error
-                    logger.info(
-                        "rose.complete.direct_auth.failed",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        token_type=direct_auth.token_type,
-                        reason=type(cause).__name__ if cause else "unknown",
-                        token_error=token_error,
-                        rotations=direct_rotations,
-                    )
+                        if direct_auth.token_type == "claude":
+                            source = _try_claude_auth(
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                tools=claude_auth_tools,
+                                tool_choice=claude_auth_tool_choice,
+                                response_format=None if claude_auth_tools else openrouter_response_format,
+                                max_tokens=max_tokens,
+                                skip_cache_write=skip_cache_write,
+                                auth=cast(ClaudeAuthContext, attempt_auth),
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                thinking=thinking,
+                                effort=effort,
+                                ttft_timeout_s=current_ttft_s,
+                                idle_timeout_s=idle_timeout_s,
+                            )
+                        else:
+                            source = _try_gpt_auth(
+                                pool_spec=pool_spec,
+                                messages=messages,
+                                tools=gpt_auth_tools,
+                                tool_choice=gpt_auth_tool_choice,
+                                response_format=None if gpt_auth_tools else openrouter_response_format,
+                                temperature=temperature,
+                                effort=effort,
+                                auth=cast(GptAuthContext, attempt_auth),
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                ttft_timeout_s=current_ttft_s,
+                                idle_timeout_s=idle_timeout_s,
+                            )
 
-                    can_rotate = (
-                        token_error in ("auth_error", "rate_limit")
-                        and direct_rotations < direct_auth.max_rotations
-                        and direct_auth.fetch_fresh is not None
-                    )
-                    if not can_rotate:
+                        direct_yielded_any = False
+                        try:
+                            async for chunk in _guarded(source, ttft_override=current_ttft_s):
+                                direct_yielded_any = True
+                                if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                                    _seen_actual_model = chunk.data["actual_model"]
+                                elif chunk.kind == "usage":
+                                    token_used = _compute_token_payload(direct_auth)
+                                    usage_data = {
+                                        **chunk.data,
+                                        "compute_token_used": token_used,
+                                        "compute_token_rotated": direct_rotations > 0,
+                                    }
+                                    if direct_auth.token_type == "claude":
+                                        usage_data["claude_token_rotated"] = direct_rotations > 0
+                                    else:
+                                        usage_data["gpt_token_rotated"] = direct_rotations > 0
+                                    chunk = StreamChunk(kind="usage", data=usage_data)
+                                    _emit_llm_cache(chunk.data)
+                                yield chunk
+                        except RoseStallError as exc:
+                            if not direct_yielded_any:
+                                raise _FallThrough() from exc
+                            raise
+                        logger.info(
+                            "rose.complete.direct_auth.done",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            token_type=direct_auth.token_type,
+                            rotations=direct_rotations,
+                            stall_retries=stall_retry_idx,
+                            elapsed_s=round(time.monotonic() - started, 3),
+                        )
+                        return
+                    except _FallThrough as ft:
+                        cause = ft.__cause__
+                        if (
+                            isinstance(cause, RoseStallError)
+                            and stall_retry_idx < len(_STALL_TTFT_MULTIPLIERS)
+                        ):
+                            stall_retry_idx += 1
+                            next_ttft_s = ttft_timeout_s * _STALL_TTFT_MULTIPLIERS[stall_retry_idx - 1]
+                            logger.info(
+                                "rose.complete.direct_auth.stall_retry",
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                token_type=direct_auth.token_type,
+                                attempt=stall_retry_idx,
+                                next_ttft_s=next_ttft_s,
+                            )
+                            continue
+                        ft_to_handle = ft
                         break
-                    fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
-                    if fresh is None:
-                        break
-                    direct_rotations += 1
-                    direct_auth = fresh
-                    logger.info(
-                        "rose.complete.direct_auth.rotated",
-                        request_id=rid,
-                        agent_id=agent_id,
-                        call_site=call_site,
-                        next_token_type=direct_auth.token_type,
-                        next_source=direct_auth.source,
-                        rotations=direct_rotations,
+
+                ft = ft_to_handle
+                assert ft is not None
+                cause = ft.__cause__
+                if direct_auth.token_type == "claude":
+                    token_error = (
+                        classify_claude_token_error(cause)
+                        if isinstance(cause, RoseError)
+                        else "server_error"
                     )
+                    claude_token_error = token_error
+                else:
+                    token_error = (
+                        classify_gpt_token_error(cause)
+                        if isinstance(cause, RoseError)
+                        else "server_error"
+                    )
+                    gpt_token_error = token_error
+                direct_token_errors[direct_auth.token_type] = token_error
+                logger.info(
+                    "rose.complete.direct_auth.failed",
+                    request_id=rid,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    token_type=direct_auth.token_type,
+                    reason=type(cause).__name__ if cause else "unknown",
+                    token_error=token_error,
+                    rotations=direct_rotations,
+                    stall_retries=stall_retry_idx,
+                )
+
+                # Stalls are rotation-eligible immediately: cold-start jitter
+                # is absorbed by the 45s TTFT, and Anthropic's batched-response
+                # silences are absorbed by the 120s idle window. A stall here
+                # means the token/route itself is unhealthy, so rotate.
+                can_rotate = (
+                    token_error in ("auth_error", "rate_limit", "stall")
+                    and direct_rotations < direct_auth.max_rotations
+                    and direct_auth.fetch_fresh is not None
+                )
+                if not can_rotate:
+                    break
+                fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                if fresh is None:
+                    break
+                direct_rotations += 1
+                direct_auth = fresh
+                logger.info(
+                    "rose.complete.direct_auth.rotated",
+                    request_id=rid,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    next_token_type=direct_auth.token_type,
+                    next_source=direct_auth.source,
+                    rotations=direct_rotations,
+                    token_error=token_error,
+                )
 
             if direct_token_errors:
                 claude_token_error = direct_token_errors.get("claude", claude_token_error)

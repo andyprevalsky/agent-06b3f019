@@ -18,7 +18,8 @@
  * Props determine visual state:
  * - plan.status: 'planning' | 'ready' | 'executing' | 'complete' | 'error'
  * - toolStatus: 'IN_PROGRESS' | 'FINISHED' | 'ERROR' (shimmer effect / error state)
- * - charCount: number (animated char counter shown during streaming)
+ * - charCount: number (converted to animated token estimate during streaming)
+ * - streamStartedAtMs: LLM request start timestamp for elapsed timer
  */
 
 import { memo, useState, useMemo } from 'react';
@@ -46,6 +47,8 @@ interface PlanChipProps {
   toolStatus?: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   /** Character count to display with spring animation when streaming */
   charCount?: number;
+  /** LLM request start timestamp for streaming elapsed time */
+  streamStartedAtMs?: number;
 }
 
 /**
@@ -59,11 +62,13 @@ export const PlanChip = memo(function PlanChip({
   className,
   toolStatus = 'FINISHED',
   charCount = 0,
+  streamStartedAtMs,
 }: PlanChipProps) {
   const isError = toolStatus === 'ERROR';
   const [isExpanded, setIsExpanded] = useState(isError);
   const isStreaming = toolStatus === 'IN_PROGRESS';
-  const animatedCharCount = useAnimatedCounter(charCount, 0.3);
+  const tokenCount = Math.round(charCount / 4);
+  const animatedTokenCount = useAnimatedCounter(tokenCount, 0.3);
 
   const { sortedTasks, headerText } = useMemo(() => {
     const tasks = plan.tasks || [];
@@ -96,8 +101,9 @@ export const PlanChip = memo(function PlanChip({
           isExpanded={isExpanded}
           isError={isError}
           isStreaming={isStreaming}
-          charCount={charCount}
-          animatedCharCount={animatedCharCount}
+          tokenCount={tokenCount}
+          animatedTokenCount={animatedTokenCount}
+          streamStartedAtMs={streamStartedAtMs}
           onToggle={toggleExpanded}
         />
 

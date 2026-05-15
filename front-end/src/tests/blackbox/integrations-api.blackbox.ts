@@ -66,16 +66,12 @@ describe('integrations/api', () => {
       server.use(
         http.get(`${API_BASE}/integrations`, () =>
           HttpResponse.json({
-            integrations: [
-              { id: 'gmail', name: 'Gmail', status: 'CONNECTED', isActive: true },
-            ],
+            integrations: [{ id: 'gmail', name: 'Gmail', status: 'CONNECTED', isActive: true }],
           }),
         ),
       );
       const out = await fetchIntegrationsApi();
-      expect(out).toEqual([
-        { id: 'gmail', name: 'Gmail', status: 'CONNECTED', isActive: true },
-      ]);
+      expect(out).toEqual([{ id: 'gmail', name: 'Gmail', status: 'CONNECTED', isActive: true }]);
     });
 
     it('returns [] when integrations field is missing', async () => {
@@ -139,8 +135,9 @@ describe('integrations/api', () => {
 
     it('falls back to a default message when payload has no error', async () => {
       server.use(
-        http.post(`${API_BASE}/integrations/contacts/upload`, () =>
-          new HttpResponse('not-json', { status: 500 }),
+        http.post(
+          `${API_BASE}/integrations/contacts/upload`,
+          () => new HttpResponse('not-json', { status: 500 }),
         ),
       );
       const file = new File(['x'], 'c.vcf');
@@ -220,8 +217,9 @@ describe('integrations/api', () => {
 
     it('throws default message on non-OK with unparseable body', async () => {
       server.use(
-        http.post(`${API_BASE}/integrations/passwords/request`, () =>
-          new HttpResponse('<html>', { status: 500 }),
+        http.post(
+          `${API_BASE}/integrations/passwords/request`,
+          () => new HttpResponse('<html>', { status: 500 }),
         ),
       );
       await expect(sendPasswordRequestApi('x')).rejects.toThrow(/failed to send request/i);
@@ -252,8 +250,9 @@ describe('integrations/api', () => {
 
     it('falls back to default message when body is unreadable', async () => {
       server.use(
-        http.post(`${API_BASE}/integrations/passwords/apple/upload`, () =>
-          new HttpResponse(null, { status: 500 }),
+        http.post(
+          `${API_BASE}/integrations/passwords/apple/upload`,
+          () => new HttpResponse(null, { status: 500 }),
         ),
       );
       const file = new File(['x'], 'p.csv');
@@ -292,9 +291,7 @@ describe('integrations/api', () => {
     });
 
     it('throws default message when error field missing', async () => {
-      server.use(
-        http.post(`${API_BASE}/agents`, () => HttpResponse.json({}, { status: 500 })),
-      );
+      server.use(http.post(`${API_BASE}/agents`, () => HttpResponse.json({}, { status: 500 })));
       await expect(createLinkedInSyncAgentApi()).rejects.toThrow(/failed to create agent/i);
     });
   });

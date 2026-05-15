@@ -39,6 +39,26 @@ def _truncate_pattern(pattern: str) -> str:
     return pattern[: DISPLAY_PATTERN_MAX_LENGTH - 3] + "..."
 
 
+def _format_source(source: str) -> str:
+    return source.replace("_", " ") if source else "messages"
+
+
+def _format_grep_title(prefix: str, pattern: str, source: str, person_id: Optional[str], since: Optional[str]) -> str:
+    display_pattern = _truncate_pattern(pattern)
+    source_label = _format_source(source)
+    query = f'"{display_pattern}"' if display_pattern else "all messages"
+    qualifiers = []
+    if person_id:
+        qualifiers.append("selected person")
+    if since:
+        qualifiers.append(f"since {since}")
+
+    title = f"{prefix} {source_label} for {query}"
+    if qualifiers:
+        title += f" ({', '.join(qualifiers)})"
+    return title
+
+
 async def execute_grep(
     execute_activity: ExecuteActivityCallable,
     tool_call: Dict[str, Any],
@@ -52,7 +72,9 @@ async def execute_grep(
     person_id = tool_call.get("person_id")
     since = tool_call.get("since")
 
-    display_pattern = _truncate_pattern(pattern)
+    progress_title = _format_grep_title("Searching", pattern, source, person_id, since)
+    completed_title = _format_grep_title("Searched", pattern, source, person_id, since)
+    failed_title = _format_grep_title("Grep failed searching", pattern, source, person_id, since)
 
     start_time = _safe_time()
 
@@ -60,7 +82,7 @@ async def execute_grep(
     await handle_tool_event(
         event=ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"Grep: {display_pattern}" if display_pattern else "Grep: all messages",
+            title=progress_title,
             message="",
             status=MessageStatus.IN_PROGRESS,
         ),
@@ -104,7 +126,7 @@ async def execute_grep(
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=f"Grep: {display_pattern}" if display_pattern else "Grep completed",
+                title=completed_title,
                 message=message,
                 status=MessageStatus.FINISHED,
             ),
@@ -136,7 +158,7 @@ async def execute_grep(
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=f"Grep failed: {display_pattern}" if display_pattern else "Grep failed",
+                title=failed_title,
                 message=error_message,
                 status=MessageStatus.ERROR,
             ),

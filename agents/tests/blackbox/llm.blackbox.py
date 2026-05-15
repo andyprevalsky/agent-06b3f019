@@ -3,7 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import (
     BlackboxResult,
@@ -2326,7 +2326,9 @@ async def test_call_planner_llm_activity_happy_path():
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
     assert planner_body["model"] == "claude-sonnet-4-6"
     assert planner_body["stream"] is True
-    assert planner_body["output_config"]["effort"] == "max"
+    # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
+    # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
+    assert planner_body["output_config"]["effort"] == "xhigh"
 
 
 async def test_call_llm_activity_happy_path_with_messages_list():
@@ -2357,7 +2359,9 @@ async def test_call_llm_activity_happy_path_with_messages_list():
 
     set_mock_handler(handler)
 
-    with patch("temporalio.activity.heartbeat"):
+    with patch("temporalio.activity.heartbeat"), patch(
+        "helpers.llm.stream_assistant_chunk", new_callable=AsyncMock
+    ) as stream_mock:
         result = await call_llm_activity(
             messages_or_agent_id=[{"role": "user", "content": "hi"}],
             model="rose-labs/rose-1-lite",
@@ -2372,6 +2376,11 @@ async def test_call_llm_activity_happy_path_with_messages_list():
     assert result["tool_calls"] == []
     assert result["usage"]["total_tokens"] == 30
     assert result["detected_tools_ordered"] == []
+    first_stream = stream_mock.await_args_list[0].kwargs
+    assert first_stream["delta"] == ""
+    assert first_stream["done"] is False
+    assert first_stream["sequence"] == 0
+    assert isinstance(first_stream["llm_started_at_ms"], int)
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():

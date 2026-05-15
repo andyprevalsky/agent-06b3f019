@@ -52,6 +52,7 @@ export interface ExploreStep {
   timestamp?: string;
   message?: string;
   toolName?: string;
+  toolCallId?: string;
 }
 
 // ─── Wait-For Chip ────────────────────────────────────────────────────────
@@ -129,7 +130,16 @@ export interface ClaudeCodeChipProps {
 export interface OutputField {
   key: string;
   label: string;
-  value: string | number | string[] | FilePointer | FilePointer[] | Record<string, unknown>;
+  value:
+    | string
+    | number
+    | boolean
+    | null
+    | string[]
+    | unknown[]
+    | FilePointer
+    | FilePointer[]
+    | Record<string, unknown>;
 }
 
 export interface ToolUsage {
