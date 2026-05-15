@@ -4,7 +4,7 @@
  *   [MOUNT] → load looping video → [PLAYING]
  *   [PLAYING] ─(hue prop changes)→ CSS hue-rotate retints frames → [PLAYING]
  *
- * The asset is a pre-rendered orb animation served from /voice-orb.mp4.
+ * The asset is a pre-rendered orb animation served from the Vite public dir.
  * `objectFit: cover` keeps the orb at full size (the source is 4:3 with the
  * orb centered), and a circular clip-path crops just outside the orb's
  * bounds to hide the white background.
@@ -18,6 +18,11 @@ interface VoiceOrbProps {
   size?: number;
 }
 
+export const resolveVoiceOrbSrc = (baseUrl: string = import.meta.env.BASE_URL): string => {
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return `${normalizedBase}voice-orb.mp4`;
+};
+
 const VoiceOrb = ({ hue, size = 220 }: VoiceOrbProps): JSX.Element => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -30,7 +35,7 @@ const VoiceOrb = ({ hue, size = 220 }: VoiceOrbProps): JSX.Element => {
   return (
     <video
       ref={videoRef}
-      src="/voice-orb.mp4"
+      src={resolveVoiceOrbSrc()}
       autoPlay
       loop
       muted
