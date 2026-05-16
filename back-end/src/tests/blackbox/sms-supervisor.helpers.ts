@@ -10,6 +10,7 @@
  */
 
 import type { PrismaClient } from '@prisma/client';
+import { buildSmsContext } from '../../providers/smsSupervisor/contextBuilder';
 
 export const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 
@@ -225,6 +226,98 @@ export async function cleanupSessionScopedUser(
 ): Promise<void> {
   await prisma.smsSession.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
+}
+
+// ==================== CONTEXT ASSERTIONS ====================
+
+export async function assertRecentCompletedRootStaysInHierarchy(
+  prisma: PrismaClient
+): Promise<void> {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const recentSummary = 'Recent completion summary for SMS context retention';
+  const oldSummary = 'Old completion summary should not be visible';
+
+  try {
+    const recentAgent = await prisma.agent.create({
+      data: {
+        userId,
+        goal: 'Recent completed SMS root',
+        status: 'COMPLETED',
+        source: 'SMS',
+        progress: 1,
+      },
+    });
+    await prisma.message.create({
+      data: {
+        agentId: recentAgent.id,
+        role: 'TOOL',
+        text: recentSummary,
+        metadata: {
+          isFinalSummary: true,
+          toolName: 'completion_summary',
+          title: 'Completion summary',
+          completionSummary: { summary: recentSummary },
+        },
+      },
+    });
+
+    const oldAgent = await prisma.agent.create({
+      data: {
+        userId,
+        goal: 'Old completed SMS root',
+        status: 'COMPLETED',
+        source: 'SMS',
+        progress: 1,
+      },
+    });
+    await prisma.message.create({
+      data: {
+        agentId: oldAgent.id,
+        role: 'TOOL',
+        text: oldSummary,
+        metadata: {
+          isFinalSummary: true,
+          toolName: 'completion_summary',
+          title: 'Completion summary',
+          completionSummary: { summary: oldSummary },
+        },
+      },
+    });
+    await prisma.$executeRaw`
+      UPDATE "Agent"
+      SET "updatedAt" = NOW() - INTERVAL '8 days'
+      WHERE id = ${oldAgent.id}
+    `;
+
+    const context = await buildSmsContext(userId);
+
+    if (!context.contextUserMessage.includes('Recent completed SMS root')) {
+      throw new Error(
+        `Expected recent completed root in hierarchy:\n${context.contextUserMessage}`
+      );
+    }
+    if (!context.contextUserMessage.includes('COMPLETED')) {
+      throw new Error(`Expected completed status in hierarchy:\n${context.contextUserMessage}`);
+    }
+    if (!context.contextUserMessage.includes(recentSummary)) {
+      throw new Error(
+        `Expected recent completion summary in context:\n${context.contextUserMessage}`
+      );
+    }
+    if (context.contextUserMessage.includes('Old completed SMS root')) {
+      throw new Error(
+        `Did not expect old completed root in hierarchy:\n${context.contextUserMessage}`
+      );
+    }
+    if (context.contextUserMessage.includes(oldSummary)) {
+      throw new Error(
+        `Did not expect old completion summary in context:\n${context.contextUserMessage}`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
 }
 
 // ==================== TEST RUNNER ====================

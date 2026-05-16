@@ -656,22 +656,23 @@ async function commitStartNewAgent(
       workflowId,
     });
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Failed to start workflow', {
       phase: 'start',
       agentId: agent.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMsg,
     });
 
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { status: 'FAILED', statusMessage: 'Failed to start workflow' },
+      data: { status: 'FAILED', statusMessage: `Failed to start workflow: ${errorMsg}` },
     });
 
     return {
       tool: 'start_new_agent',
       success: false,
       result: '',
-      error: 'Failed to start agent workflow',
+      error: `Failed to start agent workflow: ${errorMsg}`,
     };
   }
 

@@ -23,6 +23,7 @@ import {
   BYPASS_FIXTURE_REAL_LLM,
   TestResult,
   assertStatus,
+  assertRecentCompletedRootStaysInHierarchy,
   buildStartNewAgentFixture,
   captureToken,
   cleanupAgentScopedUser,
@@ -40,6 +41,8 @@ import {
   uniqueSmsPhone,
   waitFor,
 } from './sms-supervisor.helpers';
+import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
+import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 config();
 
 const prisma = new PrismaClient();
@@ -379,6 +382,32 @@ async function testWriteCommit_startNewAgentCommitsOnAttemptCompletion() {
   }
 }
 
+// ==================== WRITE-TOOL COMMIT FAILURE REPORTING ====================
+
+async function testWriteCommit_failureBuildsUserVisibleError() {
+  const op: PendingOp = {
+    kind: 'increase_budget',
+    args: { agent_id_or_prefix: 'missing-agent', amount_dollars: 10 },
+    agentId: 'missing-agent',
+  };
+  const results = await commitPendingWrites([op], 'missing-user');
+  const failures = results.filter((result) => !result.success);
+  if (failures.length !== 1) {
+    throw new Error(`Expected one failed commit result, got ${JSON.stringify(results)}`);
+  }
+
+  const message = buildToolFailureMessage(failures, 'commit');
+  if (!message.includes('increase_budget') || !message.includes('no longer exists')) {
+    throw new Error(`Expected commit failure details in user-visible message, got: ${message}`);
+  }
+  if (!message.includes(failures[0].error ?? '')) {
+    throw new Error(`Expected exact commit error in user-visible message, got: ${message}`);
+  }
+  if (/started|completed successfully/i.test(message)) {
+    throw new Error(`Failure message must not claim success, got: ${message}`);
+  }
+}
+
 // ==================== WS-2 SUPPRESSED-RUN DISCARD — pendingWrites dropped ====================
 
 async function testWs2_suppressedRunDiscardsStartNewAgent() {
@@ -606,6 +635,10 @@ async function runAll() {
 
   const tests: { name: string; fn: () => Promise<void> }[] = [
     {
+      name: 'context -- recently completed roots stay in SMS hierarchy for 7 days',
+      fn: () => assertRecentCompletedRootStaysInHierarchy(prisma),
+    },
+    {
       name: 'smoke -- inbound SMS runs supervisor loop and sends SMS response',
       fn: testSmoke_knownPhoneSupervisorSendsSmsResponse,
     },
@@ -624,6 +657,10 @@ async function runAll() {
     {
       name: 'write-commit -- start_new_agent fires on attempt_completion',
       fn: testWriteCommit_startNewAgentCommitsOnAttemptCompletion,
+    },
+    {
+      name: 'write-commit -- commit failure produces user-visible error',
+      fn: testWriteCommit_failureBuildsUserVisibleError,
     },
     {
       name: 'ws2 -- suppressed run discards queued start_new_agent',

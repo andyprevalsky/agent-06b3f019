@@ -38,6 +38,9 @@ const MAX_MESSAGES_PER_AGENT = 3;
 const MAX_TOTAL_MESSAGES = 15;
 // Only include messages from agents updated within this window
 const RECENT_AGENT_WINDOW_HOURS = 2;
+// Keep recently completed root agents visible so the SMS supervisor can
+// reconcile follow-up texts with completion SMSes the user already saw.
+const COMPLETED_ROOT_RETENTION_DAYS = 7;
 // Max attention requests to include
 const MAX_ATTENTION_REQUESTS = 10;
 // Max root agents to include in hierarchy
@@ -137,10 +140,12 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   // Fetch visible messages from recently active agents
   const recentAgentIds = rootAgents
     .filter((a) => {
-      const isRecent =
-        Date.now() - new Date(a.updatedAt).getTime() < RECENT_AGENT_WINDOW_HOURS * 60 * 60 * 1000;
+      const ageMs = Date.now() - new Date(a.updatedAt).getTime();
+      const isRecent = ageMs < RECENT_AGENT_WINDOW_HOURS * 60 * 60 * 1000;
       const isActive = ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'].includes(a.status);
-      return isRecent || isActive;
+      const isRetainedCompletion =
+        a.status === 'COMPLETED' && ageMs < COMPLETED_ROOT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+      return isRecent || isActive || isRetainedCompletion;
     })
     .map((a) => a.id);
 
@@ -241,14 +246,23 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
 // ============================================
 
 async function fetchAgentHierarchy(userId: string) {
+  const completedSince = new Date(Date.now() - COMPLETED_ROOT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
   const rootAgents = await prisma.agent.findMany({
     where: {
       userId,
       parentAgentId: null,
       deletedAt: null,
-      status: {
-        in: ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'],
-      },
+      OR: [
+        {
+          status: {
+            in: ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'],
+          },
+        },
+        {
+          status: 'COMPLETED',
+          updatedAt: { gte: completedSince },
+        },
+      ],
     },
     orderBy: { createdAt: 'desc' },
     take: MAX_ROOT_AGENTS,
@@ -407,10 +421,10 @@ async function fetchShortcodesForRequests(
 
 function formatAgentHierarchy(rootAgents: RootAgentNode[]): string {
   if (rootAgents.length === 0) {
-    return '# Your Active Agents\n\nNo active agents.';
+    return '# Agent Hierarchy\n\nNo active or recently completed agents.';
   }
 
-  const lines = ['# Your Active Agents\n'];
+  const lines = ['# Agent Hierarchy\n'];
 
   for (const root of rootAgents) {
     const prefix = root.id.substring(0, 6);

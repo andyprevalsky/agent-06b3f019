@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: sonner.tsx (Sonner Toaster)
+ *
+ * [TOAST_CREATED] --> Sonner receives toast event
+ *        |
+ *        v
+ * [TOP_RIGHT_VIEWPORT] --> Sonner renders toast stack at viewport top-right
+ *        |
+ *        v
+ * [DISMISSED] --> Sonner timeout / action removes toast
+ */
+
 import { useTheme } from 'next-themes';
 import { Toaster as Sonner, toast } from 'sonner';
 
@@ -9,6 +21,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={theme as ToasterProps['theme']}
+      position="top-right"
       className="toaster group"
       toastOptions={{
         classNames: {
