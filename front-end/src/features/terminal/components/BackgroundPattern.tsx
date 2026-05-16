@@ -8,6 +8,8 @@
 
 import { SmallTileAnimationCanvas } from '@/features/terminal-component-group';
 
+import { GridEnergyPills } from './GridEnergyPills';
+
 interface BackgroundPatternProps {
   patternOffset: { x: number; y: number };
   tileColors: Map<string, number>;
@@ -41,6 +43,19 @@ export function BackgroundPattern({
         <LargeTileCorners />
       </svg>
 
+      <svg
+        className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
+        xmlns="http://www.w3.org/2000/svg"
+        style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
+      >
+        <TerminalEnergyMask />
+        <GridEnergyPills
+          idPrefix="terminal-grid-energy"
+          patternOffset={patternOffset}
+          maskId="terminal-energy-large-tile-mask"
+        />
+      </svg>
+
       <SmallTileAnimationCanvas
         key={animationResetKey}
         enabled={true}
@@ -50,6 +65,36 @@ export function BackgroundPattern({
         selectedAgentId={selectedAgentId}
       />
     </>
+  );
+}
+
+function TerminalEnergyMask() {
+  const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
+  const viewportHeight = typeof window === 'undefined' ? 900 : window.innerHeight;
+  const queryBoxClearance = viewportWidth < 768 ? 260 : 220;
+  const queryBoxCutoutY = Math.max(0, viewportHeight - queryBoxClearance);
+
+  return (
+    <defs>
+      <mask id="terminal-energy-large-tile-mask">
+        <rect x="-5000" y="-5000" width="10000" height="10000" fill="white" />
+        <rect
+          x="50%"
+          y="40%"
+          width="426.8"
+          height="426.8"
+          style={{ transform: 'translate(-213.4px, -213.4px)' }}
+          fill="black"
+        />
+        <rect
+          x="-5000"
+          y={queryBoxCutoutY}
+          width="10000"
+          height={queryBoxClearance + 5000}
+          fill="black"
+        />
+      </mask>
+    </defs>
   );
 }
 

@@ -142,7 +142,7 @@ describe('electron-app blackbox', () => {
     installIpcMock({});
   });
 
-  it('renders loading spinner while auth is resolving (no backend call yet)', () => {
+  it('renders loading spinner while auth is resolving (no backend call yet)', async () => {
     setAuth({ loading: true, isFullySignedIn: false });
 
     const { container } = render(<ElectronApp />);
@@ -154,6 +154,13 @@ describe('electron-app blackbox', () => {
 
     // And no backend call has been made yet.
     expect(capturedRequests.filter((r) => r.url.includes('/api/user-settings'))).toHaveLength(0);
+
+    await waitFor(() => {
+      expect(container.querySelector('.animate-spin')).not.toBeNull();
+      expect(screen.queryByTestId('onboarding-view')).toBeNull();
+      expect(screen.queryByTestId('terminal-page')).toBeNull();
+      expect(capturedRequests.filter((r) => r.url.includes('/api/user-settings'))).toHaveLength(0);
+    });
   });
 
   it('unauthenticated user lands on Onboarding with auth step (no backend call)', async () => {

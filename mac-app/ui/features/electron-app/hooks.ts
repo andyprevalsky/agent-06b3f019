@@ -62,7 +62,7 @@ interface OnboardingStatus {
  * transition straight into the Terminal view.
  */
 export const useOnboardingStatus = (auth: AuthState): OnboardingStatus => {
-  const { authLoading, isFullySignedIn, isAnonymous, refreshAuthState } = auth;
+  const { loading: authLoading, isFullySignedIn, isAnonymous, refreshAuthState } = auth;
 
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [checkingOnboarding, setCheckingOnboarding] = useState(true);
