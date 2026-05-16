@@ -103,6 +103,8 @@ export function TerminalContent() {
         <TerminalHeader
           onCreateNewAgent={agents.handleCreateNewAgent}
           onSelectAgent={agents.handleSelectAgent}
+          onLoginClick={agents.handleLoginClick}
+          isSignedIn={agents.isFullySignedIn}
           clientSource={agents.clientSource}
           realtimeReady={agents.realtimeReady}
           dripStyles={drip.dripStyles}
