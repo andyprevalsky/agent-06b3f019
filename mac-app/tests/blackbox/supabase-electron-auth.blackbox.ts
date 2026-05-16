@@ -13,7 +13,10 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import React from 'react';
+import { render, waitFor, screen } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
+import { server } from './msw/server';
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: vi.fn(() => ({
@@ -59,6 +62,10 @@ function anonymousSession(id = 'anon-1') {
 
 async function importSupabaseModule() {
   return import('@/lib/supabase');
+}
+
+async function importAuthHooks() {
+  return import('@/features/auth/hooks');
 }
 
 describe('supabase Electron auth bridge blackbox', () => {
@@ -170,5 +177,78 @@ describe('supabase Electron auth bridge blackbox', () => {
 
     expect(electronSession).toBeNull();
     expect(window.localStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+
+  it('keeps useAuth loading until the Electron auth bridge primes a persisted session', async () => {
+    const bridgedSession = testSession('bridged-user');
+    let resolveElectronCheck: ((session: unknown) => void) | null = null;
+    let anonymousSessionCalls = 0;
+
+    server.use(
+      http.post('http://localhost:3001/api/auth/anonymous', () => {
+        anonymousSessionCalls += 1;
+        return HttpResponse.json({
+          user: { id: 'anon-user' },
+          session: {
+            access_token: 'anon-access',
+            refresh_token: 'anon-refresh',
+            expires_in: 3600,
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            token_type: 'bearer',
+          },
+        });
+      }),
+      http.get('http://localhost:3001/api/invite-codes/check', () =>
+        HttpResponse.json({ needsInviteCode: false })
+      )
+    );
+
+    window.api = {
+      auth: {
+        check: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              resolveElectronCheck = resolve;
+            })
+        ),
+        save: vi.fn(async () => ({ success: true })),
+        clear: vi.fn(async () => ({ success: true })),
+      },
+    } as typeof window.api;
+
+    const observedStates: string[] = [];
+    const { useAuth } = await importAuthHooks();
+
+    function AuthProbe() {
+      const auth = useAuth();
+      observedStates.push(
+        `${auth.loading ? 'loading' : 'ready'}:${auth.isFullySignedIn ? 'signed-in' : 'signed-out'}`
+      );
+      return React.createElement(
+        'div',
+        { 'data-testid': 'auth-state' },
+        `${auth.loading ? 'loading' : 'ready'}:${auth.isFullySignedIn ? 'signed-in' : 'signed-out'}`
+      );
+    }
+
+    render(React.createElement(AuthProbe));
+
+    await waitFor(() => {
+      expect(window.api.auth.check).toHaveBeenCalledTimes(1);
+    });
+    await Promise.resolve();
+
+    expect(screen.getByTestId('auth-state')).toHaveTextContent('loading:signed-out');
+    expect(anonymousSessionCalls).toBe(0);
+
+    resolveElectronCheck?.(bridgedSession);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('auth-state')).toHaveTextContent('ready:signed-in');
+    });
+
+    expect(anonymousSessionCalls).toBe(0);
+    expect(JSON.parse(window.localStorage.getItem(SESSION_KEY) ?? 'null')).toEqual(bridgedSession);
+    expect(observedStates).not.toContain('ready:signed-out');
   });
 });

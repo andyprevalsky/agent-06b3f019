@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { GridEnergyPills } from '@/features/terminal/components/GridEnergyPills';
 
 const SMALL_DIAMOND_PATH = 'M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z';
 
@@ -85,6 +86,7 @@ const BackgroundTiles = (): JSX.Element => {
         </pattern>
       </defs>
       <rect x="0" y="0" width="100%" height="100%" fill="url(#onboarding-grid-pattern)" />
+      <GridEnergyPills idPrefix="onboarding-grid-energy" patternOffset={offset} />
     </svg>
   );
 };

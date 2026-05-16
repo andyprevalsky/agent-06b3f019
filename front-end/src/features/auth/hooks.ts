@@ -11,6 +11,7 @@ import {
   isAnonymousUser,
   setRealtimeAuth,
   AUTH_SESSION_CHANGED_EVENT,
+  waitForElectronAuthBridgePrimed,
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
 
@@ -33,6 +34,7 @@ async function initAuthSession(
   applySession: (origin: string, nextSession: Session | null) => Promise<void>,
 ): Promise<void> {
   logAuth('Initializing auth state...');
+  await waitForElectronAuthBridgePrimed();
   const existingSession = getSession();
 
   if (existingSession && !existingSession.user?.is_anonymous) {

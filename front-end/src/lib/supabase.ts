@@ -365,13 +365,19 @@ export function isAnonymousUser(user: User | null): boolean {
 export const getStoredSession = getSession;
 export const clearStoredSession = clearSession;
 
+let electronAuthBridgePrimed: Promise<void> = Promise.resolve();
+
+export function waitForElectronAuthBridgePrimed(): Promise<void> {
+  return electronAuthBridgePrimed;
+}
+
 // Electron auth bridge priming (for mac-app)
-// Bidirectional: Electron store → localStorage, and localStorage → Electron store
+// Bidirectional: Electron store -> localStorage, and localStorage -> Electron store
 if (typeof window !== 'undefined' && window.api?.auth) {
   const bridgeCheckStartedAtLogoutEpoch = window.localStorage.getItem(LOGOUT_EPOCH_KEY);
   const bridgeCheckStartedDuringLogout = window.localStorage.getItem(LOGOUT_PENDING_KEY) === '1';
 
-  window.api.auth
+  electronAuthBridgePrimed = window.api.auth
     .check()
     .then((electronSession) => {
       if (window.localStorage.getItem(LOGOUT_EPOCH_KEY) !== bridgeCheckStartedAtLogoutEpoch) {
