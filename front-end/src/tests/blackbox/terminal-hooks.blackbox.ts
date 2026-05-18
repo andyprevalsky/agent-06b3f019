@@ -537,6 +537,9 @@ describe('useTerminalAgents', () => {
     ctxState.agent = null;
     ctxState.selectedAgentId = null;
     (ctxState.setSelectedAgentId as any).mockReset();
+    authState.isAuthenticated = true;
+    authState.isAnonymous = false;
+    authState.isFullySignedIn = true;
     authState.refreshAuthState.mockClear();
     authState.signOut.mockClear();
     vi.mocked(signOut).mockResolvedValue(undefined);
@@ -557,6 +560,16 @@ describe('useTerminalAgents', () => {
     expect(result.current.selectedAgentId).toBeNull();
     expect(result.current.ancestors).toEqual([]);
     expect(result.current.canSubmitGoals).toBe(true);
+    unmount();
+  });
+
+  it('does not allow goal submission when auth is anonymous', () => {
+    authState.isAnonymous = true;
+    authState.isFullySignedIn = false;
+    const { result, unmount } = renderHook(() =>
+      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+    );
+    expect(result.current.canSubmitGoals).toBe(false);
     unmount();
   });
 
@@ -641,6 +654,7 @@ describe('useTerminalAgents', () => {
 
   it('quick-query event (unauthenticated) opens login modal', async () => {
     authState.isAuthenticated = false;
+    authState.isFullySignedIn = false;
     const { result, unmount } = renderHook(() =>
       useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
     );
@@ -648,7 +662,6 @@ describe('useTerminalAgents', () => {
       dispatchQuickQueryEvent({ query: 'hi there', submittedAt: Date.now() });
     });
     await waitFor(() => expect(result.current.loginModalOpen).toBe(true));
-    authState.isAuthenticated = true;
     unmount();
   });
 

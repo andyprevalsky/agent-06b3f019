@@ -32,7 +32,7 @@ export function useTerminalAgents(
 ) {
   const { toast } = useToast();
   const auth = useAuth();
-  const canSubmitGoals = auth.isAuthenticated;
+  const canSubmitGoals = auth.isFullySignedIn;
   const clientSource = useMemo(() => getClientSource(), []);
   const ctx = useAgentContext();
 
