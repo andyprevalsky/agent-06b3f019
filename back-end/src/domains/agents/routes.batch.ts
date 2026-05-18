@@ -30,12 +30,19 @@ function handleRouteError(res: Response, error: unknown, msg: string): void {
   res.status(500).json({ error: msg });
 }
 
+function rejectAnonymousBatchCreate(req: HybridAuthRequest, res: Response): boolean {
+  if (req.isAnonymous !== true) return false;
+  res.status(401).json({ error: 'Login required to create agents' });
+  return true;
+}
+
 router.post(
   '/',
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = batchCreateAgentsSchema.parse(req.body);
+      if (rejectAnonymousBatchCreate(req, res)) return;
       const userId = req.userId ?? body.agents[0]?.user_id;
       if (userId === undefined || userId === null || userId === '') {
         res.status(401).json({ error: 'Unauthorized: user_id required' });

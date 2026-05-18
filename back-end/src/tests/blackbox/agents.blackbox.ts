@@ -655,6 +655,18 @@ test('POST / — no auth → 401 or 402', async () => {
   }
 });
 
+test('POST / — anonymous JWT cannot create agent → 401', async () => {
+  const session = await createAnonymousSession('create-anon-rejected');
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({ goal: 'Anonymous create should fail' }),
+  });
+  assertStatus(res.status, 401, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'POST / anonymous rejected');
+  assert(body.error.includes('Login required'), `Unexpected error: ${body.error}`);
+});
+
 test('POST / — missing goal → 400', async () => {
   const session = await createAnonymousSession('create-no-goal');
   const res = await request(`${BASE_URL}/api/agents`, {
@@ -2538,7 +2550,7 @@ test('POST / — with context_gates parameter', async () => {
   const session = await createAnonymousSession('ctx-gates');
   const res = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
-    headers: authHeaders(session.session.access_token),
+    headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({
       goal: 'Context gates test',
       context_gates: {
@@ -2559,7 +2571,7 @@ test('POST / — with start_phase=plan', async () => {
   const session = await createAnonymousSession('start-plan');
   const res = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
-    headers: authHeaders(session.session.access_token),
+    headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({ goal: 'Start phase plan test', start_phase: 'plan' }),
   });
   // 201 on success; 500 if Temporal is not running in this environment
@@ -2576,7 +2588,7 @@ test('POST / — with start_phase=execute', async () => {
   const session = await createAnonymousSession('start-exec');
   const res = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
-    headers: authHeaders(session.session.access_token),
+    headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({ goal: 'Start phase execute test', start_phase: 'execute' }),
   });
   // 201 on success; 500 if Temporal is not running in this environment
@@ -2591,7 +2603,7 @@ test('POST / — with start_phase=execute', async () => {
 
 test('POST / — with price_limit_cents', async () => {
   const session = await createAnonymousSession('price-limit');
-  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
     goal: 'Price limit test',
     price_limit_cents: 500,
   });
@@ -2612,7 +2624,7 @@ test('POST / — with price_limit_cents', async () => {
 
 test('POST / — with custom_system_prompt', async () => {
   const session = await createAnonymousSession('custom-prompt');
-  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
     goal: 'Custom prompt test',
     custom_system_prompt: 'You are a helpful coding assistant.',
   });
@@ -2623,7 +2635,7 @@ test('POST / — with custom_system_prompt', async () => {
 
 test('POST / — with write_lock_enabled', async () => {
   const session = await createAnonymousSession('write-lock');
-  const res = await postAgentWithRetry(authHeaders(session.session.access_token), {
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
     goal: 'Write lock test',
     write_lock_enabled: true,
   });
@@ -3403,6 +3415,26 @@ test('POST /agents/batch — happy path: 3 children all spawn', async () => {
   }
   for (const r of body.results) await deleteTestAgent(r.agent_id, session.user.id);
   await deleteTestAgent(parentId, session.user.id);
+});
+
+test('POST /agents/batch — anonymous JWT cannot create children → 401', async () => {
+  const session = await createAnonymousSession('batch-anon-rejected');
+  const res = await request(`${BASE_URL}/api/agents/batch`, {
+    method: 'POST',
+    headers: authHeaders(session.session.access_token),
+    body: JSON.stringify({
+      agents: [
+        makeBatchAgent({
+          parentAgentId: FAKE_UUID,
+          busId: FAKE_UUID,
+          goal: 'Anonymous batch create should fail',
+        }),
+      ],
+    }),
+  });
+  assertStatus(res.status, 401, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'POST /agents/batch anonymous rejected');
+  assert(body.error.includes('Login required'), `Unexpected error: ${body.error}`);
 });
 
 test('POST /agents/batch — missing agents → 400', async () => {

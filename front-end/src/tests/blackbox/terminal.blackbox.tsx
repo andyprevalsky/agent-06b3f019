@@ -312,13 +312,35 @@ describe('Terminal page', () => {
       });
     });
 
+    it('submit without a stored session opens login and does not create an agent', async () => {
+      const user = userEvent.setup();
+      localStorage.clear();
+      clearCaptures();
+      renderWithProviders(<Terminal />);
+
+      await waitFor(() => {
+        expect(document.querySelector('textarea')).toBeInTheDocument();
+      });
+      const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+      await user.click(textarea);
+      await user.type(textarea, 'No stored session should sign in');
+      await user.keyboard('{Meta>}{Enter}{/Meta}');
+
+      await waitFor(() => {
+        expect(screen.getByText('Start Building.')).toBeInTheDocument();
+      });
+      const createReq = capturedRequests.find(
+        (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
+      );
+      expect(createReq).toBeUndefined();
+    });
+
     it('renders with anonymous session', async () => {
       localStorage.clear();
       mockAnonymousSession();
       renderWithProviders(<Terminal />);
 
-      // Anonymous users still get the page structure and query input
-      // (canSubmitGoals = isAuthenticated, which is true for anonymous Supabase sessions)
+      // Anonymous users still get the page structure and query input.
       await waitFor(() => {
         expect(screen.getByText('Rose')).toBeInTheDocument();
       });
@@ -326,6 +348,30 @@ describe('Terminal page', () => {
       // (it always renders, just may be disabled without auth)
       const textarea = document.querySelector('textarea');
       expect(textarea).toBeInTheDocument();
+    });
+
+    it('anonymous submit opens login and does not create an agent', async () => {
+      const user = userEvent.setup();
+      localStorage.clear();
+      mockAnonymousSession();
+      clearCaptures();
+      renderWithProviders(<Terminal />);
+
+      await waitFor(() => {
+        expect(document.querySelector('textarea')).toBeInTheDocument();
+      });
+      const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+      await user.click(textarea);
+      await user.type(textarea, 'Anonymous users should sign in');
+      await user.keyboard('{Meta>}{Enter}{/Meta}');
+
+      await waitFor(() => {
+        expect(screen.getByText('Start Building.')).toBeInTheDocument();
+      });
+      const createReq = capturedRequests.find(
+        (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
+      );
+      expect(createReq).toBeUndefined();
     });
   });
 });

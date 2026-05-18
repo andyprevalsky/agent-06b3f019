@@ -31,6 +31,12 @@ function noCacheHeaders(res: Response): void {
   res.set('Expires', '0');
 }
 
+function rejectAnonymousCreate(req: HybridAuthRequest, res: Response): boolean {
+  if (req.isAnonymous !== true) return false;
+  res.status(401).json({ error: 'Login required to create an agent' });
+  return true;
+}
+
 function handleRouteError(
   res: Response,
   error: unknown,
@@ -147,6 +153,7 @@ router.post(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = createAgentSchema.parse(req.body);
+      if (rejectAnonymousCreate(req, res)) return;
       const userId = req.userId ?? body.user_id;
       if (userId === undefined || userId === null || userId === '') {
         res.status(401).json({ error: 'Unauthorized: user_id required' });
