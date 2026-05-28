@@ -34,6 +34,7 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 const WS_PORT = 3000;
 const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes
 const WS_READY_TIMEOUT_MS = 10000;
+const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
 const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 
@@ -184,6 +185,7 @@ export async function createClaudeCodeSession(
   // Wait for WS server to be ready
   log.info('Waiting for WebSocket server to start');
   const startTime = Date.now();
+  let wsReady = false;
 
   // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not a retry-on-error pattern
   while (Date.now() - startTime < WS_READY_TIMEOUT_MS) {
@@ -196,6 +198,7 @@ export async function createClaudeCodeSession(
       if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
         const elapsedMs = Date.now() - startTime;
         log.info(`WebSocket server ready in ${elapsedMs}ms`);
+        wsReady = true;
         break;
       }
     } catch {
@@ -204,8 +207,10 @@ export async function createClaudeCodeSession(
   }
 
   const totalElapsed = Date.now() - startTime;
-  if (totalElapsed >= WS_READY_TIMEOUT_MS) {
+  if (!wsReady) {
     log.warn(`WebSocket server readiness check timed out after ${totalElapsed}ms`);
+    await sandbox.kill();
+    throw new Error('Claude Code WebSocket server failed to become ready');
   }
 
   // Create DB record with real values (no placeholders)
@@ -323,8 +328,9 @@ export async function createCodexCodeSession(
 
   log.info('Waiting for Codex WebSocket server to start');
   const startTime = Date.now();
+  let wsReady = false;
   // eslint-disable-next-line no-restricted-syntax -- polling loop (wait-until-ready), not retry fallback
-  while (Date.now() - startTime < WS_READY_TIMEOUT_MS) {
+  while (Date.now() - startTime < CODEX_WS_READY_TIMEOUT_MS) {
     await new Promise((resolve) => setTimeout(resolve, WS_READY_POLL_INTERVAL_MS));
     try {
       const result = await sandbox.commands.run(`netstat -tln | grep :${WS_PORT}`, {
@@ -332,6 +338,7 @@ export async function createCodexCodeSession(
       });
       if (result.exitCode === 0 && result.stdout.includes(`:${WS_PORT}`)) {
         log.info(`Codex WebSocket server ready in ${Date.now() - startTime}ms`);
+        wsReady = true;
         break;
       }
     } catch {
@@ -339,8 +346,10 @@ export async function createCodexCodeSession(
     }
   }
 
-  if (Date.now() - startTime >= WS_READY_TIMEOUT_MS) {
+  if (!wsReady) {
     log.warn(`Codex WebSocket server readiness check timed out after ${Date.now() - startTime}ms`);
+    await sandbox.kill();
+    throw new Error('Codex WebSocket server failed to become ready');
   }
 
   await prisma.claudeCodeSession.create({
