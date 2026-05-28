@@ -1,9 +1,13 @@
 /**
  * STATE MACHINE: BackgroundPattern
  *
- * STATIC: Renders SVG grid pattern, animated tile overlays,
+ * STATIC: Renders SVG grid pattern, energy pills, animated tile overlays,
  *         large tile border, and corner decorations.
  *         No internal state transitions — purely derived from props.
+ *
+ * LAYER CONTRACT:
+ * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
+ * -> [PAGE_CONTENT z-4, later sibling] -> [CHROME z-50]
  */
 
 import { SmallTileAnimationCanvas } from '@/features/terminal-component-group';
@@ -32,6 +36,7 @@ export function BackgroundPattern({
   return (
     <>
       <svg
+        data-testid="terminal-grid-background-layer"
         className="absolute inset-0 w-full h-full pointer-events-none z-[3]"
         xmlns="http://www.w3.org/2000/svg"
         style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
@@ -44,7 +49,8 @@ export function BackgroundPattern({
       </svg>
 
       <svg
-        className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
+        data-testid="terminal-grid-energy-layer"
+        className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
         xmlns="http://www.w3.org/2000/svg"
         style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
       >
