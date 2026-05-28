@@ -158,6 +158,20 @@ describe('Terminal page', () => {
       expect(screen.getByRole('complementary', { hidden: true })).toHaveClass('z-[50]');
     });
 
+    it('clips grid energy pills below the landing popular goals controls', async () => {
+      renderWithProviders(<Terminal />);
+
+      const landingInput = await screen.findByPlaceholderText('Enter any goal');
+      const inputAreaMask = screen.getByTestId('terminal-energy-input-area-mask');
+      const landingControlsClearance = window.innerWidth < 768 ? 340 : 300;
+
+      expect(landingInput).toBeInTheDocument();
+      expect(Number(inputAreaMask.getAttribute('y'))).toBe(
+        Math.max(0, window.innerHeight - landingControlsClearance),
+      );
+      expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
+    });
+
     it('renders Privacy and Terms links', async () => {
       renderWithProviders(<Terminal />);
       await waitFor(() => {
