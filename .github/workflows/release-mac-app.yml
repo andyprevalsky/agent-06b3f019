@@ -144,6 +144,7 @@ jobs:
       # ============================================
 
       - name: Upload signed DMG as artifact (backup)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: signed-dmg-backup
